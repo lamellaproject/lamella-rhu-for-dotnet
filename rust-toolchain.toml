@@ -1,0 +1,7 @@
+# Pinned Rust toolchain for every crate in this repository. The exact
+# compiler version is part of every gate result (docs record the full
+# environment manifest); bumping it is a gated migration, never a drift.
+[toolchain]
+channel = "1.96.0"
+components = ["llvm-tools"]
+targets = ["thumbv7em-none-eabihf"]

@@ -1,0 +1,54 @@
+[package]
+name = "rhu-kernel"
+version = "0.2.0"
+edition = "2021"
+description = "The Lamella RHU kernel: a runtime-hosting unikernel for .NET 11 (NativeAOT) on Cortex-M microcontrollers."
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "rhu-kernel"
+path = "src/main.rs"
+
+# The whole kernel lives in the lib target: rlib for the bin above,
+# staticlib for the external-linker payload merge (frozen ILC object +
+# librhu_kernel.a under `ld -T payload-<board>.x`).
+[lib]
+name = "rhu_kernel"
+path = "src/lib.rs"
+crate-type = ["rlib", "staticlib"]
+
+# The kernel takes no crate dependencies: it owns the vector table and
+# the UsageFault/SVC/PendSV exception seams outright, so no runtime
+# crate may own them first.
+[dependencies]
+
+[features]
+default = ["qemu-exit", "board-mps2-an500"]
+# Exactly one board feature must be selected (src/board/mod.rs enforces).
+board-mps2-an500 = []
+# Semihosting exits on the shutdown/panic/fault paths. QEMU runs only:
+# without a debugger attached, BKPT #0xAB escalates to HardFault on real
+# silicon, so non-QEMU builds disable this and every exit becomes a park.
+qemu-exit = []
+# Gate flavors: deliberately exercise the panic / fault path after the
+# selftests pass.
+test-panic = []
+test-fault = []
+# Gate flavor: multithreaded smoke (sleep ordering, round-robin + tick
+# preemption, callee-saved FP survival beside a hostile peer).
+sched-smoke = []
+# Payload hosting: the import surface the hosted minirt payloads bind
+# against, plus the managed entry sequence. The image only exists via
+# the external payload link (staticlib + frozen ILC object).
+payload = []
+
+[profile.release]
+opt-level = 2
+debug = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+panic = "abort"

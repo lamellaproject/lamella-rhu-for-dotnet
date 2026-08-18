@@ -1,0 +1,9 @@
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+rustflags = [
+  # The board linker script arrives from build.rs as a link argument.
+  # --nmagic: no page-alignment padding -- a flat MCU image.
+  "-C", "link-arg=--nmagic",
+]
