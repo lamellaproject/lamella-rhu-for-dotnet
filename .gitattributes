@@ -1,4 +1,2 @@
 # Normalize line endings to LF for reproducible, cross-platform checkouts.
 * text=auto eol=lf
-# Gate goldens hold authentic wire bytes (CRLF included); never normalized.
-/src/scripts/goldens/** -text

@@ -2,7 +2,7 @@
 
 ![Status](https://img.shields.io/badge/status-in_development-orange)
 
-A runtime-hosting unikernel for .NET: runs full .NET 11 (NativeAOT) on
+A runtime-hosting unikernel for .NET: runs full .NET (NativeAOT) on
 microcontrollers. Pronounced "roo."
 
 Lamella RHU (the Lamella Runtime-Hosting Unikernel) is a from-scratch OS kernel
@@ -29,7 +29,6 @@ In the tree today:
   switching
 - Payload hosting: NativeAOT-compiled test payloads linked into the kernel
   image and verified against golden transcripts
-- A cumulative gate chain with negative controls and machine-readable results
 
 Hardware board support and the full runtime bring-up land incrementally.
 

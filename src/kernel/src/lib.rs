@@ -28,6 +28,8 @@ const FLAVOR: &str = if cfg!(feature = "test-panic") {
     "test-fault"
 } else if cfg!(feature = "sched-smoke") {
     "sched-smoke"
+} else if cfg!(feature = "api-smoke") {
+    "api-smoke"
 } else if cfg!(feature = "payload") {
     "payload"
 } else {
@@ -87,6 +89,9 @@ extern "C" fn kthread_main(_: usize) {
 
     #[cfg(feature = "sched-smoke")]
     smoke::run();
+
+    #[cfg(feature = "api-smoke")]
+    api_smoke::run();
 
     #[cfg(feature = "payload")]
     payload::run();
@@ -300,4 +305,35 @@ __rhu_fp_clobber:
     .size __rhu_fp_clobber, . - __rhu_fp_clobber
 "#
     );
+}
+
+
+#[cfg(feature = "api-smoke")]
+mod api_smoke {
+    use crate::sched;
+
+    fn busy_wait_ms(ms: u32) {
+        let t0 = sched::now_ms();
+        while sched::now_ms().wrapping_sub(t0) < ms {
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Tick quiescence: with no armed timer and no equal-or-more-urgent
+    /// Ready peer (idle is less urgent by definition), the tick must
+    /// stop pending -- a solo busy loop takes ZERO context switches
+    /// while the tick clock advances beneath it. The unconditional-pend
+    /// policy records one switch per tick here (~30 in 30 ms), which is
+    /// the negative control's red shape.
+    pub fn run() {
+        kprintln!("[api] tick-quiescent: solo busy 30 ms, switch delta armed");
+        let t0 = sched::now_ms();
+        let s0 = sched::switch_count();
+        busy_wait_ms(30);
+        let ds = sched::switch_count().wrapping_sub(s0);
+        let dt = sched::now_ms().wrapping_sub(t0);
+        assert!(dt >= 30, "tick clock failed to advance: {} ms", dt);
+        assert!(ds == 0, "context switches during solo busy loop: {}", ds);
+        kprintln!("[api] PASS tick-quiescent (solo busy 30 ms: 0 switches, clock advanced)");
+    }
 }

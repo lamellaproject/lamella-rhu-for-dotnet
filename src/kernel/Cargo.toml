@@ -2,7 +2,7 @@
 name = "rhu-kernel"
 version = "0.2.0"
 edition = "2021"
-description = "The Lamella RHU kernel: a runtime-hosting unikernel for .NET 11 (NativeAOT) on Cortex-M microcontrollers."
+description = "The Lamella RHU kernel: a runtime-hosting unikernel for .NET (NativeAOT) on Cortex-M microcontrollers."
 license = "MIT OR Apache-2.0"
 
 [[bin]]
@@ -37,6 +37,9 @@ test-fault = []
 # Gate flavor: multithreaded smoke (sleep ordering, round-robin + tick
 # preemption, callee-saved FP survival beside a hostile peer).
 sched-smoke = []
+# Gate flavor: hosting-API smoke (tick quiescence: a solo thread runs
+# tick-free while the tick clock advances).
+api-smoke = []
 # Payload hosting: the import surface the hosted minirt payloads bind
 # against, plus the managed entry sequence. The image only exists via
 # the external payload link (staticlib + frozen ILC object).

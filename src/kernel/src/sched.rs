@@ -108,6 +108,14 @@ static mut STACK_POOL: StackPool = StackPool([0; board::STACK_POOL_BYTES]);
 #[export_name = "__rhu_ticks"]
 pub static TICKS: AtomicU32 = AtomicU32::new(0);
 
+/// Context switches taken since boot (PendSV entries; a switch back to
+/// the same thread counts). Only the switch path writes. Exported
+/// beside `__rhu_ticks` for the debug-visible contract; a
+/// quiescence check reads the delta across a window to assert that no
+/// switch happened inside it.
+#[export_name = "__rhu_switches"]
+pub static SWITCHES: AtomicU32 = AtomicU32::new(0);
+
 /// The debug-visible layout contract, v1: how external tooling reads
 /// kernel state from memory with no target-resident agent. A debugger
 /// resolves three symbols -- `__rhu_debug_layout` (this record),
@@ -187,6 +195,11 @@ fn set_state(s: &mut Sched, i: usize, st: State) {
 
 pub fn now_ms() -> u32 {
     TICKS.load(Ordering::Relaxed)
+}
+
+/// Context switches taken so far (see `SWITCHES`).
+pub fn switch_count() -> u32 {
+    SWITCHES.load(Ordering::Relaxed)
 }
 
 /// The .kstacks pool window (for the boot selftest's placement check).
@@ -359,6 +372,7 @@ fn pick(s: &mut Sched) -> usize {
 
 #[no_mangle]
 extern "C" fn __rhu_switch(sp: u32) -> u32 {
+    SWITCHES.fetch_add(1, Ordering::Relaxed);
     with_cs(|| unsafe {
         let s = sched();
         s.tcbs[s.current].sp = sp;
@@ -388,24 +402,46 @@ extern "C" fn __rhu_msp_top() -> u32 {
     addr_of!(__stack_start) as usize as u32
 }
 
-/// SysTick: advance the tick clock, wake due sleepers, pend a switch.
-/// Runs above PendSV and below the zero-latency band; kernel CS holders
-/// delay it wholesale, so scheduler state is never seen torn.
+/// True iff a Ready thread OTHER than current is equal-or-more urgent
+/// (numerically `<=`; the equality arm is what rotates equal-priority
+/// peers on the tick). Mask-derived, read-only.
+fn ready_peer_at_or_above(s: &Sched) -> bool {
+    let cur_prio = s.tcbs[s.current].prio;
+    let mut m = s.ready_mask & !(1u32 << s.current);
+    while m != 0 {
+        let i = m.trailing_zeros() as usize;
+        m &= m - 1;
+        if s.tcbs[i].prio <= cur_prio {
+            return true;
+        }
+    }
+    false
+}
+
+/// SysTick: advance the tick clock, wake due sleepers, and pend a
+/// switch iff a timer fired this tick or an equal-or-more-urgent Ready
+/// peer exists (a solo thread runs tick-free). Runs above PendSV and
+/// below the zero-latency band; kernel CS holders delay it wholesale,
+/// so scheduler state is never seen torn.
 pub unsafe extern "C" fn systick_vector() {
     let now = TICKS.fetch_add(1, Ordering::Release).wrapping_add(1);
     let s = sched();
     if !s.started {
         return;
     }
+    let mut fired = false;
     let mut m = s.timer_mask;
     while m != 0 {
         let i = m.trailing_zeros() as usize;
         m &= m - 1;
         if (now.wrapping_sub(s.tcbs[i].wake_tick) as i32) >= 0 {
             set_state(s, i, State::Ready);
+            fired = true;
         }
     }
-    pend_switch();
+    if fired || ready_peer_at_or_above(s) {
+        pend_switch();
+    }
 }
 
 extern "C" fn idle_entry(_: usize) {
