@@ -4,7 +4,7 @@
 
 use core::arch::global_asm;
 use core::mem::offset_of;
-use core::ptr::{self, addr_of, addr_of_mut, write_volatile};
+use core::ptr::{self, addr_of, addr_of_mut, read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::board;
@@ -17,11 +17,22 @@ const _: () = assert!(MAX_THREADS <= 31, "slot masks are u32");
 
 const ICSR: *mut u32 = 0xE000_ED04 as *mut u32;
 const ICSR_PENDSVSET: u32 = 1 << 28;
+const ICSR_PENDSTSET: u32 = 1 << 26;
 const SHPR2: *mut u32 = 0xE000_ED1C as *mut u32;
 const SHPR3: *mut u32 = 0xE000_ED20 as *mut u32;
 const SYST_CSR: *mut u32 = 0xE000_E010 as *mut u32;
 const SYST_RVR: *mut u32 = 0xE000_E014 as *mut u32;
 const SYST_CVR: *mut u32 = 0xE000_E018 as *mut u32;
+
+/// Nanosecond clock geometry. Both divisions must be exact or the
+/// interpolated clock drifts against the tick clock it shares hardware
+/// with; a board that violates either assert re-derives its own
+/// geometry instead of shipping a lie.
+const CYCLES_PER_TICK: u32 = board::SYSCLK_HZ / board::TICK_HZ;
+const NS_PER_TICK: u64 = 1_000_000_000 / board::TICK_HZ as u64;
+const NS_PER_CYCLE: u64 = (1_000_000_000 / board::SYSCLK_HZ) as u64;
+const _: () = assert!(board::SYSCLK_HZ % board::TICK_HZ == 0, "tick not a whole cycle count");
+const _: () = assert!(1_000_000_000 % board::SYSCLK_HZ == 0, "cycle not a whole ns count");
 
 /// Thread state. `repr(u8)` with stated values: part of the
 /// debug-visible layout contract.
@@ -48,6 +59,15 @@ struct Tcb {
     entry: Option<extern "C" fn(usize)>,
     arg: usize,
     name: &'static str,
+    /// Futex wait channel: the address this thread blocks on (0 = not a
+    /// futex wait -- a futex waiter is `Sleeping` with this set, so the
+    /// debug-layout state values stay v1). The WAKER clears it before
+    /// readying; a timer wake leaves it set -- that asymmetry is how the
+    /// resumed thread tells woken from timed out.
+    wait_addr: usize,
+    /// True iff `wake_tick` is armed for this futex wait (an infinite
+    /// wait must not join the timer walk).
+    wait_deadline: bool,
 }
 
 const TCB_INIT: Tcb = Tcb {
@@ -61,6 +81,8 @@ const TCB_INIT: Tcb = Tcb {
     entry: None,
     arg: 0,
     name: "",
+    wait_addr: 0,
+    wait_deadline: false,
 };
 
 static NEXT_TID: AtomicU32 = AtomicU32::new(1);
@@ -76,6 +98,7 @@ struct Sched {
     /// pick() sweeps into set-bit iteration.
     ready_mask: u32,
     timer_mask: u32,
+    futex_mask: u32,
     /// Exited-but-unreaped threads; reap() runs only when nonzero.
     exited_n: u32,
 }
@@ -85,7 +108,7 @@ struct Sched {
 /// masks -- single-core discipline. Exported by name for the
 /// debug-visible layout contract (a debugger resolves the symbol and
 /// applies `__rhu_debug_layout`'s offsets; no target code runs).
-#[export_name = "__rhu_sched"]
+#[unsafe(export_name = "__rhu_sched")]
 static mut SCHED: Sched = Sched {
     tcbs: [TCB_INIT; MAX_THREADS],
     current: 0,
@@ -93,6 +116,7 @@ static mut SCHED: Sched = Sched {
     started: false,
     ready_mask: 0,
     timer_mask: 0,
+    futex_mask: 0,
     exited_n: 0,
 };
 
@@ -100,20 +124,25 @@ static mut SCHED: Sched = Sched {
 /// (the board map places the section; spawn zeroes each carved region).
 #[repr(align(8))]
 struct StackPool([u8; board::STACK_POOL_BYTES]);
-#[link_section = ".kstacks"]
+#[unsafe(link_section = ".kstacks")]
 static mut STACK_POOL: StackPool = StackPool([0; board::STACK_POOL_BYTES]);
 
 /// Milliseconds since scheduler init (wrapping; all comparisons are
 /// wrapping). Only SysTick writes. Exported for the layout contract.
-#[export_name = "__rhu_ticks"]
+#[unsafe(export_name = "__rhu_ticks")]
 pub static TICKS: AtomicU32 = AtomicU32::new(0);
+
+/// High word of the 64-bit tick count: incremented by SysTick alone,
+/// when `TICKS` wraps (~49.7 days at 1 kHz). Not part of the debug
+/// contract; `now_ns`'s stability loop is the only reader.
+static TICKS_HI: AtomicU32 = AtomicU32::new(0);
 
 /// Context switches taken since boot (PendSV entries; a switch back to
 /// the same thread counts). Only the switch path writes. Exported
 /// beside `__rhu_ticks` for the debug-visible contract; a
 /// quiescence check reads the delta across a window to assert that no
 /// switch happened inside it.
-#[export_name = "__rhu_switches"]
+#[unsafe(export_name = "__rhu_switches")]
 pub static SWITCHES: AtomicU32 = AtomicU32::new(0);
 
 /// The debug-visible layout contract, v1: how external tooling reads
@@ -141,8 +170,8 @@ pub struct DebugLayout {
 }
 
 #[used]
-#[no_mangle]
-#[link_section = ".rhu_debug"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".rhu_debug")]
 pub static __rhu_debug_layout: DebugLayout = DebugLayout {
     magic: 0x4448_5552,
     version: 1,
@@ -160,29 +189,38 @@ pub static __rhu_debug_layout: DebugLayout = DebugLayout {
 };
 
 #[allow(clippy::mut_from_ref)]
-unsafe fn sched() -> &'static mut Sched {
+unsafe fn sched() -> &'static mut Sched { unsafe {
     &mut *addr_of_mut!(SCHED)
-}
+}}
 
 fn pend_switch() {
     unsafe { write_volatile(ICSR, ICSR_PENDSVSET) };
 }
 
 /// Recompute slot i's mask bits from its TCB -- the ONLY writer of the
-/// ready/timer masks. Every state mutation goes through `set_state`,
-/// which calls this; that single-writer rule is what keeps the masks
-/// and the TCBs from ever disagreeing.
+/// ready/timer/futex masks. Every state mutation goes through
+/// `set_state`, which calls this; that single-writer rule is what keeps
+/// the masks and the TCBs from ever disagreeing. A futex waiter is
+/// Sleeping with `wait_addr` set: it joins the futex walk always and
+/// the timer walk only when a deadline is armed; a plain sleeper
+/// (`wait_addr` 0) joins the timer walk alone.
 fn sync_bits(s: &mut Sched, i: usize) {
     let bit = 1u32 << i;
-    if s.tcbs[i].state == State::Ready {
+    let t = &s.tcbs[i];
+    if t.state == State::Ready {
         s.ready_mask |= bit;
     } else {
         s.ready_mask &= !bit;
     }
-    if s.tcbs[i].state == State::Sleeping {
+    if t.state == State::Sleeping && (t.wait_addr == 0 || t.wait_deadline) {
         s.timer_mask |= bit;
     } else {
         s.timer_mask &= !bit;
+    }
+    if t.state == State::Sleeping && t.wait_addr != 0 {
+        s.futex_mask |= bit;
+    } else {
+        s.futex_mask &= !bit;
     }
 }
 
@@ -198,6 +236,7 @@ pub fn now_ms() -> u32 {
 }
 
 /// Context switches taken so far (see `SWITCHES`).
+#[allow(dead_code)]
 pub fn switch_count() -> u32 {
     SWITCHES.load(Ordering::Relaxed)
 }
@@ -272,6 +311,8 @@ pub fn spawn(
             entry: Some(entry),
             arg,
             name,
+            wait_addr: 0,
+            wait_deadline: false,
         };
         sync_bits(s, slot);
         (slot, s.started && prio < s.tcbs[s.current].prio)
@@ -347,6 +388,213 @@ pub fn sleep_ms(ms: u32) {
     }
 }
 
+
+/// Wait forever (`rhu.h` RHU_DEADLINE_NONE). Deadlines are absolute
+/// nanoseconds on the `now_ns` clock.
+pub const DEADLINE_NONE: u64 = u64::MAX;
+/// RHU-owned error surface (errno-mirroring, defined in include/rhu.h).
+pub const ERR_AGAIN: i32 = -11;
+pub const ERR_TIMEDOUT: i32 = -110;
+pub const ERR_INVAL: i32 = -22;
+
+/// 64-bit monotonic nanoseconds since scheduler init. The three
+/// recorded hazards, each handled in order:
+///   1. torn 64-bit tick read -- hi/lo stability loop (re-read brackets;
+///      the handler runs atomically w.r.t. thread level, so a bracketed
+///      equal pair is a consistent pair);
+///   2. sub-millisecond resolution -- SysTick CVR interpolation (CVR
+///      counts DOWN from the reload value);
+///   3. the wrapped-but-undelivered window -- the counter reloaded but
+///      the tick interrupt has not run (masked under a kernel CS, or
+///      raced): ICSR.PENDSTSET says so, and the read must add the
+///      pending tick or time steps backward across the wrap. CVR is
+///      resampled AFTER seeing the bit so the interpolation describes
+///      the post-wrap countdown the +1 belongs to.
+/// A CS held across MORE than one reload loses the extras (the pend bit
+/// is single); monotonicity survives, accuracy is bounded by the
+/// kernel's short-CS discipline.
+pub fn now_ns() -> u64 {
+    loop {
+        let h1 = TICKS_HI.load(Ordering::Relaxed);
+        let l1 = TICKS.load(Ordering::Relaxed);
+        let mut cvr = unsafe { read_volatile(SYST_CVR) };
+        let pending = unsafe { read_volatile(ICSR) } & ICSR_PENDSTSET != 0;
+        if pending {
+            cvr = unsafe { read_volatile(SYST_CVR) };
+        }
+        let l2 = TICKS.load(Ordering::Relaxed);
+        let h2 = TICKS_HI.load(Ordering::Relaxed);
+        if h1 == h2 && l1 == l2 {
+            let ticks = (((h1 as u64) << 32) | l1 as u64) + pending as u64;
+            let elapsed = (CYCLES_PER_TICK - 1).saturating_sub(cvr) as u64;
+            return ticks * NS_PER_TICK + elapsed * NS_PER_CYCLE;
+        }
+    }
+}
+
+/// The tick at which `now_ns() >= deadline_ns` is guaranteed: ceil to
+/// the next tick boundary, +1 for the arm-race margin (a tick firing
+/// between the deadline computation and the arm). Ticks and `now_ns`
+/// share the SysTick clock, so ceil alone is already never-early; the
+/// negative control that reds the never-early checks is FLOORING this
+/// conversion. Truncation to u32 is the wrapping
+/// tick arithmetic.
+fn tick_for_deadline(deadline_ns: u64) -> u32 {
+    (deadline_ns.div_ceil(NS_PER_TICK) as u32).wrapping_add(1)
+}
+
+/// Nanosecond-request sleep: never early (gate check 2's contract), up
+/// to ~2 ms late at the 1 kHz tick. Arm-once, no recheck loop: nothing
+/// wakes a plain sleeper early today -- no signals by futex rule 2; a
+/// future activation mechanism must revisit this.
+pub fn sleep_ns(ns: u64) {
+    let target = now_ns().saturating_add(ns);
+    let expired = with_cs(|| unsafe {
+        if now_ns() >= target {
+            return true;
+        }
+        let s = sched();
+        let cur = s.current;
+        s.tcbs[cur].wait_addr = 0;
+        s.tcbs[cur].wait_deadline = false;
+        s.tcbs[cur].wake_tick = tick_for_deadline(target);
+        set_state(s, cur, State::Sleeping);
+        false
+    });
+    if !expired {
+        pend_switch();
+    }
+}
+
+/// Block until `*addr` is signaled, the value stops matching, or the
+/// deadline passes. The compare-and-sleep is atomic w.r.t. wakers: both
+/// sides run under the kernel CS (single core -- the CS IS the
+/// atomicity), so the lost-wakeup window closes by construction.
+/// Returns 0 woken, ERR_AGAIN when `*addr != expected` at entry,
+/// ERR_TIMEDOUT when the deadline passed, ERR_INVAL on a null or
+/// misaligned address (a wild-but-plausible pointer instead faults
+/// through the funnel -- loud, never silent).
+pub fn futex_wait(addr: *const u32, expected: u32, deadline_ns: u64) -> i32 {
+    if addr.is_null() || (addr as usize) & 3 != 0 {
+        return ERR_INVAL;
+    }
+    enum Armed {
+        Value,
+        Timeout,
+        Slept,
+    }
+    let armed = with_cs(|| unsafe {
+        if read_volatile(addr) != expected {
+            return Armed::Value;
+        }
+        if deadline_ns != DEADLINE_NONE && now_ns() >= deadline_ns {
+            return Armed::Timeout;
+        }
+        let s = sched();
+        let cur = s.current;
+        s.tcbs[cur].wait_addr = addr as usize;
+        s.tcbs[cur].wait_deadline = deadline_ns != DEADLINE_NONE;
+        if s.tcbs[cur].wait_deadline {
+            s.tcbs[cur].wake_tick = tick_for_deadline(deadline_ns);
+        }
+        set_state(s, cur, State::Sleeping);
+        Armed::Slept
+    });
+    match armed {
+        Armed::Value => return ERR_AGAIN,
+        Armed::Timeout => return ERR_TIMEDOUT,
+        Armed::Slept => {}
+    }
+    pend_switch();
+    let woken = with_cs(|| unsafe {
+        let s = sched();
+        let cur = s.current;
+        if s.tcbs[cur].wait_addr == 0 {
+            true
+        } else {
+            s.tcbs[cur].wait_addr = 0;
+            s.tcbs[cur].wait_deadline = false;
+            false
+        }
+    });
+    if woken {
+        0
+    } else {
+        ERR_TIMEDOUT
+    }
+}
+
+/// Ready up to `n` waiters blocked on `addr`; returns the count.
+/// Rotation-fair in slot order from the caller's slot (pick's split
+/// walk -- allocation-free, no per-address queue state; slot rotation,
+/// never FIFO). Every wake path pends explicitly, per the
+/// conditional-tick policy: an equal-or-more-urgent woken thread runs
+/// now, not at the next tick.
+pub fn futex_wake(addr: *const u32, n: u32) -> i32 {
+    if addr.is_null() || (addr as usize) & 3 != 0 {
+        return ERR_INVAL;
+    }
+    let (count, urgent) = with_cs(|| unsafe {
+        let s = sched();
+        let split = (1u32 << (s.current + 1)).wrapping_sub(1);
+        let mut count = 0u32;
+        let mut urgent = false;
+        'outer: for part in [s.futex_mask & !split, s.futex_mask & split] {
+            let mut m = part;
+            while m != 0 {
+                if count == n {
+                    break 'outer;
+                }
+                let i = m.trailing_zeros() as usize;
+                m &= m - 1;
+                if s.tcbs[i].wait_addr == addr as usize {
+                    s.tcbs[i].wait_addr = 0;
+                    s.tcbs[i].wait_deadline = false;
+                    set_state(s, i, State::Ready);
+                    if s.tcbs[i].prio <= s.tcbs[s.current].prio {
+                        urgent = true;
+                    }
+                    count += 1;
+                }
+            }
+        }
+        (count, urgent)
+    });
+    if urgent {
+        pend_switch();
+    }
+    count as i32
+}
+
+/// Kernel-policy observability for the api smoke ONLY (the
+/// readied-vs-ran audit fold): counts read under the CS,
+/// never shipped in the default build.
+#[cfg(feature = "api-smoke")]
+pub fn probe_futex_waiting(addr: *const u32) -> u32 {
+    with_cs(|| unsafe {
+        let s = sched();
+        let mut m = s.futex_mask;
+        let mut count = 0;
+        while m != 0 {
+            let i = m.trailing_zeros() as usize;
+            m &= m - 1;
+            if s.tcbs[i].wait_addr == addr as usize {
+                count += 1;
+            }
+        }
+        count
+    })
+}
+
+/// Ready-state count among the given slots (see `probe_futex_waiting`).
+#[cfg(feature = "api-smoke")]
+pub fn probe_ready_among(slots: &[usize]) -> u32 {
+    with_cs(|| unsafe {
+        let s = sched();
+        slots.iter().filter(|&&i| s.tcbs[i].state == State::Ready).count() as u32
+    })
+}
+
 /// Round-robin pick of the most urgent Ready thread: walk the ready
 /// mask's set bits in rotation order current+1..wrap (high half first,
 /// then low), strict `<` so the first equal-best in rotation order wins
@@ -370,7 +618,7 @@ fn pick(s: &mut Sched) -> usize {
     best
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn __rhu_switch(sp: u32) -> u32 {
     SWITCHES.fetch_add(1, Ordering::Relaxed);
     with_cs(|| unsafe {
@@ -385,7 +633,7 @@ extern "C" fn __rhu_switch(sp: u32) -> u32 {
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn __rhu_first_sp() -> u32 {
     with_cs(|| unsafe {
         let s = sched();
@@ -394,9 +642,9 @@ extern "C" fn __rhu_first_sp() -> u32 {
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn __rhu_msp_top() -> u32 {
-    extern "C" {
+    unsafe extern "C" {
         static __stack_start: u32;
     }
     addr_of!(__stack_start) as usize as u32
@@ -423,8 +671,11 @@ fn ready_peer_at_or_above(s: &Sched) -> bool {
 /// peer exists (a solo thread runs tick-free). Runs above PendSV and
 /// below the zero-latency band; kernel CS holders delay it wholesale,
 /// so scheduler state is never seen torn.
-pub unsafe extern "C" fn systick_vector() {
+pub unsafe extern "C" fn systick_vector() { unsafe {
     let now = TICKS.fetch_add(1, Ordering::Release).wrapping_add(1);
+    if now == 0 {
+        TICKS_HI.fetch_add(1, Ordering::Release);
+    }
     let s = sched();
     if !s.started {
         return;
@@ -442,7 +693,7 @@ pub unsafe extern "C" fn systick_vector() {
     if fired || ready_peer_at_or_above(s) {
         pend_switch();
     }
-}
+}}
 
 extern "C" fn idle_entry(_: usize) {
     loop {

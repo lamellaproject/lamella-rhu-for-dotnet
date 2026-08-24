@@ -1,0 +1,12 @@
+rhu 0.2.0 -- Lamella RHU: runtime-hosting unikernel for .NET on Cortex-M
+[boot] QEMU mps2-an500 | CMSDK UART0 | flavor: boot
+[boot] VTOR=0x00000000 CPUID=0x411fc272 (Cortex-M7 r1p2)
+[sched] online: 16 slots | SysTick 1000 Hz | BASEPRI ceiling 0x40 | zero-latency band below 0x40 never masked
+[selftest] .data copied from code-region LMA: OK
+[selftest] .bss zeroed, RAM readback: OK
+[selftest] kmain on PSP inside the .kstacks pool: OK
+[selftest] f32 multiply on hardware FPU: OK
+[selftest] f64 multiply on soft-float path: OK
+[selftest] SysTick advances + sleep(25 ms) never early: OK
+[base] ALL GOOD (boot + console + panic/fault funnel armed)
+[sched] ALL GOOD (threads + timers + preemption online)

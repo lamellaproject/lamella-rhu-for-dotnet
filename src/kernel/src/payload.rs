@@ -32,7 +32,7 @@ static PAYLOAD_STACK_TOP: AtomicU32 = AtomicU32::new(0);
 /// Write a NUL-terminated byte string to the console, unprefixed,
 /// under the console lock (payload lines must not tear against kernel
 /// lines from other threads).
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn sh_write0(p: *const u8) {
     unsafe {
         let mut n = 0usize;
@@ -45,17 +45,17 @@ extern "C" fn sh_write0(p: *const u8) {
 }
 
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn arena_base() -> *mut u8 {
     unsafe { addr_of_mut!(ARENA.0) as *mut u8 }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn arena_bytes() -> u32 {
     ARENA_BYTES as u32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn startbits_base() -> *mut u8 {
     addr_of_mut!(STARTBITS) as *mut u8
 }
@@ -63,24 +63,24 @@ extern "C" fn startbits_base() -> *mut u8 {
 /// Static-roots window start: the image's whole .data..bss range. The
 /// board scripts keep .kstacks OUTSIDE this window precisely so a
 /// conservative statics scan never walks stale thread-stack contents.
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn statics_start() -> *mut u8 {
-    extern "C" {
+    unsafe extern "C" {
         static mut __sdata: u32;
     }
     addr_of_mut!(__sdata) as *mut u8
 }
 
 /// Static-roots window end (see `statics_start`).
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn statics_end() -> *mut u8 {
-    extern "C" {
+    unsafe extern "C" {
         static __ebss: u32;
     }
     addr_of!(__ebss) as *mut u8
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn stack_top() -> *mut u8 {
     PAYLOAD_STACK_TOP.load(Ordering::Relaxed) as *mut u8
 }
@@ -112,30 +112,30 @@ gc_current_sp:
 /// against. Entry and exit read the same static, so any consistent
 /// constant satisfies the check; this profile has no runtime
 /// randomization source at boot.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static __security_cookie: usize = 0x5248_5521;
 
 /// EHABI personality routine named by the payload's unwind tables. The
 /// hosted profile fail-fasts instead of unwinding, so this is
 /// unreachable by design; park loudly-adjacent (wfi forever) if a
 /// future payload ever routes here.
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn __aeabi_unwind_cpp_pr0() -> ! {
     semihost::park()
 }
 
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn RhpLLsh(value: u64, count: i32) -> u64 {
     value << (count & 63)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn RhpLRsz(value: u64, count: i32) -> u64 {
     value >> (count & 63)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn RhpLRsh(value: i64, count: i32) -> i64 {
     value >> (count & 63)
 }
@@ -147,7 +147,7 @@ extern "C" fn RhpLRsh(value: i64, count: i32) -> i64 {
 pub fn run() -> ! {
     PAYLOAD_STACK_TOP.store(sched::current_stack_top(), Ordering::Relaxed);
 
-    extern "C" {
+    unsafe extern "C" {
         fn InitializeModules(
             os_module: usize,
             headers: *const usize,

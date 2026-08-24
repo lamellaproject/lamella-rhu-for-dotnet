@@ -1,7 +1,7 @@
 [package]
 name = "rhu-kernel"
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
 description = "The Lamella RHU kernel: a runtime-hosting unikernel for .NET (NativeAOT) on Cortex-M microcontrollers."
 license = "MIT OR Apache-2.0"
 

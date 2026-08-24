@@ -42,6 +42,10 @@ SECTIONS
 
   .text : ALIGN(4)
   {
+    /* The hosting-API surface (rhu_now_ns .. rhu_futex_wake): the shim
+     * backend links against these, so section GC must never fold a
+     * fully-inlined one away. The test harness asserts all four. */
+    KEEP(*(.text.rhu_api));
     *(.text .text.*);
     *(__managedcode*);
   } > CODE

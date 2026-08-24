@@ -83,7 +83,7 @@ fn panic(info: &PanicInfo) -> ! {
     semihost::exit(1)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn __rhu_exception(frame: *const ExcFrame, exc_return: u32) -> ! {
     if TERMINAL_DEPTH.fetch_add(1, Ordering::SeqCst) > 0 {
         semihost::park();

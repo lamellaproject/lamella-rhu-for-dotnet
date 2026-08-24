@@ -9,6 +9,7 @@
 
 #[macro_use]
 mod console;
+mod api;
 mod board;
 mod boot;
 mod critical;
@@ -49,7 +50,7 @@ static F64_B: f64 = 1.5;
 const SCB_CPUID: *const u32 = 0xE000_ED00 as *const u32;
 const SCB_VTOR: *const u32 = 0xE000_ED08 as *const u32;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kmain() -> ! {
     let cpuid = unsafe { read_volatile(SCB_CPUID) };
     let vtor = unsafe { read_volatile(SCB_VTOR) };
@@ -179,7 +180,7 @@ mod smoke {
     static FP_DONE: AtomicU32 = AtomicU32::new(0);
     static FP_OUT: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
 
-    extern "C" {
+    unsafe extern "C" {
         fn __rhu_fp_probe(release: *const u32, out: *const u32);
         fn __rhu_fp_clobber(stop: *const u32);
     }
@@ -310,7 +311,11 @@ __rhu_fp_clobber:
 
 #[cfg(feature = "api-smoke")]
 mod api_smoke {
-    use crate::sched;
+    use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::critical::with_cs;
+    use crate::{api, board, sched};
 
     fn busy_wait_ms(ms: u32) {
         let t0 = sched::now_ms();
@@ -319,13 +324,208 @@ mod api_smoke {
         }
     }
 
-    /// Tick quiescence: with no armed timer and no equal-or-more-urgent
-    /// Ready peer (idle is less urgent by definition), the tick must
-    /// stop pending -- a solo busy loop takes ZERO context switches
-    /// while the tick clock advances beneath it. The unconditional-pend
-    /// policy records one switch per tick here (~30 in 30 ms), which is
-    /// the negative control's red shape.
+    /// Spin until the SysTick counter sits in the last eighth of its
+    /// tick. The never-early checks (1, 2, 4) take their base timestamp
+    /// from HERE so their negative controls red structurally, never by
+    /// arm-phase luck: a floored deadline conversion is early by most
+    /// of a millisecond from this position, and an ignored pending tick
+    /// reads backward across the wrap -- while the correct paths are
+    /// position-independent. (Discovered live: the check-4 floored
+    /// control PASSED on its first pre-hardening run because the arm
+    /// happened to sit early in its tick; the positioning below
+    /// forces the case instead of hoping for it.)
+    fn late_in_tick() {
+        const SYST_CVR: *const u32 = 0xE000_E018 as *const u32;
+        const LATE: u32 = (board::SYSCLK_HZ / board::TICK_HZ) / 8;
+        unsafe { while read_volatile(SYST_CVR) > LATE {} }
+    }
+
+    /// The eight API contract checks, in gate order, one boot,
+    /// sequential; every marker is constant text the gate pins. Waiters
+    /// and workers run LESS urgent than this thread (prio 4 vs 3), so the
+    /// conditional-tick policy (a wake pends a switch only when one is
+    /// owed) makes "readied but not run" a deterministic observable, not
+    /// a race.
     pub fn run() {
+        check_monotonic();
+        check_sleep();
+        check_eagain();
+        check_timeout();
+        check_wake();
+        check_mutex();
+        check_quiescent();
+    }
+
+    fn check_monotonic() {
+        kprintln!("[api] ns-monotonic: 5000 paired reads + cs wrap window armed");
+        let mut prev = 0u64;
+        for _ in 0..5000 {
+            let a = api::rhu_now_ns();
+            let b = api::rhu_now_ns();
+            assert!(a >= prev && b >= a, "ns clock stepped backward at thread level");
+            prev = b;
+        }
+        const SYST_CVR: *const u32 = 0xE000_E018 as *const u32;
+        let (t_a, t_b) = with_cs(|| unsafe {
+            late_in_tick();
+            let t_a = api::rhu_now_ns();
+            let mut last = read_volatile(SYST_CVR);
+            let mut wraps = 0u32;
+            while wraps < 2 {
+                let c = read_volatile(SYST_CVR);
+                if c > last {
+                    wraps += 1;
+                }
+                last = c;
+            }
+            let t_b = api::rhu_now_ns();
+            (t_a, t_b)
+        });
+        assert!(t_b > t_a, "ns clock stepped backward across a masked tick wrap");
+        kprintln!("[api] PASS ns-monotonic (5000 paired reads + cs wrap window)");
+    }
+
+    fn check_sleep() {
+        kprintln!("[api] sleep-ns-floor: 25 ms request armed");
+        late_in_tick();
+        let t0 = api::rhu_now_ns();
+        api::rhu_sleep_ns(25_000_000);
+        let dt = api::rhu_now_ns() - t0;
+        assert!(dt >= 25_000_000, "sleep_ns(25 ms) returned early");
+        kprintln!("[api] PASS sleep-ns-floor (25 ms request: never early)");
+    }
+
+    fn check_eagain() {
+        kprintln!("[api] futex-eagain: mismatch refusal armed");
+        static WORD: AtomicU32 = AtomicU32::new(7);
+        let s0 = sched::switch_count();
+        let r = api::rhu_futex_wait(WORD.as_ptr(), 8, sched::DEADLINE_NONE);
+        let ds = sched::switch_count().wrapping_sub(s0);
+        assert!(r == sched::ERR_AGAIN, "mismatched wait returned {}", r);
+        assert!(ds == 0, "mismatched wait slept: {} switches", ds);
+        kprintln!("[api] PASS futex-eagain (changed value refused: no sleep, 0 switches)");
+    }
+
+    fn check_timeout() {
+        kprintln!("[api] futex-timeout: 10 ms deadline armed");
+        static WORD: AtomicU32 = AtomicU32::new(0);
+        late_in_tick();
+        let deadline = api::rhu_now_ns() + 10_000_000;
+        let r = api::rhu_futex_wait(WORD.as_ptr(), 0, deadline);
+        assert!(r == sched::ERR_TIMEDOUT, "timed wait returned {}", r);
+        assert!(api::rhu_now_ns() >= deadline, "timeout fired before the deadline");
+        kprintln!("[api] PASS futex-timeout (10 ms deadline honored: never early)");
+    }
+
+    static WAKE_WORD: AtomicU32 = AtomicU32::new(0);
+    static RAN: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
+
+    extern "C" fn waiter(i: usize) {
+        let r = api::rhu_futex_wait(WAKE_WORD.as_ptr(), 0, sched::DEADLINE_NONE);
+        assert!(r == 0, "waiter woke with {}", r);
+        RAN[i].store(1, Ordering::Release);
+    }
+
+    fn check_wake() {
+        kprintln!("[api] futex-wake: 3 waiters arming");
+        let slots = [
+            sched::spawn("fw0", waiter, 0, 4, 4 * 1024),
+            sched::spawn("fw1", waiter, 1, 4, 4 * 1024),
+            sched::spawn("fw2", waiter, 2, 4, 4 * 1024),
+        ];
+        while sched::probe_futex_waiting(WAKE_WORD.as_ptr()) != 3 {
+            api::rhu_sleep_ns(1_000_000);
+        }
+        let woken = api::rhu_futex_wake(WAKE_WORD.as_ptr(), 1);
+        assert!(woken == 1, "wake-one readied {}", woken);
+        let readied = sched::probe_ready_among(&slots);
+        let waiting = sched::probe_futex_waiting(WAKE_WORD.as_ptr());
+        let ran: u32 = RAN.iter().map(|f| f.load(Ordering::Acquire)).sum();
+        assert!(readied == 1, "wake-one: {} slots readied", readied);
+        assert!(waiting == 2, "wake-one: {} slots still waiting", waiting);
+        assert!(ran == 0, "wake-one: a waiter RAN before this thread yielded");
+        kprintln!("[api] PASS futex-wake-one (3 blocked: readied exactly 1, ran 0)");
+
+        let rest = api::rhu_futex_wake(WAKE_WORD.as_ptr(), u32::MAX);
+        assert!(rest == 2, "wake-all readied {}", rest);
+        assert!(sched::probe_ready_among(&slots) == 3, "wake-all left a waiter behind");
+        while RAN.iter().map(|f| f.load(Ordering::Acquire)).sum::<u32>() != 3 {
+            api::rhu_sleep_ns(1_000_000);
+        }
+        kprintln!("[api] PASS futex-wake-all (released remaining 2, count exact, all ran after)");
+    }
+
+    static LOCK: AtomicU32 = AtomicU32::new(0);
+    static IN_CS: AtomicU32 = AtomicU32::new(0);
+    static SLOWPATH: AtomicU32 = AtomicU32::new(0);
+    static MUTEX_DONE: AtomicU32 = AtomicU32::new(0);
+    static mut COUNTER: u32 = 0;
+
+    fn lock() {
+        if LOCK
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+        loop {
+            if LOCK.swap(2, Ordering::Acquire) == 0 {
+                return;
+            }
+            SLOWPATH.fetch_add(1, Ordering::Relaxed);
+            let _ = api::rhu_futex_wait(LOCK.as_ptr(), 2, sched::DEADLINE_NONE);
+        }
+    }
+
+    fn unlock() {
+        if LOCK.swap(0, Ordering::Release) == 2 {
+            api::rhu_futex_wake(LOCK.as_ptr(), 1);
+        }
+    }
+
+    extern "C" fn mutex_worker(_: usize) {
+        for i in 0..300u32 {
+            lock();
+            assert!(
+                IN_CS
+                    .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok(),
+                "mutex overlap: two threads inside the critical section"
+            );
+            unsafe {
+                let c = read_volatile(addr_of!(COUNTER));
+                write_volatile(addr_of_mut!(COUNTER), c + 1);
+            }
+            if i % 50 == 0 {
+                busy_wait_ms(2);
+            }
+            IN_CS.store(0, Ordering::Release);
+            unlock();
+        }
+        MUTEX_DONE.fetch_add(1, Ordering::Release);
+        api::rhu_futex_wake(MUTEX_DONE.as_ptr(), u32::MAX);
+    }
+
+    fn check_mutex() {
+        kprintln!("[api] futex-mutex: 4 workers x 300 armed");
+        for name in ["mx0", "mx1", "mx2", "mx3"] {
+            sched::spawn(name, mutex_worker, 0, 4, 4 * 1024);
+        }
+        loop {
+            let d = MUTEX_DONE.load(Ordering::Acquire);
+            if d == 4 {
+                break;
+            }
+            let _ = api::rhu_futex_wait(MUTEX_DONE.as_ptr(), d, sched::DEADLINE_NONE);
+        }
+        let count = unsafe { read_volatile(addr_of!(COUNTER)) };
+        assert!(count == 1200, "counter {} after 4 x 300", count);
+        assert!(SLOWPATH.load(Ordering::Relaxed) >= 1, "slow path never fired");
+        assert!(IN_CS.load(Ordering::Relaxed) == 0, "critical section flag stuck");
+        kprintln!("[api] PASS futex-mutex (4x300 stress: counter 1200 exact, overlap-free, slow path fired)");
+    }
+
+    fn check_quiescent() {
         kprintln!("[api] tick-quiescent: solo busy 30 ms, switch delta armed");
         let t0 = sched::now_ms();
         let s0 = sched::switch_count();

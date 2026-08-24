@@ -14,7 +14,7 @@ pub union Vector {
     reserved: usize,
 }
 
-extern "C" {
+unsafe extern "C" {
     fn Reset();
     fn ExceptionTrampoline();
     fn SvcHandler();
@@ -28,15 +28,15 @@ extern "C" {
 }
 
 /// [1] Reset -- hardware loads MSP from slot 0 (linker-provided), then here.
-#[link_section = ".vector_table.reset"]
-#[no_mangle]
+#[unsafe(link_section = ".vector_table.reset")]
+#[unsafe(no_mangle)]
 static __RESET_VECTOR: unsafe extern "C" fn() = Reset;
 
 /// [2..=15] System exceptions. Faults funnel through the trampoline
 /// (the Rust side decodes IPSR); the scheduler owns SVCall, PendSV, and
 /// SysTick.
-#[link_section = ".vector_table.exceptions"]
-#[no_mangle]
+#[unsafe(link_section = ".vector_table.exceptions")]
+#[unsafe(no_mangle)]
 static __EXCEPTIONS: [Vector; 14] = [
     Vector { handler: ExceptionTrampoline },
     Vector { handler: ExceptionTrampoline },
@@ -56,8 +56,8 @@ static __EXCEPTIONS: [Vector; 14] = [
 
 /// [16..) External IRQ lines -- the count is a board fact. Every line
 /// funnels: an unexpected interrupt is a loud fault report, not a spin.
-#[link_section = ".vector_table.interrupts"]
-#[no_mangle]
+#[unsafe(link_section = ".vector_table.interrupts")]
+#[unsafe(no_mangle)]
 static __INTERRUPTS: [Vector; crate::board::NIRQ] =
     [Vector { handler: ExceptionTrampoline }; crate::board::NIRQ];
 
@@ -88,8 +88,8 @@ Reset:
 const SCB_VTOR: *mut u32 = 0xE000_ED08 as *mut u32;
 const SCB_SHCSR: *mut u32 = 0xE000_ED24 as *mut u32;
 
-#[no_mangle]
-unsafe extern "C" fn __rhu_reset() -> ! {
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __rhu_reset() -> ! { unsafe {
     let sdata = addr_of_mut!(__sdata) as *mut u8;
     let edata = addr_of!(__edata) as *const u8;
     let sidata = addr_of!(__sidata) as *const u8;
@@ -105,4 +105,4 @@ unsafe extern "C" fn __rhu_reset() -> ! {
 
     crate::console::init();
     crate::kmain()
-}
+}}

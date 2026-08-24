@@ -12,11 +12,11 @@ const SYS_EXIT_EXTENDED: u32 = 0x20;
 const ADP_STOPPED_APPLICATION_EXIT: u32 = 0x20026;
 
 #[cfg(feature = "qemu-exit")]
-unsafe fn call(op: u32, param: u32) -> u32 {
+unsafe fn call(op: u32, param: u32) -> u32 { unsafe {
     let ret;
     asm!("bkpt #0xab", inlateout("r0") op => ret, in("r1") param, options(nostack));
     ret
-}
+}}
 
 /// Terminate the machine with an exit code (QEMU) or park (silicon).
 /// SYS_EXIT_EXTENDED carries the code into the host's exit status;

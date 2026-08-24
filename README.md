@@ -13,8 +13,9 @@ else.
 
 Lamella RHU is part of the [Lamella project](https://github.com/lamellaproject/lamella):
 Lamella's toolchain brings C# to even the smallest parts; Lamella RHU runs the
-full .NET runtime wherever there is headroom for it. Lamella RHU is free and
-open source under the [licenses below](#license).
+full .NET runtime wherever there is headroom for it.
+
+Lamella RHU is free and open source under the [licenses below](#license).
 
 ## Status
 
@@ -43,6 +44,20 @@ The only prerequisite is Rust: the exact toolchain is pinned by
 
     cd src/kernel
     cargo build --release
+
+## Verifying (optional)
+
+The unikernel's quality gate chain builds each kernel configuration, runs it
+on QEMU, and checks its behavior. To run it via Rust's cargo, ensure
+`qemu-system-arm` is on your PATH, then:
+
+    cd src/harness
+    cargo run --release -- chain
+
+Please note that gate results are pinned against a specific QEMU release
+(currently the QEMU 11.0 series; each gate's result line reports the exact
+QEMU and Rust versions it ran under). If your QEMU version is different, the
+chain may report correspondingly-different results.
 
 ## Contributing
 

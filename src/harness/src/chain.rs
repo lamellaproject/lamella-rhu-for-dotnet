@@ -1,0 +1,82 @@
+//! The chain owner: every gate in order, one owner process, and a
+//! verdict line that DECLARES any tier it could not run -- stated loudly,
+//! never skipped silently.
+
+use std::io::Write as _;
+use std::path::Path;
+use std::process::{exit, Command};
+
+/// The chain verdict line: gate count, gate names, and the declared
+/// absence of the payload tier when its frozen inputs are not present.
+/// Byte-identical to the chain of record's line -- the drop pipeline
+/// parses it into the manifest.
+pub fn chain_verdict(gates: &[&str], declared_absent: Option<&str>) -> String {
+    let declared = match declared_absent {
+        Some(inputs) => format!(" + payload tier NOT RUN (frozen inputs absent: {inputs})"),
+        None => String::new(),
+    };
+    format!(
+        "CHAIN: PASS ({} gates: {}){}",
+        gates.len(),
+        gates.join(" "),
+        declared
+    )
+}
+
+/// Print one owner line and flush: child legs inherit the same stdout,
+/// so an unflushed parent banner would batch AFTER a child's output in a
+/// captured transcript and break the interleaving the console shows.
+fn say(line: &str) {
+    println!("{line}");
+    let _ = std::io::stdout().flush();
+}
+
+pub fn run(repo: &Path) -> ! {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            say(&format!("rhu-gate chain: cannot resolve own binary path: {e}"));
+            exit(1);
+        }
+    };
+
+    let mut legs: Vec<&str> = vec!["base", "sched"];
+    let mut declared: Option<&str> = None;
+    if repo.join("goldens").join("payload").is_dir() {
+        legs.push("payload");
+    } else {
+        declared = Some("goldens/payload");
+        say("==== chain: payload tier frozen inputs absent (goldens/payload) -- tier DECLARED, not run ====");
+    }
+    legs.push("api");
+
+    let chain_id = format!("chain-{}", std::process::id());
+    let mut names: Vec<String> = Vec::new();
+    for (i, leg) in legs.iter().enumerate() {
+        let name = format!("rhu-gate-{leg}");
+        say(&format!("==== chain [{i}] {name} ===="));
+        let status = Command::new(&exe)
+            .arg(leg)
+            .env("RHU_CHAIN_ID", &chain_id)
+            .env("RHU_CHAIN_INDEX", i.to_string())
+            .status();
+        match status {
+            Ok(s) if s.success() => names.push(name),
+            Ok(s) => {
+                match s.code() {
+                    Some(_) => say(&format!("CHAIN: FAIL at {name}")),
+                    None => say(&format!("CHAIN: FAIL at {name} (terminated by signal)")),
+                }
+                exit(1);
+            }
+            Err(e) => {
+                say(&format!("CHAIN: FAIL at {name} (spawn error: {e})"));
+                exit(1);
+            }
+        }
+    }
+
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    say(&chain_verdict(&name_refs, declared));
+    exit(0);
+}

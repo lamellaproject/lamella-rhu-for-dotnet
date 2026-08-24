@@ -42,6 +42,11 @@ SECTIONS
 
   .text : ALIGN(4)
   {
+    /* The hosting-API surface (rhu_now_ns .. rhu_futex_wake): a
+     * consumer links against these AFTER this image is built, so
+     * section GC must never fold a fully-inlined one away. The test
+     * harness asserts all four in the artifact. */
+    KEEP(*(.text.rhu_api));
     *(.text .text.*);
   } > CODE
 
