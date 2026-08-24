@@ -24,15 +24,34 @@ const SYST_CSR: *mut u32 = 0xE000_E010 as *mut u32;
 const SYST_RVR: *mut u32 = 0xE000_E014 as *mut u32;
 const SYST_CVR: *mut u32 = 0xE000_E018 as *mut u32;
 
-/// Nanosecond clock geometry. Both divisions must be exact or the
-/// interpolated clock drifts against the tick clock it shares hardware
-/// with; a board that violates either assert re-derives its own
-/// geometry instead of shipping a lie.
+/// Nanosecond clock geometry. The tick divisions must be exact; the
+/// sub-tick interpolation is the exact reduced fraction
+/// `NS_NUM/NS_DEN = 1e9/SYSCLK_HZ`, so a SYSCLK that does not divide
+/// 1e9 (silicon PLL rates) still yields an honest clock: at every tick
+/// boundary `CYCLES_PER_TICK * NS_NUM / NS_DEN == NS_PER_TICK`
+/// identically (the boundary-identity assert below is the tripwire),
+/// and within a tick the floor of a monotone product stays monotone.
 const CYCLES_PER_TICK: u32 = board::SYSCLK_HZ / board::TICK_HZ;
 const NS_PER_TICK: u64 = 1_000_000_000 / board::TICK_HZ as u64;
-const NS_PER_CYCLE: u64 = (1_000_000_000 / board::SYSCLK_HZ) as u64;
+const NS_GCD: u64 = gcd(1_000_000_000, board::SYSCLK_HZ as u64);
+const NS_NUM: u64 = 1_000_000_000 / NS_GCD;
+const NS_DEN: u64 = board::SYSCLK_HZ as u64 / NS_GCD;
 const _: () = assert!(board::SYSCLK_HZ % board::TICK_HZ == 0, "tick not a whole cycle count");
-const _: () = assert!(1_000_000_000 % board::SYSCLK_HZ == 0, "cycle not a whole ns count");
+const _: () = assert!(CYCLES_PER_TICK - 1 <= 0x00FF_FFFF, "reload exceeds SysTick's 24 bits");
+const _: () = assert!(1_000_000_000 % board::TICK_HZ as u64 == 0, "tick not a whole ns count");
+const _: () = assert!(
+    CYCLES_PER_TICK as u64 * NS_NUM / NS_DEN == NS_PER_TICK,
+    "sub-tick fraction disagrees with the tick clock at the boundary"
+);
+
+const fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a
+}
 
 /// Thread state. `repr(u8)` with stated values: part of the
 /// debug-visible layout contract.
@@ -427,7 +446,7 @@ pub fn now_ns() -> u64 {
         if h1 == h2 && l1 == l2 {
             let ticks = (((h1 as u64) << 32) | l1 as u64) + pending as u64;
             let elapsed = (CYCLES_PER_TICK - 1).saturating_sub(cvr) as u64;
-            return ticks * NS_PER_TICK + elapsed * NS_PER_CYCLE;
+            return ticks * NS_PER_TICK + elapsed * NS_NUM / NS_DEN;
         }
     }
 }

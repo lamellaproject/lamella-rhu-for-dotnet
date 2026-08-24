@@ -30,8 +30,9 @@ In the tree today:
   switching
 - Payload hosting: NativeAOT-compiled test payloads linked into the kernel
   image and verified against golden transcripts
+- Supported boards: STM32F769I-DISCO
 
-Hardware board support and the full runtime bring-up land incrementally.
+Further hardware board support and the full runtime bring-up land incrementally.
 
 To be notified when releases are available, click **Watch** at the top of this
 repo, select **Custom**, and check **Releases**.

@@ -23,6 +23,12 @@ pub const KMAIN_STACK_BYTES: usize = 16 * 1024;
 /// table.
 pub const NIRQ: usize = 32;
 
+/// FPU shape: the AN500's Cortex-M7 carries FPv5 double precision.
+/// Consumed by records and gates, never by context-switch code (lazy
+/// stacking of S0-S31 is FP-shape-agnostic).
+#[allow(dead_code)]
+pub const FPU_DP: bool = true;
+
 /// RAM windows a hardware-pushed exception frame may plausibly live in
 /// (SSRAM2/3 and PSRAM; each end backed off by one 8-word frame). The
 /// funnel refuses to dereference a frame pointer outside them.
@@ -40,6 +46,17 @@ const BAUDDIV: *mut u32 = (UART0 + 0x10) as *mut u32;
 const STATE_TXFULL: u32 = 1 << 0;
 const CTRL_TXEN: u32 = 1 << 0;
 const BAUD: u32 = 115_200;
+
+/// Clock posture: the FPGA image runs at its fixed 25 MHz; there is
+/// nothing to program. Boards with a real clock tree enforce their
+/// posture here, before the console exists.
+pub fn clock_init() {}
+
+/// Boring posture: no clock line in the banner (the banked transcript
+/// surface stands byte-identical).
+pub fn clock_readback() -> Option<crate::board::ClockReadback> {
+    None
+}
 
 /// Program the divider and enable the transmitter. Idempotent, so the
 /// panic/fault paths may call it again defensively.

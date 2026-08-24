@@ -26,6 +26,14 @@ crate-type = ["rlib", "staticlib"]
 default = ["qemu-exit", "board-mps2-an500"]
 # Exactly one board feature must be selected (src/board/mod.rs enforces).
 board-mps2-an500 = []
+# STM32F769I-DISCO (Cortex-M7 silicon, flash-boot at 0x08000000): build
+# with --no-default-features (no semihosting exits off the bench).
+board-stm32f769i-disco = []
+# F769 clock posture 2: PLL at 216 MHz (the production clock). A gated
+# posture -- own image names, own goldens, banner line from register
+# read-back; requires board-stm32f769i-disco (src/board/mod.rs refuses
+# otherwise). Without it the board runs the boring HSI-16 default.
+f769-pll216 = []
 # Semihosting exits on the shutdown/panic/fault paths. QEMU runs only:
 # without a debugger attached, BKPT #0xAB escalates to HardFault on real
 # silicon, so non-QEMU builds disable this and every exit becomes a park.

@@ -69,6 +69,27 @@ pub extern "C" fn kmain() -> ! {
         cpuid & 0xF
     );
 
+    if let Some(ck) = board::clock_readback() {
+        kprintln!(
+            "[boot] clock: {} | SYSCLK {} Hz (SWS={}, {}/{} x{} /{}) | flash WS {} | over-drive {}",
+            ck.posture,
+            ck.sysclk_hz,
+            ck.sws,
+            ck.src,
+            ck.pllm,
+            ck.plln,
+            ck.pllp,
+            ck.flash_ws,
+            if ck.overdrive { "on" } else { "off" }
+        );
+        assert!(
+            ck.sysclk_hz == board::SYSCLK_HZ,
+            "clock posture mismatch: registers say {} Hz, build says {} Hz",
+            ck.sysclk_hz,
+            board::SYSCLK_HZ
+        );
+    }
+
     sched::init();
     let main_slot = sched::spawn("kmain", kthread_main, 0, 3, board::KMAIN_STACK_BYTES);
     kprintln!(

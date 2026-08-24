@@ -103,6 +103,7 @@ unsafe extern "C" fn __rhu_reset() -> ! { unsafe {
 
     SCB_SHCSR.write_volatile(SCB_SHCSR.read_volatile() | (0b111 << 16));
 
+    crate::board::clock_init();
     crate::console::init();
     crate::kmain()
 }}
