@@ -8,6 +8,8 @@
 fn main() {
     let script = if cfg!(feature = "board-stm32f769i-disco") {
         "link-stm32f769i-disco.x"
+    } else if cfg!(feature = "board-mps2-an505") {
+        "link-mps2-an505.x"
     } else {
         "link-mps2-an500.x"
     };

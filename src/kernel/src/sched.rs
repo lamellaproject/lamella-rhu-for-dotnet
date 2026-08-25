@@ -156,6 +156,13 @@ pub static TICKS: AtomicU32 = AtomicU32::new(0);
 /// contract; `now_ns`'s stability loop is the only reader.
 static TICKS_HI: AtomicU32 = AtomicU32::new(0);
 
+/// `now_ns` monotonicity watermark: the last value returned, split into
+/// halves (this core has no 64-bit atomics). Read and written ONLY
+/// inside the kernel CS in `now_ns` -- the CS, not the atomics, is the
+/// pair's consistency.
+static NOW_LAST_LO: AtomicU32 = AtomicU32::new(0);
+static NOW_LAST_HI: AtomicU32 = AtomicU32::new(0);
+
 /// Context switches taken since boot (PendSV entries; a switch back to
 /// the same thread counts). Only the switch path writes. Exported
 /// beside `__rhu_ticks` for the debug-visible contract; a
@@ -416,7 +423,7 @@ pub const ERR_AGAIN: i32 = -11;
 pub const ERR_TIMEDOUT: i32 = -110;
 pub const ERR_INVAL: i32 = -22;
 
-/// 64-bit monotonic nanoseconds since scheduler init. The three
+/// 64-bit monotonic nanoseconds since scheduler init. The four
 /// recorded hazards, each handled in order:
 ///   1. torn 64-bit tick read -- hi/lo stability loop (re-read brackets;
 ///      the handler runs atomically w.r.t. thread level, so a bracketed
@@ -428,12 +435,23 @@ pub const ERR_INVAL: i32 = -22;
 ///      raced): ICSR.PENDSTSET says so, and the read must add the
 ///      pending tick or time steps backward across the wrap. CVR is
 ///      resampled AFTER seeing the bit so the interpolation describes
-///      the post-wrap countdown the +1 belongs to.
-/// A CS held across MORE than one reload loses the extras (the pend bit
-/// is single); monotonicity survives, accuracy is bounded by the
-/// kernel's short-CS discipline.
+///      the post-wrap countdown the +1 belongs to;
+///   4. the saturated pend bit -- the bit is SINGLE, so a CS held
+///      across more than one reload loses the extras, and a read that
+///      consumed the +1 EARLY in such a CS shares its tick term with
+///      every later read inside it: ordering would fall to CVR
+///      interpolations from different countdown generations, which can
+///      regress by a few cycles (or compare equal under an emulator's
+///      lazily-advanced counter). The returned-value watermark below
+///      carries ordering structurally: a computed value that fails to
+///      exceed the last value returned becomes last+1 instead, so
+///      distinct calls always advance -- a 1 ns floor can never outrun
+///      a call's real cost. Accuracy across such a CS stays what it
+///      was: the lost ticks stay lost, bounded by the kernel's
+///      short-CS discipline; the watermark repairs ORDER, not
+///      accuracy.
 pub fn now_ns() -> u64 {
-    loop {
+    let computed = loop {
         let h1 = TICKS_HI.load(Ordering::Relaxed);
         let l1 = TICKS.load(Ordering::Relaxed);
         let mut cvr = unsafe { read_volatile(SYST_CVR) };
@@ -446,9 +464,17 @@ pub fn now_ns() -> u64 {
         if h1 == h2 && l1 == l2 {
             let ticks = (((h1 as u64) << 32) | l1 as u64) + pending as u64;
             let elapsed = (CYCLES_PER_TICK - 1).saturating_sub(cvr) as u64;
-            return ticks * NS_PER_TICK + elapsed * NS_NUM / NS_DEN;
+            break ticks * NS_PER_TICK + elapsed * NS_NUM / NS_DEN;
         }
-    }
+    };
+    with_cs(|| {
+        let last = ((NOW_LAST_HI.load(Ordering::Relaxed) as u64) << 32)
+            | NOW_LAST_LO.load(Ordering::Relaxed) as u64;
+        let v = if computed > last { computed } else { last + 1 };
+        NOW_LAST_HI.store((v >> 32) as u32, Ordering::Relaxed);
+        NOW_LAST_LO.store(v as u32, Ordering::Relaxed);
+        v
+    })
 }
 
 /// The tick at which `now_ns() >= deadline_ns` is guaranteed: ceil to

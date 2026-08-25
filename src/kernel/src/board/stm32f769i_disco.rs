@@ -1,6 +1,6 @@
 //! STM32F769I-DISCO (STM32F769NI, Cortex-M7 r1p0): the first silicon
 //! board. Flash-boot at 0x08000000, USART1 console on the ST-LINK VCP.
-//! Two clock postures, feature-selected (`f769-pll216` -- the gated-
+//! Two clock postures, feature-selected (`stm32f769i-disco-pll216` -- the gated-
 //! posture pattern: own feature, own image names, own goldens, banner
 //! line from register read-back): the boring HSI 16 MHz default, and
 //! PLL216 (216 MHz, the production posture). Caches and ART stay off
@@ -13,18 +13,18 @@ pub const CONSOLE: &str = "USART1 (ST-LINK VCP)";
 
 /// Clock posture 1 (default): HSI 16 MHz, SYSCLK = HCLK = PCLK1 = PCLK2
 /// (all prescalers div1). `clock_init` enforces exactly this posture.
-#[cfg(not(feature = "f769-pll216"))]
+#[cfg(not(feature = "stm32f769i-disco-pll216"))]
 pub const SYSCLK_HZ: u32 = 16_000_000;
-#[cfg(not(feature = "f769-pll216"))]
+#[cfg(not(feature = "stm32f769i-disco-pll216"))]
 const PCLK2_HZ: u32 = SYSCLK_HZ;
 
-/// Clock posture 2 (`f769-pll216`): PLL at 216 MHz off HSI -- HSI/8
+/// Clock posture 2 (`stm32f769i-disco-pll216`): PLL at 216 MHz off HSI -- HSI/8
 /// gives a 2 MHz VCO input, x216 puts the VCO at its 432 MHz ceiling,
 /// /2 lands SYSCLK at 216. HCLK = SYSCLK; APB1 = /4 (54 MHz, its cap);
 /// APB2 = /2 (108 MHz, its cap). All caps and the recipe per RM0410.
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 pub const SYSCLK_HZ: u32 = 216_000_000;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const PCLK2_HZ: u32 = SYSCLK_HZ / 2;
 
 /// SysTick rate.
@@ -55,19 +55,19 @@ pub const FRAME_RANGES: [(usize, usize); 1] = [(0x2002_0000, 0x2008_0000 - 32)];
 
 const RCC: usize = 0x4002_3800;
 const RCC_CR: *mut u32 = RCC as *mut u32;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const RCC_PLLCFGR: *mut u32 = (RCC + 0x04) as *mut u32;
 const RCC_CFGR: *mut u32 = (RCC + 0x08) as *mut u32;
 const RCC_AHB1ENR: *mut u32 = (RCC + 0x30) as *mut u32;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const RCC_APB1ENR: *mut u32 = (RCC + 0x40) as *mut u32;
 const RCC_APB2ENR: *mut u32 = (RCC + 0x44) as *mut u32;
 
 const CR_HSION: u32 = 1 << 0;
 const CR_HSIRDY: u32 = 1 << 1;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const CR_PLLON: u32 = 1 << 24;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const CR_PLLRDY: u32 = 1 << 25;
 /// CFGR fields: SW [1:0], SWS [3:2], HPRE [7:4], PPRE1 [12:10],
 /// PPRE2 [15:13]. Zero in every field = HSI selected, div1 everywhere.
@@ -76,56 +76,56 @@ const CFGR_SWS: u32 = 0b11 << 2;
 const CFGR_HPRE: u32 = 0b1111 << 4;
 const CFGR_PPRE1: u32 = 0b111 << 10;
 const CFGR_PPRE2: u32 = 0b111 << 13;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const CFGR_SW_PLL: u32 = 0b10;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const CFGR_SWS_PLL: u32 = 0b10 << 2;
 /// APB prescaler codes: 0b101 = /4, 0b100 = /2 (top bit = "divide").
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const CFGR_PPRE1_DIV4: u32 = 0b101 << 10;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const CFGR_PPRE2_DIV2: u32 = 0b100 << 13;
 
 /// PLLCFGR fields: PLLM [5:0], PLLN [14:6], PLLP [17:16] (00 = /2),
 /// PLLSRC [22] (0 = HSI), PLLQ [27:24]. PLLQ 9 taps the 432 MHz VCO to
 /// a well-formed 48 MHz -- nothing consumes it; a garbage field is not
 /// worth the two bits it saves.
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const PLLM: u32 = 8;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const PLLN: u32 = 216;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const PLLQ: u32 = 9;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const PLLCFGR_VALUE: u32 = PLLM | (PLLN << 6) | (PLLQ << 24);
 
 const FLASH_ACR: *mut u32 = 0x4002_3C00 as *mut u32;
 const ACR_LATENCY: u32 = 0b1111;
 /// 216 MHz at VOS1 + over-drive, 2.7-3.6 V supply row: 7 wait states.
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const ACR_LATENCY_7WS: u32 = 7;
 
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const APB1ENR_PWREN: u32 = 1 << 28;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const PWR: usize = 0x4000_7000;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const PWR_CR1: *mut u32 = PWR as *mut u32;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const PWR_CSR1: *mut u32 = (PWR + 0x04) as *mut u32;
 /// PWR_CR1: VOS [15:14] (0b11 = Scale 1), ODEN [16], ODSWEN [17];
 /// PWR_CSR1: VOSRDY [14], ODRDY [16], ODSWRDY [17].
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const CR1_VOS_SCALE1: u32 = 0b11 << 14;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const CR1_ODEN: u32 = 1 << 16;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const CR1_ODSWEN: u32 = 1 << 17;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const CSR1_VOSRDY: u32 = 1 << 14;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const CSR1_ODRDY: u32 = 1 << 16;
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 const CSR1_ODSWRDY: u32 = 1 << 17;
 
 const GPIOA: usize = 0x4002_0000;
@@ -152,7 +152,7 @@ const BAUD: u32 = 115_200;
 /// to the 16 MHz row only after the downshift. The PLL and the flash
 /// ART/prefetch bits are left as found -- both are off the HSI path,
 /// and levers this posture does not need stay unpulled.
-#[cfg(not(feature = "f769-pll216"))]
+#[cfg(not(feature = "stm32f769i-disco-pll216"))]
 pub fn clock_init() {
     unsafe {
         write_volatile(RCC_CR, read_volatile(RCC_CR) | CR_HSION);
@@ -167,7 +167,7 @@ pub fn clock_init() {
 
 /// Boring posture: no clock line in the banner (the banked transcript
 /// surface stands byte-identical).
-#[cfg(not(feature = "f769-pll216"))]
+#[cfg(not(feature = "stm32f769i-disco-pll216"))]
 pub fn clock_readback() -> Option<crate::board::ClockReadback> {
     None
 }
@@ -183,7 +183,7 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
 /// switch) run while SYSCLK is still HSI. APB prescalers land before
 /// the switch so no bus overshoots its cap for even a cycle. The flash
 /// ART/prefetch bits are left as found; caches stay off (posture law).
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 pub fn clock_init() {
     unsafe {
         write_volatile(RCC_CR, read_volatile(RCC_CR) | CR_HSION);
@@ -225,7 +225,7 @@ pub fn clock_init() {
 /// Gated posture: report the live clock tree for the banner line, every
 /// numeric field decoded from registers (a silently-failed PLL yields
 /// SWS=HSI and 16 MHz here, and the kmain assert dies loudly).
-#[cfg(feature = "f769-pll216")]
+#[cfg(feature = "stm32f769i-disco-pll216")]
 pub fn clock_readback() -> Option<crate::board::ClockReadback> {
     /// The DISCO's HSE crystal (X2, 25 MHz per UM2033) -- decode-only:
     /// this posture never enables HSE, but an honest decoder still

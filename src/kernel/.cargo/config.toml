@@ -7,3 +7,10 @@ rustflags = [
   # --nmagic: no page-alignment padding -- a flat MCU image.
   "-C", "link-arg=--nmagic",
 ]
+
+# The ARMv8-M mainline leg (QEMU an505, Cortex-M33) -- same flags; the
+# board linker script still arrives from build.rs.
+[target."thumbv8m.main-none-eabihf"]
+rustflags = [
+  "-C", "link-arg=--nmagic",
+]

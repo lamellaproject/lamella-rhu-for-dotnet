@@ -19,7 +19,7 @@ const MARKER_QUIESCENT: &str =
     "[api] PASS tick-quiescent (solo busy 30 ms: 0 switches, clock advanced)";
 /// The eight [api] boot markers, boot order.
 const MARKERS_A: [&str; 8] = [
-    "[api] PASS ns-monotonic (5000 paired reads + cs wrap window)",
+    "[api] PASS ns-monotonic (5000 paired reads + cs wrap + saturated pend windows)",
     "[api] PASS sleep-ns-floor (25 ms request: never early)",
     "[api] PASS futex-eagain (changed value refused: no sleep, 0 switches)",
     "[api] PASS futex-timeout (10 ms deadline honored: never early)",

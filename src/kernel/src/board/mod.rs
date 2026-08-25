@@ -29,11 +29,24 @@ mod stm32f769i_disco;
 #[cfg(feature = "board-stm32f769i-disco")]
 pub use stm32f769i_disco::*;
 
-#[cfg(all(feature = "board-mps2-an500", feature = "board-stm32f769i-disco"))]
+#[cfg(feature = "board-mps2-an505")]
+mod mps2_an505;
+#[cfg(feature = "board-mps2-an505")]
+pub use mps2_an505::*;
+
+#[cfg(any(
+    all(feature = "board-mps2-an500", feature = "board-stm32f769i-disco"),
+    all(feature = "board-mps2-an500", feature = "board-mps2-an505"),
+    all(feature = "board-stm32f769i-disco", feature = "board-mps2-an505"),
+))]
 compile_error!("select exactly one board-* feature");
 
-#[cfg(not(any(feature = "board-mps2-an500", feature = "board-stm32f769i-disco")))]
+#[cfg(not(any(
+    feature = "board-mps2-an500",
+    feature = "board-stm32f769i-disco",
+    feature = "board-mps2-an505",
+)))]
 compile_error!("select exactly one board-* feature");
 
-#[cfg(all(feature = "f769-pll216", not(feature = "board-stm32f769i-disco")))]
-compile_error!("f769-pll216 is a posture of board-stm32f769i-disco -- select that board");
+#[cfg(all(feature = "stm32f769i-disco-pll216", not(feature = "board-stm32f769i-disco")))]
+compile_error!("stm32f769i-disco-pll216 is a posture of board-stm32f769i-disco -- select that board");

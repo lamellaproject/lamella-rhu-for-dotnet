@@ -137,6 +137,7 @@ fn cpu_name(cpuid: u32) -> &'static str {
         0xC27 => "Cortex-M7",
         0xC24 => "Cortex-M4",
         0xC23 => "Cortex-M3",
+        0xD21 => "Cortex-M33",
         _ => "unrecognized part",
     }
 }
@@ -361,6 +362,22 @@ mod api_smoke {
         unsafe { while read_volatile(SYST_CVR) > LATE {} }
     }
 
+    /// Spin until SysTick reloads once: CVR counts DOWN, so the first
+    /// sample reading HIGHER than the last crossed a reload. Callable
+    /// inside the kernel CS -- the crossing still latches
+    /// ICSR.PENDSTSET even while the interrupt is masked.
+    fn wait_wrap() {
+        const SYST_CVR: *const u32 = 0xE000_E018 as *const u32;
+        let mut last = unsafe { read_volatile(SYST_CVR) };
+        loop {
+            let c = unsafe { read_volatile(SYST_CVR) };
+            if c > last {
+                return;
+            }
+            last = c;
+        }
+    }
+
     /// The eight API contract checks, in gate order, one boot,
     /// sequential; every marker is constant text the gate pins. Waiters
     /// and workers run LESS urgent than this thread (prio 4 vs 3), so the
@@ -378,12 +395,12 @@ mod api_smoke {
     }
 
     fn check_monotonic() {
-        kprintln!("[api] ns-monotonic: 5000 paired reads + cs wrap window armed");
+        kprintln!("[api] ns-monotonic: 5000 paired reads + cs wrap + saturated-pend windows armed");
         let mut prev = 0u64;
         for _ in 0..5000 {
             let a = api::rhu_now_ns();
             let b = api::rhu_now_ns();
-            assert!(a >= prev && b >= a, "ns clock stepped backward at thread level");
+            assert!(a > prev && b > a, "ns clock failed to advance at thread level");
             prev = b;
         }
         const SYST_CVR: *const u32 = 0xE000_E018 as *const u32;
@@ -403,7 +420,16 @@ mod api_smoke {
             (t_a, t_b)
         });
         assert!(t_b > t_a, "ns clock stepped backward across a masked tick wrap");
-        kprintln!("[api] PASS ns-monotonic (5000 paired reads + cs wrap window)");
+        let (t_c, t_d) = with_cs(|| {
+            wait_wrap();
+            late_in_tick();
+            let t_c = api::rhu_now_ns();
+            wait_wrap();
+            let t_d = api::rhu_now_ns();
+            (t_c, t_d)
+        });
+        assert!(t_d > t_c, "ns clock stepped backward across a saturated pend window");
+        kprintln!("[api] PASS ns-monotonic (5000 paired reads + cs wrap + saturated pend windows)");
     }
 
     fn check_sleep() {
