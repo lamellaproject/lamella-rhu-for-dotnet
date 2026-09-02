@@ -16,6 +16,11 @@ pub const TICK_HZ: u32 = 1_000;
 /// small-RAM boards re-derive it from their own budgets.
 pub const STACK_POOL_BYTES: usize = 64 * 1024;
 
+/// The boot kheap carve out of the arena (the GC board table's
+/// `kheap_carve` row). Sized conservatively rather than from measured
+/// demand.
+pub const KHEAP_BYTES: usize = 64 * 1024;
+
 /// Stack for the kmain thread (the boot thread's continuation).
 pub const KMAIN_STACK_BYTES: usize = 16 * 1024;
 
@@ -45,7 +50,9 @@ const CTRL: *mut u32 = (UART0 + 0x08) as *mut u32;
 const BAUDDIV: *mut u32 = (UART0 + 0x10) as *mut u32;
 
 const STATE_TXFULL: u32 = 1 << 0;
+const STATE_RXFULL: u32 = 1 << 1;
 const CTRL_TXEN: u32 = 1 << 0;
+const CTRL_RXEN: u32 = 1 << 1;
 const BAUD: u32 = 115_200;
 
 /// Clock posture: the FPGA image runs at its fixed 20 MHz; there is
@@ -59,12 +66,12 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
     None
 }
 
-/// Program the divider and enable the transmitter. Idempotent, so the
+/// Program the divider and enable both directions. Idempotent, so the
 /// panic/fault paths may call it again defensively.
 pub fn console_init() {
     unsafe {
         write_volatile(BAUDDIV, SYSCLK_HZ / BAUD);
-        write_volatile(CTRL, CTRL_TXEN);
+        write_volatile(CTRL, CTRL_TXEN | CTRL_RXEN);
     }
 }
 
@@ -73,5 +80,16 @@ pub fn console_putb(b: u8) {
     unsafe {
         while read_volatile(STATE) & STATE_TXFULL != 0 {}
         write_volatile(DATA, b as u32);
+    }
+}
+
+/// Non-blocking byte receive: one pending byte, or None immediately.
+pub fn console_getb() -> Option<u8> {
+    unsafe {
+        if read_volatile(STATE) & STATE_RXFULL != 0 {
+            Some(read_volatile(DATA) as u8)
+        } else {
+            None
+        }
     }
 }

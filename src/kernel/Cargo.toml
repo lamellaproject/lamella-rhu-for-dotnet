@@ -34,11 +34,21 @@ board-stm32f769i-disco = []
 # stays there (no SAU programming, no NS transition). Build with
 # --target thumbv8m.main-none-eabihf.
 board-mps2-an505 = []
+# NUCLEO-U5A5ZJ-Q (STM32U5A5ZJ, Cortex-M33 silicon, flash-boot at
+# 0x08000000, TrustZone option bit off): build with
+# --no-default-features (no semihosting exits off the bench) and
+# --target thumbv8m.main-none-eabihf.
+board-nucleo-u5a5zj-q = []
 # F769 clock posture 2: PLL at 216 MHz (the production clock). A gated
 # posture -- own image names, own goldens, banner line from register
 # read-back; requires board-stm32f769i-disco (src/board/mod.rs refuses
 # otherwise). Without it the board runs the boring HSI-16 default.
 stm32f769i-disco-pll216 = []
+# U5A5 clock posture 2: PLL1 at 160 MHz (the range-1 ceiling posture). A
+# gated posture -- own image names, own goldens, banner line from
+# register read-back; requires board-nucleo-u5a5zj-q (src/board/mod.rs
+# refuses otherwise). Without it the board runs the boring HSI16 default.
+nucleo-u5a5zj-q-pll160 = []
 # Semihosting exits on the shutdown/panic/fault paths. QEMU runs only:
 # without a debugger attached, BKPT #0xAB escalates to HardFault on real
 # silicon, so non-QEMU builds disable this and every exit becomes a park.
@@ -47,6 +57,12 @@ qemu-exit = []
 # selftests pass.
 test-panic = []
 test-fault = []
+# The designed death: corrupt a free kheap header, walk, die loud.
+test-kheap-loud = []
+# The tick-cost measurement flavor (QEMU an500 + the
+# Deterministic icount profile only): raw dns/dms/dsw numbers, never a
+# gate case, never golden'd, never a silicon flavor.
+test-tickcost = []
 # Gate flavor: multithreaded smoke (sleep ordering, round-robin + tick
 # preemption, callee-saved FP survival beside a hostile peer).
 sched-smoke = []

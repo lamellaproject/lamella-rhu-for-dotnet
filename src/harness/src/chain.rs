@@ -7,14 +7,17 @@ use std::path::Path;
 use std::process::{exit, Command};
 
 /// The chain verdict line: gate count, gate names, and the declared
-/// absence of the payload tier when its frozen inputs are not present.
-/// Byte-identical to the chain of record's line -- the drop pipeline
-/// parses it into the manifest.
-pub fn chain_verdict(gates: &[&str], declared_absent: Option<&str>) -> String {
-    let declared = match declared_absent {
-        Some(inputs) => format!(" + payload tier NOT RUN (frozen inputs absent: {inputs})"),
-        None => String::new(),
-    };
+/// absence of every frozen-input tier whose inputs are not present
+/// (payload and gc), in leg order. Byte-identical to the chain of
+/// record's line -- the drop pipeline parses it into the manifest --
+/// and byte-identical to the pre-generalization rendering for the
+/// zero- and payload-declared shapes (the core selfcheck pins all
+/// three shapes).
+pub fn chain_verdict(gates: &[&str], declared_absent: &[(&str, &str)]) -> String {
+    let declared: String = declared_absent
+        .iter()
+        .map(|(tier, inputs)| format!(" + {tier} tier NOT RUN (frozen inputs absent: {inputs})"))
+        .collect();
     format!(
         "CHAIN: PASS ({} gates: {}){}",
         gates.len(),
@@ -41,14 +44,20 @@ pub fn run(repo: &Path) -> ! {
     };
 
     let mut legs: Vec<&str> = vec!["base", "sched"];
-    let mut declared: Option<&str> = None;
+    let mut declared: Vec<(&str, &str)> = Vec::new();
     if repo.join("goldens").join("payload").is_dir() {
         legs.push("payload");
     } else {
-        declared = Some("goldens/payload");
+        declared.push(("payload", "goldens/payload"));
         say("==== chain: payload tier frozen inputs absent (goldens/payload) -- tier DECLARED, not run ====");
     }
     legs.push("api");
+    if repo.join("goldens").join("gc").is_dir() {
+        legs.push("gc");
+    } else {
+        declared.push(("gc", "goldens/gc"));
+        say("==== chain: gc tier frozen inputs absent (goldens/gc) -- tier DECLARED, not run ====");
+    }
 
     let chain_id = format!("chain-{}", std::process::id());
     let mut names: Vec<String> = Vec::new();
@@ -77,6 +86,6 @@ pub fn run(repo: &Path) -> ! {
     }
 
     let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    say(&chain_verdict(&name_refs, declared));
+    say(&chain_verdict(&name_refs, &declared));
     exit(0);
 }

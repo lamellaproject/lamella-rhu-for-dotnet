@@ -171,15 +171,23 @@ pub fn run(repo: &Path) -> ! {
 
     sc.accept_probe(
         "chain-line-full",
-        "four-gate chain verdict line matches the chain of record",
-        chain_verdict(&["rhu-gate-base", "rhu-gate-sched", "rhu-gate-payload", "rhu-gate-api"], None)
-            == "CHAIN: PASS (4 gates: rhu-gate-base rhu-gate-sched rhu-gate-payload rhu-gate-api)",
+        "five-gate chain verdict line matches the chain of record",
+        chain_verdict(&["rhu-gate-base", "rhu-gate-sched", "rhu-gate-payload", "rhu-gate-api", "rhu-gate-gc"], &[])
+            == "CHAIN: PASS (5 gates: rhu-gate-base rhu-gate-sched rhu-gate-payload rhu-gate-api rhu-gate-gc)",
     );
     sc.accept_probe(
         "chain-line-declared",
         "declared-tier chain verdict line matches the chain of record",
-        chain_verdict(&["rhu-gate-base", "rhu-gate-sched", "rhu-gate-api"], Some("goldens/payload"))
-            == "CHAIN: PASS (3 gates: rhu-gate-base rhu-gate-sched rhu-gate-api) + payload tier NOT RUN (frozen inputs absent: goldens/payload)",
+        chain_verdict(&["rhu-gate-base", "rhu-gate-sched", "rhu-gate-api", "rhu-gate-gc"], &[("payload", "goldens/payload")])
+            == "CHAIN: PASS (4 gates: rhu-gate-base rhu-gate-sched rhu-gate-api rhu-gate-gc) + payload tier NOT RUN (frozen inputs absent: goldens/payload)",
+    );
+    sc.accept_probe(
+        "chain-line-both-declared",
+        "drop-shaped chain verdict line (payload + gc tiers declared) matches",
+        chain_verdict(
+            &["rhu-gate-base", "rhu-gate-sched", "rhu-gate-api"],
+            &[("payload", "goldens/payload"), ("gc", "goldens/gc")],
+        ) == "CHAIN: PASS (3 gates: rhu-gate-base rhu-gate-sched rhu-gate-api) + payload tier NOT RUN (frozen inputs absent: goldens/payload) + gc tier NOT RUN (frozen inputs absent: goldens/gc)",
     );
 
     sc.accept_probe(

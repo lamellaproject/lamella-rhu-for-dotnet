@@ -35,6 +35,35 @@ pub fn locked<R>(f: impl FnOnce(&mut Out) -> R) -> R {
     crate::critical::with_cs(|| f(&mut Out))
 }
 
+/// The write door's plumbing: the WHOLE buffer under one console
+/// lock, so a hosted writer never tears against a kprintln line (the
+/// same line-atomicity every kprintln already buys; callers size
+/// their lines accordingly). Wire grammar applies.
+pub fn door_write(bytes: &[u8]) {
+    locked(|_out| write_bytes(bytes));
+}
+
+/// The read door's plumbing: drain pending receiver bytes -- up to
+/// the buffer's length, RAW (no echo, no translation) -- and return
+/// the count. Polls only; a board with nothing pending answers 0
+/// immediately. CS-bounded like every other verb (bounded by the
+/// buffer and the receiver's shallow hardware depth).
+pub fn door_read(buf: &mut [u8]) -> usize {
+    crate::critical::with_cs(|| {
+        let mut i = 0;
+        while i < buf.len() {
+            match board::console_getb() {
+                Some(b) => {
+                    buf[i] = b;
+                    i += 1;
+                }
+                None => break,
+            }
+        }
+        i
+    })
+}
+
 macro_rules! kprintln {
     () => {{
         $crate::console::locked(|_out| $crate::console::write_bytes(b"\n"));

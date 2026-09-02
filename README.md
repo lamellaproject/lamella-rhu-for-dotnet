@@ -30,7 +30,14 @@ In the tree today:
   switching
 - Payload hosting: NativeAOT-compiled test payloads linked into the kernel
   image and verified against golden transcripts
-- Supported boards: STM32F769I-DISCO
+- The hosting API a runtime consumes: futexes and nanosecond time, a
+  zero-initialized memory arena and a heap, threads with per-module TLS, a
+  module registry, and the suspend/resume and activation primitives a garbage
+  collector needs
+- A garbage collector running against the .NET runtime's GC interface:
+  allocation, stop-the-world mark and sweep, finalization, and per-board memory
+  configurations
+- Supported boards: STM32F769I-DISCO, NUCLEO-U5A5ZJ-Q
 
 Further hardware board support and the full runtime bring-up land incrementally.
 

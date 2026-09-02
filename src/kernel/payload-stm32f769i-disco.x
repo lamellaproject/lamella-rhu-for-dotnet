@@ -12,7 +12,7 @@
  * MEMORY region, so overflow fails the LINK loudly; the payload gate
  * additionally asserts the contract symbols and the managed entry in
  * the ARTIFACT by nm (a section the linker cannot police would need
- * exactly that assert, so the gate carries it from day one).
+ * exactly that assert, so the gate carries it).
  */
 
 MEMORY
@@ -24,6 +24,15 @@ MEMORY
   /* 0x20000000 DTCM 128K: RESERVED-UNUSED in this map revision. */
   DATA (rwx) : ORIGIN = 0x20020000, LENGTH = 384K
 }
+
+/* GC-substrate floor: the arena window this board GUARANTEES after
+ * statics + .kstacks + the boot-stack reserve (link-enforced by the
+ * window asserts at the bottom of this map). PAYLOAD-map value: the
+ * payload flavor carries ~100K of payload .data/.bss the boot flavor
+ * does not, so this map's ceiling is ~155K today -- 128K covers the
+ * mini-tier 96K-region class with aux headroom and leaves ~27K of
+ * static growth. The kernel map keeps 192K. */
+RHU_ARENA_MIN = 128K;
 
 ENTRY(Reset);
 
@@ -43,12 +52,15 @@ SECTIONS
 
   .text : ALIGN(4)
   {
+    __stext = .;
     /* The hosting-API surface (rhu_now_ns .. rhu_futex_wake): the shim
      * backend links against these, so section GC must never fold a
      * fully-inlined one away. The test harness asserts all four. */
     KEEP(*(.text.rhu_api));
     *(.text .text.*);
     *(__managedcode*);
+    . = ALIGN(4);
+    __etext = .;
   } > CODE
 
   /* Module table: the managed entry sequence walks
@@ -64,13 +76,23 @@ SECTIONS
   .rodata : ALIGN(4)
   {
     *(.rodata .rodata.*);
-    *(.frozen*);
     *(.dotnet*);
     /* Debug-visible layout contract record (__rhu_debug_layout):
      * nothing in the image references it, so only KEEP holds it
      * through section GC. The test harness asserts it in the artifact. */
     KEEP(*(.rhu_debug));
     . = ALIGN(4);
+  } > CODE
+
+  /* Frozen segments as first-class link facts: the GC's
+   * root-source range -- rhu_module_roots serves it from these
+   * brackets. Empty until a payload carries frozen blobs; the
+   * brackets are exact either way. */
+  .frozen : ALIGN(4)
+  {
+    __rhu_frozen_lo = .;
+    *(.frozen*);
+    __rhu_frozen_hi = .;
   } > CODE
 
   /* Static-link GOT: any GOT-relative references in the payload object
@@ -93,6 +115,20 @@ SECTIONS
     __sdata = .;
     *(.data .data.*);
     *(.hydrated*);
+    /* Module 0's TLS template: thread-local input placed contiguously
+     * (zero-fill input emits as file zeros here, so the whole span is
+     * one initialized master copy riding the .data load path) and
+     * bracketed for the boot registration. KEEP: the template is
+     * consumed by address through the brackets, never by symbol
+     * reference, so section GC would otherwise drop it. The 8-align
+     * matches the kernel's per-thread block alignment. Empty until a
+     * hosted payload carries thread-local state -- an empty pair is
+     * an honest value. */
+    . = ALIGN(8);
+    __rhu_tdata_lo = .;
+    KEEP(*(.tdata .tdata.*));
+    KEEP(*(.tbss .tbss.*));
+    __rhu_tdata_hi = .;
     . = ALIGN(4);
     __edata = .;
   } > DATA AT> CODE
@@ -119,7 +155,16 @@ SECTIONS
   /DISCARD/ : { *(.comment) *(.note*) }
 }
 
-/* Keep 64K of handler/boot stack headroom above static RAM use. (Top
- * level: the linker rejects a bare ASSERT between output sections and
- * reports the error one command late.) */
-ASSERT(__stack_start - __ekstacks >= 64K, "static RAM leaves <64K of boot stack");
+/* The arena window: link-defined slack between the end of
+ * .kstacks and the boot/handler-stack reserve at the top of DATA.
+ * Kernel-owned NOLOAD space outside every section; arena::init()
+ * establishes the zero-birth invariant over it at boot. (Top level: the
+ * linker rejects a bare ASSERT between output sections and reports the
+ * error one command late.) */
+RHU_BOOT_STACK_RESERVE = 64K;
+__rhu_arena_lo = ALIGN(__ekstacks, 8);
+__rhu_arena_hi = __stack_start - RHU_BOOT_STACK_RESERVE;
+ASSERT(__rhu_arena_hi >= __rhu_arena_lo,
+  "static RAM + .kstacks overflow into the boot-stack reserve (arena window negative)");
+ASSERT(__rhu_arena_hi - __rhu_arena_lo >= RHU_ARENA_MIN,
+  "arena window under this board's GC-substrate floor (RHU_ARENA_MIN)");

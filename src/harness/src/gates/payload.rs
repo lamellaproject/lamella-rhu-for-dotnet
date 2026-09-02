@@ -6,7 +6,7 @@ use crate::results::{chain_json_from_env, golden_json, validate_results, Results
 use crate::sha256::sha256_file;
 use crate::text::{
     contains_fixed, cr_count, final_free, final_gcs, lf_normalize, payload_stream,
-    word_sym_present,
+    word_sym_present, word_sym_value,
 };
 use crate::tools::{
     echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts, status_bounded, ExecProfile,
@@ -39,7 +39,7 @@ const SHA_GCTEST_G: &str = "5900b85b44294d57e75e9160feed525a8f0465b481d6992e716d
 /// final line remains the expected-free source because the derived value
 /// equals it; a divergent derivation would have moved that expectation
 /// into a gate-owned constant.
-const COLLECTIONS_EXACT: &str = "62";
+const COLLECTIONS_EXACT: &str = "61";
 
 /// The deterministic profile's name in the results surface (additive,
 /// report-only, between "control" and "image"). Emitted only on case
@@ -354,6 +354,45 @@ impl MPayload {
                     &format!("symbol '{s}' absent from the linked artifact"),
                 );
             }
+        }
+        let (Some(flo), Some(fhi)) = (
+            word_sym_value(&dump, "__rhu_frozen_lo"),
+            word_sym_value(&dump, "__rhu_frozen_hi"),
+        ) else {
+            self.ctx.gate_fail(&format!(
+                "{name}: frozen bracket pair not value-parseable from the linked artifact"
+            ));
+        };
+        if flo > fhi {
+            self.ctx.gate_fail(&format!(
+                "{name}: frozen bracket inverted ({flo:#x} > {fhi:#x})"
+            ));
+        }
+        let (Some(xlo), Some(xhi)) = (
+            word_sym_value(&dump, "__exidx_start"),
+            word_sym_value(&dump, "__exidx_end"),
+        ) else {
+            self.ctx.gate_fail(&format!(
+                "{name}: exidx bracket pair not value-parseable from the linked artifact"
+            ));
+        };
+        if xlo >= xhi {
+            self.ctx.gate_fail(&format!(
+                "{name}: exidx bracket not strictly nonzero ({xlo:#x} .. {xhi:#x}) -- managed exidx input missed its bracket"
+            ));
+        }
+        let (Some(tlo), Some(thi)) = (
+            word_sym_value(&dump, "__rhu_tdata_lo"),
+            word_sym_value(&dump, "__rhu_tdata_hi"),
+        ) else {
+            self.ctx.gate_fail(&format!(
+                "{name}: tls-template bracket pair not value-parseable from the linked artifact"
+            ));
+        };
+        if tlo > thi {
+            self.ctx.gate_fail(&format!(
+                "{name}: tls-template bracket inverted ({tlo:#x} > {thi:#x})"
+            ));
         }
         if let Ok(size) = llvm_tool(&self.facts, "llvm-size") {
             let size_out = self.ctx.out.join(format!("{name}.size"));
@@ -671,8 +710,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         payload_stream(&unfiltered) == glf,
     );
 
-    let goodfinal = b"gctest: collections=62 free=89016 x ALL GOOD\n".to_vec();
-    let badfree = b"gctest: collections=62 free=89017 x ALL GOOD\n".to_vec();
+    let goodfinal = b"gctest: collections=61 free=89016 x ALL GOOD\n".to_vec();
+    let badfree = b"gctest: collections=61 free=89017 x ALL GOOD\n".to_vec();
     let badgcs = b"gctest: collections=9 free=89016 x ALL GOOD\n".to_vec();
     let nofinal = b"no final line here\n".to_vec();
     let golden_gc = std::fs::read(gold_dir.join("gctest-mps2.golden.txt")).unwrap_or_default();
@@ -714,6 +753,50 @@ pub fn selfcheck(repo: &Path) -> ! {
         "entry-sym-gone",
         "linked-artifact symbol dump without __managed__Main",
         word_sym_present(&noentry, "__managed__Main"),
+    );
+
+    let nofrozen = b"00012000 R __rhu_frozen_lo\n0000da48 T __exidx_start\n0000db00 T __exidx_end\n".to_vec();
+    write_fixture(&tmp.join("nofrozen.nm"), &nofrozen);
+    sc.probe(
+        "bracket-sym-gone",
+        "linked-artifact symbol dump without __rhu_frozen_hi (value parse must refuse)",
+        matches!(
+            (word_sym_value(&nofrozen, "__rhu_frozen_lo"), word_sym_value(&nofrozen, "__rhu_frozen_hi")),
+            (Some(a), Some(b)) if a <= b
+        ),
+    );
+    let emptyexidx = b"00012000 R __rhu_frozen_lo\n00012000 R __rhu_frozen_hi\n0000da48 T __exidx_start\n0000da48 T __exidx_end\n".to_vec();
+    write_fixture(&tmp.join("emptyexidx.nm"), &emptyexidx);
+    sc.probe(
+        "exidx-empty",
+        "payload-family dump with an empty exidx bracket (managed input missed the bracket)",
+        matches!(
+            (word_sym_value(&emptyexidx, "__exidx_start"), word_sym_value(&emptyexidx, "__exidx_end")),
+            (Some(a), Some(b)) if a < b
+        ),
+    );
+    let goodbrackets = b"00012000 R __rhu_frozen_lo\n00012000 R __rhu_frozen_hi\n0000da48 T __exidx_start\n0000db00 T __exidx_end\n".to_vec();
+    write_fixture(&tmp.join("goodbrackets.nm"), &goodbrackets);
+    sc.accept_probe(
+        "brackets-well-formed",
+        "genuine payload-family bracket dump (frozen equal-ordered, exidx nonzero) accepted",
+        matches!(
+            (word_sym_value(&goodbrackets, "__rhu_frozen_lo"), word_sym_value(&goodbrackets, "__rhu_frozen_hi")),
+            (Some(a), Some(b)) if a <= b
+        ) && matches!(
+            (word_sym_value(&goodbrackets, "__exidx_start"), word_sym_value(&goodbrackets, "__exidx_end")),
+            (Some(a), Some(b)) if a < b
+        ),
+    );
+    let invtdata = b"20000010 D __rhu_tdata_lo\n20000000 D __rhu_tdata_hi\n".to_vec();
+    write_fixture(&tmp.join("invtdata.nm"), &invtdata);
+    sc.probe(
+        "tdata-inverted",
+        "payload-family dump with an inverted tls-template bracket (lo above hi)",
+        matches!(
+            (word_sym_value(&invtdata, "__rhu_tdata_lo"), word_sym_value(&invtdata, "__rhu_tdata_hi")),
+            (Some(a), Some(b)) if a <= b
+        ),
     );
 
     sc.finish("genuine inputs accepted");

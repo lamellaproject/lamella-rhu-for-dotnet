@@ -6,3 +6,9 @@ the Apache License, Version 2.0 (LICENSE-APACHE).
 
 Notices for third-party components distributed with this product, when any are
 distributed, appear alongside those components and in this file.
+
+Third-party components:
+
+- src/vendor/ -- GC interface headers from the dotnet/runtime repository,
+  Copyright (c) .NET Foundation and Contributors, MIT license. See
+  src/vendor/gcinterface/NOTICE and src/VENDORED.md.

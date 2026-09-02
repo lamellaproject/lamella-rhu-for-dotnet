@@ -1,0 +1,15 @@
+Third-party notice for the src/vendor/ tree
+
+The vendored files under src/vendor/ (this directory and src/vendor/gcenv/)
+are taken, unmodified, from the
+dotnet/runtime repository (https://github.com/dotnet/runtime) at the commit
+recorded in src/VENDORED.md.
+
+Copyright (c) .NET Foundation and Contributors
+
+SPDX-License-Identifier: MIT
+
+Licensed under the MIT license. The MIT license text is available at
+LICENSE-MIT in the repository root and in the dotnet/runtime repository
+(LICENSE.TXT). Per-file provenance, the pinned upstream commit, and the
+recorded file hashes are in src/VENDORED.md.

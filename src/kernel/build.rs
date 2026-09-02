@@ -10,6 +10,8 @@ fn main() {
         "link-stm32f769i-disco.x"
     } else if cfg!(feature = "board-mps2-an505") {
         "link-mps2-an505.x"
+    } else if cfg!(feature = "board-nucleo-u5a5zj-q") {
+        "link-nucleo-u5a5zj-q.x"
     } else {
         "link-mps2-an500.x"
     };

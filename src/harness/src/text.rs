@@ -57,6 +57,26 @@ pub fn word_sym_present(dump: &[u8], sym: &str) -> bool {
     false
 }
 
+/// Word-bounded symbol VALUE from an nm dump (the bracket-symbol
+/// value asserts). nm line shape: `<hex> <type> <name>`; the name match
+/// is word-bounded exactly as `word_sym_present`, and the value is the
+/// line's leading hex field. None when the symbol is absent or its line
+/// has no parseable leading value -- callers REFUSE on None (a missing
+/// bracket is never a silent zero).
+pub fn word_sym_value(dump: &[u8], sym: &str) -> Option<u64> {
+    for (line, _) in lines_with_endings(&lf_normalize(dump)) {
+        let mut fields = line.split(|&b| b == b' ' || b == b'\t').filter(|f| !f.is_empty());
+        let (Some(val), _ty, Some(name)) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        if name == sym.as_bytes() && fields.next().is_none() {
+            let s = core::str::from_utf8(val).ok()?;
+            return u64::from_str_radix(s, 16).ok();
+        }
+    }
+    None
+}
+
 /// Lines of an LF-normalized buffer, each with a flag for whether it was
 /// newline-terminated (the final line of a capture may not be; filters
 /// preserve that property so filtered output stays byte-faithful).

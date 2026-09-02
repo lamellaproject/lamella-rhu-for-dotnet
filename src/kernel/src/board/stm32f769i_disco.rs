@@ -21,7 +21,9 @@ const PCLK2_HZ: u32 = SYSCLK_HZ;
 /// Clock posture 2 (`stm32f769i-disco-pll216`): PLL at 216 MHz off HSI -- HSI/8
 /// gives a 2 MHz VCO input, x216 puts the VCO at its 432 MHz ceiling,
 /// /2 lands SYSCLK at 216. HCLK = SYSCLK; APB1 = /4 (54 MHz, its cap);
-/// APB2 = /2 (108 MHz, its cap). All caps and the recipe per RM0410.
+/// APB2 = /2 (108 MHz, its cap). Bus-frequency caps per the F769NI
+/// datasheet DS11532 (the 216/108/54 MHz maxima); the register recipe
+/// per RM0410.
 #[cfg(feature = "stm32f769i-disco-pll216")]
 pub const SYSCLK_HZ: u32 = 216_000_000;
 #[cfg(feature = "stm32f769i-disco-pll216")]
@@ -33,6 +35,13 @@ pub const TICK_HZ: u32 = 1_000;
 /// Thread stack pool (lives in .kstacks) -- same budgets as the QEMU
 /// board; 384 K of AXI SRAM leaves wide headroom (the link asserts it).
 pub const STACK_POOL_BYTES: usize = 64 * 1024;
+
+/// The boot kheap carve out of the arena (the GC board table's
+/// `kheap_carve` row). Sized conservatively from the window
+/// arithmetic rather than from measured demand: the payload flavor's
+/// 155.7K window over its 128K GC floor caps this board's carve at
+/// 27.7K.
+pub const KHEAP_BYTES: usize = 16 * 1024;
 
 /// Stack for the kmain thread (the boot thread's continuation).
 pub const KMAIN_STACK_BYTES: usize = 16 * 1024;
@@ -138,11 +147,17 @@ const USART1: usize = 0x4001_1000;
 const USART1_CR1: *mut u32 = USART1 as *mut u32;
 const USART1_BRR: *mut u32 = (USART1 + 0x0C) as *mut u32;
 const USART1_ISR: *mut u32 = (USART1 + 0x1C) as *mut u32;
+const USART1_ICR: *mut u32 = (USART1 + 0x20) as *mut u32;
+const USART1_RDR: *mut u32 = (USART1 + 0x24) as *mut u32;
 const USART1_TDR: *mut u32 = (USART1 + 0x28) as *mut u32;
 
 const CR1_UE: u32 = 1 << 0;
+const CR1_RE: u32 = 1 << 2;
 const CR1_TE: u32 = 1 << 3;
 const ISR_TXE: u32 = 1 << 7;
+const ISR_RXNE: u32 = 1 << 5;
+const ISR_ORE: u32 = 1 << 3;
+const ICR_ORECF: u32 = 1 << 3;
 const BAUD: u32 = 115_200;
 
 /// Enforce the HSI-16 posture. On a cold flash boot every write below
@@ -263,8 +278,9 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
 /// Route PA9/PA10 to USART1 (AF7 -- the ST-LINK VCP wiring) and program
 /// 115200 8N1 from PCLK2. Idempotent by construction (every write lands
 /// the same values); the UE-low reprogram window can tear at most one
-/// in-flight character when the panic path re-runs it, which the
-/// transcript discipline tolerates.
+/// in-flight character when the panic path re-runs it; output checks
+/// anchor on the panic banner that follows, so a single torn
+/// character is harmless.
 pub fn console_init() {
     unsafe {
         write_volatile(RCC_AHB1ENR, read_volatile(RCC_AHB1ENR) | AHB1ENR_GPIOAEN);
@@ -279,7 +295,7 @@ pub fn console_init() {
 
         write_volatile(USART1_CR1, 0);
         write_volatile(USART1_BRR, (PCLK2_HZ + BAUD / 2) / BAUD);
-        write_volatile(USART1_CR1, CR1_UE | CR1_TE);
+        write_volatile(USART1_CR1, CR1_UE | CR1_TE | CR1_RE);
     }
 }
 
@@ -288,5 +304,20 @@ pub fn console_putb(b: u8) {
     unsafe {
         while read_volatile(USART1_ISR) & ISR_TXE == 0 {}
         write_volatile(USART1_TDR, b as u32);
+    }
+}
+
+/// Non-blocking byte receive: one pending byte, or None immediately.
+/// A latched overrun (missed polls) is cleared on the empty path so
+/// the receiver never wedges; the lost bytes stay lost, honestly.
+pub fn console_getb() -> Option<u8> {
+    unsafe {
+        if read_volatile(USART1_ISR) & ISR_RXNE != 0 {
+            return Some(read_volatile(USART1_RDR) as u8);
+        }
+        if read_volatile(USART1_ISR) & ISR_ORE != 0 {
+            write_volatile(USART1_ICR, ICR_ORECF);
+        }
+        None
     }
 }

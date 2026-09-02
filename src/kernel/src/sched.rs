@@ -3,17 +3,32 @@
 //! BASEPRI-only masking throughout.
 
 use core::arch::global_asm;
+use core::ffi::c_void;
 use core::mem::offset_of;
 use core::ptr::{self, addr_of, addr_of_mut, read_volatile, write_volatile};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::board;
 use crate::critical::with_cs;
+use crate::{kheap, registry};
 
 /// TCB slots. Sized for the hosted runtime's thread census plus kernel
 /// threads; the slot masks are u32, so this must stay below 32.
 pub const MAX_THREADS: usize = 16;
 const _: () = assert!(MAX_THREADS <= 31, "slot masks are u32");
+
+/// Per-thread exit-destructor stack depth (rhu.h RHU_ATEXIT_SLOTS --
+/// the two change together or not at all).
+pub const ATEXIT_SLOTS: usize = 8;
+
+/// Retired-stack list depth: exact-fit reuse covers the repeating-size
+/// case (thread-pool workers); overflow lands in the audited leak
+/// counters, visible and bounded, never a panic. (pub(crate): the api
+/// smoke's leak-audit algebra reads it.)
+pub(crate) const RETIRED_CAP: usize = 8;
+
+/// A thread-exit destructor as the C ABI hands it over.
+type AtexitFn = extern "C" fn(*mut c_void);
 
 const ICSR: *mut u32 = 0xE000_ED04 as *mut u32;
 const ICSR_PENDSVSET: u32 = 1 << 28;
@@ -87,6 +102,34 @@ struct Tcb {
     /// True iff `wake_tick` is armed for this futex wait (an infinite
     /// wait must not join the timer walk).
     wait_deadline: bool,
+    /// Per-module TLS blocks, kheap-backed, eagerly allocated (null =
+    /// module absent or zero-sized). Cleared under the CS before their
+    /// blocks are freed at exit, so the teardown is once-only even if
+    /// a dtor exits again.
+    tls: [*mut u8; registry::MAX_MODULES],
+    /// LIFO thread-exit destructor stack; runs on the exiting thread
+    /// before TLS teardown.
+    atexit: [(Option<AtexitFn>, *mut c_void); ATEXIT_SLOTS],
+    atexit_n: u8,
+    /// Suspension flag, ORTHOGONAL to `state`: a suspended thread
+    /// keeps its state and its waits; it is simply never in the
+    /// pickable set (sync_bits's ready arm). Only suspend/resume
+    /// write it, under the CS.
+    suspended: bool,
+    /// Activation pending -- the flag IS the whole queue (sends
+    /// coalesce). Consumed by the delivery transform at scheduling-in
+    /// or by the SVC #1 re-delivery check.
+    act_pending: bool,
+    /// True from the delivery transform until the final SVC #1
+    /// restore: gates re-transformation of a preempted handler.
+    act_in_handler: bool,
+    /// The futex-wait interruption latch: set by the break arm when a
+    /// send readies a futex waiter; read-and-cleared by the wait's
+    /// exit path (the third exit beside woken/timed-out).
+    act_interrupted: bool,
+    /// The interrupted context's saved-frame sp, held across the
+    /// handler run so SVC #1 can rebuild the restore from it.
+    act_saved_sp: u32,
 }
 
 const TCB_INIT: Tcb = Tcb {
@@ -102,9 +145,25 @@ const TCB_INIT: Tcb = Tcb {
     name: "",
     wait_addr: 0,
     wait_deadline: false,
+    tls: [ptr::null_mut(); registry::MAX_MODULES],
+    atexit: [(None, ptr::null_mut()); ATEXIT_SLOTS],
+    atexit_n: 0,
+    suspended: false,
+    act_pending: false,
+    act_in_handler: false,
+    act_interrupted: false,
+    act_saved_sp: 0,
 };
 
 static NEXT_TID: AtomicU32 = AtomicU32::new(1);
+
+/// THE process-global activation handler (0 = unregistered); written
+/// once by `act_register` under the CS, read at delivery.
+static ACT_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
+/// Idle's slot, recorded once at `init()` -- the refusal arms resolve
+/// idle by slot, never by name or priority.
+static IDLE_SLOT: AtomicU32 = AtomicU32::new(u32::MAX);
 
 struct Sched {
     tcbs: [Tcb; MAX_THREADS],
@@ -120,6 +179,15 @@ struct Sched {
     futex_mask: u32,
     /// Exited-but-unreaped threads; reap() runs only when nonzero.
     exited_n: u32,
+    /// Retired stacks (base, len), pushed at reap, taken by exact-fit
+    /// at spawn -- the pool's recycling story for the repeating-size
+    /// case.
+    retired: [(u32, u32); RETIRED_CAP],
+    retired_n: u32,
+    /// Retire-list overflow audit: entries dropped and bytes leaked.
+    /// Bounded by construction, loud by visibility, never a panic.
+    leak_drops: u32,
+    leak_bytes: u32,
 }
 
 /// The one scheduler instance. All access happens under the kernel
@@ -137,6 +205,10 @@ static mut SCHED: Sched = Sched {
     timer_mask: 0,
     futex_mask: 0,
     exited_n: 0,
+    retired: [(0, 0); RETIRED_CAP],
+    retired_n: 0,
+    leak_drops: 0,
+    leak_bytes: 0,
 };
 
 /// Thread stacks live in .kstacks -- outside the __sdata..__ebss window
@@ -229,11 +301,14 @@ fn pend_switch() {
 /// the masks and the TCBs from ever disagreeing. A futex waiter is
 /// Sleeping with `wait_addr` set: it joins the futex walk always and
 /// the timer walk only when a deadline is armed; a plain sleeper
-/// (`wait_addr` 0) joins the timer walk alone.
+/// (`wait_addr` 0) joins the timer walk alone. The ready mask is the
+/// PICKABLE set: Ready AND not suspended (suspension is orthogonal to
+/// state -- a suspended thread keeps its timer/futex membership and is
+/// simply never picked).
 fn sync_bits(s: &mut Sched, i: usize) {
     let bit = 1u32 << i;
     let t = &s.tcbs[i];
-    if t.state == State::Ready {
+    if t.state == State::Ready && !t.suspended {
         s.ready_mask |= bit;
     } else {
         s.ready_mask &= !bit;
@@ -284,31 +359,83 @@ pub fn current_stack_top() -> u32 {
     })
 }
 
-/// Kernel-thread spawn from the .kstacks pool. Returns the slot index.
-/// The pool is bump-only: exited threads free their SLOT, not their
-/// stack bytes -- kernel threads are long-lived by design here, and
-/// stack recycling arrives with arena-backed stacks.
-pub fn spawn(
+/// Why a spawn was refused. Kernel callers turn each into its loud
+/// panic; the C door maps all three onto one honest RHU_EAGAIN.
+pub enum SpawnErr {
+    NoSlot,
+    PoolExhausted,
+    TlsExhausted,
+}
+
+/// Fallible thread spawn from the .kstacks pool: `(slot, tid)` or the
+/// refusal reason with NOTHING committed (a taken retired stack is put
+/// back, a bump is un-bumped, partial TLS blocks are freed). Stacks
+/// come from exact-fit reuse of the retired list first, the bump top
+/// second; the new thread eagerly receives a TLS block for every
+/// registered module (the other eager direction
+/// lives in `tls_on_register`).
+pub fn try_spawn(
     name: &'static str,
     entry: extern "C" fn(usize),
     arg: usize,
     prio: u8,
     stack_bytes: usize,
-) -> usize {
+) -> Result<(usize, i32), SpawnErr> {
     let stack_bytes = (stack_bytes + 7) & !7;
-    let (slot, urgent) = with_cs(|| unsafe {
+    let r = with_cs(|| unsafe {
+        let (demands, nmod) = registry::tls_demands();
         let s = sched();
-        let slot = (0..MAX_THREADS)
-            .find(|&i| s.tcbs[i].state == State::Free)
-            .expect("out of TCB slots");
-        assert!(
-            s.pool_used + stack_bytes <= board::STACK_POOL_BYTES,
-            "stack pool exhausted"
-        );
-        let base = addr_of!(STACK_POOL.0) as usize + s.pool_used;
-        s.pool_used += stack_bytes;
+        let Some(slot) = (0..MAX_THREADS).find(|&i| s.tcbs[i].state == State::Free) else {
+            return Err(SpawnErr::NoSlot);
+        };
+        let mut from_retired = false;
+        let base = if let Some(ri) =
+            (0..s.retired_n as usize).find(|&i| s.retired[i].1 as usize == stack_bytes)
+        {
+            let (b, _) = s.retired[ri];
+            s.retired[ri] = s.retired[s.retired_n as usize - 1];
+            s.retired_n -= 1;
+            from_retired = true;
+            b as usize
+        } else {
+            if s.pool_used + stack_bytes > board::STACK_POOL_BYTES {
+                return Err(SpawnErr::PoolExhausted);
+            }
+            let b = addr_of!(STACK_POOL.0) as usize + s.pool_used;
+            s.pool_used += stack_bytes;
+            b
+        };
         let top = base + stack_bytes;
         ptr::write_bytes(base as *mut u8, 0, stack_bytes);
+
+        let mut tls = [ptr::null_mut::<u8>(); registry::MAX_MODULES];
+        for m in 0..nmod {
+            let (bytes, init) = demands[m];
+            if bytes == 0 {
+                continue;
+            }
+            let block = kheap::alloc(bytes, 8);
+            if block.is_null() {
+                for b in tls.iter().take(m) {
+                    if !b.is_null() {
+                        kheap::free(*b);
+                    }
+                }
+                if from_retired {
+                    s.retired[s.retired_n as usize] = (base as u32, stack_bytes as u32);
+                    s.retired_n += 1;
+                } else {
+                    s.pool_used -= stack_bytes;
+                }
+                return Err(SpawnErr::TlsExhausted);
+            }
+            if init.is_null() {
+                ptr::write_bytes(block, 0, bytes as usize);
+            } else {
+                ptr::copy_nonoverlapping(init, block, bytes as usize);
+            }
+            tls[m] = block;
+        }
 
         let hw = (top - 32) as *mut u32;
         hw.add(0).write(slot as u32);
@@ -326,6 +453,7 @@ pub fn spawn(
         }
         sw.add(8).write(0xFFFF_FFFD);
 
+        let tid = NEXT_TID.fetch_add(1, Ordering::Relaxed) as i32;
         s.tcbs[slot] = Tcb {
             sp: sw as u32,
             stack_base: base as u32,
@@ -333,20 +461,51 @@ pub fn spawn(
             state: State::Ready,
             prio,
             wake_tick: 0,
-            tid: NEXT_TID.fetch_add(1, Ordering::Relaxed) as i32,
+            tid,
             entry: Some(entry),
             arg,
             name,
             wait_addr: 0,
             wait_deadline: false,
+            tls,
+            atexit: [(None, ptr::null_mut()); ATEXIT_SLOTS],
+            atexit_n: 0,
+            suspended: false,
+            act_pending: false,
+            act_in_handler: false,
+            act_interrupted: false,
+            act_saved_sp: 0,
         };
         sync_bits(s, slot);
-        (slot, s.started && prio < s.tcbs[s.current].prio)
+        Ok((slot, tid, s.started && prio < s.tcbs[s.current].prio))
     });
-    if urgent {
-        pend_switch();
+    match r {
+        Ok((slot, tid, urgent)) => {
+            if urgent {
+                pend_switch();
+            }
+            Ok((slot, tid))
+        }
+        Err(e) => Err(e),
     }
-    slot
+}
+
+/// Kernel-thread spawn: birth errors are kernel bugs and stay loud
+/// panics (hosted callers go through the C door, which refuses
+/// honestly instead). Returns the slot index.
+pub fn spawn(
+    name: &'static str,
+    entry: extern "C" fn(usize),
+    arg: usize,
+    prio: u8,
+    stack_bytes: usize,
+) -> usize {
+    match try_spawn(name, entry, arg, prio, stack_bytes) {
+        Ok((slot, _)) => slot,
+        Err(SpawnErr::NoSlot) => panic!("out of TCB slots"),
+        Err(SpawnErr::PoolExhausted) => panic!("stack pool exhausted"),
+        Err(SpawnErr::TlsExhausted) => panic!("TLS exhausted at spawn"),
+    }
 }
 
 extern "C" fn thread_tramp(slot: u32) -> ! {
@@ -358,7 +517,42 @@ extern "C" fn thread_tramp(slot: u32) -> ! {
     exit_current()
 }
 
+/// Thread exit, in the registered order: dtors run LIFO on the exiting
+/// thread (outside the CS -- they are arbitrary code), then TLS blocks
+/// are freed clear-then-free (so a dtor that itself exits re-enters
+/// this path with the remaining dtors still running exactly once and
+/// the TLS freed exactly once), then the slot goes Exited and the reap
+/// recycles the stack.
 pub fn exit_current() -> ! {
+    loop {
+        let popped = with_cs(|| unsafe {
+            let s = sched();
+            let t = &mut s.tcbs[s.current];
+            if t.atexit_n == 0 {
+                None
+            } else {
+                t.atexit_n -= 1;
+                let e = t.atexit[t.atexit_n as usize];
+                t.atexit[t.atexit_n as usize] = (None, ptr::null_mut());
+                Some(e)
+            }
+        });
+        match popped {
+            Some((Some(f), a)) => f(a),
+            _ => break,
+        }
+    }
+    let blocks = with_cs(|| unsafe {
+        let s = sched();
+        let mut b = [ptr::null_mut::<u8>(); registry::MAX_MODULES];
+        core::mem::swap(&mut b, &mut s.tcbs[s.current].tls);
+        b
+    });
+    for p in blocks {
+        if !p.is_null() {
+            kheap::free(p);
+        }
+    }
     with_cs(|| unsafe {
         let s = sched();
         let cur = s.current;
@@ -371,12 +565,22 @@ pub fn exit_current() -> ! {
     }
 }
 
-/// Reap finished threads: free the slots. Runs inside the switch path
-/// with the CS held, so a reaped thread can never still be live -- it
-/// has been switched away from for good.
+/// Reap finished threads: retire the stack for exact-fit reuse (a full
+/// retired list drops into the audited leak counters -- visible,
+/// bounded, never a panic), then free the slot. Runs inside the switch
+/// path with the CS held, so a reaped thread can never still be live
+/// -- it has been switched away from for good.
 unsafe fn reap(s: &mut Sched) {
     for i in 0..MAX_THREADS {
         if s.tcbs[i].state == State::Exited && i != s.current {
+            let len = s.tcbs[i].stack_top - s.tcbs[i].stack_base;
+            if (s.retired_n as usize) < RETIRED_CAP {
+                s.retired[s.retired_n as usize] = (s.tcbs[i].stack_base, len);
+                s.retired_n += 1;
+            } else {
+                s.leak_drops += 1;
+                s.leak_bytes = s.leak_bytes.saturating_add(len);
+            }
             s.tcbs[i] = TCB_INIT;
             sync_bits(s, i);
             s.exited_n -= 1;
@@ -422,6 +626,10 @@ pub const DEADLINE_NONE: u64 = u64::MAX;
 pub const ERR_AGAIN: i32 = -11;
 pub const ERR_TIMEDOUT: i32 = -110;
 pub const ERR_INVAL: i32 = -22;
+/// No such thread (the first tid-addressed verb's refusal).
+pub const ERR_SRCH: i32 = -3;
+/// Futex wait broken by activation delivery (rhu.h RHU_EINTR).
+pub const ERR_INTR: i32 = -4;
 
 /// 64-bit monotonic nanoseconds since scheduler init. The four
 /// recorded hazards, each handled in order:
@@ -489,24 +697,28 @@ fn tick_for_deadline(deadline_ns: u64) -> u32 {
 }
 
 /// Nanosecond-request sleep: never early (gate check 2's contract), up
-/// to ~2 ms late at the 1 kHz tick. Arm-once, no recheck loop: nothing
-/// wakes a plain sleeper early today -- no signals by futex rule 2; a
-/// future activation mechanism must revisit this.
+/// to ~2 ms late at the 1 kHz tick. Recheck loop: an activation
+/// delivery breaks
+/// the sleep for the handler run, and the loop re-arms the REMAINING
+/// time -- never-early survives and the caller sees nothing.
 pub fn sleep_ns(ns: u64) {
     let target = now_ns().saturating_add(ns);
-    let expired = with_cs(|| unsafe {
-        if now_ns() >= target {
-            return true;
+    loop {
+        let expired = with_cs(|| unsafe {
+            if now_ns() >= target {
+                return true;
+            }
+            let s = sched();
+            let cur = s.current;
+            s.tcbs[cur].wait_addr = 0;
+            s.tcbs[cur].wait_deadline = false;
+            s.tcbs[cur].wake_tick = tick_for_deadline(target);
+            set_state(s, cur, State::Sleeping);
+            false
+        });
+        if expired {
+            return;
         }
-        let s = sched();
-        let cur = s.current;
-        s.tcbs[cur].wait_addr = 0;
-        s.tcbs[cur].wait_deadline = false;
-        s.tcbs[cur].wake_tick = tick_for_deadline(target);
-        set_state(s, cur, State::Sleeping);
-        false
-    });
-    if !expired {
         pend_switch();
     }
 }
@@ -551,22 +763,19 @@ pub fn futex_wait(addr: *const u32, expected: u32, deadline_ns: u64) -> i32 {
         Armed::Slept => {}
     }
     pend_switch();
-    let woken = with_cs(|| unsafe {
+    with_cs(|| unsafe {
         let s = sched();
         let cur = s.current;
+        let intr = s.tcbs[cur].act_interrupted;
+        s.tcbs[cur].act_interrupted = false;
         if s.tcbs[cur].wait_addr == 0 {
-            true
+            0
         } else {
             s.tcbs[cur].wait_addr = 0;
             s.tcbs[cur].wait_deadline = false;
-            false
+            if intr { ERR_INTR } else { ERR_TIMEDOUT }
         }
-    });
-    if woken {
-        0
-    } else {
-        ERR_TIMEDOUT
-    }
+    })
 }
 
 /// Ready up to `n` waiters blocked on `addr`; returns the count.
@@ -596,7 +805,7 @@ pub fn futex_wake(addr: *const u32, n: u32) -> i32 {
                     s.tcbs[i].wait_addr = 0;
                     s.tcbs[i].wait_deadline = false;
                     set_state(s, i, State::Ready);
-                    if s.tcbs[i].prio <= s.tcbs[s.current].prio {
+                    if !s.tcbs[i].suspended && s.tcbs[i].prio <= s.tcbs[s.current].prio {
                         urgent = true;
                     }
                     count += 1;
@@ -609,6 +818,409 @@ pub fn futex_wake(addr: *const u32, n: u32) -> i32 {
         pend_switch();
     }
     count as i32
+}
+
+
+/// Registration-side eager TLS: give every LIVE thread a block for the
+/// module being registered. All-or-nothing: a refused block unwinds
+/// the walk and reports false, and the registration commits nothing.
+/// Runs under the registry's CS (nesting is the CS's contract).
+pub fn tls_on_register(module: usize, bytes: u32, init: *const u8) -> bool {
+    if bytes == 0 {
+        return true;
+    }
+    with_cs(|| unsafe {
+        let s = sched();
+        for i in 0..MAX_THREADS {
+            let live = s.tcbs[i].state == State::Ready || s.tcbs[i].state == State::Sleeping;
+            if !live {
+                continue;
+            }
+            let block = kheap::alloc(bytes, 8);
+            if block.is_null() {
+                for j in 0..i {
+                    let b = s.tcbs[j].tls[module];
+                    if !b.is_null() {
+                        s.tcbs[j].tls[module] = ptr::null_mut();
+                        kheap::free(b);
+                    }
+                }
+                return false;
+            }
+            if init.is_null() {
+                ptr::write_bytes(block, 0, bytes as usize);
+            } else {
+                ptr::copy_nonoverlapping(init, block, bytes as usize);
+            }
+            s.tcbs[i].tls[module] = block;
+        }
+        true
+    })
+}
+
+/// The calling thread's TLS block for a module handle. Eager
+/// allocation makes a valid handle's block non-null by construction;
+/// an invalid handle, or one registered with zero TLS, is a caller bug
+/// and dies loud.
+pub fn tls_get(module: i32) -> *mut u8 {
+    with_cs(|| unsafe {
+        assert!(
+            module >= 0 && (module as usize) < registry::count(),
+            "tls_get: invalid module handle (caller bug)"
+        );
+        let s = sched();
+        let p = s.tcbs[s.current].tls[module as usize];
+        assert!(!p.is_null(), "tls_get: module has no TLS (caller bug)");
+        p
+    })
+}
+
+/// Push a thread-exit destructor onto the calling thread's LIFO stack.
+/// 0, or ERR_AGAIN when all `ATEXIT_SLOTS` are taken -- loudly honest.
+pub fn atexit_push(f: AtexitFn, arg: *mut c_void) -> i32 {
+    with_cs(|| unsafe {
+        let s = sched();
+        let t = &mut s.tcbs[s.current];
+        if t.atexit_n as usize == ATEXIT_SLOTS {
+            return ERR_AGAIN;
+        }
+        t.atexit[t.atexit_n as usize] = (Some(f), arg);
+        t.atexit_n += 1;
+        0
+    })
+}
+
+/// The calling thread's tid.
+pub fn self_tid() -> i32 {
+    with_cs(|| unsafe {
+        let s = sched();
+        s.tcbs[s.current].tid
+    })
+}
+
+/// A live thread's stack carve by tid: `(base, len)` exactly as
+/// spawned. Lookup is by tid, never slot, so a reused slot cannot
+/// alias a dead thread; Exited-unreaped threads are not live.
+pub fn stack_bounds_by_tid(tid: i32) -> Option<(u32, u32)> {
+    with_cs(|| unsafe {
+        let s = sched();
+        for t in s.tcbs.iter() {
+            let live = t.state == State::Ready || t.state == State::Sleeping;
+            if live && t.tid == tid {
+                return Some((t.stack_base, t.stack_top - t.stack_base));
+            }
+        }
+        None
+    })
+}
+
+
+/// The C-ABI `rhu_ctx` (include/rhu.h) -- layout mirrored exactly.
+/// sp is the post-pop stack pointer, a SNAPSHOT: refused on write by
+/// set_context, ignored by the activation-return door.
+#[repr(C)]
+pub struct RhuCtx {
+    pub r: [u32; 13],
+    pub sp: u32,
+    pub lr: u32,
+    pub pc: u32,
+    pub xpsr: u32,
+    pub flags: u32,
+}
+
+/// EPSR ITSTATE bits inside xPSR ([26:25] + [15:10]): cleared when a
+/// pc edit lands -- resuming an edited pc into a live IT block would
+/// be unpredictable, so the safe form is the only form.
+const ITSTATE_MASK: u32 = 0x0600_FC00;
+
+/// Parse a switched-out thread's saved frames (sw: r4-r11 +
+/// EXC_RETURN; optional s16-s31; hw: r0-r3, r12, lr, pc, xpsr) into a
+/// ctx. The post-pop sp honors the frame type AND the stacked-aligner
+/// bit (xpsr[9]). Sound for every non-current live thread: PendSV's
+/// FP store completes lazy stacking before any frame is saved, so
+/// frames are always fully materialized.
+unsafe fn fill_ctx(sp: u32) -> RhuCtx { unsafe {
+    let sw = sp as *const u32;
+    let exc = sw.add(8).read();
+    let ext = exc & 0x10 == 0;
+    let hw_off = 36 + if ext { 64 } else { 0 };
+    let hw = (sp + hw_off) as *const u32;
+    let xpsr = hw.add(7).read();
+    let post_pop =
+        sp + hw_off + if ext { 104 } else { 32 } + if xpsr & (1 << 9) != 0 { 4 } else { 0 };
+    let mut r = [0u32; 13];
+    for k in 0..4 {
+        r[k] = hw.add(k).read();
+    }
+    for k in 0..8 {
+        r[4 + k] = sw.add(k).read();
+    }
+    r[12] = hw.add(4).read();
+    RhuCtx {
+        r,
+        sp: post_pop,
+        lr: hw.add(5).read(),
+        pc: hw.add(6).read(),
+        xpsr,
+        flags: ext as u32,
+    }
+}}
+
+/// Apply a ctx back into the saved frames -- ONE mechanism, two
+/// entrances (set_context and the activation return), both landing in
+/// the scheduler-owned context. Writes r0-r12 and lr; pc is written
+/// bit-0-cleared (the Thumb bit lives in xPSR.T) and a pc EDIT clears
+/// the restored ITSTATE; xpsr is otherwise never written; sp,
+/// EXC_RETURN, and geometry never move.
+unsafe fn apply_ctx(frames_sp: u32, c: &RhuCtx) { unsafe {
+    let sw = frames_sp as *mut u32;
+    let exc = sw.add(8).read();
+    let ext = exc & 0x10 == 0;
+    let hw = (frames_sp + 36 + if ext { 64 } else { 0 }) as *mut u32;
+    for k in 0..8 {
+        sw.add(k).write(c.r[4 + k]);
+    }
+    for k in 0..4 {
+        hw.add(k).write(c.r[k]);
+    }
+    hw.add(4).write(c.r[12]);
+    hw.add(5).write(c.lr);
+    let new_pc = c.pc & !1;
+    if new_pc != hw.add(6).read() & !1 {
+        hw.add(6).write(new_pc);
+        let x = hw.add(7).read();
+        hw.add(7).write(x & !ITSTATE_MASK);
+    }
+}}
+
+/// Live-slot lookup by tid (Ready|Sleeping -- suspension is a flag,
+/// not a state, so suspended threads are still live and addressable).
+fn find_live(s: &Sched, tid: i32) -> Option<usize> {
+    (0..MAX_THREADS).find(|&i| {
+        let t = &s.tcbs[i];
+        (t.state == State::Ready || t.state == State::Sleeping) && t.tid == tid
+    })
+}
+
+/// Suspend by tid and fill *out (non-null, checked at the C door).
+/// Refusals per rhu.h: ESRCH unknown/dead, EINVAL self or idle,
+/// EAGAIN already suspended. No pend: the target is switched out
+/// already (single core), removing it from pickability changes
+/// nothing for the running thread.
+pub fn suspend_by_tid(tid: i32, out: *mut RhuCtx) -> i32 {
+    with_cs(|| unsafe {
+        let s = sched();
+        let Some(i) = find_live(s, tid) else {
+            return ERR_SRCH;
+        };
+        if i == s.current || i as u32 == IDLE_SLOT.load(Ordering::Relaxed) {
+            return ERR_INVAL;
+        }
+        if s.tcbs[i].suspended {
+            return ERR_AGAIN;
+        }
+        out.write(fill_ctx(s.tcbs[i].sp));
+        s.tcbs[i].suspended = true;
+        sync_bits(s, i);
+        0
+    })
+}
+
+/// Hijack a SUSPENDED thread's saved context (registers and pc, never
+/// geometry): ctx->sp must equal the snapshot's or the whole edit is
+/// refused writing nothing.
+pub fn set_context_by_tid(tid: i32, ctx: *const RhuCtx) -> i32 {
+    with_cs(|| unsafe {
+        let s = sched();
+        let Some(i) = find_live(s, tid) else {
+            return ERR_SRCH;
+        };
+        if !s.tcbs[i].suspended {
+            return ERR_AGAIN;
+        }
+        let c = &*ctx;
+        if c.sp != fill_ctx(s.tcbs[i].sp).sp {
+            return ERR_INVAL;
+        }
+        apply_ctx(s.tcbs[i].sp, c);
+        0
+    })
+}
+
+/// The send/resume break arm: ready a Sleeping target for delivery,
+/// latching the futex-interruption discriminant when it was a waiter
+/// (wait_addr stays SET -- the exit path's three-way tell).
+unsafe fn break_wait(s: &mut Sched, i: usize) {
+    if s.tcbs[i].wait_addr != 0 {
+        s.tcbs[i].act_interrupted = true;
+    }
+    set_state(s, i, State::Ready);
+}
+
+/// Resume by tid. A pending activation deferred by suspension makes a
+/// still-Sleeping target's wait break NOW; pends iff the target is
+/// now pickable and equal-or-more urgent than the caller.
+pub fn resume_by_tid(tid: i32) -> i32 {
+    let (r, urgent) = with_cs(|| unsafe {
+        let s = sched();
+        let Some(i) = find_live(s, tid) else {
+            return (ERR_SRCH, false);
+        };
+        if !s.tcbs[i].suspended {
+            return (ERR_AGAIN, false);
+        }
+        s.tcbs[i].suspended = false;
+        sync_bits(s, i);
+        if s.tcbs[i].act_pending && s.tcbs[i].state == State::Sleeping {
+            break_wait(s, i);
+        }
+        let urgent =
+            s.tcbs[i].state == State::Ready && s.tcbs[i].prio <= s.tcbs[s.current].prio;
+        (0, urgent)
+    });
+    if urgent {
+        pend_switch();
+    }
+    r
+}
+
+/// Register THE process-global activation handler, once (CAS is the
+/// once-ness; a second registration is refused EINVAL).
+pub fn act_register(handler: usize) -> i32 {
+    if ACT_HANDLER
+        .compare_exchange(0, handler, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        0
+    } else {
+        ERR_INVAL
+    }
+}
+
+/// Mark an activation pending (the flag IS the queue -- sends
+/// coalesce). Breaks an unsuspended Sleeping target's wait; a
+/// suspended target latches only (delivery waits for resume). Pends
+/// for PEER targets only: a self-send's delivery point is the
+/// sender's own next scheduling-out, and pending a switch for it
+/// would buy nothing.
+pub fn act_send(tid: i32) -> i32 {
+    let (r, urgent) = with_cs(|| unsafe {
+        let s = sched();
+        let Some(i) = find_live(s, tid) else {
+            return (ERR_SRCH, false);
+        };
+        if i as u32 == IDLE_SLOT.load(Ordering::Relaxed) {
+            return (ERR_INVAL, false);
+        }
+        if ACT_HANDLER.load(Ordering::Relaxed) == 0 {
+            return (ERR_INVAL, false);
+        }
+        s.tcbs[i].act_pending = true;
+        if !s.tcbs[i].suspended && s.tcbs[i].state == State::Sleeping {
+            break_wait(s, i);
+        }
+        let urgent = i != s.current
+            && !s.tcbs[i].suspended
+            && s.tcbs[i].state == State::Ready
+            && s.tcbs[i].prio <= s.tcbs[s.current].prio;
+        (0, urgent)
+    });
+    if urgent {
+        pend_switch();
+    }
+    r
+}
+
+/// The activation trampoline: entered by exception return on the
+/// TARGET's stack with &ctx in r0; calls the handler, then SVC #1
+/// hands the (possibly edited) ctx back to the kernel for the
+/// restore. Never returns -- the kernel rebuilds or restores.
+extern "C" fn act_tramp(ctx: *mut RhuCtx) -> ! {
+    let h = ACT_HANDLER.load(Ordering::Relaxed);
+    assert!(h != 0, "activation: delivery without a handler");
+    let f: extern "C" fn(*mut RhuCtx) = unsafe { core::mem::transmute(h) };
+    f(ctx);
+    unsafe { core::arch::asm!("svc #1", options(noreturn)) }
+}
+
+/// Build the canonical trampoline frame pair below `ctx_base`: a
+/// basic hw frame (r0 = &ctx, pc = act_tramp, Thumb xPSR) and a sw
+/// frame (zeros + thread-mode/PSP/basic EXC_RETURN). Returns the new
+/// sp. The trampoline starts clean-integer; the interrupted FP state
+/// rides the ORIGINAL frames untouched.
+unsafe fn build_tramp_frames(ctx_base: u32) -> u32 { unsafe {
+    let fhw = (ctx_base - 32) as *mut u32;
+    fhw.add(0).write(ctx_base);
+    fhw.add(1).write(0);
+    fhw.add(2).write(0);
+    fhw.add(3).write(0);
+    fhw.add(4).write(0);
+    fhw.add(5).write(0);
+    fhw.add(6).write(act_tramp as *const () as usize as u32 & !1);
+    fhw.add(7).write(0x0100_0000);
+    let new_sp = ctx_base - 68;
+    let fsw = new_sp as *mut u32;
+    for k in 0..8 {
+        fsw.add(k).write(0);
+    }
+    fsw.add(8).write(0xFFFF_FFFD);
+    new_sp
+}}
+
+/// The delivery transform, run in the switch path
+/// on the PICKED thread: materialize the ctx onto the target's own
+/// stack below its saved frames, then point its sp at a fresh frame
+/// pair entering the trampoline. Cost: 72 (ctx) + 68 (frames) = 140
+/// bytes, asserted against the stack base -- a budgeting bug is a
+/// first-delivery fact, never silent corruption.
+unsafe fn deliver_activation(s: &mut Sched, i: usize) { unsafe {
+    let old_sp = s.tcbs[i].sp;
+    let ctx_base = (old_sp - 72) & !7;
+    let new_sp = ctx_base - 68;
+    assert!(new_sp >= s.tcbs[i].stack_base, "activation: target stack exhausted");
+    (ctx_base as *mut RhuCtx).write(fill_ctx(old_sp));
+    let built = build_tramp_frames(ctx_base);
+    s.tcbs[i].act_saved_sp = old_sp;
+    s.tcbs[i].act_in_handler = true;
+    s.tcbs[i].act_pending = false;
+    s.tcbs[i].sp = built;
+}}
+
+/// SVC #1 (the reserved activation-resume immediate):
+/// re-deliver if a send landed during the handler (same ctx storage,
+/// the cost never nests), else apply the possibly-edited ctx to the
+/// original frames (activation door: ctx.sp ignored) and restore.
+/// Returns the psp to pop from; the asm arm pops the PendSV shape.
+#[unsafe(no_mangle)]
+extern "C" fn __rhu_act_resume(_psp: u32) -> u32 {
+    with_cs(|| unsafe {
+        let s = sched();
+        let i = s.current;
+        assert!(s.tcbs[i].act_in_handler, "activation: stray SVC #1");
+        let saved = s.tcbs[i].act_saved_sp;
+        let ctx_base = (saved - 72) & !7;
+        if s.tcbs[i].act_pending {
+            s.tcbs[i].act_pending = false;
+            let new_sp = build_tramp_frames(ctx_base);
+            s.tcbs[i].sp = new_sp;
+            new_sp
+        } else {
+            apply_ctx(saved, &*(ctx_base as *const RhuCtx));
+            s.tcbs[i].act_in_handler = false;
+            s.tcbs[i].sp = saved;
+            saved
+        }
+    })
+}
+
+/// Idle's tid, for the api smoke's refusal matrix ONLY (see
+/// `probe_futex_waiting` for the probe rules).
+#[cfg(feature = "api-smoke")]
+pub fn probe_idle_tid() -> i32 {
+    with_cs(|| unsafe {
+        let s = sched();
+        s.tcbs[IDLE_SLOT.load(Ordering::Relaxed) as usize].tid
+    })
 }
 
 /// Kernel-policy observability for the api smoke ONLY (the
@@ -637,6 +1249,36 @@ pub fn probe_ready_among(slots: &[usize]) -> u32 {
     with_cs(|| unsafe {
         let s = sched();
         slots.iter().filter(|&&i| s.tcbs[i].state == State::Ready).count() as u32
+    })
+}
+
+/// (live, free) slot counts -- the thread-abi exhaustion arm derives
+/// its expected spawn count from these and asserts no Exited residue
+/// first (see `probe_futex_waiting` for the probe rules).
+#[cfg(feature = "api-smoke")]
+pub fn probe_slot_states() -> (u32, u32) {
+    with_cs(|| unsafe {
+        let s = sched();
+        let mut live = 0;
+        let mut free = 0;
+        for t in s.tcbs.iter() {
+            match t.state {
+                State::Ready | State::Sleeping => live += 1,
+                State::Free => free += 1,
+                State::Exited => {}
+            }
+        }
+        (live, free)
+    })
+}
+
+/// (retired-list occupancy, leak drops, leaked bytes) -- the smoke's
+/// algorithmic leak-audit reads.
+#[cfg(feature = "api-smoke")]
+pub fn probe_retired() -> (u32, u32, u32) {
+    with_cs(|| unsafe {
+        let s = sched();
+        (s.retired_n, s.leak_drops, s.leak_bytes)
     })
 }
 
@@ -673,6 +1315,14 @@ extern "C" fn __rhu_switch(sp: u32) -> u32 {
         s.current = next;
         if s.exited_n > 0 {
             reap(s);
+        }
+        let t = &s.tcbs[next];
+        if t.act_pending
+            && !t.act_in_handler
+            && !t.suspended
+            && next as u32 != IDLE_SLOT.load(Ordering::Relaxed)
+        {
+            deliver_activation(s, next);
         }
         s.tcbs[next].sp
     })
@@ -732,7 +1382,9 @@ pub unsafe extern "C" fn systick_vector() { unsafe {
         m &= m - 1;
         if (now.wrapping_sub(s.tcbs[i].wake_tick) as i32) >= 0 {
             set_state(s, i, State::Ready);
-            fired = true;
+            if !s.tcbs[i].suspended {
+                fired = true;
+            }
         }
     }
     if fired || ready_peer_at_or_above(s) {
@@ -755,7 +1407,8 @@ pub fn init() {
         write_volatile(SYST_CVR, 0);
         write_volatile(SYST_CSR, 0b111);
     }
-    spawn("idle", idle_entry, 0, 0xFF, 1024);
+    let idle = spawn("idle", idle_entry, 0, 0xFF, 1024);
+    IDLE_SLOT.store(idle as u32, Ordering::Relaxed);
 }
 
 /// Hand the CPU to the scheduler; the given slot runs first. The boot
@@ -779,6 +1432,7 @@ SvcHandler:
     /* Dispatch on the SVC immediate (read out of the instruction below
        the stacked PC; SVC is the 16-bit 0xDFxx encoding):
          #0  scheduler first start
+         #1  activation resume (from the trampoline)
        Anything else is unexpected here and takes the terminal funnel. */
     tst   lr, #4
     ite   eq
@@ -788,15 +1442,31 @@ SvcHandler:
     subs  r1, r1, #2
     ldrb  r1, [r1]
     cbz   r1, 1f
+    cmp   r1, #1
+    beq   2f
     b     ExceptionTrampoline
 
 1:  /* First start: reset MSP to the top (the boot-thread frame below is
        abandoned; MSP is the handler stack from here on), then
-       exception-return into the first thread via its prebuilt frames. */
+       exception-return into the first thread via its prebuilt frames.
+       No delivery rides this path: nothing can be pending before the
+       scheduler starts. */
     bl    __rhu_msp_top
     msr   msp, r0
     bl    __rhu_first_sp
     ldmia r0!, {{r4-r11, lr}}
+    msr   psp, r0
+    bx    lr
+
+2:  /* Activation resume: the kernel half decides re-delivery vs final
+       restore and returns the psp to pop; the pop is the PendSV
+       restore shape verbatim. The trampoline's own SVC-pushed frame
+       becomes dead space above the restored sp by construction. */
+    bl    __rhu_act_resume
+    ldmia r0!, {{r4-r11, lr}}
+    tst   lr, #0x10
+    it    eq
+    vldmiaeq r0!, {{s16-s31}}
     msr   psp, r0
     bx    lr
     .size SvcHandler, . - SvcHandler

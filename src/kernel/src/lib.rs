@@ -10,12 +10,16 @@
 #[macro_use]
 mod console;
 mod api;
+mod arena;
 mod board;
 mod boot;
 mod critical;
+mod entropy;
 mod funnel;
+mod kheap;
 #[cfg(feature = "payload")]
 mod payload;
+mod registry;
 mod sched;
 mod semihost;
 
@@ -27,6 +31,10 @@ const FLAVOR: &str = if cfg!(feature = "test-panic") {
     "test-panic"
 } else if cfg!(feature = "test-fault") {
     "test-fault"
+} else if cfg!(feature = "test-kheap-loud") {
+    "test-kheap-loud"
+} else if cfg!(feature = "test-tickcost") {
+    "test-tickcost"
 } else if cfg!(feature = "sched-smoke") {
     "sched-smoke"
 } else if cfg!(feature = "api-smoke") {
@@ -90,6 +98,9 @@ pub extern "C" fn kmain() -> ! {
         );
     }
 
+    arena::init();
+    kheap::init();
+    registry::init_module0();
     sched::init();
     let main_slot = sched::spawn("kmain", kthread_main, 0, 3, board::KMAIN_STACK_BYTES);
     kprintln!(
@@ -103,7 +114,7 @@ pub extern "C" fn kmain() -> ! {
 }
 
 #[cfg_attr(
-    any(feature = "test-panic", feature = "test-fault", feature = "payload"),
+    any(feature = "test-panic", feature = "test-fault", feature = "payload", feature = "test-kheap-loud", feature = "test-tickcost", feature = "api-smoke"),
     allow(unreachable_code)
 )]
 extern "C" fn kthread_main(_: usize) {
@@ -127,8 +138,63 @@ extern "C" fn kthread_main(_: usize) {
         unsafe { core::arch::asm!("udf #0") };
     }
 
+    #[cfg(feature = "test-kheap-loud")]
+    {
+        kprintln!("[kheap-loud] corrupting a free block header, then allocating -- expect a KERNEL PANIC");
+        let a = api::rhu_kheap_alloc(64, 8);
+        assert!(!a.is_null(), "kheap-loud: seed alloc failed");
+        let g = api::rhu_kheap_alloc(64, 8);
+        assert!(!g.is_null(), "kheap-loud: guard alloc failed");
+        api::rhu_kheap_free(a);
+        kheap::probe_corrupt_first_free();
+        let _ = api::rhu_kheap_alloc(64, 8);
+        kprintln!("[kheap-loud] UNREACHABLE: the corrupt walk survived");
+        semihost::exit(3)
+    }
+
+    #[cfg(feature = "test-tickcost")]
+    {
+        const W: u32 = 25_000_000;
+        const N: u32 = 100_000;
+        kprintln!("[tickcost] phase 1: solo busy window armed (W iterations, 2 insns each)");
+        let ms0 = sched::now_ms();
+        let sw0 = sched::switch_count();
+        let t0 = api::rhu_now_ns();
+        unsafe {
+            core::arch::asm!(
+                "1:",
+                "subs {i}, {i}, #1",
+                "bne 1b",
+                i = inout(reg) W => _,
+                options(nomem, nostack)
+            );
+        }
+        let t1 = api::rhu_now_ns();
+        let dsw = sched::switch_count().wrapping_sub(sw0);
+        let dms = sched::now_ms().wrapping_sub(ms0);
+        assert!(dsw == 0, "tickcost: switches during the solo busy window");
+        kprintln!("[tickcost] p1 dns={} dms={} dsw={} W={}", t1 - t0, dms, dsw, W);
+        kprintln!("[tickcost] phase 2: solo yield round-trips armed (N calls)");
+        let sw1 = sched::switch_count();
+        let t2 = api::rhu_now_ns();
+        for _ in 0..N {
+            api::rhu_thread_yield();
+        }
+        let t3 = api::rhu_now_ns();
+        let dsw2 = sched::switch_count().wrapping_sub(sw1);
+        assert!(dsw2 == N, "tickcost: yield round trips missed PendSV");
+        kprintln!("[tickcost] p2 dns={} dsw={} N={}", t3 - t2, dsw2, N);
+        kprintln!("[tickcost] done");
+        semihost::exit(0)
+    }
+
     kprintln!("[base] ALL GOOD (boot + console + panic/fault funnel armed)");
     kprintln!("[sched] ALL GOOD (threads + timers + preemption online)");
+    #[cfg(feature = "api-smoke")]
+    {
+        kprintln!("[api] exit-door: handing the machine exit to rhu_exit(0)");
+        api::rhu_exit(0);
+    }
     semihost::exit(0)
 }
 
@@ -333,11 +399,12 @@ __rhu_fp_clobber:
 
 #[cfg(feature = "api-smoke")]
 mod api_smoke {
+    use core::ffi::c_void;
     use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
     use crate::critical::with_cs;
-    use crate::{api, board, sched};
+    use crate::{api, arena, board, kheap, registry, sched};
 
     fn busy_wait_ms(ms: u32) {
         let t0 = sched::now_ms();
@@ -378,7 +445,7 @@ mod api_smoke {
         }
     }
 
-    /// The eight API contract checks, in gate order, one boot,
+    /// The API contract checks, in gate order, one boot,
     /// sequential; every marker is constant text the gate pins. Waiters
     /// and workers run LESS urgent than this thread (prio 4 vs 3), so the
     /// conditional-tick policy (a wake pends a switch only when one is
@@ -392,6 +459,32 @@ mod api_smoke {
         check_wake();
         check_mutex();
         check_quiescent();
+        check_arena_carve();
+        check_arena_zero_birth();
+        check_arena_rezero();
+        check_arena_audit();
+        check_arena_headroom();
+        check_kheap_basic();
+        check_kheap_coalesce();
+        check_tls_blocks();
+        check_tls_dtors();
+        check_thread_abi();
+        check_thread_bounds();
+        check_registry_basic();
+        check_susp_pick();
+        check_susp_ctx();
+        check_susp_hijack();
+        check_resume_urgent();
+        check_act_refuse();
+        check_act_deliver();
+        check_act_coalesce();
+        check_act_redeliver();
+        check_act_eintr();
+        check_act_sleep_rearm();
+        check_module_find();
+        check_module_roots();
+        check_console_pair();
+        check_entropy();
     }
 
     fn check_monotonic() {
@@ -582,5 +675,1334 @@ mod api_smoke {
         assert!(dt >= 30, "tick clock failed to advance: {} ms", dt);
         assert!(ds == 0, "context switches during solo busy loop: {}", ds);
         kprintln!("[api] PASS tick-quiescent (solo busy 30 ms: 0 switches, clock advanced)");
+    }
+
+
+    /// Volatile full scan: true iff every byte of [p, p+len) reads
+    /// zero. Bool-returning on purpose -- the zero-birth check proves
+    /// this scanner refuses a nonzero byte before trusting it (panics
+    /// cannot be caught in-kernel, so refusal probes cannot ride
+    /// assert).
+    fn scan_zero(p: *const u8, len: usize) -> bool {
+        for i in 0..len {
+            if unsafe { read_volatile(p.add(i)) } != 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn check_arena_carve() {
+        kprintln!("[api] arena-carve: window + disjointness asserts armed");
+        unsafe extern "C" {
+            static __ekstacks: u32;
+            static __stack_start: u32;
+            static __sdata: u32;
+            static __ebss: u32;
+        }
+        let (lo, hi, bump) = arena::probe_window();
+        let eks = addr_of!(__ekstacks) as usize;
+        let stk = addr_of!(__stack_start) as usize;
+        let sd = addr_of!(__sdata) as usize;
+        let eb = addr_of!(__ebss) as usize;
+        assert!(lo >= eks, "arena window: lo below __ekstacks");
+        assert!(hi <= stk, "arena window: hi above __stack_start");
+        assert!(stk - hi >= 64 * 1024, "arena window: boot-stack reserve under 64K");
+        assert!(lo < hi, "arena window: empty or negative");
+        assert!(bump >= lo && bump <= hi, "arena window: bump outside the window");
+        let (klo, khi) = sched::kstacks_window();
+        assert!(hi.min(khi) <= lo.max(klo), "arena window overlaps .kstacks");
+        assert!(hi.min(eb) <= lo.max(sd), "arena window overlaps the statics window");
+        kprintln!("[api] PASS arena-carve (window bracketed, disjoint from kstacks + statics)");
+    }
+
+    fn check_arena_zero_birth() {
+        kprintln!("[api] arena-zero-birth: poisoned-boot hand-out scan armed");
+        let mut fixture = [0u8; 16];
+        fixture[9] = 1;
+        assert!(
+            !scan_zero(fixture.as_ptr(), fixture.len()),
+            "zero scanner accepted a one-nonzero-byte page"
+        );
+        let site = check_arena_zero_birth as *const () as usize as u32;
+        let p1 = api::rhu_arena_alloc_at(4096, 4096, site);
+        assert!(!p1.is_null(), "zero-birth: probe 1 alloc failed");
+        assert!(!api::rhu_arena_alloc_at(32 * 1024, 8, site).is_null(), "zero-birth: filler 1 failed");
+        let p2 = api::rhu_arena_alloc_at(4096, 4096, site);
+        assert!(!p2.is_null(), "zero-birth: probe 2 alloc failed");
+        assert!(!api::rhu_arena_alloc_at(64 * 1024, 8, site).is_null(), "zero-birth: filler 2 failed");
+        let p3 = api::rhu_arena_alloc_at(4096, 4096, site);
+        assert!(!p3.is_null(), "zero-birth: probe 3 alloc failed");
+        for p in [p1, p2, p3] {
+            assert!(scan_zero(p as *const u8, 4096), "zero-birth: a handed-out page reads nonzero");
+        }
+        kprintln!("[api] PASS arena-zero-birth (pages read all-zero through the boot poison)");
+    }
+
+    fn check_arena_rezero() {
+        kprintln!("[api] arena-rezero: pattern + rezero + VA-burn probe armed");
+        let site = check_arena_rezero as *const () as usize as u32;
+        let q = api::rhu_arena_alloc_at(4096, 8, site);
+        assert!(!q.is_null(), "rezero: alloc failed");
+        for i in 0..4096 {
+            unsafe { write_volatile(q.add(i), 0x5A) };
+        }
+        let h0 = api::rhu_arena_headroom();
+        let (_, _, b0) = arena::probe_window();
+        let r = api::rhu_arena_rezero(q, 4096);
+        assert!(r == 0, "rezero returned nonzero on a handed-out range");
+        assert!(scan_zero(q as *const u8, 4096), "rezero: the pattern survived");
+        let h1 = api::rhu_arena_headroom();
+        let (_, _, b1) = arena::probe_window();
+        assert!(h0 == h1 && b0 == b1, "rezero burned VA (headroom or bump moved)");
+        assert!(
+            api::rhu_arena_rezero(core::ptr::null_mut(), 8) == sched::ERR_INVAL,
+            "null rezero not refused"
+        );
+        let oob = (b1 + 64) as *mut u8;
+        assert!(
+            api::rhu_arena_rezero(oob, 8) == sched::ERR_INVAL,
+            "never-handed-out rezero not refused"
+        );
+        let h2 = api::rhu_arena_headroom();
+        let (_, _, b2) = arena::probe_window();
+        assert!(h1 == h2 && b1 == b2, "a refused rezero touched state");
+        kprintln!("[api] PASS arena-rezero (range re-zeroed in place: same address, zero VA burned, oob refused)");
+    }
+
+    fn check_arena_audit() {
+        kprintln!("[api] arena-audit: two-site attribution armed");
+        let site_a = check_arena_audit as *const () as usize as u32;
+        let site_b = check_arena_carve as *const () as usize as u32;
+        assert!(site_a != site_b, "audit: the two sites are not distinct");
+        for b in [8u32, 16, 24] {
+            assert!(!api::rhu_arena_alloc_at(b, 8, site_a).is_null(), "audit: site-A alloc failed");
+        }
+        for b in [32u32, 40] {
+            assert!(!api::rhu_arena_alloc_at(b, 8, site_b).is_null(), "audit: site-B alloc failed");
+        }
+        let (ca, ba) = arena::probe_site(site_a);
+        let (cb, bb) = arena::probe_site(site_b);
+        assert!(ca == 3 && ba == 8 + 16 + 24, "audit: site-A row wrong");
+        assert!(cb == 2 && bb == 32 + 40, "audit: site-B row wrong");
+        kprintln!("[api] PASS arena-audit (two sites attributed exactly: rows, counts, bytes)");
+    }
+
+    fn check_arena_headroom() {
+        kprintln!("[api] arena-headroom: exact-fit exhaustion armed");
+        let missing = check_quiescent as *const () as usize as u32;
+        assert!(
+            arena::probe_site(missing) == (0, 0),
+            "audit probe invented a row for a never-used site"
+        );
+        let site = check_arena_headroom as *const () as usize as u32;
+        let h = api::rhu_arena_headroom();
+        assert!(h != 0 && h % 8 == 0, "headroom not a positive 8-multiple");
+        let p = api::rhu_arena_alloc_at(h, 8, site);
+        assert!(!p.is_null(), "exact-fit alloc of the full headroom failed");
+        assert!(api::rhu_arena_headroom() == 0, "headroom nonzero after the exact fit");
+        let q = api::rhu_arena_alloc_at(8, 8, site);
+        assert!(q.is_null(), "alloc past exhaustion was not refused NULL");
+        assert!(api::rhu_arena_headroom() == 0, "a refused alloc changed headroom");
+        kprintln!("[api] PASS arena-headroom (exact fit taken, further alloc refused NULL, headroom 0)");
+    }
+
+
+    /// Bounded poll: the C checks join their threads by observable
+    /// state, never by luck; a stuck condition dies loud at 2 s.
+    fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
+        let t0 = sched::now_ms();
+        while !cond() {
+            assert!(sched::now_ms().wrapping_sub(t0) < 2000, "timed out waiting: {}", what);
+            api::rhu_sleep_ns(1_000_000);
+        }
+    }
+
+    /// Release a park word: store-then-wake, so a late arrival sees the
+    /// changed value and refuses the wait instead of sleeping forever.
+    fn release(word: &AtomicU32) {
+        word.store(1, Ordering::Release);
+        api::rhu_futex_wake(word.as_ptr(), u32::MAX);
+    }
+
+    fn check_kheap_basic() {
+        kprintln!("[api] kheap-basic: alloc/free/reuse + mixed-align armed");
+        let a = api::rhu_kheap_alloc(40, 8);
+        let b = api::rhu_kheap_alloc(64, 16);
+        let c = api::rhu_kheap_alloc(24, 64);
+        assert!(!a.is_null() && !b.is_null() && !c.is_null(), "kheap-basic: an alloc failed");
+        for (p, al) in [(a, 8usize), (b, 16), (c, 64)] {
+            assert!(p as usize & (al - 1) == 0, "kheap-basic: alignment violated");
+        }
+        unsafe {
+            write_volatile(a, 0x11u8);
+            write_volatile(b, 0x22);
+            write_volatile(c, 0x33);
+            assert!(
+                read_volatile(a) == 0x11 && read_volatile(b) == 0x22 && read_volatile(c) == 0x33,
+                "kheap-basic: writes did not stick"
+            );
+        }
+        api::rhu_kheap_free(a);
+        let a2 = api::rhu_kheap_alloc(40, 8);
+        assert!(a2 == a, "kheap-basic: exact-fit free not reused at the same address");
+        api::rhu_kheap_free(a2);
+        api::rhu_kheap_free(b);
+        api::rhu_kheap_free(c);
+        kprintln!("[api] PASS kheap-basic (freed block reused at the same address, alignment honored)");
+    }
+
+    fn check_kheap_coalesce() {
+        kprintln!("[api] kheap-coalesce: guarded three-block mixed-order free armed");
+        let x = api::rhu_kheap_alloc(48, 8);
+        let y = api::rhu_kheap_alloc(80, 8);
+        let z = api::rhu_kheap_alloc(112, 8);
+        let g = api::rhu_kheap_alloc(24, 8);
+        assert!(
+            !x.is_null() && !y.is_null() && !z.is_null() && !g.is_null(),
+            "kheap-coalesce: an alloc failed"
+        );
+        assert!(
+            y as usize == x as usize + 48 + kheap::HDR_BYTES as usize,
+            "kheap-coalesce: x/y not adjacent (heap not pristine?)"
+        );
+        assert!(
+            z as usize == y as usize + 80 + kheap::HDR_BYTES as usize,
+            "kheap-coalesce: y/z not adjacent"
+        );
+        api::rhu_kheap_free(y);
+        api::rhu_kheap_free(z);
+        api::rhu_kheap_free(x);
+        let sum = 48 + 80 + 112 + 2 * kheap::HDR_BYTES;
+        let w = api::rhu_kheap_alloc(sum, 8);
+        assert!(w == x, "kheap-coalesce: the summed span did not reallocate at the first block");
+        api::rhu_kheap_free(w);
+        api::rhu_kheap_free(g);
+        kprintln!("[api] PASS kheap-coalesce (adjacent frees merged whole: the summed span reallocated at the first block)");
+    }
+
+    static TLS_H1: AtomicI32 = AtomicI32::new(-1);
+    static TLS_H2: AtomicI32 = AtomicI32::new(-1);
+    static TLS_INIT_IMAGE: [u8; 24] = [
+        0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE,
+        0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8,
+    ];
+    static TLS_ADDRS: [AtomicUsize; 4] = [
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+    ];
+    static TLS_SEEN_BAD: AtomicU32 = AtomicU32::new(0);
+    static TLS_READY: AtomicU32 = AtomicU32::new(0);
+    static TLS_PARK: AtomicU32 = AtomicU32::new(0);
+    static TLS_EXITED: AtomicU32 = AtomicU32::new(0);
+
+    fn scan_eq(p: *const u8, want: &[u8]) -> bool {
+        for (i, w) in want.iter().enumerate() {
+            if unsafe { read_volatile(p.add(i)) } != *w {
+                return false;
+            }
+        }
+        true
+    }
+
+    extern "C" fn tls_worker(arg: *mut c_void) {
+        let me = arg as usize;
+        let h1 = TLS_H1.load(Ordering::Acquire);
+        let h2 = TLS_H2.load(Ordering::Acquire);
+        let b1 = api::rhu_tls_get(h1);
+        let b2 = api::rhu_tls_get(h2);
+        if !scan_eq(b1, &TLS_INIT_IMAGE) || !scan_zero(b2, 48) {
+            TLS_SEEN_BAD.store(1, Ordering::Release);
+        }
+        unsafe {
+            write_volatile(b1, 0x41 + me as u8);
+            write_volatile(b2, 0x61 + me as u8);
+        }
+        TLS_ADDRS[me * 2].store(b1 as usize, Ordering::Release);
+        TLS_ADDRS[me * 2 + 1].store(b2 as usize, Ordering::Release);
+        TLS_READY.fetch_add(1, Ordering::Release);
+        api::rhu_futex_wake(TLS_READY.as_ptr(), u32::MAX);
+        while TLS_PARK.load(Ordering::Acquire) == 0 {
+            let _ = api::rhu_futex_wait(TLS_PARK.as_ptr(), 0, sched::DEADLINE_NONE);
+        }
+        TLS_EXITED.fetch_add(1, Ordering::Release);
+        api::rhu_futex_wake(TLS_EXITED.as_ptr(), u32::MAX);
+    }
+
+    fn check_tls_blocks() {
+        kprintln!("[api] tls-blocks: two modules x two threads armed");
+        let d1 = registry::ModuleDesc {
+            text_lo: 0,
+            text_hi: 0,
+            statics_lo: [0; 4],
+            statics_hi: [0; 4],
+            frozen_lo: 0,
+            frozen_hi: 0,
+            exidx_lo: 0,
+            exidx_hi: 0,
+            tls_bytes: 24,
+            tls_init: TLS_INIT_IMAGE.as_ptr(),
+            name: c"smoke-tls-img".as_ptr() as *const u8,
+        };
+        let mut d2 = d1;
+        d2.tls_bytes = 48;
+        d2.tls_init = core::ptr::null();
+        d2.name = c"smoke-tls-zero".as_ptr() as *const u8;
+        let h1 = api::rhu_module_register(&d1);
+        let h2 = api::rhu_module_register(&d2);
+        assert!(h1 > 0 && h2 > 0 && h1 != h2, "tls-blocks: bad handles {} {}", h1, h2);
+        TLS_H1.store(h1, Ordering::Release);
+        TLS_H2.store(h2, Ordering::Release);
+
+        let g1 = api::rhu_tls_get(h1);
+        let g2 = api::rhu_tls_get(h2);
+        assert!(scan_eq(g1, &TLS_INIT_IMAGE), "tls-blocks: kmain's init image wrong");
+        assert!(scan_zero(g2, 48), "tls-blocks: kmain's zero-fill block dirty");
+        unsafe { write_volatile(g1, 0xAA) };
+
+        let t0 = api::rhu_thread_spawn(
+            Some(tls_worker),
+            0 as *mut c_void,
+            4 * 1024,
+            0x40,
+            c"tlsw0".as_ptr(),
+        );
+        let t1 = api::rhu_thread_spawn(
+            Some(tls_worker),
+            1 as *mut c_void,
+            4 * 1024,
+            0x40,
+            c"tlsw1".as_ptr(),
+        );
+        assert!(t0 >= 1 && t1 >= 1 && t0 != t1, "tls-blocks: spawn failed");
+        wait_until(|| TLS_READY.load(Ordering::Acquire) == 2, "tls workers ready");
+
+        let a1 = TLS_ADDRS[0].load(Ordering::Acquire) as *const u8;
+        let a2 = TLS_ADDRS[1].load(Ordering::Acquire) as *const u8;
+        let b1 = TLS_ADDRS[2].load(Ordering::Acquire) as *const u8;
+        let b2 = TLS_ADDRS[3].load(Ordering::Acquire) as *const u8;
+        assert!(TLS_SEEN_BAD.load(Ordering::Acquire) == 0, "tls-blocks: a worker saw a bad birth copy");
+        let mut all = [g1 as usize, g2 as usize, a1 as usize, a2 as usize, b1 as usize, b2 as usize];
+        all.sort_unstable();
+        for w in all.windows(2) {
+            assert!(w[0] != w[1], "tls-blocks: two blocks share an address");
+        }
+        unsafe {
+            assert!(read_volatile(a1) == 0x41 && read_volatile(b1) == 0x42, "tls-blocks: module-1 writes wrong");
+            assert!(read_volatile(a2) == 0x61 && read_volatile(b2) == 0x62, "tls-blocks: module-2 writes wrong");
+            assert!(read_volatile(g1) == 0xAA, "tls-blocks: a worker's write bled into kmain's block");
+            assert!(scan_eq(a1.add(1), &TLS_INIT_IMAGE[1..]), "tls-blocks: worker image tail damaged");
+        }
+        release(&TLS_PARK);
+        wait_until(|| TLS_EXITED.load(Ordering::Acquire) == 2, "tls workers exited");
+        kprintln!("[api] PASS tls-blocks (per-thread blocks distinct, init image + zero fill honored, no cross-thread bleed)");
+    }
+
+    static DTOR_SEQ: AtomicU32 = AtomicU32::new(0);
+    static DTOR_ORDER: [AtomicU32; 8] = [
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+    ];
+    static DTOR_TID: AtomicI32 = AtomicI32::new(0);
+    static DTOR_BAD: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn dtor_recorder(arg: *mut c_void) {
+        let seq = DTOR_SEQ.fetch_add(1, Ordering::AcqRel);
+        if (seq as usize) < DTOR_ORDER.len() {
+            DTOR_ORDER[seq as usize].store(arg as u32 + 1, Ordering::Release);
+        }
+        if api::rhu_thread_self() != DTOR_TID.load(Ordering::Acquire) {
+            DTOR_BAD.fetch_or(1, Ordering::AcqRel);
+        }
+        let p = api::rhu_tls_get(TLS_H1.load(Ordering::Acquire));
+        if unsafe { read_volatile(p) } != 0xD7 {
+            DTOR_BAD.fetch_or(2, Ordering::AcqRel);
+        }
+    }
+
+    extern "C" fn dtor_thread(_: *mut c_void) {
+        let p = api::rhu_tls_get(TLS_H1.load(Ordering::Acquire));
+        unsafe { write_volatile(p, 0xD7) };
+        DTOR_TID.store(api::rhu_thread_self(), Ordering::Release);
+        for i in 0..8usize {
+            let r = api::rhu_thread_atexit(Some(dtor_recorder), i as *mut c_void);
+            assert!(r == 0, "tls-dtors: registration {} refused with {}", i, r);
+        }
+        let r = api::rhu_thread_atexit(Some(dtor_recorder), 8 as *mut c_void);
+        assert!(r == sched::ERR_AGAIN, "tls-dtors: the ninth dtor was not refused ({})", r);
+    }
+
+    fn check_tls_dtors() {
+        kprintln!("[api] tls-dtors: LIFO dtor stack + cap refusal armed");
+        let t = api::rhu_thread_spawn(
+            Some(dtor_thread),
+            core::ptr::null_mut(),
+            4 * 1024,
+            0x40,
+            c"dtor".as_ptr(),
+        );
+        assert!(t >= 1, "tls-dtors: spawn failed");
+        wait_until(|| DTOR_SEQ.load(Ordering::Acquire) == 8, "eight dtors to run");
+        api::rhu_sleep_ns(2_000_000);
+        assert!(DTOR_SEQ.load(Ordering::Acquire) == 8, "tls-dtors: more than eight dtor runs");
+        for (call, slot) in DTOR_ORDER.iter().enumerate() {
+            let want = 8 - call as u32;
+            assert!(
+                slot.load(Ordering::Acquire) == want,
+                "tls-dtors: call {} recorded {} (want {})",
+                call,
+                slot.load(Ordering::Acquire),
+                want
+            );
+        }
+        assert!(DTOR_BAD.load(Ordering::Acquire) == 0, "tls-dtors: off-thread run or dead TLS inside a dtor");
+        kprintln!("[api] PASS tls-dtors (dtors ran LIFO exactly once on the exiting thread, TLS live inside, cap refused honest)");
+    }
+
+    static ABI_PARK: AtomicU32 = AtomicU32::new(0);
+    static ABI_SELF_SEEN: AtomicI32 = AtomicI32::new(0);
+
+    extern "C" fn probe_return(_: *mut c_void) {
+        while ABI_PARK.load(Ordering::Acquire) == 0 {
+            let _ = api::rhu_futex_wait(ABI_PARK.as_ptr(), 0, sched::DEADLINE_NONE);
+        }
+    }
+
+    extern "C" fn probe_exit_verb(_: *mut c_void) {
+        ABI_SELF_SEEN.store(api::rhu_thread_self(), Ordering::Release);
+        api::rhu_thread_yield();
+        while ABI_PARK.load(Ordering::Acquire) == 0 {
+            let _ = api::rhu_futex_wait(ABI_PARK.as_ptr(), 0, sched::DEADLINE_NONE);
+        }
+        api::rhu_thread_exit();
+    }
+
+    /// Spawn one parked probe through the C door.
+    fn spawn_probe(entry: extern "C" fn(*mut c_void), stack: u32) -> i32 {
+        api::rhu_thread_spawn(Some(entry), core::ptr::null_mut(), stack, 0x40, c"probe".as_ptr())
+    }
+
+    /// Join a probe by its own verb: dead reads RHU_ESRCH; then one
+    /// sleep so the reap (a switch-path event) has provably run.
+    fn join_tid(tid: i32) {
+        wait_until(
+            || {
+                let (mut lo, mut b) = (0u32, 0u32);
+                api::rhu_thread_stack_bounds(tid, &mut lo, &mut b) == sched::ERR_SRCH
+            },
+            "probe exit",
+        );
+        api::rhu_sleep_ns(2_000_000);
+    }
+
+    fn check_thread_abi() {
+        kprintln!("[api] thread-abi: C-door round trip + exact-fit stack reuse armed");
+        let t1 = spawn_probe(probe_exit_verb, 2048);
+        assert!(t1 >= 1, "thread-abi: spawn returned {}", t1);
+        wait_until(|| sched::probe_futex_waiting(ABI_PARK.as_ptr()) == 1, "probe 1 parked");
+        assert!(ABI_SELF_SEEN.load(Ordering::Acquire) == t1, "thread-abi: self() != spawn's tid");
+        let (mut lo1, mut b1) = (0u32, 0u32);
+        assert!(api::rhu_thread_stack_bounds(t1, &mut lo1, &mut b1) == 0, "thread-abi: bounds(t1) refused");
+        release(&ABI_PARK);
+        join_tid(t1);
+        ABI_PARK.store(0, Ordering::Release);
+
+        let t2 = spawn_probe(probe_exit_verb, 2048);
+        assert!(t2 >= 1 && t2 != t1, "thread-abi: tid not unique across spawn-exit-spawn");
+        wait_until(|| sched::probe_futex_waiting(ABI_PARK.as_ptr()) == 1, "probe 2 parked");
+        let (mut lo2, mut b2) = (0u32, 0u32);
+        assert!(api::rhu_thread_stack_bounds(t2, &mut lo2, &mut b2) == 0, "thread-abi: bounds(t2) refused");
+        assert!(lo2 == lo1 && b2 == b1, "thread-abi: exact-fit reuse missed (bounds differ)");
+        release(&ABI_PARK);
+        join_tid(t2);
+        ABI_PARK.store(0, Ordering::Release);
+
+        let (live0, free0) = sched::probe_slot_states();
+        assert!(
+            live0 + free0 == sched::MAX_THREADS as u32,
+            "thread-abi: exited residue before the exhaustion arm"
+        );
+        let (occ0, drops0, bytes0) = sched::probe_retired();
+        let mut spawned = 0u32;
+        let mut tids = [0i32; sched::MAX_THREADS];
+        loop {
+            let t = spawn_probe(probe_return, 1024);
+            if t == sched::ERR_AGAIN {
+                break;
+            }
+            assert!(t >= 1, "thread-abi: spawn returned {}", t);
+            tids[spawned as usize] = t;
+            spawned += 1;
+            assert!(spawned <= sched::MAX_THREADS as u32, "thread-abi: spawn never refused");
+        }
+        assert!(spawned == free0, "thread-abi: refused at {} spawns, {} slots were free", spawned, free0);
+        assert!(
+            spawn_probe(probe_return, 1024) == sched::ERR_AGAIN,
+            "thread-abi: refusal not stable"
+        );
+        release(&ABI_PARK);
+        for i in 0..spawned {
+            join_tid(tids[i as usize]);
+        }
+        ABI_PARK.store(0, Ordering::Release);
+        let (occ1, drops1, bytes1) = sched::probe_retired();
+        let accepted = spawned.min(sched::RETIRED_CAP as u32 - occ0);
+        assert!(occ1 == occ0 + accepted, "thread-abi: retired occupancy {} (want {})", occ1, occ0 + accepted);
+        assert!(
+            drops1 - drops0 == spawned - accepted,
+            "thread-abi: leak drops {} (want {})",
+            drops1 - drops0,
+            spawned - accepted
+        );
+        assert!(
+            bytes1 - bytes0 == (spawned - accepted) * 1024,
+            "thread-abi: leaked bytes {} (want {})",
+            bytes1 - bytes0,
+            (spawned - accepted) * 1024
+        );
+        kprintln!("[api] PASS thread-abi (round trip clean, tids unique, exact-fit stack reused, slot exhaustion refused honest)");
+    }
+
+    static PEER_LOCAL: AtomicUsize = AtomicUsize::new(0);
+    static PEER_PARK: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn bounds_peer(_: *mut c_void) {
+        let planted = 0u32;
+        PEER_LOCAL.store(addr_of!(planted) as usize, Ordering::Release);
+        while PEER_PARK.load(Ordering::Acquire) == 0 {
+            let _ = api::rhu_futex_wait(PEER_PARK.as_ptr(), 0, sched::DEADLINE_NONE);
+        }
+    }
+
+    fn check_thread_bounds() {
+        kprintln!("[api] thread-bounds: own + peer + reaped-tid probes armed");
+        let my_local = 0u32;
+        let me = api::rhu_thread_self();
+        let (mut mlo, mut mb) = (0u32, 0u32);
+        assert!(api::rhu_thread_stack_bounds(me, &mut mlo, &mut mb) == 0, "thread-bounds: own lookup refused");
+        let mla = addr_of!(my_local) as usize;
+        assert!(
+            (mlo as usize..(mlo + mb) as usize).contains(&mla),
+            "thread-bounds: own local outside own window"
+        );
+        let (klo, khi) = sched::kstacks_window();
+        assert!(
+            mlo as usize >= klo && (mlo + mb) as usize <= khi,
+            "thread-bounds: own window outside the kstacks pool"
+        );
+
+        let tp = api::rhu_thread_spawn(
+            Some(bounds_peer),
+            core::ptr::null_mut(),
+            4 * 1024,
+            0x40,
+            c"peer".as_ptr(),
+        );
+        assert!(tp >= 1, "thread-bounds: peer spawn failed");
+        wait_until(|| PEER_LOCAL.load(Ordering::Acquire) != 0, "peer planted its local");
+        let (mut plo, mut pb) = (0u32, 0u32);
+        assert!(api::rhu_thread_stack_bounds(tp, &mut plo, &mut pb) == 0, "thread-bounds: peer lookup refused");
+        let pla = PEER_LOCAL.load(Ordering::Acquire);
+        assert!(
+            (plo as usize..(plo + pb) as usize).contains(&pla),
+            "thread-bounds: peer local outside peer window"
+        );
+        assert!(
+            !((plo as usize..(plo + pb) as usize).contains(&mla)),
+            "thread-bounds: own local inside the peer window"
+        );
+        assert!(
+            plo as usize >= klo && (plo + pb) as usize <= khi,
+            "thread-bounds: peer window outside the kstacks pool"
+        );
+        assert!(
+            ((plo + pb).min(mlo + mb)) <= plo.max(mlo),
+            "thread-bounds: the two windows overlap"
+        );
+
+        let mut scratch = 0u32;
+        assert!(
+            api::rhu_thread_stack_bounds(me, core::ptr::null_mut(), &mut scratch) == sched::ERR_INVAL,
+            "thread-bounds: null lo not refused EINVAL"
+        );
+        assert!(
+            api::rhu_thread_stack_bounds(me, &mut scratch, core::ptr::null_mut()) == sched::ERR_INVAL,
+            "thread-bounds: null bytes not refused EINVAL"
+        );
+        let dead = DTOR_TID.load(Ordering::Acquire);
+        assert!(dead >= 1, "thread-bounds: no reaped tid on record");
+        assert!(
+            api::rhu_thread_stack_bounds(dead, &mut mlo, &mut mb) == sched::ERR_SRCH,
+            "thread-bounds: reaped tid not refused ESRCH"
+        );
+        release(&PEER_PARK);
+        join_tid(tp);
+        kprintln!("[api] PASS thread-bounds (own and peer locals bracketed, windows inside kstacks, reaped tid refused ESRCH)");
+    }
+
+    fn check_registry_basic() {
+        kprintln!("[api] registry-basic: desc copy-proof + slots-full refusal armed");
+        unsafe extern "C" {
+            static __stext: u32;
+            static __etext: u32;
+            static __sdata: u32;
+            static __edata: u32;
+            static __sbss: u32;
+            static __ebss: u32;
+        }
+        let mod0 = registry::probe_module(0);
+        assert!(
+            mod0.text_lo == addr_of!(__stext) as u32 && mod0.text_hi == addr_of!(__etext) as u32,
+            "registry-basic: module 0 text bracket wrong"
+        );
+        assert!(
+            mod0.statics_lo[0] == addr_of!(__sdata) as u32 && mod0.statics_hi[0] == addr_of!(__edata) as u32,
+            "registry-basic: module 0 .data range wrong"
+        );
+        assert!(
+            mod0.statics_lo[1] == addr_of!(__sbss) as u32 && mod0.statics_hi[1] == addr_of!(__ebss) as u32,
+            "registry-basic: module 0 .bss range wrong"
+        );
+        assert!(mod0.tls_bytes == 0, "registry-basic: module 0 grew TLS");
+
+        let keep_name = c"x3".as_ptr() as *const u8;
+        let mut d3 = registry::ModuleDesc {
+            text_lo: 0x1000,
+            text_hi: 0x2000,
+            statics_lo: [0x3000, 0, 0, 0],
+            statics_hi: [0x3800, 0, 0, 0],
+            frozen_lo: 0,
+            frozen_hi: 0,
+            exidx_lo: 0,
+            exidx_hi: 0,
+            tls_bytes: 0,
+            tls_init: core::ptr::null(),
+            name: keep_name,
+        };
+        let h3 = api::rhu_module_register(&d3);
+        let h1 = TLS_H1.load(Ordering::Acquire);
+        let h2 = TLS_H2.load(Ordering::Acquire);
+        assert!(h3 > 0 && h3 != h1 && h3 != h2, "registry-basic: handle {} not distinct", h3);
+        unsafe {
+            core::ptr::write_bytes(addr_of_mut!(d3), 0xFF, 1);
+        }
+        let stored = registry::probe_module(h3);
+        assert!(
+            stored.text_lo == 0x1000
+                && stored.text_hi == 0x2000
+                && stored.statics_lo[0] == 0x3000
+                && stored.statics_hi[0] == 0x3800
+                && stored.tls_bytes == 0
+                && stored.name == keep_name,
+            "registry-basic: the stored desc changed with its caller's struct"
+        );
+        let d4 = registry::ModuleDesc { name: c"x4".as_ptr() as *const u8, ..stored };
+        assert!(
+            api::rhu_module_register(&d4) == sched::ERR_AGAIN,
+            "registry-basic: full table not refused"
+        );
+        assert!(
+            api::rhu_module_register(&d4) == sched::ERR_AGAIN,
+            "registry-basic: refusal not stable"
+        );
+        kprintln!("[api] PASS registry-basic (handles distinct, stored desc survives caller clobber, full table refused honest)");
+    }
+
+
+    fn zctx() -> sched::RhuCtx {
+        sched::RhuCtx { r: [0; 13], sp: 0, lr: 0, pc: 0, xpsr: 0, flags: 0 }
+    }
+
+    static SUSP_PROG: AtomicU32 = AtomicU32::new(0);
+    static SUSP_REL: AtomicU32 = AtomicU32::new(0);
+    static SUSP_RAN: AtomicU32 = AtomicU32::new(0);
+    static SUSP_WWORD: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn susp_spinner(_: usize) {
+        while SUSP_REL.load(Ordering::Acquire) == 0 {
+            SUSP_PROG.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    extern "C" fn susp_waiter(_: usize) {
+        let r = api::rhu_futex_wait(SUSP_WWORD.as_ptr(), 0, sched::DEADLINE_NONE);
+        assert!(r == 0, "susp-pick: waiter woke with {}", r);
+        SUSP_RAN.store(1, Ordering::Release);
+    }
+
+    fn check_susp_pick() {
+        kprintln!("[api] susp-pick: suspended-ready spinner + woken-waiter hold armed");
+        let (slot, tid) =
+            sched::try_spawn("dspin", susp_spinner, 0, 3, 4096).ok().expect("susp-pick: spawn");
+        api::rhu_sleep_ns(2_000_000);
+        assert!(SUSP_PROG.load(Ordering::Acquire) > 0, "susp-pick: spinner never ran");
+        let mut ctx = zctx();
+        assert!(api::rhu_thread_suspend(tid, &mut ctx) == 0, "susp-pick: suspend refused");
+        let p0 = SUSP_PROG.load(Ordering::Acquire);
+        for _ in 0..50 {
+            api::rhu_thread_yield();
+        }
+        assert!(sched::probe_ready_among(&[slot]) == 1, "susp-pick: state left Ready");
+        assert!(SUSP_PROG.load(Ordering::Acquire) == p0, "susp-pick: suspended spinner progressed");
+        assert!(api::rhu_thread_resume(tid) == 0, "susp-pick: resume refused");
+        wait_until(|| SUSP_PROG.load(Ordering::Acquire) > p0, "resumed spinner to progress");
+        SUSP_REL.store(1, Ordering::Release);
+        join_tid(tid);
+
+        let (wslot, wtid) =
+            sched::try_spawn("dwait", susp_waiter, 0, 3, 4096).ok().expect("susp-pick: spawn 2");
+        wait_until(|| sched::probe_futex_waiting(SUSP_WWORD.as_ptr()) == 1, "waiter to park");
+        let mut ctx2 = zctx();
+        assert!(api::rhu_thread_suspend(wtid, &mut ctx2) == 0, "susp-pick: waiter suspend refused");
+        let woken = api::rhu_futex_wake(SUSP_WWORD.as_ptr(), 1);
+        assert!(woken == 1, "susp-pick: suspended waiter not counted readied ({})", woken);
+        assert!(sched::probe_ready_among(&[wslot]) == 1, "susp-pick: woken waiter not Ready");
+        for _ in 0..50 {
+            api::rhu_thread_yield();
+        }
+        assert!(SUSP_RAN.load(Ordering::Acquire) == 0, "susp-pick: suspended waiter RAN");
+        assert!(api::rhu_thread_resume(wtid) == 0, "susp-pick: waiter resume refused");
+        wait_until(|| SUSP_RAN.load(Ordering::Acquire) == 1, "resumed waiter to run");
+        join_tid(wtid);
+        kprintln!("[api] PASS susp-pick (suspended spinner stayed ready with zero progress, woken waiter held until resume)");
+    }
+
+    static CTX_REL: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn ctx_planter(_: usize) {
+        unsafe {
+            core::arch::asm!(
+                "2:",
+                "ldr {t}, [{w}]",
+                "cmp {t}, #0",
+                "beq 2b",
+                w = in(reg) CTX_REL.as_ptr(),
+                t = out(reg) _,
+                in("r4") 0xD400_04D4u32,
+                in("r5") 0xD500_05D5u32,
+                in("r9") 0xD900_09D9u32,
+                in("r8") 0xD800_08D8u32,
+                in("r10") 0xDA00_0ADAu32,
+                in("r11") 0xDB00_0BDBu32,
+                options(nostack, readonly)
+            );
+        }
+    }
+
+    fn check_susp_ctx() {
+        kprintln!("[api] susp-ctx: planted-pattern context snapshot armed");
+        unsafe extern "C" {
+            static __stext: u32;
+            static __etext: u32;
+        }
+        CTX_REL.store(0, Ordering::Release);
+        let (_slot, tid) =
+            sched::try_spawn("dctx", ctx_planter, 0, 3, 4096).ok().expect("susp-ctx: spawn");
+        api::rhu_sleep_ns(2_000_000);
+        let mut ctx = zctx();
+        assert!(api::rhu_thread_suspend(tid, &mut ctx) == 0, "susp-ctx: suspend refused");
+        for (reg, want) in [
+            (4usize, 0xD400_04D4u32),
+            (5, 0xD500_05D5),
+            (9, 0xD900_09D9),
+            (8, 0xD800_08D8),
+            (10, 0xDA00_0ADA),
+            (11, 0xDB00_0BDB),
+        ] {
+            assert!(
+                ctx.r[reg] == want,
+                "susp-ctx: r{} read {:#010x} (want {:#010x})",
+                reg,
+                ctx.r[reg],
+                want
+            );
+        }
+        let (mut lo, mut b) = (0u32, 0u32);
+        assert!(api::rhu_thread_stack_bounds(tid, &mut lo, &mut b) == 0, "susp-ctx: bounds refused");
+        assert!(ctx.sp > lo && ctx.sp <= lo + b, "susp-ctx: snapshot sp outside the target stack");
+        let (tlo, thi) = (addr_of!(__stext) as u32, addr_of!(__etext) as u32);
+        assert!(ctx.pc >= tlo && ctx.pc < thi, "susp-ctx: snapshot pc outside kernel text");
+        let _ = ctx.flags;
+        assert!(api::rhu_thread_resume(tid) == 0, "susp-ctx: resume refused");
+        CTX_REL.store(1, Ordering::Release);
+        join_tid(tid);
+        kprintln!("[api] PASS susp-ctx (planted registers exact in ctx, sp inside the target stack, pc inside kernel text)");
+    }
+
+    static HJ_WITNESS: AtomicU32 = AtomicU32::new(0);
+    static HJ_TID: AtomicI32 = AtomicI32::new(0);
+
+    extern "C" fn hijack_pad(magic: usize) -> ! {
+        HJ_WITNESS.store(magic as u32, Ordering::Release);
+        HJ_TID.store(api::rhu_thread_self(), Ordering::Release);
+        api::rhu_thread_exit()
+    }
+
+    fn check_susp_hijack() {
+        kprintln!("[api] susp-hijack: set-context landing pad + sp-refusal armed");
+        CTX_REL.store(0, Ordering::Release);
+        let (_slot, tid) =
+            sched::try_spawn("dhij", ctx_planter, 0, 3, 4096).ok().expect("susp-hijack: spawn");
+        api::rhu_sleep_ns(2_000_000);
+        let mut ctx = zctx();
+        assert!(api::rhu_thread_suspend(tid, &mut ctx) == 0, "susp-hijack: suspend refused");
+        let mut c2 = zctx();
+        assert!(
+            api::rhu_thread_suspend(tid, &mut c2) == sched::ERR_AGAIN,
+            "susp-hijack: double suspend not EAGAIN"
+        );
+        let good_sp = ctx.sp;
+        ctx.sp = good_sp.wrapping_add(8);
+        assert!(
+            api::rhu_thread_set_context(tid, &ctx) == sched::ERR_INVAL,
+            "susp-hijack: sp edit not refused EINVAL"
+        );
+        ctx.sp = good_sp;
+        ctx.pc = hijack_pad as *const () as usize as u32;
+        ctx.r[0] = 0xC0DE_FACE;
+        assert!(api::rhu_thread_set_context(tid, &ctx) == 0, "susp-hijack: hijack edit refused");
+        assert!(api::rhu_thread_resume(tid) == 0, "susp-hijack: resume refused");
+        wait_until(|| HJ_WITNESS.load(Ordering::Acquire) == 0xC0DE_FACE, "pad to run");
+        assert!(HJ_TID.load(Ordering::Acquire) == tid, "susp-hijack: pad ran off-thread");
+        join_tid(tid);
+        kprintln!("[api] PASS susp-hijack (sp edit refused exact, hijacked pc ran the pad with the planted witness)");
+    }
+
+    static RU_WORD: AtomicU32 = AtomicU32::new(0);
+    static RU_FLAG: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn urgent_worker(_: usize) {
+        while RU_WORD.load(Ordering::Acquire) == 0 {
+            let _ = api::rhu_futex_wait(RU_WORD.as_ptr(), 0, sched::DEADLINE_NONE);
+        }
+        RU_FLAG.store(1, Ordering::Release);
+    }
+
+    fn check_resume_urgent() {
+        kprintln!("[api] resume-urgent: more-urgent suspended resume armed");
+        let (_slot, tid) =
+            sched::try_spawn("durg", urgent_worker, 0, 2, 4096).ok().expect("resume-urgent: spawn");
+        wait_until(|| sched::probe_futex_waiting(RU_WORD.as_ptr()) == 1, "urgent worker to park");
+        let mut ctx = zctx();
+        assert!(api::rhu_thread_suspend(tid, &mut ctx) == 0, "resume-urgent: suspend refused");
+        RU_WORD.store(1, Ordering::Release);
+        let woken = api::rhu_futex_wake(RU_WORD.as_ptr(), u32::MAX);
+        assert!(woken == 1, "resume-urgent: readied {}", woken);
+        assert!(RU_FLAG.load(Ordering::Acquire) == 0, "resume-urgent: suspended thread ran");
+        assert!(api::rhu_thread_resume(tid) == 0, "resume-urgent: resume refused");
+        assert!(
+            RU_FLAG.load(Ordering::Acquire) == 1,
+            "resume-urgent: resume did not preempt the caller"
+        );
+        join_tid(tid);
+        kprintln!("[api] PASS resume-urgent (resume preempted the caller before its next line)");
+    }
+
+    static ACT_MODE: AtomicU32 = AtomicU32::new(0);
+    static ACT_COUNT: AtomicU32 = AtomicU32::new(0);
+    static ACT_TID: AtomicI32 = AtomicI32::new(0);
+    static ACT_SP: AtomicUsize = AtomicUsize::new(0);
+    static ACT_SNAP: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+    static H_MS: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn act_handler(_ctx: *mut sched::RhuCtx) {
+        let n = ACT_COUNT.fetch_add(1, Ordering::AcqRel);
+        ACT_TID.store(api::rhu_thread_self(), Ordering::Release);
+        let probe = 0u32;
+        ACT_SP.store(addr_of!(probe) as usize, Ordering::Release);
+        match ACT_MODE.load(Ordering::Acquire) {
+            1 => {
+                if n == 0 {
+                    ACT_SNAP[0].store(D_PROG.load(Ordering::Acquire), Ordering::Release);
+                    let r = api::rhu_activation_send(api::rhu_thread_self());
+                    assert!(r == 0, "redeliver: in-handler send refused {}", r);
+                } else {
+                    ACT_SNAP[1].store(D_PROG.load(Ordering::Acquire), Ordering::Release);
+                }
+            }
+            2 => {
+                H_MS.store(sched::now_ms(), Ordering::Release);
+            }
+            _ => {}
+        }
+    }
+
+    fn check_act_refuse() {
+        kprintln!("[api] act-refuse: registration door + refusal matrix armed");
+        ABI_PARK.store(0, Ordering::Release);
+        let tp = spawn_probe(probe_return, 4096);
+        assert!(tp >= 1, "act-refuse: probe spawn failed");
+        wait_until(|| sched::probe_futex_waiting(ABI_PARK.as_ptr()) == 1, "probe to park");
+        let mut c = zctx();
+        assert!(
+            api::rhu_activation_send(tp) == sched::ERR_INVAL,
+            "act-refuse: pre-registration send not EINVAL"
+        );
+        assert!(
+            api::rhu_activation_register(None) == sched::ERR_INVAL,
+            "act-refuse: null registration not EINVAL"
+        );
+        assert!(api::rhu_activation_register(Some(act_handler)) == 0, "act-refuse: registration refused");
+        assert!(
+            api::rhu_activation_register(Some(act_handler)) == sched::ERR_INVAL,
+            "act-refuse: second registration not EINVAL"
+        );
+        let idle = sched::probe_idle_tid();
+        assert!(
+            api::rhu_activation_send(idle) == sched::ERR_INVAL,
+            "act-refuse: send(idle) not EINVAL"
+        );
+        assert!(
+            api::rhu_thread_suspend(idle, &mut c) == sched::ERR_INVAL,
+            "act-refuse: suspend(idle) not EINVAL"
+        );
+        assert!(
+            api::rhu_thread_suspend(api::rhu_thread_self(), &mut c) == sched::ERR_INVAL,
+            "act-refuse: suspend(self) not EINVAL"
+        );
+        assert!(api::rhu_activation_send(4095) == sched::ERR_SRCH, "act-refuse: send(unknown) not ESRCH");
+        assert!(
+            api::rhu_thread_suspend(4095, &mut c) == sched::ERR_SRCH,
+            "act-refuse: suspend(unknown) not ESRCH"
+        );
+        assert!(api::rhu_thread_resume(4095) == sched::ERR_SRCH, "act-refuse: resume(unknown) not ESRCH");
+        assert!(
+            api::rhu_thread_set_context(4095, &c) == sched::ERR_SRCH,
+            "act-refuse: set_context(unknown) not ESRCH"
+        );
+        assert!(
+            api::rhu_thread_suspend(tp, core::ptr::null_mut()) == sched::ERR_INVAL,
+            "act-refuse: null out_ctx not EINVAL"
+        );
+        assert!(
+            api::rhu_thread_set_context(tp, core::ptr::null()) == sched::ERR_INVAL,
+            "act-refuse: null ctx not EINVAL"
+        );
+        assert!(
+            api::rhu_thread_resume(tp) == sched::ERR_AGAIN,
+            "act-refuse: resume(not-suspended) not EAGAIN"
+        );
+        assert!(
+            api::rhu_thread_set_context(tp, &c) == sched::ERR_AGAIN,
+            "act-refuse: set_context(not-suspended) not EAGAIN"
+        );
+        release(&ABI_PARK);
+        join_tid(tp);
+        ABI_PARK.store(0, Ordering::Release);
+        assert!(
+            api::rhu_thread_suspend(tp, &mut c) == sched::ERR_SRCH,
+            "act-refuse: suspend(dead) not ESRCH"
+        );
+        assert!(
+            api::rhu_activation_send(tp) == sched::ERR_SRCH,
+            "act-refuse: send(dead) not ESRCH"
+        );
+        kprintln!("[api] PASS act-refuse (pre-registration send, null/second registration, self/idle suspends, idle send, unknown tids, unsuspended resume/set-context all refused exact)");
+    }
+
+    static D_PROG: AtomicU32 = AtomicU32::new(0);
+    static D_REL: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn act_spinner(_: usize) {
+        while D_REL.load(Ordering::Acquire) == 0 {
+            D_PROG.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn check_act_deliver() {
+        kprintln!("[api] act-deliver: peer + self delivery armed");
+        ACT_MODE.store(0, Ordering::Release);
+        let c0 = ACT_COUNT.load(Ordering::Acquire);
+        D_PROG.store(0, Ordering::Release);
+        D_REL.store(0, Ordering::Release);
+        let (_slot, tid) =
+            sched::try_spawn("dact", act_spinner, 0, 4, 4096).ok().expect("act-deliver: spawn");
+        assert!(api::rhu_activation_send(tid) == 0, "act-deliver: send refused");
+        let snap = D_PROG.load(Ordering::Acquire);
+        api::rhu_sleep_ns(2_000_000);
+        wait_until(|| ACT_COUNT.load(Ordering::Acquire) == c0 + 1, "peer delivery");
+        assert!(ACT_TID.load(Ordering::Acquire) == tid, "act-deliver: handler ran off-target");
+        let (mut lo, mut b) = (0u32, 0u32);
+        assert!(api::rhu_thread_stack_bounds(tid, &mut lo, &mut b) == 0, "act-deliver: bounds");
+        let hsp = ACT_SP.load(Ordering::Acquire) as u32;
+        assert!(hsp > lo && hsp < lo + b, "act-deliver: handler SP outside the target stack");
+        wait_until(|| D_PROG.load(Ordering::Acquire) > snap, "interrupted flow to continue");
+
+        let c1 = ACT_COUNT.load(Ordering::Acquire);
+        let me = api::rhu_thread_self();
+        assert!(api::rhu_activation_send(me) == 0, "act-deliver: self send refused");
+        assert!(
+            ACT_COUNT.load(Ordering::Acquire) == c1,
+            "act-deliver: self delivery inside send (no scheduling point yet)"
+        );
+        api::rhu_thread_yield();
+        assert!(ACT_COUNT.load(Ordering::Acquire) == c1 + 1, "act-deliver: self delivery missed");
+        assert!(ACT_TID.load(Ordering::Acquire) == me, "act-deliver: self handler off-thread");
+        let (mut klo, mut kb) = (0u32, 0u32);
+        assert!(api::rhu_thread_stack_bounds(me, &mut klo, &mut kb) == 0, "act-deliver: own bounds");
+        let ksp = ACT_SP.load(Ordering::Acquire) as u32;
+        assert!(ksp > klo && ksp < klo + kb, "act-deliver: self handler SP outside own stack");
+        D_REL.store(1, Ordering::Release);
+        join_tid(tid);
+        kprintln!("[api] PASS act-deliver (handler ran once per send on the target thread and stack, both interrupted flows continued)");
+    }
+
+    fn check_act_coalesce() {
+        kprintln!("[api] act-coalesce: three sends before the target runs armed");
+        ACT_MODE.store(0, Ordering::Release);
+        let c0 = ACT_COUNT.load(Ordering::Acquire);
+        D_PROG.store(0, Ordering::Release);
+        D_REL.store(0, Ordering::Release);
+        let (_slot, tid) =
+            sched::try_spawn("dcoal", act_spinner, 0, 4, 4096).ok().expect("act-coalesce: spawn");
+        for _ in 0..3 {
+            assert!(api::rhu_activation_send(tid) == 0, "act-coalesce: send refused");
+        }
+        api::rhu_sleep_ns(2_000_000);
+        wait_until(|| ACT_COUNT.load(Ordering::Acquire) == c0 + 1, "coalesced delivery");
+        api::rhu_sleep_ns(2_000_000);
+        assert!(
+            ACT_COUNT.load(Ordering::Acquire) == c0 + 1,
+            "act-coalesce: more than one delivery"
+        );
+        wait_until(|| D_PROG.load(Ordering::Acquire) > 0, "flow to continue");
+        D_REL.store(1, Ordering::Release);
+        join_tid(tid);
+        kprintln!("[api] PASS act-coalesce (three sends delivered exactly one handler run)");
+    }
+
+    fn check_act_redeliver() {
+        kprintln!("[api] act-redeliver: in-handler self-send armed");
+        ACT_COUNT.store(0, Ordering::Release);
+        ACT_MODE.store(1, Ordering::Release);
+        D_PROG.store(0, Ordering::Release);
+        D_REL.store(0, Ordering::Release);
+        let (_slot, tid) =
+            sched::try_spawn("dredl", act_spinner, 0, 4, 4096).ok().expect("act-redeliver: spawn");
+        assert!(api::rhu_activation_send(tid) == 0, "act-redeliver: send refused");
+        api::rhu_sleep_ns(2_000_000);
+        wait_until(|| ACT_COUNT.load(Ordering::Acquire) == 2, "both handler runs");
+        api::rhu_sleep_ns(2_000_000);
+        assert!(ACT_COUNT.load(Ordering::Acquire) == 2, "act-redeliver: ran again");
+        assert!(
+            ACT_SNAP[0].load(Ordering::Acquire) == ACT_SNAP[1].load(Ordering::Acquire),
+            "act-redeliver: the interrupted flow ran between the two handler runs"
+        );
+        wait_until(
+            || D_PROG.load(Ordering::Acquire) > ACT_SNAP[1].load(Ordering::Acquire),
+            "flow to continue after both",
+        );
+        D_REL.store(1, Ordering::Release);
+        join_tid(tid);
+        ACT_MODE.store(0, Ordering::Release);
+        kprintln!("[api] PASS act-redeliver (the handler re-entered before the interrupted flow resumed, then the flow continued)");
+    }
+
+    static EI_WORD: AtomicU32 = AtomicU32::new(0);
+    static EI_PROG: AtomicU32 = AtomicU32::new(0);
+    static EI_R1: AtomicI32 = AtomicI32::new(99);
+    static EI_C1: AtomicU32 = AtomicU32::new(99);
+    static EI_R2: AtomicI32 = AtomicI32::new(99);
+
+    extern "C" fn eintr_worker(_: usize) {
+        let r = api::rhu_futex_wait(EI_WORD.as_ptr(), 0, sched::DEADLINE_NONE);
+        EI_R1.store(r, Ordering::Release);
+        EI_C1.store(ACT_COUNT.load(Ordering::Acquire), Ordering::Release);
+        EI_PROG.store(1, Ordering::Release);
+        api::rhu_futex_wake(EI_PROG.as_ptr(), u32::MAX);
+        let r2 = api::rhu_futex_wait(EI_WORD.as_ptr(), 0, sched::DEADLINE_NONE);
+        EI_R2.store(r2, Ordering::Release);
+        EI_PROG.store(2, Ordering::Release);
+        api::rhu_futex_wake(EI_PROG.as_ptr(), u32::MAX);
+    }
+
+    fn check_act_eintr() {
+        kprintln!("[api] act-eintr: infinite-wait break by activation armed");
+        ACT_MODE.store(0, Ordering::Release);
+        let c0 = ACT_COUNT.load(Ordering::Acquire);
+        let (_slot, tid) =
+            sched::try_spawn("deintr", eintr_worker, 0, 4, 4096).ok().expect("act-eintr: spawn");
+        wait_until(|| sched::probe_futex_waiting(EI_WORD.as_ptr()) == 1, "worker to park");
+        assert!(api::rhu_activation_send(tid) == 0, "act-eintr: send refused");
+        wait_until(|| EI_PROG.load(Ordering::Acquire) == 1, "broken wait to return");
+        assert!(
+            EI_R1.load(Ordering::Acquire) == sched::ERR_INTR,
+            "act-eintr: broken wait returned {} (want RHU_EINTR)",
+            EI_R1.load(Ordering::Acquire)
+        );
+        assert!(
+            EI_C1.load(Ordering::Acquire) == c0 + 1,
+            "act-eintr: the wait returned before the handler ran"
+        );
+        wait_until(|| sched::probe_futex_waiting(EI_WORD.as_ptr()) == 1, "worker to re-wait");
+        assert!(api::rhu_futex_wake(EI_WORD.as_ptr(), 1) == 1, "act-eintr: real wake missed");
+        wait_until(|| EI_PROG.load(Ordering::Acquire) == 2, "re-wait to wake clean");
+        assert!(
+            EI_R2.load(Ordering::Acquire) == 0,
+            "act-eintr: the re-wait returned {} (want 0)",
+            EI_R2.load(Ordering::Acquire)
+        );
+        join_tid(tid);
+        kprintln!("[api] PASS act-eintr (the wait returned RHU_EINTR after the handler ran, the re-wait then woke clean)");
+    }
+
+    static RA_FLAG: AtomicU32 = AtomicU32::new(0);
+    static RA_T0MS: AtomicU32 = AtomicU32::new(0);
+    static RA_DONE: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn rearm_worker(_: usize) {
+        let t0 = api::rhu_now_ns();
+        RA_T0MS.store(sched::now_ms(), Ordering::Release);
+        RA_FLAG.store(1, Ordering::Release);
+        api::rhu_futex_wake(RA_FLAG.as_ptr(), u32::MAX);
+        api::rhu_sleep_ns(200_000_000);
+        let dt = api::rhu_now_ns() - t0;
+        assert!(dt >= 200_000_000, "act-sleep-rearm: sleep under delivery returned early");
+        RA_DONE.store(1, Ordering::Release);
+        api::rhu_futex_wake(RA_DONE.as_ptr(), u32::MAX);
+    }
+
+    fn check_act_sleep_rearm() {
+        kprintln!("[api] act-sleep-rearm: sleeping-target delivery + never-early armed");
+        ACT_MODE.store(2, Ordering::Release);
+        let c0 = ACT_COUNT.load(Ordering::Acquire);
+        let (_slot, tid) =
+            sched::try_spawn("drearm", rearm_worker, 0, 4, 4096).ok().expect("act-sleep-rearm: spawn");
+        wait_until(|| RA_FLAG.load(Ordering::Acquire) == 1, "worker to reach its sleep");
+        api::rhu_sleep_ns(20_000_000);
+        assert!(api::rhu_activation_send(tid) == 0, "act-sleep-rearm: send refused");
+        wait_until(|| RA_DONE.load(Ordering::Acquire) == 1, "sleep to finish not-early");
+        assert!(
+            ACT_COUNT.load(Ordering::Acquire) == c0 + 1,
+            "act-sleep-rearm: handler run count wrong"
+        );
+        let early = H_MS.load(Ordering::Acquire).wrapping_sub(RA_T0MS.load(Ordering::Acquire));
+        assert!(early < 200, "act-sleep-rearm: handler did not run early ({} ms in)", early);
+        ACT_MODE.store(0, Ordering::Release);
+        join_tid(tid);
+        kprintln!("[api] PASS act-sleep-rearm (the handler ran early, the sleep still returned not-early)");
+    }
+
+    /// The whole desc as bytes for the miss-writes-nothing and
+    /// one-storage-two-doors compares (repr(C), all-u32/pointer
+    /// fields on a 32-bit target: no padding, so a byte compare is a
+    /// field compare).
+    fn desc_bytes(d: &registry::ModuleDesc) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(
+                d as *const registry::ModuleDesc as *const u8,
+                core::mem::size_of::<registry::ModuleDesc>(),
+            )
+        }
+    }
+
+    /// A 0xA5-filled desc: the sentinel a refused query must leave
+    /// byte-intact (zero would be reproducible by a zeroing bug; the
+    /// pointer fields hold the pattern as an address value and are
+    /// never dereferenced).
+    fn sentinel_desc() -> registry::ModuleDesc {
+        unsafe {
+            let mut d = core::mem::MaybeUninit::<registry::ModuleDesc>::uninit();
+            core::ptr::write_bytes(
+                d.as_mut_ptr() as *mut u8,
+                0xA5,
+                core::mem::size_of::<registry::ModuleDesc>(),
+            );
+            d.assume_init()
+        }
+    }
+
+    fn check_module_find() {
+        kprintln!("[api] mod-find: containing-module lookup armed");
+        unsafe extern "C" {
+            static __stext: u32;
+            static __etext: u32;
+            static __rhu_arena_lo: u32;
+        }
+        let stext = addr_of!(__stext) as u32;
+        let etext = addr_of!(__etext) as u32;
+        let arena_lo = addr_of!(__rhu_arena_lo) as u32;
+        assert!(
+            api::rhu_module_find(stext, core::ptr::null_mut()) == sched::ERR_INVAL,
+            "mod-find: null out not refused EINVAL"
+        );
+        let mut out = sentinel_desc();
+        assert!(api::rhu_module_find(stext, &mut out) == 0, "mod-find: __stext missed module 0");
+        let door: extern "C" fn(u32, *mut registry::ModuleDesc) -> i32 = api::rhu_module_find;
+        let probe = (door as *const () as u32) & !1;
+        assert!(
+            api::rhu_module_find(probe, &mut out) == 0,
+            "mod-find: own door address missed module 0"
+        );
+        assert!(
+            out.text_lo == stext && out.text_hi == etext,
+            "mod-find: returned text range is not the link bracket"
+        );
+        let mut miss = sentinel_desc();
+        let miss0 = sentinel_desc();
+        assert!(
+            api::rhu_module_find(etext, &mut miss) == sched::ERR_SRCH,
+            "mod-find: __etext not refused (half-open hi violated)"
+        );
+        assert!(
+            api::rhu_module_find(arena_lo, &mut miss) == sched::ERR_SRCH,
+            "mod-find: arena address not refused ESRCH"
+        );
+        assert!(
+            desc_bytes(&miss) == desc_bytes(&miss0),
+            "mod-find: a miss wrote into the out desc"
+        );
+        kprintln!("[api] PASS mod-find (kernel text resolved to module 0 half-open exact, arena address refused ESRCH, miss wrote nothing)");
+    }
+
+    fn check_module_roots() {
+        kprintln!("[api] mod-roots: module 0 root-source enumeration armed");
+        unsafe extern "C" {
+            static __stext: u32;
+            static __etext: u32;
+            static __sdata: u32;
+            static __edata: u32;
+            static __sbss: u32;
+            static __ebss: u32;
+            static __rhu_frozen_lo: u32;
+            static __rhu_frozen_hi: u32;
+            static __exidx_start: u32;
+            static __exidx_end: u32;
+            static __rhu_tdata_lo: u32;
+            static __rhu_tdata_hi: u32;
+        }
+        assert!(
+            api::rhu_module_roots(0, core::ptr::null_mut()) == sched::ERR_INVAL,
+            "mod-roots: null out not refused EINVAL"
+        );
+        let mut miss = sentinel_desc();
+        let miss0 = sentinel_desc();
+        assert!(
+            api::rhu_module_roots(-1, &mut miss) == sched::ERR_SRCH,
+            "mod-roots: negative handle not ESRCH"
+        );
+        let mut out = sentinel_desc();
+        assert!(api::rhu_module_roots(0, &mut out) == 0, "mod-roots: module 0 refused");
+        assert!(
+            out.text_lo == addr_of!(__stext) as u32 && out.text_hi == addr_of!(__etext) as u32,
+            "mod-roots: text range is not the link bracket"
+        );
+        assert!(
+            out.statics_lo[0] == addr_of!(__sdata) as u32
+                && out.statics_hi[0] == addr_of!(__edata) as u32
+                && out.statics_lo[1] == addr_of!(__sbss) as u32
+                && out.statics_hi[1] == addr_of!(__ebss) as u32
+                && out.statics_lo[2] == 0
+                && out.statics_hi[2] == 0
+                && out.statics_lo[3] == 0
+                && out.statics_hi[3] == 0,
+            "mod-roots: statics ranges are not the link windows"
+        );
+        let flo = core::hint::black_box(addr_of!(__rhu_frozen_lo) as u32);
+        let fhi = core::hint::black_box(addr_of!(__rhu_frozen_hi) as u32);
+        let xlo = core::hint::black_box(addr_of!(__exidx_start) as u32);
+        let xhi = core::hint::black_box(addr_of!(__exidx_end) as u32);
+        assert!(
+            out.frozen_lo == flo && out.frozen_hi == fhi,
+            "mod-roots: frozen range is not the frozen bracket"
+        );
+        assert!(
+            out.frozen_lo == out.frozen_hi,
+            "mod-roots: frozen range not empty in a base-family image"
+        );
+        assert!(
+            out.exidx_lo == xlo && out.exidx_hi == xhi,
+            "mod-roots: exidx range is not the exidx bracket"
+        );
+        assert!(
+            out.exidx_lo == out.exidx_hi,
+            "mod-roots: exidx range not empty in a base-family image"
+        );
+        let tlo = core::hint::black_box(addr_of!(__rhu_tdata_lo) as u32);
+        let thi = core::hint::black_box(addr_of!(__rhu_tdata_hi) as u32);
+        assert!(
+            out.tls_bytes == thi - tlo,
+            "mod-roots: tls size is not the tdata bracket span"
+        );
+        assert!(out.tls_bytes == 0, "mod-roots: tls not empty in a base-family image");
+        assert!(out.tls_init.is_null(), "mod-roots: empty tls carries a non-null init image");
+        assert!(!out.name.is_null(), "mod-roots: module 0 name wrong");
+        let mut via_find = sentinel_desc();
+        assert!(
+            api::rhu_module_find(out.text_lo, &mut via_find) == 0,
+            "mod-roots: find cross-check missed"
+        );
+        assert!(
+            desc_bytes(&via_find) == desc_bytes(&out),
+            "mod-roots: find and roots disagree about module 0"
+        );
+        let mut w = sentinel_desc();
+        for h in 1..4 {
+            assert!(api::rhu_module_roots(h, &mut w) == 0, "mod-roots: live handle {} refused", h);
+        }
+        assert!(
+            api::rhu_module_roots(4, &mut miss) == sched::ERR_SRCH,
+            "mod-roots: walk terminator not ESRCH"
+        );
+        assert!(
+            desc_bytes(&miss) == desc_bytes(&miss0),
+            "mod-roots: a refusal wrote into the out desc"
+        );
+        kprintln!("[api] PASS mod-roots (module 0 ranges tie the link brackets, frozen, exidx, and tls empty in this family, walk ends ESRCH at the table count)");
+    }
+
+
+    fn check_console_pair() {
+        kprintln!("[api] console-pair: door write + no-input read armed");
+        let line = b"[api] console-door: this line reached the wire through rhu_console_write\n";
+        assert!(
+            api::rhu_console_write(line.as_ptr(), line.len() as u32) == line.len() as i32,
+            "console-pair: write door returned the wrong count"
+        );
+        assert!(
+            api::rhu_console_write(core::ptr::null(), 4) == sched::ERR_INVAL,
+            "console-pair: null write not refused EINVAL"
+        );
+        assert!(
+            api::rhu_console_write(line.as_ptr(), (i32::MAX as u32) + 1) == sched::ERR_INVAL,
+            "console-pair: oversize write not refused EINVAL"
+        );
+        assert!(api::rhu_console_write(line.as_ptr(), 0) == 0, "console-pair: zero write not 0");
+        let mut buf = [0xA5u8; 16];
+        assert!(
+            api::rhu_console_read(buf.as_mut_ptr(), 16) == 0,
+            "console-pair: no-input read not 0"
+        );
+        assert!(buf.iter().all(|&b| b == 0xA5), "console-pair: empty read wrote into the buffer");
+        assert!(
+            api::rhu_console_read(core::ptr::null_mut(), 4) == sched::ERR_INVAL,
+            "console-pair: null read not refused EINVAL"
+        );
+        kprintln!("[api] PASS console-pair (door write returned exact and hit the wire, no-input read returned 0 writing nothing, null and oversize refused)");
+    }
+
+    fn check_entropy() {
+        kprintln!("[api] entropy-honesty: software-stream doors armed");
+        let mut a = [0u8; 16];
+        let mut b = [0u8; 16];
+        assert!(api::rhu_entropy(a.as_mut_ptr(), 16) == 0, "entropy: first draw refused");
+        assert!(api::rhu_entropy(b.as_mut_ptr(), 16) == 0, "entropy: second draw refused");
+        assert!(a != b, "entropy: two draws returned identical bytes");
+        assert!(a.iter().any(|&x| x != 0), "entropy: draw left the buffer all-zero");
+        assert!(
+            api::rhu_entropy(core::ptr::null_mut(), 16) == sched::ERR_INVAL,
+            "entropy: null draw not refused EINVAL"
+        );
+        assert!(api::rhu_entropy(a.as_mut_ptr(), 0) == 0, "entropy: zero-length draw not 0");
+        assert!(api::rhu_entropy_is_hardware() == 0, "entropy: hardware claim on a software-stream board");
+        kprintln!("[api] PASS entropy-honesty (draws filled and distinct, null refused, zero-length trivial, hardware query answers 0 on this class)");
     }
 }
