@@ -129,6 +129,15 @@ pub fn roots(handle: i32) -> Option<ModuleDesc> {
     })
 }
 
+#[cfg(feature = "payload")]
+core::arch::global_asm!(
+    r#"
+    .section .tdata.rhu_anchor, "awT", %progbits
+    .p2align 0
+    .text
+"#
+);
+
 /// Self-register the merged image as module 0 from the link symbols
 /// the maps export. Called from `kmain` after `kheap::init()` and
 /// before `sched::init()`: zero threads live, so the eager TLS walk is

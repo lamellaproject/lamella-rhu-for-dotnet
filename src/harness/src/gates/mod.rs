@@ -5,3 +5,4 @@ pub mod sched;
 pub mod payload;
 pub mod api;
 pub mod gc;
+pub mod shim;

@@ -106,29 +106,38 @@ SECTIONS
     __exidx_end = .;
   } > CODE
 
-  .data : ALIGN(4)
+  .data : ALIGN(8)
   {
     __sdata = .;
     *(.data .data.*);
     *(.hydrated*);
-    /* Module 0's TLS template: thread-local input placed contiguously
-     * (zero-fill input emits as file zeros here, so the whole span is
-     * one initialized master copy riding the .data load path) and
-     * bracketed for the boot registration. KEEP: the template is
-     * consumed by address through the brackets, never by symbol
-     * reference, so section GC would otherwise drop it. The 8-align
-     * matches the kernel's per-thread block alignment. Empty until a
-     * hosted payload carries thread-local state -- an empty pair is
-     * an honest value. */
     . = ALIGN(8);
+  } > DATA AT> CODE
+  __sidata = LOADADDR(.data);
+
+  /* Module 0's TLS template, in its own output section: the assembler
+   * marks .tdata/.tbss input thread-local and the linker refuses that
+   * mark inside a plain data section, so the template cannot share
+   * .data. The section is PROGBITS by construction -- the kernel
+   * contributes a byte-less thread-local PROGBITS input, so zero-fill
+   * input emits as file zeros and the whole span is one initialized
+   * master copy -- and sits inside the boot copy window ([__sdata,
+   * __edata) ends here) at the same load/run offset as .data
+   * (asserted at the bottom of this map), so the existing copy lands
+   * it. KEEP: the template is consumed by address through the
+   * brackets, never by symbol reference, so section GC would
+   * otherwise drop it. The 8-align matches the kernel's per-thread
+   * block alignment and is the segment alignment thread-local offsets
+   * are computed against. Empty until a hosted payload carries
+   * thread-local state -- an empty pair is an honest value. */
+  .tdata : ALIGN(8)
+  {
     __rhu_tdata_lo = .;
     KEEP(*(.tdata .tdata.*));
     KEEP(*(.tbss .tbss.*));
     __rhu_tdata_hi = .;
-    . = ALIGN(4);
     __edata = .;
   } > DATA AT> CODE
-  __sidata = LOADADDR(.data);
 
   .bss (NOLOAD) : ALIGN(4)
   {
@@ -164,3 +173,8 @@ ASSERT(__rhu_arena_hi >= __rhu_arena_lo,
   "static RAM + .kstacks overflow into the boot-stack reserve (arena window negative)");
 ASSERT(__rhu_arena_hi - __rhu_arena_lo >= RHU_ARENA_MIN,
   "arena window under this board's GC-substrate floor (RHU_ARENA_MIN)");
+
+/* The module-0 TLS template rides the boot's single .data copy: its
+ * load/run offset must equal .data's, on every board. */
+ASSERT(LOADADDR(.tdata) - ADDR(.tdata) == LOADADDR(.data) - ADDR(.data),
+  "module-0 TLS template outside the boot copy's single load/run offset");

@@ -90,19 +90,29 @@ SECTIONS
   __rhu_frozen_lo = .;
   __rhu_frozen_hi = .;
 
-  .data : ALIGN(4)
+  .data : ALIGN(8)
   {
     __sdata = .;
-    /* The TLS-template pair (empty range, a RAM address -- distinct
-     * by region from the frozen and exidx pairs, so a cross-wired
-     * registration stays detectable). */
-    __rhu_tdata_lo = .;
-    __rhu_tdata_hi = .;
     *(.data .data.*);
-    . = ALIGN(4);
-    __edata = .;
+    . = ALIGN(8);
   } > DATA AT> CODE
   __sidata = LOADADDR(.data);
+
+  /* The TLS-template pair: module 0's thread-local template section,
+   * the payload map's shape (a RAM address -- distinct by region from
+   * the frozen and exidx pairs, so a cross-wired registration stays
+   * detectable), inside the boot copy window -- [__sdata, __edata)
+   * ends here -- at .data's load/run offset (asserted at the bottom
+   * of this map). Empty in this map's images: nothing they link
+   * carries thread-local input. */
+  .tdata : ALIGN(8)
+  {
+    __rhu_tdata_lo = .;
+    KEEP(*(.tdata .tdata.*));
+    KEEP(*(.tbss .tbss.*));
+    __rhu_tdata_hi = .;
+    __edata = .;
+  } > DATA AT> CODE
 
   .bss (NOLOAD) : ALIGN(4)
   {
@@ -143,3 +153,8 @@ ASSERT(__rhu_arena_hi >= __rhu_arena_lo,
   "static RAM + .kstacks overflow into the boot-stack reserve (arena window negative)");
 ASSERT(__rhu_arena_hi - __rhu_arena_lo >= RHU_ARENA_MIN,
   "arena window under this board's GC-substrate floor (RHU_ARENA_MIN)");
+
+/* The module-0 TLS template rides the boot's single .data copy: its
+ * load/run offset must equal .data's, on every board. */
+ASSERT(LOADADDR(.tdata) - ADDR(.tdata) == LOADADDR(.data) - ADDR(.data),
+  "module-0 TLS template outside the boot copy's single load/run offset");

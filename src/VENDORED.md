@@ -59,4 +59,4 @@ in the working tree and the hashes below hold on any platform.
   fragments carry no header upstream, and the repository-level MIT license
   governs them.
 - **Modifications: NONE.** These files are byte-identical to upstream; the
-  `gc` quality gate re-verifies the hashes above on every run.
+  RHU repository's `gc` quality gate re-verifies the hashes above.

@@ -1,0 +1,1608 @@
+//! The shim gate on the runner: the hosting shim's gate family, running
+//! on FROZEN world objects and goldens (goldens/shim) -- the consumer
+//! story is Rust + QEMU only, and the C compile lives behind the frozen
+//! boundary on the internal rederive leg.
+
+use crate::gate::{write_fixture, Selfcheck};
+use crate::gates::gc::{parse_undefined, parse_vendored_manifest, resolve_gxx, resolve_ld, run_tool_bounded, ToolCmd};
+use crate::results::{chain_json_from_env, validate_results, Results};
+use crate::sha256::sha256_file;
+use crate::text::{contains_fixed, cr_count, eq_lf_normalized, payload_stream, word_sym_present, word_sym_value};
+use crate::tools::{echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts, ExecProfile, RustcFacts};
+use std::path::{Path, PathBuf};
+use std::process::exit;
+use std::time::Duration;
+
+const GATE: &str = "shim";
+const DISPLAY: &str = "SHIM GATE";
+const HOST: &str = "qemu-mps2-an500";
+const RUNNER: &str = "src/harness";
+const RUN_TIMEOUT_S: u64 = 120;
+
+/// The compile flag set of record for the shim's C: the pinned kit's g++
+/// driver running the C front end, the image ABI half (hard-float to
+/// match thumbv7em-none-eabihf), no C library assumed, every diagnostic
+/// an error, and the include closure (the shim, the board rows, rhu.h).
+const CC_FLAGS: [&str; 19] = [
+    "-x",
+    "c",
+    "-c",
+    "-O2",
+    "-mcpu=cortex-m7",
+    "-mthumb",
+    "-mfloat-abi=hard",
+    "-mfpu=fpv5-d16",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-ffreestanding",
+    "-fno-common",
+    "-std=gnu11",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-Isrc/shim",
+    "-Isrc/gc/host",
+    "-Isrc/kernel/include",
+];
+
+/// goldens/shim/MANIFEST.md's own sha256: the in-code anchor beside the
+/// manifest. A re-freeze updates objects + goldens + manifest + this pin
+/// together in one reviewed commit.
+const SHA_FROZEN_MANIFEST: &str = "b8cc8bafd609ea5a1537a982f129e8c6fc62a620e04c29cb257b63fc5664e91b";
+
+/// The frozen-object plan of record: file name under goldens/shim/,
+/// source TU, extra defines beyond CC_FLAGS. The manifest's records must
+/// tie this table by name both directions; 'rhu-gate shim rederive'
+/// recompiles every row and byte-asserts the output against the frozen
+/// bytes.
+const FROZEN_PLAN: [(&str, &str, &[&str]); 18] = [
+    ("shim-core.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500"]),
+    ("shim-core-break-sipid.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SIPID"]),
+    ("shim-core-break-ctxpc.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_CTXPC"]),
+    ("shim-core-break-tlsoff.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_TLSOFF"]),
+    ("shim-core-break-tlscache.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_TLSCACHE"]),
+    ("shim-sysnative.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500"]),
+    ("shim-sysnative-break-fdbase.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_FD_BASE"]),
+    ("shim-libc-glue.o", "src/shim/rhu_libc_glue.c", &[]),
+    ("shim-host.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN500"]),
+    ("shim-host-break-dataverify.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_DATAVERIFY"]),
+    ("shim-stdio-sym.o", "src/shim/rhu_stdio_sym.c", &[]),
+    ("shimtest-core.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_CORE"]),
+    ("shimtest-core-break-errno.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_CORE", "-DRHU_SHIMTEST_BREAK_ERRNO"]),
+    ("shimtest-core-break-canary.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_CORE", "-DRHU_SHIMTEST_BREAK_CANARY"]),
+    ("shimtest-fdmap.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_FDMAP"]),
+    ("shimtest-activation.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_ACTIVATION"]),
+    ("shimtest-tls.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_TLS"]),
+    ("shimtest-host.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_HOST"]),
+];
+
+/// The frozen goldens: the payload stream of each positive image, class
+/// bytes. Recorded in the manifest beside the objects.
+const GOLDENS: [&str; 5] = [
+    "shimtest-core.golden.txt",
+    "shimtest-fdmap.golden.txt",
+    "shimtest-activation.golden.txt",
+    "shimtest-tls.golden.txt",
+    "shimtest-host.golden.txt",
+];
+
+/// The core object's EXACT import closure: the kernel verbs it consumes
+/// (the activation pair since the costume), the two arena-window link
+/// symbols, the compiler builtins and the 64-bit division helper (the
+/// loader-seam hooks are weak references, not imports, and stay outside
+/// the pin).
+const IMPORTS_CORE: [&str; 30] = [
+    "__aeabi_uldivmod",
+    "__rhu_arena_hi",
+    "__rhu_arena_lo",
+    "memcmp",
+    "memcpy",
+    "memset",
+    "rhu_activation_register",
+    "rhu_activation_send",
+    "rhu_arena_alloc_at",
+    "rhu_arena_headroom",
+    "rhu_arena_rezero",
+    "rhu_console_write",
+    "rhu_entropy",
+    "rhu_exit",
+    "rhu_futex_wait",
+    "rhu_futex_wake",
+    "rhu_kheap_alloc",
+    "rhu_kheap_free",
+    "rhu_module_register",
+    "rhu_module_roots",
+    "rhu_now_ns",
+    "rhu_sleep_ns",
+    "rhu_thread_atexit",
+    "rhu_thread_self",
+    "rhu_thread_spawn",
+    "rhu_thread_stack_bounds",
+    "rhu_thread_yield",
+    "rhu_tls_get",
+    "strlen",
+    "strncmp",
+];
+
+/// The PAL object's EXACT import closure: the kernel verbs, the glue's
+/// allocator, the core's errno, diagnostics, thread and mmap paths, the
+/// mutex recipe, the string functions, the division helpers.
+const IMPORTS_SYSNATIVE: [&str; 34] = [
+    "__aeabi_ldivmod",
+    "__aeabi_uldivmod",
+    "__errno_location",
+    "free",
+    "malloc",
+    "malloc_usable_size",
+    "memalign",
+    "memcpy",
+    "memset",
+    "mmap64",
+    "pthread_mutex_init",
+    "pthread_mutex_lock",
+    "pthread_mutex_unlock",
+    "realloc",
+    "rhu_arena_alloc_at",
+    "rhu_console_read",
+    "rhu_console_write",
+    "rhu_entropy",
+    "rhu_entropy_is_hardware",
+    "rhu_exit",
+    "rhu_futex_wait",
+    "rhu_futex_wake",
+    "rhu_now_ns",
+    "rhu_shim_create_thread",
+    "rhu_shim_exit",
+    "rhu_shim_log",
+    "rhu_sleep_ns",
+    "rhu_thread_self",
+    "strchr",
+    "strcmp",
+    "strcpy",
+    "strlen",
+    "strncmp",
+    "strrchr",
+];
+
+/// The glue object's EXACT import closure: the kernel heap and console
+/// doors, the exit door, the core's errno and diagnostics, the builtins.
+const IMPORTS_GLUE: [&str; 11] = [
+    "__errno_location",
+    "memcpy",
+    "memset",
+    "rhu_console_read",
+    "rhu_console_write",
+    "rhu_exit",
+    "rhu_kheap_alloc",
+    "rhu_kheap_free",
+    "rhu_shim_exit",
+    "rhu_shim_log",
+    "rhu_thread_self",
+];
+
+/// Symbols no object and no staticlib member carries, because they are
+/// the LINK's own. Two sources, and the difference matters when one of
+/// them is wrong: the board map declares the first group deliberately,
+/// while the second is synthesized by the linker for any image that
+/// mentions it -- which is why the host checks where the constructor
+/// array actually landed rather than trusting that it exists.
+const MAP_SYMBOLS: [&str; 9] = [
+    "__rhu_arena_lo",
+    "__rhu_arena_hi",
+    "__rhu_tdata_lo",
+    "__rhu_tdata_hi",
+    "__sdata",
+    "__edata",
+    "__sidata",
+    "__init_array_start",
+    "__init_array_end",
+];
+
+/// Import families that must never appear in a shim object: C++ runtime
+/// and unwinding, soft-float helpers, emulated thread-local storage.
+const FORBIDDEN_IMPORT_FAMILIES: [&str; 6] = ["_Unwind", "__cxa", "_ZSt", "__aeabi_f", "__aeabi_d", "__emutls"];
+
+/// The diagnostic lines the core run must carry (fixed strings).
+const PINNED_CORE_LINES: [&str; 9] = [
+    "[shim] init: per-thread block registered as module 1 (48 bytes)",
+    "[shim] pthread_create: stack 96 KB clamped to 24 KB (the row's clamp)",
+    "[shim] mmap: MAP_FIXED re-zero in place (decommit; further requests counted silently)",
+    "[shim] frozen-object reserve 4096 KB -> pool 64 KB (commit guard armed)",
+    "[shim] frozen-object commit refused beyond the pool (managed allocation failure, never a wild write)",
+    "[shim] entropy: software PRNG, not cryptographic (no hardware source on this board)",
+    "[shim] fork: not available (ENOSYS)",
+    "[shim] syscall 999: not available (ENOSYS)",
+    "[shim] open(/nonexistent): no such path (ENOENT)",
+];
+
+const CORE_ALL_GOOD: &str = "SHIMTEST: ALL GOOD (glibc personality + PAL on the kernel doors)";
+const FDMAP_ALL_GOOD: &str = "SHIMTEST-FDMAP: ALL GOOD (explicit descriptor bands; the console never answers for a file)";
+const CANARY_LINE: &str = "[shim] free: corrupt block header (canary)";
+
+/// The diagnostic lines the activation run must carry (fixed strings):
+/// the per-thread block, the two refusals before any registration, the
+/// arming line, the two recorded fault-signal dispositions, the ignored
+/// stack-pointer edit, and the signal rows' honesty line.
+const PINNED_ACT_LINES: [&str; 8] = [
+    "[shim] init: per-thread block registered as module 1 (48 bytes)",
+    "[shim] pthread_kill(2, 34): no activation handler recorded (EINVAL)",
+    "[shim] pthread_kill(2, 10): only the activation signal is deliverable on this platform (EINVAL)",
+    "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
+    "[shim] sigaction(8): handler recorded; this platform delivers no signal of that number",
+    "[shim] sigaction(11): handler recorded; this platform delivers no signal of that number",
+    "[shim] activation: a stack-pointer edit in the signal context is ignored (frame geometry never moves)",
+    "[shim] signals: no signal source on this platform; registrations are recorded, none can arrive",
+];
+const ACT_ALL_GOOD: &str = "SHIMTEST-ACTIVATION: ALL GOOD (the activation costume on the kernel's delivery; the signal rows recorded, none deliverable)";
+const ACT_FAIL_SIPID: &str = "FAIL shim-act-deliver (the activation named a foreign process)";
+const ACT_FAIL_CTXPC: &str = "FAIL shim-act-deliver (the interrupted pc is outside the worker's window)";
+
+/// Symbols the activation image must carry beyond the common contract.
+const ACT_SYMBOLS: [&str; 5] = ["sigaction", "pthread_kill", "__libc_current_sigrtmin", "SystemNative_InitializeTerminalAndSignalHandling", "__errno_location"];
+
+const TLS_ALL_GOOD: &str = "SHIMTEST-TLS: ALL GOOD (the image's thread-local template on module 0; a fresh copy per thread, isolated)";
+const TLS_FAIL_OFF: &str = "FAIL shim-tls-initial (the zero-fill word is not zero)";
+const TLS_FAIL_CACHE: &str = "FAIL shim-tls-fresh (a worker did not start from the template)";
+
+/// Symbols the thread-local image must carry beyond the common contract.
+const TLS_SYMBOLS: [&str; 4] = ["__tls_get_addr", "__rhu_tdata_lo", "__rhu_tdata_hi", "__errno_location"];
+
+/// The bytes the thread-local image's template must span: the tenant's
+/// one initialized word and one zero-fill word. Every other image links
+/// no thread-local input at all, so its bracket pair is empty.
+const TLS_TEMPLATE_SPAN: u64 = 8;
+const NO_TEMPLATE: u64 = 0;
+
+/// The host's markers, in the ONE order the contract allows. The case
+/// asserts this sequence, not merely that each line is somewhere in the
+/// capture: a host that bound its streams after registering its module
+/// would satisfy presence and violate the contract.
+const HOST_MARKERS: [&str; 8] = [
+    "[host] stdio: standard error bound to the C library's stream",
+    "[host] stdio: standard output line buffered",
+    "[host] data: initialized region verified against its load image",
+    "[host] ctors: none (this image carries no static constructor)",
+    "[host] runtime: initialized",
+    "[host] runtime: module registered, class-library slots: 12",
+    "[host] argv: 0",
+    "[host] entering managed entry",
+];
+
+/// The markers that must FOLLOW managed entry: the audit is printed
+/// before the exit line, so a run that ends normally still reports what
+/// it left behind.
+const HOST_TAIL_MARKERS: [&str; 2] = ["[host] arena headroom at exit: ", "[host] exit: 0"];
+
+const HOST_ALL_GOOD: &str = "SHIMTEST-HOST: ALL GOOD (the initialization contract in order; the class-library table as the pin declares it)";
+const HOST_FAIL_VERIFY: &str = "[host] FAIL initialized data does not match the image it was loaded from";
+
+/// Symbols the host image must carry beyond the common contract.
+const HOST_SYMBOLS: [&str; 3] = ["rhu_host_main", "RhInitialize", "RhRegisterOSModule"];
+
+/// The C-library members the retarget must keep OUT of a linked image:
+/// the allocator member's own imports -- the heap break it needs to start
+/// and the lock pair it takes around every call. Their arrival would mean
+/// two heaps in one image. (The allocator's own entry points are spelled
+/// as the reentrant names this image defines strongly, so they are not
+/// what an arrival would look like.)
+const RETARGET_FORBIDDEN: [&str; 3] = ["_sbrk_r", "__malloc_lock", "__malloc_unlock"];
+
+/// The compile-tier probe for the generated C-library layout header: the
+/// kit's own stream and task-record headers beside the generated one, and
+/// one static assertion per generated value against the kit's macro,
+/// offset or size. Compiled under the nano configuration the image's link
+/// uses. The genuine header compiles; a header with one value moved is
+/// refused at the assertion that names it.
+const NEWLIB_PROBE_SOURCE: &[u8] = br#"#include <stddef.h>
+#include <stdio.h>
+#include <sys/reent.h>
+#include "rhu_newlib_arm32.h"
+_Static_assert(__NEWLIB__ == RHU_NEWLIB_VERSION_MAJOR, "the major version ties the kit");
+_Static_assert(__NEWLIB_MINOR__ == RHU_NEWLIB_VERSION_MINOR, "the minor version ties the kit");
+#ifdef _REENT_SMALL
+_Static_assert(RHU_NEWLIB_REENT_SMALL == 1, "the small-reent switch ties the kit");
+#else
+_Static_assert(RHU_NEWLIB_REENT_SMALL == 0, "the small-reent switch ties the kit");
+#endif
+#ifdef __DYNAMIC_REENT__
+_Static_assert(RHU_NEWLIB_DYNAMIC_REENT == 1, "the dynamic-reent switch ties the kit");
+#else
+_Static_assert(RHU_NEWLIB_DYNAMIC_REENT == 0, "the dynamic-reent switch ties the kit");
+#endif
+_Static_assert(__SLBF == RHU_NEWLIB_STREAM_LINEBUF, "the line-buffered flag ties the kit");
+_Static_assert(__SNBF == RHU_NEWLIB_STREAM_NOBUF, "the unbuffered flag ties the kit");
+_Static_assert(__SRD == RHU_NEWLIB_STREAM_READ, "the read flag ties the kit");
+_Static_assert(__SSTR == RHU_NEWLIB_STREAM_STRING, "the string-stream flag ties the kit");
+_Static_assert(offsetof(struct __sFILE, _flags) == RHU_NEWLIB_STREAM_FLAGS_OFFSET, "the flag word's offset ties the kit");
+_Static_assert(sizeof(((struct __sFILE *)0)->_flags) == RHU_NEWLIB_STREAM_FLAGS_SIZE, "the flag word's width ties the kit");
+_Static_assert(offsetof(struct __sFILE, _file) == RHU_NEWLIB_STREAM_FILE_OFFSET, "the descriptor's offset ties the kit");
+_Static_assert(offsetof(struct _reent, _errno) == RHU_NEWLIB_TASK_ERRNO_OFFSET, "the errno offset ties the kit");
+_Static_assert(offsetof(struct _reent, _stdin) == RHU_NEWLIB_TASK_STDIN_OFFSET, "the standard input offset ties the kit");
+_Static_assert(offsetof(struct _reent, _stdout) == RHU_NEWLIB_TASK_STDOUT_OFFSET, "the standard output offset ties the kit");
+_Static_assert(offsetof(struct _reent, _stderr) == RHU_NEWLIB_TASK_STDERR_OFFSET, "the standard error offset ties the kit");
+int rhu_newlib_header_probe;
+"#;
+
+/// The line of the generated header the control moves for its doctored
+/// copy, and what it moves it to: the line-buffered flag set to the
+/// string-stream value, exactly the mistake the header exists to refuse.
+const NEWLIB_DOCTOR_FROM: &str = "#define RHU_NEWLIB_STREAM_LINEBUF 0x0001";
+const NEWLIB_DOCTOR_TO: &str = "#define RHU_NEWLIB_STREAM_LINEBUF 0x0200";
+
+/// A translation unit that genuinely consumes the toolchain's C library,
+/// so the retarget case runs against a link that really reaches it.
+const PROBE_SOURCE: &[u8] = b"#include <stdio.h>\nvoid rhu_newlib_consumer(void);\nvoid rhu_newlib_consumer(void) { printf(\"%d\\n\", 1); }\n";
+
+/// Patterns a positive run must not carry.
+const FORBIDDEN_PATTERNS: [&str; 6] = ["FAIL ", "KERNEL PANIC", "EXCEPTION:", "REFUSED", "abort()", "unsupported conversion"];
+
+/// Listed, never counted and never vacuously green. Empty since the
+/// thread-local template check armed; the mechanism stays for whatever
+/// the gate grows next.
+const PENDING: [&str; 0] = [];
+
+const INTERNAL_CASES: [&str; 3] = [
+    "shim.foreign-errno-refused -- compile-tier; runs under 'rhu-gate shim rederive' at the pinned kit",
+    "shim.newlib-header-ties-kit -- compile-tier; runs under 'rhu-gate shim rederive' at the pinned kit: the generated C-library layout header against the kit's own headers",
+    "shim.newlib-retarget -- link-tier; runs under 'rhu-gate shim rederive' when the kit's C library is resolved",
+];
+
+/// The module-root template brackets, read from a linked artifact: the
+/// pair must parse and must span exactly the bytes this image's inputs
+/// contribute (zero for every image that links no thread-local input).
+/// Returns the complaint, or None when the pair is right.
+fn template_span_fault(lo: Option<u64>, hi: Option<u64>, want: u64) -> Option<String> {
+    let (Some(lo), Some(hi)) = (lo, hi) else {
+        return Some("the __rhu_tdata bracket pair is not value-parseable from the artifact".to_string());
+    };
+    if hi < lo {
+        return Some(format!("the __rhu_tdata bracket pair is inverted ({lo:#x} > {hi:#x})"));
+    }
+    if hi - lo != want {
+        return Some(format!(
+            "the __rhu_tdata bracket pair spans {} bytes, wanted {want} ({lo:#x} .. {hi:#x})",
+            hi - lo
+        ));
+    }
+    None
+}
+
+/// The first marker that is absent from `raw`, or out of order relative
+/// to the ones before it. Returns None when every marker appears exactly
+/// in the order given. Presence is not order: a contract whose steps
+/// depend on each other is only proven by the sequence.
+fn markers_out_of_order(raw: &[u8], markers: &[&str]) -> Option<String> {
+    let mut from = 0usize;
+    for m in markers {
+        match find_fixed_from(raw, m, from) {
+            Some(at) => from = at + m.len(),
+            None => {
+                return Some(if contains_fixed(raw, m) {
+                    format!("marker '{m}' appears, but before a marker that must precede it")
+                } else {
+                    format!("marker '{m}' is absent")
+                })
+            }
+        }
+    }
+    None
+}
+
+/// The offset of `needle` in `raw` at or after `from`.
+fn find_fixed_from(raw: &[u8], needle: &str, from: usize) -> Option<usize> {
+    let n = needle.as_bytes();
+    if n.is_empty() || from > raw.len() {
+        return None;
+    }
+    raw[from..]
+        .windows(n.len())
+        .position(|w| w == n)
+        .map(|p| p + from)
+}
+
+/// The directory holding the toolchain's own C library, resolved the way
+/// the image-tier compiler already is: RHU_NEWLIB, else the first line of
+/// an untracked machine-local pointer file, else absent. Absent is not a
+/// failure -- the retarget case is INTERNAL and the main gate never needs
+/// it -- so this returns an Option and the caller declares the case.
+///
+/// The pointer file names a directory in the form the LINKER can open,
+/// which on a desk whose compiler lives behind a translation layer is not
+/// the form the compiler prints; that is why it is a recorded
+/// machine-local fact and not a derivation.
+fn resolve_newlib_dir(repo: &Path) -> Option<String> {
+    if let Ok(v) = std::env::var("RHU_NEWLIB") {
+        if !v.trim().is_empty() {
+            return Some(v.trim().to_string());
+        }
+    }
+    let local = repo.join("tools").join("toolchains").join("newlib.local");
+    let line = std::fs::read_to_string(&local)
+        .ok()
+        .and_then(|t| t.lines().next().map(str::to_string))
+        .unwrap_or_default();
+    if line.trim().is_empty() {
+        None
+    } else {
+        Some(line.trim().to_string())
+    }
+}
+
+/// True when the sorted import list equals the pinned set exactly.
+fn imports_match(got: &[String], want: &[&str]) -> bool {
+    let mut w: Vec<&str> = want.to_vec();
+    w.sort_unstable();
+    got.len() == w.len() && got.iter().zip(w.iter()).all(|(g, w)| g == w)
+}
+
+/// The first forbidden-family hit in an import list, if any.
+fn forbidden_import(got: &[String]) -> Option<String> {
+    got.iter()
+        .find(|n| FORBIDDEN_IMPORT_FAMILIES.iter().any(|f| n.starts_with(f)))
+        .cloned()
+}
+
+/// Strong (non-weak, non-local) definitions in an nm dump: the names of
+/// lines whose type letter is T, D, B or R.
+fn strong_defined(dump: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in dump.lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(_), Some(t), Some(name)) = (it.next(), it.next(), it.next()) {
+            if matches!(t, "T" | "D" | "B" | "R") && it.next().is_none() {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Every defined name in an nm dump, whatever its type letter (strong
+/// and weak alike; archive member headers and undefined lines skipped).
+fn defined_names(dump: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in dump.lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(_), Some(t), Some(name)) = (it.next(), it.next(), it.next()) {
+            if t != "U" && t != "w" && it.next().is_none() {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Imports of the linked objects that neither the objects themselves, the
+/// kernel staticlib, nor the board map define. The linker's section garbage collection
+/// never reports a reference from a function nothing references, so a
+/// missing definition would otherwise surface only in the image that
+/// first calls it.
+fn unresolved_imports(imports: &[Vec<String>], defined: &[Vec<String>], lib_defined: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for list in imports {
+        for name in list {
+            let here = defined.iter().any(|d| d.contains(name));
+            let by_map = MAP_SYMBOLS.contains(&name.as_str());
+            if !here && !by_map && !lib_defined.contains(name) && !out.contains(name) {
+                out.push(name.clone());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Names defined strongly in more than one dump (sorted, deduplicated).
+fn duplicate_definitions(dumps: &[&str]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut dups: Vec<String> = Vec::new();
+    for d in dumps {
+        for n in strong_defined(d) {
+            if seen.contains(&n) {
+                if !dups.contains(&n) {
+                    dups.push(n);
+                }
+            } else {
+                seen.push(n);
+            }
+        }
+    }
+    dups.sort();
+    dups
+}
+
+/// The frozen record set against the plan and the goldens, both
+/// directions, plus the on-disk sweep: every plan object and golden has a
+/// record; every record names a plan object or a golden under
+/// goldens/shim/; every `.o` on disk is in the plan.
+fn frozen_consistency(records: &[(String, String)], on_disk: &[String]) -> Result<(), String> {
+    let expected = FROZEN_PLAN.len() + GOLDENS.len();
+    if records.len() != expected {
+        return Err(format!(
+            "manifest parsed to {} records, the frozen plan and goldens hold {} -- a record set that drifted",
+            records.len(),
+            expected
+        ));
+    }
+    for (name, _, _) in FROZEN_PLAN {
+        if !records.iter().any(|(p, _)| p == &format!("goldens/shim/{name}")) {
+            return Err(format!("plan object {name} has no manifest record"));
+        }
+    }
+    for g in GOLDENS {
+        if !records.iter().any(|(p, _)| p == &format!("goldens/shim/{g}")) {
+            return Err(format!("golden {g} has no manifest record"));
+        }
+    }
+    for (path, _) in records {
+        let Some(name) = path.strip_prefix("goldens/shim/") else {
+            return Err(format!("manifest record '{path}' is outside goldens/shim/"));
+        };
+        if !FROZEN_PLAN.iter().any(|(n, _, _)| n == &name) && !GOLDENS.contains(&name) {
+            return Err(format!("manifest record '{path}' has no frozen-plan or golden entry"));
+        }
+    }
+    for name in on_disk {
+        if !FROZEN_PLAN.iter().any(|(n, _, _)| *n == name.as_str()) {
+            return Err(format!("goldens/shim/{name} has NO manifest record (a file without a record)"));
+        }
+    }
+    Ok(())
+}
+
+struct Shim {
+    repo: PathBuf,
+    out: PathBuf,
+    results: Results,
+    gate_id: &'static str,
+    display: &'static str,
+    /// The verified manifest records (repo-relative path, sha256).
+    records: Vec<(String, String)>,
+}
+
+impl Shim {
+    fn fail(&mut self, case: &str, msg: &str) -> ! {
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{case}\",\"verdict\":\"fail\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null}}",
+            self.gate_id
+        ));
+        self.results.tally("fail", "positive");
+        self.results.emit_summary(self.gate_id, "fail", 1);
+        let _ = validate_results(&self.repo, self.results.path());
+        println!("{}: FAIL -- {case}: {msg}", self.display);
+        exit(1);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fail_run(&mut self, case: &str, exit_got: i32, exit_want: i32, control: &str, broke: &str, sha: &str, path_rel: &str, msg: &str) -> ! {
+        let broke_frag = if control == "negative" { format!(",\"broke\":\"{broke}\"") } else { String::new() };
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{case}\",\"verdict\":\"fail\",\"exit\":{exit_got},\"exit_want\":{exit_want},\"control\":\"{control}\",\"image\":{{\"path\":\"{path_rel}\",\"sha256\":\"{sha}\"}}{broke_frag}}}",
+            self.gate_id
+        ));
+        self.results.tally("fail", control);
+        self.results.emit_summary(self.gate_id, "fail", 1);
+        let _ = validate_results(&self.repo, self.results.path());
+        println!("{}: FAIL -- {case}: {msg}", self.display);
+        exit(1);
+    }
+
+    fn golden_sha(&self, name: &str) -> String {
+        let path = format!("goldens/shim/{name}");
+        self.records
+            .iter()
+            .find(|(p, _)| p == &path)
+            .map(|(_, s)| s.clone())
+            .unwrap_or_default()
+    }
+
+    fn verify_frozen(&mut self) {
+        println!("== frozen inputs: sha256 vs goldens/shim/MANIFEST.md ==");
+        let dir = self.repo.join("goldens").join("shim");
+        let mpath = dir.join("MANIFEST.md");
+        let msha = match sha256_file(&mpath) {
+            Ok(s) => s,
+            Err(e) => self.fail(
+                "frozen-inputs",
+                &format!("goldens/shim/MANIFEST.md unreadable: {e} (the frozen tier's record; a drop copy without goldens/shim runs the chain with this tier DECLARED, never this gate)"),
+            ),
+        };
+        if msha != SHA_FROZEN_MANIFEST {
+            self.fail(
+                "frozen-inputs",
+                &format!("goldens/shim/MANIFEST.md sha256 {msha} != pinned {SHA_FROZEN_MANIFEST} -- the frozen record moved without a registered re-freeze"),
+            );
+        }
+        let text = match std::fs::read_to_string(&mpath) {
+            Ok(t) => t,
+            Err(e) => self.fail("frozen-inputs", &format!("goldens/shim/MANIFEST.md unreadable: {e}")),
+        };
+        let records = parse_vendored_manifest(&text);
+        let mut on_disk: Vec<String> = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd
+                .flatten()
+                .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                .filter(|n| n.ends_with(".o"))
+                .collect(),
+            Err(e) => self.fail("frozen-inputs", &format!("cannot list goldens/shim: {e}")),
+        };
+        on_disk.sort();
+        if let Err(e) = frozen_consistency(&records, &on_disk) {
+            self.fail("frozen-inputs", &e);
+        }
+        for (path, want) in &records {
+            let got = match sha256_file(&self.repo.join(path.replace('/', std::path::MAIN_SEPARATOR_STR))) {
+                Ok(s) => s,
+                Err(e) => self.fail("frozen-inputs", &format!("{path} unreadable: {e} (a record without a file)")),
+            };
+            if &got != want {
+                self.fail(
+                    "frozen-inputs",
+                    &format!("{path}: sha256 {got} != recorded {want} (frozen artifact moved -- WRONG, never rebuilt; derivation is 'rhu-gate shim rederive')"),
+                );
+            }
+        }
+        self.records = records;
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"frozen-inputs\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"manifest_sha\":\"{SHA_FROZEN_MANIFEST}\",\"objects\":{},\"goldens\":{}}}}}",
+            self.gate_id,
+            FROZEN_PLAN.len(),
+            GOLDENS.len()
+        ));
+        self.results.tally("pass", "positive");
+        println!(
+            "== frozen inputs: PASS ({}/{} objects and {}/{} goldens tie the manifest both directions; the manifest ties the in-code pin) ==",
+            FROZEN_PLAN.len(),
+            FROZEN_PLAN.len(),
+            GOLDENS.len(),
+            GOLDENS.len()
+        );
+    }
+
+    /// nm dump of an object (all symbols) or its undefined set.
+    fn nm_dump(&mut self, facts: &RustcFacts, case: &str, obj_rel: &str, undefined_only: bool) -> String {
+        let nm = match llvm_tool(facts, "llvm-nm") {
+            Ok(p) => p,
+            Err(e) => self.fail(case, &e),
+        };
+        let stem = Path::new(obj_rel).file_stem().unwrap().to_string_lossy().into_owned();
+        let dump_p = self.out.join(format!("{stem}.{}", if undefined_only { "nm-u" } else { "nm" }));
+        let scratch = self.out.join("nm.stderr");
+        let obj_abs = self.repo.join(obj_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let obj_arg = obj_abs.to_string_lossy().into_owned();
+        let args: Vec<&str> = if undefined_only { vec!["-u", &obj_arg] } else { vec!["--defined-only", &obj_arg] };
+        let run = run_captured(&nm, &args, &dump_p, &scratch, Duration::from_secs(60));
+        if !matches!(run, Ok(ref o) if o.exit == 0) {
+            self.fail(case, &format!("llvm-nm failed on {obj_rel}"));
+        }
+        std::fs::read_to_string(&dump_p).unwrap_or_default()
+    }
+
+    fn pin_closure(&mut self, facts: &RustcFacts, case: &str, obj: &str, want: &[&str]) -> Vec<String> {
+        let got = parse_undefined(&self.nm_dump(facts, case, &format!("goldens/shim/{obj}"), true));
+        if !imports_match(&got, want) {
+            self.fail(
+                case,
+                &format!(
+                    "{obj} import closure moved: got [{}] (pinned {} names) -- a new or vanished import is a world change",
+                    got.join(" "),
+                    want.len()
+                ),
+            );
+        }
+        if let Some(hit) = forbidden_import(&got) {
+            self.fail(case, &format!("{obj} imports forbidden family symbol '{hit}'"));
+        }
+        got
+    }
+
+    /// The one-strong-symbol sweep over the objects an image links, and
+    /// the every-import-resolves check against the objects' own
+    /// definitions plus the kernel staticlib's.
+    fn sweep_strong(&mut self, facts: &RustcFacts, case: &str, objs: &[&str]) {
+        let dumps: Vec<String> = objs.iter().map(|o| self.nm_dump(facts, case, o, false)).collect();
+        let refs: Vec<&str> = dumps.iter().map(String::as_str).collect();
+        let dups = duplicate_definitions(&refs);
+        if !dups.is_empty() {
+            self.fail(case, &format!("symbols defined strongly in more than one object: {}", dups.join(" ")));
+        }
+        let imports: Vec<Vec<String>> = objs.iter().map(|o| parse_undefined(&self.nm_dump(facts, case, o, true))).collect();
+        let defined: Vec<Vec<String>> = dumps.iter().map(|d| defined_names(d)).collect();
+        let lib = defined_names(&self.nm_dump(facts, case, "src/kernel/target/thumbv7em-none-eabihf/release/librhu_kernel.a", false));
+        let missing = unresolved_imports(&imports, &defined, &lib);
+        if !missing.is_empty() {
+            self.fail(case, &format!("imports defined by nothing in the image (hidden from the link by section GC): {}", missing.join(" ")));
+        }
+    }
+
+    /// Link objects + the payload-feature staticlib under the payload
+    /// board map; returns (sha, repo-relative path) of the ELF.
+    fn link_image(&mut self, ld: &ToolCmd, case: &str, objs: &[&str], name: &str) -> (String, String) {
+        self.link_image_extra(ld, case, objs, name, &[], &[])
+    }
+
+    /// As link_image, with extra arguments after the objects (libraries)
+    /// and before them (link-line options such as an undefined-symbol
+    /// request).
+    fn link_image_extra(&mut self, ld: &ToolCmd, case: &str, objs: &[&str], name: &str, after: &[String], before: &[&str]) -> (String, String) {
+        let path_rel = format!("src/kernel/target/shim-gate/{name}.elf");
+        let map_rel = format!("src/kernel/target/shim-gate/{name}.map");
+        let ld_log = self.out.join(format!("{name}-ld.log"));
+        let ld_out = self.out.join(format!("{name}-ld.stdout"));
+        let mut args: Vec<String> = vec![
+            "-T".to_string(),
+            "src/kernel/payload-mps2-an500.x".to_string(),
+            "--gc-sections".to_string(),
+            format!("-Map={map_rel}"),
+        ];
+        args.extend(before.iter().map(|s| s.to_string()));
+        args.extend(objs.iter().map(|s| s.to_string()));
+        args.push("src/kernel/target/thumbv7em-none-eabihf/release/librhu_kernel.a".to_string());
+        args.extend(after.iter().cloned());
+        args.push("-o".to_string());
+        args.push(path_rel.clone());
+        match run_tool_bounded(&self.repo, ld, &args, &ld_out, &ld_log) {
+            Ok(true) => {}
+            Ok(false) => {
+                echo_file(&ld_log, "");
+                self.fail(case, &format!("image link failed for {name} (see {name}-ld.log)"));
+            }
+            Err(e) => self.fail(case, &e),
+        }
+        let elf = self.repo.join(path_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let sha = match sha256_file(&elf) {
+            Ok(s) => s,
+            Err(e) => self.fail(case, &format!("cannot hash linked artifact: {e}")),
+        };
+        (sha, path_rel)
+    }
+
+    /// Run a linked image under QEMU (Parity profile); (raw, exit).
+    fn run_qemu(&mut self, qemu: &Path, case: &str, path_rel: &str) -> (Vec<u8>, i32) {
+        let elf = self.repo.join(path_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let raw_path = self.out.join(format!("{case}.raw"));
+        let stderr_path = self.out.join(format!("{case}.stderr"));
+        let elf_arg = elf.to_string_lossy().into_owned();
+        let mut args: Vec<&str> = vec!["-M", "mps2-an500", "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+        args.extend_from_slice(ExecProfile::Parity.qemu_args());
+        args.push("-kernel");
+        args.push(&elf_arg);
+        let outcome = match run_captured(qemu, &args, &raw_path, &stderr_path, Duration::from_secs(RUN_TIMEOUT_S)) {
+            Ok(o) => o,
+            Err(e) => self.fail(case, &e),
+        };
+        if outcome.timed_out {
+            println!("  (run killed at its timeout; exit recorded as 124 -- a hang is observed, never a pass)");
+        }
+        let raw = std::fs::read(&raw_path).unwrap_or_default();
+        echo_file(&raw_path, "  | ");
+        (raw, outcome.exit)
+    }
+
+    /// The artifact contract of a linked shim image by nm: the common
+    /// symbol set plus the case's own `extra` names.
+    fn artifact_contract(&mut self, facts: &RustcFacts, case: &str, path_rel: &str, extra: &[&str], want_span: u64) {
+        let nm = match llvm_tool(facts, "llvm-nm") {
+            Ok(p) => p,
+            Err(e) => self.fail(case, &e),
+        };
+        let elf_abs = self.repo.join(path_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let elf_arg = elf_abs.to_string_lossy().into_owned();
+        let sym = self.out.join(format!("{case}.elf.nm"));
+        let scratch = self.out.join(format!("{case}.elf.nm.stderr"));
+        let nm_run = run_captured(&nm, &[&elf_arg], &sym, &scratch, Duration::from_secs(60));
+        if !matches!(nm_run, Ok(ref o) if o.exit == 0) {
+            self.fail(case, "llvm-nm failed on the linked ELF");
+        }
+        let dump = std::fs::read(&sym).unwrap_or_default();
+        for s in ["__managed__Main", "__rhu_debug_layout", "__rhu_sched", "rhu_shim_init"] {
+            if !word_sym_present(&dump, s) {
+                self.fail(case, &format!("symbol '{s}' absent from the linked artifact"));
+            }
+        }
+        for s in extra {
+            if !word_sym_present(&dump, s) {
+                self.fail(case, &format!("symbol '{s}' absent from the linked artifact"));
+            }
+        }
+        if let Some(fault) = template_span_fault(
+            word_sym_value(&dump, "__rhu_tdata_lo"),
+            word_sym_value(&dump, "__rhu_tdata_hi"),
+            want_span,
+        ) {
+            self.fail(case, &fault);
+        }
+    }
+
+    /// A positive run: exit 0, CR discipline, the golden byte for byte,
+    /// pinned lines present, forbidden patterns absent, the verdict line
+    /// the payload stream's last.
+    #[allow(clippy::too_many_arguments)]
+    fn assert_positive(&mut self, case: &str, raw: &[u8], code: i32, sha: &str, rel: &str, golden: &str, pinned: &[&str], all_good: &str) {
+        if cr_count(raw) == 0 {
+            self.fail_run(case, code, 0, "positive", "", sha, rel, "no CR bytes in raw capture (wire discipline lost)");
+        }
+        let gpath = self.repo.join("goldens").join("shim").join(golden);
+        let gbytes = match std::fs::read(&gpath) {
+            Ok(b) => b,
+            Err(e) => self.fail_run(case, code, 0, "positive", "", sha, rel, &format!("golden unreadable: {e}")),
+        };
+        let stream = payload_stream(raw);
+        if !eq_lf_normalized(&stream, &gbytes) {
+            self.fail_run(case, code, 0, "positive", "", sha, rel, &format!("payload stream differs from goldens/shim/{golden} (byte class)"));
+        }
+        for m in pinned {
+            if !contains_fixed(raw, m) {
+                self.fail_run(case, code, 0, "positive", "", sha, rel, &format!("pinned line '{m}' not found"));
+            }
+        }
+        for m in FORBIDDEN_PATTERNS {
+            if contains_fixed(raw, m) {
+                self.fail_run(case, code, 0, "positive", "", sha, rel, &format!("forbidden pattern '{m}' present"));
+            }
+        }
+        let last = String::from_utf8_lossy(&stream).lines().last().unwrap_or("").to_string();
+        if last != all_good {
+            self.fail_run(case, code, 0, "positive", "", sha, rel, &format!("the payload stream's last line is not the verdict line (got '{last}')"));
+        }
+        if code != 0 {
+            self.fail_run(case, code, 0, "positive", "", sha, rel, &format!("exit {code}, wanted 0"));
+        }
+    }
+
+    /// A negative control: the expected exit, the expected line, no
+    /// verdict line, and the positive golden compare FAILING against it
+    /// (the detector bites).
+    #[allow(clippy::too_many_arguments)]
+    fn assert_control(&mut self, case: &str, raw: &[u8], code: i32, want: i32, broke: &str, sha: &str, rel: &str, golden: &str, expect_line: &str, all_good: &str) {
+        if cr_count(raw) == 0 {
+            self.fail_run(case, code, want, "negative", broke, sha, rel, "no CR bytes in raw capture");
+        }
+        if !contains_fixed(raw, expect_line) {
+            self.fail_run(case, code, want, "negative", broke, sha, rel, &format!("expected line '{expect_line}' not found"));
+        }
+        if contains_fixed(raw, all_good) {
+            self.fail_run(case, code, want, "negative", broke, sha, rel, "the verdict line appeared on a broken run");
+        }
+        let gpath = self.repo.join("goldens").join("shim").join(golden);
+        let gbytes = std::fs::read(&gpath).unwrap_or_default();
+        if eq_lf_normalized(&payload_stream(raw), &gbytes) {
+            self.fail_run(case, code, want, "negative", broke, sha, rel, "the positive golden compare ACCEPTED the broken transcript (the detector is blind)");
+        }
+        if code != want {
+            self.fail_run(case, code, want, "negative", broke, sha, rel, &format!("exit {code}, wanted {want}"));
+        }
+    }
+
+    fn emit_pass(&mut self, case: &str, code: i32, control: &str, broke: &str, sha: &str, rel: &str, golden: Option<&str>) {
+        let broke_frag = if control == "negative" { format!(",\"broke\":\"{broke}\"") } else { String::new() };
+        let golden_frag = match golden {
+            Some(g) => format!(",\"golden\":{{\"path\":\"goldens/shim/{g}\",\"sha256\":\"{}\",\"compare\":\"bytes\"}}", self.golden_sha(g)),
+            None => String::new(),
+        };
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{case}\",\"verdict\":\"pass\",\"exit\":{code},\"exit_want\":{code},\"control\":\"{control}\",\"image\":{{\"path\":\"{rel}\",\"sha256\":\"{sha}\"}}{golden_frag}{broke_frag}}}",
+            self.gate_id
+        ));
+        self.results.tally("pass", control);
+    }
+
+    fn build_staticlib(&mut self) {
+        let log = self.out.join("build-staticlib.log");
+        let ok = match crate::tools::cargo_build_kernel(&self.repo, &["--lib", "--features", "payload"], &log) {
+            Ok(ok) => ok,
+            Err(e) => {
+                println!("rhu-gate: {e}");
+                false
+            }
+        };
+        if !ok {
+            echo_file(&log, "");
+            self.fail("shim.core", "kernel staticlib build error");
+        }
+    }
+
+    fn run_core(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
+        println!("== case shim.core ==");
+        let core = self.pin_closure(facts, "shim.core", "shim-core.o", &IMPORTS_CORE);
+        let sysn = self.pin_closure(facts, "shim.core", "shim-sysnative.o", &IMPORTS_SYSNATIVE);
+        let glue = self.pin_closure(facts, "shim.core", "shim-libc-glue.o", &IMPORTS_GLUE);
+        let tenant = parse_undefined(&self.nm_dump(facts, "shim.core", "goldens/shim/shimtest-core.o", true));
+        if let Some(hit) = forbidden_import(&tenant) {
+            self.fail("shim.core", &format!("the tenant imports forbidden family symbol '{hit}'"));
+        }
+        println!(
+            "   import closures: core {}/{}, PAL {}/{}, glue {}/{} pinned; tenant {} names; forbidden families absent",
+            core.len(),
+            IMPORTS_CORE.len(),
+            sysn.len(),
+            IMPORTS_SYSNATIVE.len(),
+            glue.len(),
+            IMPORTS_GLUE.len(),
+            tenant.len()
+        );
+        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o"];
+        self.sweep_strong(facts, "shim.core", &[world[0], world[1], world[2], "goldens/shim/shimtest-core.o"]);
+        println!("   one strong definition per symbol across the four linked objects; every import resolves (the objects, the kernel staticlib, and the link's own symbols: the map's arena window, data and template brackets, and the linker's constructor-array brackets)");
+
+        let (sha, rel) = self.link_image(ld, "shim.core", &[world[0], world[1], world[2], "goldens/shim/shimtest-core.o"], "shim-core");
+        self.artifact_contract(facts, "shim.core", &rel, &["SystemNative_GetErrNo", "__errno_location"], NO_TEMPLATE);
+        let (raw, code) = self.run_qemu(qemu, "shim.core", &rel);
+        self.assert_positive("shim.core", &raw, code, &sha, &rel, GOLDENS[0], &PINNED_CORE_LINES, CORE_ALL_GOOD);
+        self.emit_pass("shim.core", 0, "positive", "", &sha, &rel, Some(GOLDENS[0]));
+        println!("== case shim.core: PASS (exit 0; the payload stream equals its golden; {} pinned diagnostic lines; the verdict line last) ==", PINNED_CORE_LINES.len());
+
+        println!("== case shim.core-break-errno (negative control) ==");
+        let broke = "a worker writes through the main thread's errno pointer (RHU_SHIMTEST_BREAK_ERRNO)";
+        let (sha_b, rel_b) = self.link_image(ld, "shim.core-break-errno", &[world[0], world[1], world[2], "goldens/shim/shimtest-core-break-errno.o"], "shim-core-break-errno");
+        let (raw_b, code_b) = self.run_qemu(qemu, "shim.core-break-errno", &rel_b);
+        self.assert_control("shim.core-break-errno", &raw_b, code_b, 1, broke, &sha_b, &rel_b, GOLDENS[0], "FAIL shim-errno-thread", CORE_ALL_GOOD);
+        self.emit_pass("shim.core-break-errno", 1, "negative", broke, &sha_b, &rel_b, None);
+        println!("== case shim.core-break-errno: PASS (exit 1; the isolation check failed loudly; the golden compare rejected the transcript) ==");
+
+        println!("== case shim.core-break-canary (negative control) ==");
+        let broke = "a block header corrupted before free (RHU_SHIMTEST_BREAK_CANARY)";
+        let (sha_c, rel_c) = self.link_image(ld, "shim.core-break-canary", &[world[0], world[1], world[2], "goldens/shim/shimtest-core-break-canary.o"], "shim-core-break-canary");
+        let (raw_c, code_c) = self.run_qemu(qemu, "shim.core-break-canary", &rel_c);
+        self.assert_control("shim.core-break-canary", &raw_c, code_c, 134, broke, &sha_c, &rel_c, GOLDENS[0], CANARY_LINE, CORE_ALL_GOOD);
+        self.emit_pass("shim.core-break-canary", 134, "negative", broke, &sha_c, &rel_c, None);
+        println!("== case shim.core-break-canary: PASS (exit 134; the allocator died loud on the corrupted header) ==");
+    }
+
+    fn run_fdmap(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
+        println!("== case shim.fdmap ==");
+        let tenant = parse_undefined(&self.nm_dump(facts, "shim.fdmap", "goldens/shim/shimtest-fdmap.o", true));
+        if let Some(hit) = forbidden_import(&tenant) {
+            self.fail("shim.fdmap", &format!("the tenant imports forbidden family symbol '{hit}'"));
+        }
+        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o"];
+        self.sweep_strong(facts, "shim.fdmap", &[world[0], world[1], world[2], "goldens/shim/shimtest-fdmap.o"]);
+        let (sha, rel) = self.link_image(ld, "shim.fdmap", &[world[0], world[1], world[2], "goldens/shim/shimtest-fdmap.o"], "shim-fdmap");
+        self.artifact_contract(facts, "shim.fdmap", &rel, &["SystemNative_GetErrNo", "__errno_location"], NO_TEMPLATE);
+        let (raw, code) = self.run_qemu(qemu, "shim.fdmap", &rel);
+        self.assert_positive("shim.fdmap", &raw, code, &sha, &rel, GOLDENS[1], &[PINNED_CORE_LINES[0]], FDMAP_ALL_GOOD);
+        self.emit_pass("shim.fdmap", 0, "positive", "", &sha, &rel, Some(GOLDENS[1]));
+        println!("== case shim.fdmap: PASS (exit 0; the payload stream equals its golden; the verdict line last) ==");
+
+        println!("== case shim.fdmap-break-fdbase (negative control) ==");
+        let broke = "the file band placed at the console's base (RHU_SHIM_BREAK_FD_BASE)";
+        let (sha_b, rel_b) = self.link_image(ld, "shim.fdmap-break-fdbase", &[world[0], "goldens/shim/shim-sysnative-break-fdbase.o", world[2], "goldens/shim/shimtest-fdmap.o"], "shim-fdmap-break-fdbase");
+        let (raw_b, code_b) = self.run_qemu(qemu, "shim.fdmap-break-fdbase", &rel_b);
+        self.assert_control("shim.fdmap-break-fdbase", &raw_b, code_b, 1, broke, &sha_b, &rel_b, GOLDENS[1], "FAIL shim-fdmap-open-fstat", FDMAP_ALL_GOOD);
+        self.emit_pass("shim.fdmap-break-fdbase", 1, "negative", broke, &sha_b, &rel_b, None);
+        println!("== case shim.fdmap-break-fdbase: PASS (exit 1; the console answered for a file and the ladder refused it) ==");
+    }
+
+    fn run_activation(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
+        println!("== case shim.activation ==");
+        let tenant = parse_undefined(&self.nm_dump(facts, "shim.activation", "goldens/shim/shimtest-activation.o", true));
+        if let Some(hit) = forbidden_import(&tenant) {
+            self.fail("shim.activation", &format!("the tenant imports forbidden family symbol '{hit}'"));
+        }
+        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o"];
+        self.sweep_strong(facts, "shim.activation", &[world[0], world[1], world[2], "goldens/shim/shimtest-activation.o"]);
+        let (sha, rel) = self.link_image(ld, "shim.activation", &[world[0], world[1], world[2], "goldens/shim/shimtest-activation.o"], "shim-activation");
+        self.artifact_contract(facts, "shim.activation", &rel, &ACT_SYMBOLS, NO_TEMPLATE);
+        let (raw, code) = self.run_qemu(qemu, "shim.activation", &rel);
+        self.assert_positive("shim.activation", &raw, code, &sha, &rel, GOLDENS[2], &PINNED_ACT_LINES, ACT_ALL_GOOD);
+        self.emit_pass("shim.activation", 0, "positive", "", &sha, &rel, Some(GOLDENS[2]));
+        println!("== case shim.activation: PASS (exit 0; the payload stream equals its golden; {} pinned diagnostic lines; the verdict line last) ==", PINNED_ACT_LINES.len());
+
+        println!("== case shim.activation-break-sipid (negative control) ==");
+        let broke = "the activation's signal information names a foreign process (RHU_SHIM_BREAK_SIPID)";
+        let (sha_b, rel_b) = self.link_image(ld, "shim.activation-break-sipid", &["goldens/shim/shim-core-break-sipid.o", world[1], world[2], "goldens/shim/shimtest-activation.o"], "shim-activation-break-sipid");
+        let (raw_b, code_b) = self.run_qemu(qemu, "shim.activation-break-sipid", &rel_b);
+        self.assert_control("shim.activation-break-sipid", &raw_b, code_b, 1, broke, &sha_b, &rel_b, GOLDENS[2], ACT_FAIL_SIPID, ACT_ALL_GOOD);
+        self.emit_pass("shim.activation-break-sipid", 1, "negative", broke, &sha_b, &rel_b, None);
+        println!("== case shim.activation-break-sipid: PASS (exit 1; the delivery check refused a foreign process id; the golden compare rejected the transcript) ==");
+
+        println!("== case shim.activation-break-ctxpc (negative control) ==");
+        let broke = "the context's program counter filled from the link register (RHU_SHIM_BREAK_CTXPC)";
+        let (sha_c, rel_c) = self.link_image(ld, "shim.activation-break-ctxpc", &["goldens/shim/shim-core-break-ctxpc.o", world[1], world[2], "goldens/shim/shimtest-activation.o"], "shim-activation-break-ctxpc");
+        let (raw_c, code_c) = self.run_qemu(qemu, "shim.activation-break-ctxpc", &rel_c);
+        self.assert_control("shim.activation-break-ctxpc", &raw_c, code_c, 1, broke, &sha_c, &rel_c, GOLDENS[2], ACT_FAIL_CTXPC, ACT_ALL_GOOD);
+        self.emit_pass("shim.activation-break-ctxpc", 1, "negative", broke, &sha_c, &rel_c, None);
+        println!("== case shim.activation-break-ctxpc: PASS (exit 1; the delivery check refused a program counter outside the worker's window) ==");
+    }
+
+    fn run_tls(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
+        println!("== case shim.tls ==");
+        let tenant = parse_undefined(&self.nm_dump(facts, "shim.tls", "goldens/shim/shimtest-tls.o", true));
+        if let Some(hit) = forbidden_import(&tenant) {
+            self.fail("shim.tls", &format!("the tenant imports forbidden family symbol '{hit}'"));
+        }
+        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o"];
+        self.sweep_strong(facts, "shim.tls", &[world[0], world[1], world[2], "goldens/shim/shimtest-tls.o"]);
+        let (sha, rel) = self.link_image(ld, "shim.tls", &[world[0], world[1], world[2], "goldens/shim/shimtest-tls.o"], "shim-tls");
+        self.artifact_contract(facts, "shim.tls", &rel, &TLS_SYMBOLS, TLS_TEMPLATE_SPAN);
+        let (raw, code) = self.run_qemu(qemu, "shim.tls", &rel);
+        self.assert_positive("shim.tls", &raw, code, &sha, &rel, GOLDENS[3], &[PINNED_CORE_LINES[0]], TLS_ALL_GOOD);
+        self.emit_pass("shim.tls", 0, "positive", "", &sha, &rel, Some(GOLDENS[3]));
+        println!("== case shim.tls: PASS (exit 0; the bracket pair spans {TLS_TEMPLATE_SPAN} bytes; the payload stream equals its golden; the verdict line last) ==");
+
+        println!("== case shim.tls-break-tlsoff (negative control) ==");
+        let broke = "a thread-local access resolved without its offset (RHU_SHIM_BREAK_TLSOFF)";
+        let (sha_b, rel_b) = self.link_image(ld, "shim.tls-break-tlsoff", &["goldens/shim/shim-core-break-tlsoff.o", world[1], world[2], "goldens/shim/shimtest-tls.o"], "shim-tls-break-tlsoff");
+        let (raw_b, code_b) = self.run_qemu(qemu, "shim.tls-break-tlsoff", &rel_b);
+        self.assert_control("shim.tls-break-tlsoff", &raw_b, code_b, 1, broke, &sha_b, &rel_b, GOLDENS[3], TLS_FAIL_OFF, TLS_ALL_GOOD);
+        self.emit_pass("shim.tls-break-tlsoff", 1, "negative", broke, &sha_b, &rel_b, None);
+        println!("== case shim.tls-break-tlsoff: PASS (exit 1; the zero-fill word read the initialized one) ==");
+
+        println!("== case shim.tls-break-tlscache (negative control) ==");
+        let broke = "the first thread-local block seen handed to every thread after it (RHU_SHIM_BREAK_TLSCACHE)";
+        let (sha_c, rel_c) = self.link_image(ld, "shim.tls-break-tlscache", &["goldens/shim/shim-core-break-tlscache.o", world[1], world[2], "goldens/shim/shimtest-tls.o"], "shim-tls-break-tlscache");
+        let (raw_c, code_c) = self.run_qemu(qemu, "shim.tls-break-tlscache", &rel_c);
+        self.assert_control("shim.tls-break-tlscache", &raw_c, code_c, 1, broke, &sha_c, &rel_c, GOLDENS[3], TLS_FAIL_CACHE, TLS_ALL_GOOD);
+        self.emit_pass("shim.tls-break-tlscache", 1, "negative", broke, &sha_c, &rel_c, None);
+        println!("== case shim.tls-break-tlscache: PASS (exit 1; a worker read the hosting thread's block) ==");
+    }
+
+    fn run_host(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
+        println!("== case shim.host ==");
+        let tenant = parse_undefined(&self.nm_dump(facts, "shim.host", "goldens/shim/shimtest-host.o", true));
+        if let Some(hit) = forbidden_import(&tenant) {
+            self.fail("shim.host", &format!("the tenant imports forbidden family symbol '{hit}'"));
+        }
+        let world = [
+            "goldens/shim/shim-core.o",
+            "goldens/shim/shim-sysnative.o",
+            "goldens/shim/shim-libc-glue.o",
+            "goldens/shim/shim-host.o",
+            "goldens/shim/shim-stdio-sym.o",
+            "goldens/shim/shimtest-host.o",
+        ];
+        self.sweep_strong(facts, "shim.host", &world);
+        let (sha, rel) = self.link_image(ld, "shim.host", &world, "shim-host");
+        self.artifact_contract(facts, "shim.host", &rel, &HOST_SYMBOLS, NO_TEMPLATE);
+        let (raw, code) = self.run_qemu(qemu, "shim.host", &rel);
+        self.assert_positive("shim.host", &raw, code, &sha, &rel, GOLDENS[4], &[], HOST_ALL_GOOD);
+        if let Some(fault) = markers_out_of_order(&raw, &HOST_MARKERS) {
+            self.fail("shim.host", &format!("the initialization contract's order: {fault}"));
+        }
+        let mut tail: Vec<&str> = vec![HOST_MARKERS[HOST_MARKERS.len() - 1]];
+        tail.extend_from_slice(&HOST_TAIL_MARKERS);
+        if let Some(fault) = markers_out_of_order(&raw, &tail) {
+            self.fail("shim.host", &format!("the accounting after managed entry: {fault}"));
+        }
+        self.emit_pass("shim.host", 0, "positive", "", &sha, &rel, Some(GOLDENS[4]));
+        println!("== case shim.host: PASS (exit 0; {} contract markers IN ORDER, then the audit before the exit line; the payload stream equals its golden) ==", HOST_MARKERS.len());
+
+        println!("== case shim.host-break-dataverify (negative control) ==");
+        let broke = "one byte of the initialized data region damaged before the host verifies it (RHU_SHIM_BREAK_DATAVERIFY)";
+        let broken_world = [
+            world[0],
+            world[1],
+            world[2],
+            "goldens/shim/shim-host-break-dataverify.o",
+            world[4],
+            world[5],
+        ];
+        let (sha_b, rel_b) = self.link_image(ld, "shim.host-break-dataverify", &broken_world, "shim-host-break-dataverify");
+        let (raw_b, code_b) = self.run_qemu(qemu, "shim.host-break-dataverify", &rel_b);
+        self.assert_control("shim.host-break-dataverify", &raw_b, code_b, 70, broke, &sha_b, &rel_b, GOLDENS[4], HOST_FAIL_VERIFY, HOST_ALL_GOOD);
+        if contains_fixed(&raw_b, HOST_MARKERS[3]) {
+            self.fail("shim.host-break-dataverify", "the constructor step ran after the data check failed");
+        }
+        self.emit_pass("shim.host-break-dataverify", 70, "negative", broke, &sha_b, &rel_b, None);
+        println!("== case shim.host-break-dataverify: PASS (exit 70; the data check refused, and the constructor step never ran) ==");
+    }
+
+    /// Compile one source with the pinned kit into the gate's obj dir;
+    /// on failure the stderr log is echoed and the gate fails.
+    fn compile(&mut self, gxx: &ToolCmd, case: &str, src_rel: &str, extra: &[&str], out_rel: &str) {
+        let stem = Path::new(out_rel).file_stem().unwrap().to_string_lossy().into_owned();
+        let stdout_p = self.out.join(format!("{stem}.cc.stdout"));
+        let stderr_p = self.out.join(format!("{stem}.cc.stderr"));
+        let mut args: Vec<String> = CC_FLAGS.iter().map(|s| s.to_string()).collect();
+        args.extend(extra.iter().map(|s| s.to_string()));
+        args.push(src_rel.to_string());
+        args.push("-o".to_string());
+        args.push(out_rel.to_string());
+        match run_tool_bounded(&self.repo, gxx, &args, &stdout_p, &stderr_p) {
+            Ok(true) => {}
+            Ok(false) => {
+                echo_file(&stderr_p, "");
+                self.fail(case, &format!("C compile failed for {src_rel} (see the compiler stderr log)"));
+            }
+            Err(e) => self.fail(case, &e),
+        }
+    }
+
+    /// The link-tier control: with the toolchain's own C library on the
+    /// link line, one heap and one console must still serve the whole
+    /// image. Two measurements, because either alone can be satisfied by
+    /// an accident:
+    ///
+    ///   (a) the image linked WITH the library is byte-identical to the
+    ///       image linked without it -- nothing of the library is
+    ///       pulled in, because this file set already defines everything
+    ///       the image references;
+    ///   (b) with a genuine consumer of that library FORCED into the
+    ///       link, the library's own members do arrive -- and the
+    ///       allocator that answers is still this image's, the heap break
+    ///       is still the one that refuses, and none of the library's
+    ///       allocator internals is present.
+    ///
+    /// (a) without (b) would pass on a link line that never reached the
+    /// library at all; (b) without (a) would not show that the ordinary
+    /// image is untouched.
+    fn run_newlib_retarget(&mut self, gxx: &ToolCmd, facts: &RustcFacts, ld: &ToolCmd, dir: &str) {
+        const CASE: &str = "shim.newlib-retarget";
+        println!("== case {CASE} (link-tier control) ==");
+        let world = [
+            "goldens/shim/shim-core.o",
+            "goldens/shim/shim-sysnative.o",
+            "goldens/shim/shim-libc-glue.o",
+            "goldens/shim/shim-host.o",
+            "goldens/shim/shim-stdio-sym.o",
+            "goldens/shim/shimtest-host.o",
+        ];
+        let (bare_sha, _) = self.link_image(ld, CASE, &world, "shim-newlib-bare");
+        let lib_args = [format!("-L{dir}"), "-lc_nano".to_string()];
+        let (with_sha, _) = self.link_image_extra(ld, CASE, &world, "shim-newlib-linked", &lib_args, &[]);
+        if bare_sha != with_sha {
+            self.fail(CASE, "the image changed when the toolchain's C library joined the link line: something of it was pulled into an image that carries its own runtime");
+        }
+        println!("   (a) the image is byte-identical with and without the library on the link line ({})", &bare_sha[..16]);
+
+        let probe_rel = "src/kernel/target/shim-gate/obj/newlib-consumer.c";
+        write_fixture(
+            &self.repo.join(probe_rel.replace('/', std::path::MAIN_SEPARATOR_STR)),
+            PROBE_SOURCE,
+        );
+        let probe_obj = "src/kernel/target/shim-gate/obj/newlib-consumer.o";
+        self.compile(gxx, CASE, probe_rel, &[], probe_obj);
+        let mut forced: Vec<&str> = world.to_vec();
+        forced.push(probe_obj);
+        let (forced_sha, rel_f) = self.link_image_extra(ld, CASE, &forced, "shim-newlib-forced", &lib_args, &["-u", "rhu_newlib_consumer"]);
+        let dump = self.nm_dump(facts, CASE, &rel_f, false);
+        let defined = strong_defined(&dump);
+        if !defined.iter().any(|d| d == "_write") {
+            self.fail(CASE, "with the library forced in, the writer it demands is not defined by this image's own runtime");
+        }
+        for f in RETARGET_FORBIDDEN {
+            if word_sym_present(dump.as_bytes(), f) || defined.iter().any(|d| d == f) {
+                self.fail(CASE, &format!("the library's own allocator arrived: '{f}' is in the image, so two heaps would answer"));
+            }
+        }
+        let dangling = parse_undefined(&self.nm_dump(facts, CASE, &rel_f, true));
+        if !dangling.is_empty() {
+            self.fail(CASE, &format!("the image has undefined symbols after the library joined the link: {}", dangling.join(" ")));
+        }
+        println!("   (b) with a library consumer forced in, the writer it demanded is this image's, none of the library's allocator internals arrived, and nothing is left undefined");
+        self.emit_pass(CASE, 0, "negative", "the toolchain's C library on the link line", &forced_sha, &rel_f, None);
+        println!("== case {CASE}: PASS (one heap and one console with the toolchain's C library linked) ==");
+    }
+
+    fn run_rederive(&mut self, gxx: &ToolCmd) {
+        println!("== rederive: {} frozen-plan objects from src/shim at the pinned kit ==", FROZEN_PLAN.len());
+        let obj_dir = self.out.join("obj");
+        if std::fs::create_dir_all(&obj_dir).is_err() {
+            self.fail("rederive", "cannot create the object directory");
+        }
+        for (name, src, extra) in FROZEN_PLAN {
+            let out_rel = format!("src/kernel/target/shim-gate/obj/{name}");
+            let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let _ = std::fs::remove_file(&out_abs);
+            self.compile(gxx, "rederive", src, extra, &out_rel);
+            let got = match sha256_file(&out_abs) {
+                Ok(s) => s,
+                Err(e) => self.fail("rederive", &format!("{name}: the compile produced no object ({e})")),
+            };
+            let want = match sha256_file(&self.repo.join("goldens").join("shim").join(name)) {
+                Ok(s) => s,
+                Err(e) => self.fail("rederive", &format!("goldens/shim/{name} unreadable: {e}")),
+            };
+            if got != want {
+                self.fail("rederive", &format!("{name}: recompiled sha256 {got} != frozen {want} -- the source, the flags or the kit moved: a re-freeze is a registered change"));
+            }
+            println!("   {name} OK ({})", &got[..16]);
+        }
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"rederive\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"objects\":{}}}}}",
+            self.gate_id,
+            FROZEN_PLAN.len()
+        ));
+        self.results.tally("pass", "positive");
+        println!("== rederive: {}/{} objects byte-identical to goldens/shim ==", FROZEN_PLAN.len(), FROZEN_PLAN.len());
+
+        println!("== case shim.foreign-errno-refused (negative control) ==");
+        let probe_rel = "src/kernel/target/shim-gate/obj/foreign-errno-probe.c";
+        write_fixture(
+            &self.repo.join(probe_rel.replace('/', std::path::MAIN_SEPARATOR_STR)),
+            b"#include <errno.h>\n#include \"rhu_pal_errno_p7.h\"\nint rhu_probe_value = RHU_GERR_ETIMEDOUT;\n",
+        );
+        let out_rel = "src/kernel/target/shim-gate/obj/foreign-errno-probe.o";
+        let stdout_p = self.out.join("foreign-errno-probe.cc.stdout");
+        let stderr_p = self.out.join("foreign-errno-probe.cc.stderr");
+        let mut args: Vec<String> = CC_FLAGS.iter().map(|s| s.to_string()).collect();
+        args.push(probe_rel.to_string());
+        args.push("-o".to_string());
+        args.push(out_rel.to_string());
+        let want_err = "a foreign errno.h is visible";
+        match run_tool_bounded(&self.repo, gxx, &args, &stdout_p, &stderr_p) {
+            Ok(true) => self.fail("shim.foreign-errno-refused", "the probe COMPILED -- the generated header's guard did not fire"),
+            Ok(false) => {
+                let err = std::fs::read_to_string(&stderr_p).unwrap_or_default();
+                if !err.contains(want_err) {
+                    echo_file(&stderr_p, "");
+                    self.fail("shim.foreign-errno-refused", &format!("the probe refused for the WRONG reason (stderr lacks '{want_err}')"));
+                }
+            }
+            Err(e) => self.fail("shim.foreign-errno-refused", &e),
+        }
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"shim.foreign-errno-refused\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"negative\",\"image\":null,\"broke\":\"the kit's errno.h included before the generated errno header\"}}",
+            self.gate_id
+        ));
+        self.results.tally("pass", "negative");
+        println!("== case shim.foreign-errno-refused: PASS (the generated errno header refused a foreign errno.h at compile with the designed message) ==");
+
+        self.run_newlib_header_control(gxx);
+    }
+
+    /// The compile-tier control for the generated C-library layout header
+    /// (`src/shim/rhu_newlib_arm32.h`): the probe above, compiled with the
+    /// kit's own headers under the nano configuration, must COMPILE against
+    /// the genuine header and must be REFUSED against a copy with one value
+    /// moved -- both sides, because a control that only accepts cannot be
+    /// told from no control. The nano include directory comes from the
+    /// compiler's own `-print-sysroot`, so no machine-local pointer is
+    /// added; the doctored copy is written beside the probe, where a quoted
+    /// include finds it first, and removed afterwards.
+    fn run_newlib_header_control(&mut self, gxx: &ToolCmd) {
+        const CASE: &str = "shim.newlib-header-ties-kit";
+        println!("== case {CASE} (compile-tier control) ==");
+        let sr_out = self.out.join("newlib-sysroot.stdout");
+        let sr_err = self.out.join("newlib-sysroot.stderr");
+        match run_tool_bounded(&self.repo, gxx, &["-print-sysroot".to_string()], &sr_out, &sr_err) {
+            Ok(true) => {}
+            Ok(false) => self.fail(CASE, "the compiler did not report its sysroot"),
+            Err(e) => self.fail(CASE, &e),
+        }
+        let sysroot = std::fs::read_to_string(&sr_out).unwrap_or_default().trim().to_string();
+        if sysroot.is_empty() {
+            self.fail(CASE, "the compiler reported an empty sysroot");
+        }
+        let nano = format!("{sysroot}/include/newlib-nano");
+        let obj_dir = self.out.join("obj");
+        let doctored = obj_dir.join("rhu_newlib_arm32.h");
+        let _ = std::fs::remove_file(&doctored);
+        let probe_rel = "src/kernel/target/shim-gate/obj/newlib-header-probe.c";
+        write_fixture(&self.repo.join(probe_rel.replace('/', std::path::MAIN_SEPARATOR_STR)), NEWLIB_PROBE_SOURCE);
+        let out_rel = "src/kernel/target/shim-gate/obj/newlib-header-probe.o";
+        self.compile(gxx, CASE, probe_rel, &["-isystem", &nano], out_rel);
+        println!("   (a) the generated header compiles against the kit's own headers under the nano configuration");
+
+        let genuine = std::fs::read_to_string(self.repo.join("src").join("shim").join("rhu_newlib_arm32.h")).unwrap_or_default();
+        if !genuine.contains(NEWLIB_DOCTOR_FROM) {
+            self.fail(CASE, "the doctored copy cannot be made: the line-buffered value is not where the control expects it");
+        }
+        let moved = genuine.replace(NEWLIB_DOCTOR_FROM, NEWLIB_DOCTOR_TO);
+        write_fixture(&doctored, moved.as_bytes());
+        let stdout_p = self.out.join("newlib-header-doctored.cc.stdout");
+        let stderr_p = self.out.join("newlib-header-doctored.cc.stderr");
+        let mut args: Vec<String> = CC_FLAGS.iter().map(|s| s.to_string()).collect();
+        args.push("-isystem".to_string());
+        args.push(nano.clone());
+        args.push(probe_rel.to_string());
+        args.push("-o".to_string());
+        args.push("src/kernel/target/shim-gate/obj/newlib-header-doctored.o".to_string());
+        let want_err = "the line-buffered flag ties the kit";
+        let outcome = run_tool_bounded(&self.repo, gxx, &args, &stdout_p, &stderr_p);
+        let _ = std::fs::remove_file(&doctored);
+        match outcome {
+            Ok(true) => self.fail(CASE, "the doctored header COMPILED -- the assertion did not bite on a moved value"),
+            Ok(false) => {
+                let err = std::fs::read_to_string(&stderr_p).unwrap_or_default();
+                if !err.contains(want_err) {
+                    echo_file(&stderr_p, "");
+                    self.fail(CASE, &format!("the doctored header refused for the WRONG reason (stderr lacks '{want_err}')"));
+                }
+            }
+            Err(e) => self.fail(CASE, &e),
+        }
+        println!("   (b) a copy with the line-buffered flag moved to the string-stream value is refused at the assertion that names it");
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"negative\",\"image\":null,\"broke\":\"one value of the generated C-library layout header moved\"}}",
+            self.gate_id
+        ));
+        self.results.tally("pass", "negative");
+        println!("== case {CASE}: PASS (the generated C-library layout header ties the kit's own headers; a moved value refused) ==");
+    }
+}
+
+pub fn run(repo: &Path) -> ! {
+    let facts = match rustc_facts() {
+        Ok(f) => f,
+        Err(e) => {
+            println!("rhu-gate: {e}");
+            exit(1);
+        }
+    };
+    let (qemu, qemu_v) = match resolve_qemu() {
+        Ok(q) => q,
+        Err(e) => {
+            println!("rhu-gate: {e}");
+            exit(1);
+        }
+    };
+    let ld = match resolve_ld(&facts) {
+        Ok(l) => l,
+        Err(e) => {
+            println!("rhu-gate: {e}");
+            exit(1);
+        }
+    };
+    let out = repo.join("src").join("kernel").join("target").join("shim-gate");
+    if std::fs::create_dir_all(&out).is_err() {
+        println!("rhu-gate: cannot create {}", out.display());
+        exit(1);
+    }
+    let results = match Results::create(&out.join("shim.results.jsonl")) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("rhu-gate: cannot create results file: {e}");
+            exit(1);
+        }
+    };
+    let mut shim = Shim { repo: repo.to_path_buf(), out, results, gate_id: GATE, display: DISPLAY, records: Vec::new() };
+    shim.results.emit(&format!(
+        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"shim\",\"run\":\"shim-{}\",\"host\":\"{HOST}\",\"runner\":\"{RUNNER}\",\"chain\":{},\"tools\":{{\"qemu\":\"{}\",\"rustc\":\"{}\",\"ld\":\"{}\"}}}}",
+        std::process::id(),
+        chain_json_from_env(),
+        qemu_v,
+        facts.version,
+        ld.version
+    ));
+    shim.verify_frozen();
+    shim.build_staticlib();
+    shim.run_core(&facts, &ld, &qemu);
+    shim.run_fdmap(&facts, &ld, &qemu);
+    shim.run_activation(&facts, &ld, &qemu);
+    shim.run_tls(&facts, &ld, &qemu);
+    shim.run_host(&facts, &ld, &qemu);
+    for p in PENDING {
+        println!("   pending (unarmed, not counted): {p}");
+    }
+    for c in INTERNAL_CASES {
+        println!("   internal (rederive leg, not counted): {c}");
+    }
+    shim.results.emit_summary(GATE, "pass", 0);
+    if !validate_results(repo, shim.results.path()) {
+        println!("{DISPLAY}: FAIL -- results file failed schema validation");
+        exit(1);
+    }
+    println!(
+        "{DISPLAY}: PASS (14/14 cases incl. 8 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        PENDING.len(),
+        INTERNAL_CASES.len(),
+        qemu_v,
+        facts.version,
+        ld.version
+    );
+    exit(0);
+}
+
+/// The internal re-derivation leg: the only place the C compiler lives.
+/// Recompiles the frozen plan, byte-asserts it against goldens/shim, then
+/// runs the compile-tier control. Needs the pinned 12.2 kit; consumers
+/// never need it -- the chain never calls this.
+pub fn rederive(repo: &Path) -> ! {
+    let gxx = match resolve_gxx(repo) {
+        Ok(g) => g,
+        Err(e) => {
+            println!("rhu-gate: {e}");
+            exit(1);
+        }
+    };
+    let out = repo.join("src").join("kernel").join("target").join("shim-gate");
+    if std::fs::create_dir_all(&out).is_err() {
+        println!("rhu-gate: cannot create {}", out.display());
+        exit(1);
+    }
+    let results = match Results::create(&out.join("shim-rederive.results.jsonl")) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("rhu-gate: cannot create results file: {e}");
+            exit(1);
+        }
+    };
+    let mut shim = Shim { repo: repo.to_path_buf(), out, results, gate_id: "shim-rederive", display: "SHIM REDERIVE", records: Vec::new() };
+    shim.results.emit(&format!(
+        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"shim-rederive\",\"run\":\"shim-rederive-{}\",\"host\":\"compile-tier\",\"runner\":\"{RUNNER}\",\"tools\":{{\"gxx\":\"{}\"}}}}",
+        std::process::id(),
+        gxx.version
+    ));
+    let mpath = repo.join("goldens").join("shim").join("MANIFEST.md");
+    match sha256_file(&mpath) {
+        Ok(s) if s == SHA_FROZEN_MANIFEST => {}
+        Ok(s) => {
+            println!("SHIM REDERIVE: FAIL -- goldens/shim/MANIFEST.md sha256 {s} != pinned {SHA_FROZEN_MANIFEST}");
+            exit(1);
+        }
+        Err(e) => {
+            println!("SHIM REDERIVE: FAIL -- goldens/shim/MANIFEST.md unreadable: {e}");
+            exit(1);
+        }
+    }
+    shim.run_rederive(&gxx);
+    let retarget = match (resolve_newlib_dir(repo), rustc_facts()) {
+        (Some(dir), Ok(facts)) => match resolve_ld(&facts) {
+            Ok(ld) => {
+                shim.run_newlib_retarget(&gxx, &facts, &ld, &dir);
+                "run"
+            }
+            Err(e) => {
+                println!("   declared (not run): shim.newlib-retarget -- {e}");
+                "declared"
+            }
+        },
+        (None, _) => {
+            println!("   declared (not run): shim.newlib-retarget -- the toolchain's C library is not resolved (set RHU_NEWLIB or write tools/toolchains/newlib.local)");
+            "declared"
+        }
+        (_, Err(e)) => {
+            println!("   declared (not run): shim.newlib-retarget -- {e}");
+            "declared"
+        }
+    };
+    shim.results.emit_summary("shim-rederive", "pass", 0);
+    if !validate_results(repo, shim.results.path()) {
+        println!("SHIM REDERIVE: FAIL -- results file failed schema validation");
+        exit(1);
+    }
+    println!(
+        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical; foreign-errno control refused at compile; C-library layout header ties the kit; C-library retarget {})  [{}]",
+        FROZEN_PLAN.len(),
+        FROZEN_PLAN.len(),
+        retarget,
+        gxx.version
+    );
+    exit(0);
+}
+
+/// Negative-control the shim gate's checkers: the manifest pin and record
+/// consistency, the frozen-object and golden compares, the import-closure
+/// pin, the one-strong-symbol sweep, the forbidden-family sweep, the
+/// failure detector, the exit-code and verdict-line checks -- each must
+/// REJECT its doctored input, with the accept side pinned on genuine
+/// inputs.
+pub fn selfcheck(repo: &Path) -> ! {
+    let rustc_v = match rustc_facts() {
+        Ok(f) => f.version,
+        Err(e) => {
+            println!("rhu-gate: {e}");
+            exit(1);
+        }
+    };
+    let out = repo.join("src").join("kernel").join("target").join("shim-gate");
+    if std::fs::create_dir_all(&out).is_err() {
+        println!("rhu-gate: cannot create {}", out.display());
+        exit(1);
+    }
+    let results = match Results::create(&out.join("shim-selfcheck.results.jsonl")) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("rhu-gate: cannot create results file: {e}");
+            exit(1);
+        }
+    };
+    let mut sc = Selfcheck {
+        repo: repo.to_path_buf(),
+        gate: "shim-selfcheck".to_string(),
+        display: "SHIM SELFCHECK".to_string(),
+        results,
+        n: 0,
+        npass: 0,
+        nneg: 0,
+    };
+    sc.results.emit(&format!(
+        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"shim-selfcheck\",\"run\":\"shim-selfcheck-{}\",\"host\":\"{HOST}\",\"runner\":\"{RUNNER}\",\"tools\":{{\"rustc\":\"{}\"}}}}",
+        std::process::id(),
+        rustc_v
+    ));
+
+    let ordered: Vec<u8> = HOST_MARKERS.join("\r\n").into_bytes();
+    sc.accept_probe("host-order-genuine", "a capture carrying the contract's markers in order", markers_out_of_order(&ordered, &HOST_MARKERS).is_none());
+    let mut noise: Vec<u8> = b"rhu 0.2.0 -- banner\r\n[boot] a kernel line\r\n".to_vec();
+    noise.extend_from_slice(&ordered);
+    noise.extend_from_slice(b"\r\n[payload] managed Main returned 0\r\n");
+    sc.accept_probe("host-order-in-noise", "the markers in order inside the surrounding kernel lines", markers_out_of_order(&noise, &HOST_MARKERS).is_none());
+    let mut swapped: Vec<&str> = HOST_MARKERS.to_vec();
+    swapped.swap(1, 4);
+    let swapped_capture: Vec<u8> = swapped.join("\r\n").into_bytes();
+    sc.probe("host-order-swapped", "every marker present, two of them in the wrong order", markers_out_of_order(&swapped_capture, &HOST_MARKERS).is_none());
+    let dropped: Vec<u8> = HOST_MARKERS[1..].join("\r\n").into_bytes();
+    sc.probe("host-order-missing", "a capture whose first contract marker never printed", markers_out_of_order(&dropped, &HOST_MARKERS).is_none());
+    let once: Vec<u8> = HOST_MARKERS[0].as_bytes().to_vec();
+    sc.probe("host-order-truncated", "a capture that stops after the first marker", markers_out_of_order(&once, &HOST_MARKERS).is_none());
+    let fault = markers_out_of_order(&swapped_capture, &HOST_MARKERS).unwrap_or_default();
+    sc.accept_probe("host-order-names-the-kind", "the out-of-order complaint says the marker appears, rather than that it is absent", fault.contains("before a marker that must precede it"));
+
+    sc.accept_probe("tls-span-empty", "an empty bracket pair where no template is wanted", template_span_fault(Some(0x2000_1000), Some(0x2000_1000), NO_TEMPLATE).is_none());
+    sc.accept_probe("tls-span-eight", "an eight-byte bracket pair where the template is wanted", template_span_fault(Some(0x2000_1000), Some(0x2000_1008), TLS_TEMPLATE_SPAN).is_none());
+    sc.probe("tls-span-unwanted", "an eight-byte bracket pair in an image that links no template", template_span_fault(Some(0x2000_1000), Some(0x2000_1008), NO_TEMPLATE).is_none());
+    sc.probe("tls-span-missing", "an empty bracket pair in the image whose template must span", template_span_fault(Some(0x2000_1000), Some(0x2000_1000), TLS_TEMPLATE_SPAN).is_none());
+    sc.probe("tls-span-short", "a four-byte bracket pair where eight are wanted", template_span_fault(Some(0x2000_1000), Some(0x2000_1004), TLS_TEMPLATE_SPAN).is_none());
+    sc.probe("tls-span-inverted", "a bracket pair whose low end is above its high end", template_span_fault(Some(0x2000_1008), Some(0x2000_1000), NO_TEMPLATE).is_none());
+    sc.probe("tls-span-unparsed", "a dump the bracket pair cannot be read from", template_span_fault(None, Some(0x2000_1008), TLS_TEMPLATE_SPAN).is_none());
+
+    let mpath = repo.join("goldens").join("shim").join("MANIFEST.md");
+    let msha = sha256_file(&mpath).unwrap_or_default();
+    sc.accept_probe("manifest-pin", "goldens/shim/MANIFEST.md ties the in-code pin", msha == SHA_FROZEN_MANIFEST);
+    let doctored_pin = format!("{}{}", &SHA_FROZEN_MANIFEST[..63], if SHA_FROZEN_MANIFEST.ends_with('0') { "1" } else { "0" });
+    sc.probe("manifest-pin-doctored", "manifest sha compared against a pin with one flipped digit", msha == doctored_pin);
+
+    let text = std::fs::read_to_string(&mpath).unwrap_or_default();
+    let records = parse_vendored_manifest(&text);
+    let on_disk: Vec<String> = FROZEN_PLAN.iter().map(|(n, _, _)| n.to_string()).collect();
+    sc.accept_probe("records-genuine", "the manifest's records tie the plan and goldens both directions", frozen_consistency(&records, &on_disk).is_ok());
+    let mut outside = records.clone();
+    if let Some(r) = outside.first_mut() {
+        r.0 = "goldens/other/shim-core.o".to_string();
+    }
+    sc.probe("record-outside-tier", "a manifest record naming a path outside goldens/shim", frozen_consistency(&outside, &on_disk).is_ok());
+    let mut extra = on_disk.clone();
+    extra.push("stray.o".to_string());
+    sc.probe("object-unrecorded", "an object on disk with no manifest record", frozen_consistency(&records, &extra).is_ok());
+
+    let want = records.iter().find(|(p, _)| p == "goldens/shim/shim-core.o").map(|(_, s)| s.clone()).unwrap_or_default();
+    let genuine = std::fs::read(repo.join("goldens").join("shim").join("shim-core.o")).unwrap_or_default();
+    let mut doctored = genuine.clone();
+    if let Some(b) = doctored.get_mut(64) {
+        *b ^= 0x01;
+    }
+    let dpath = out.join("doctored-shim-core.o");
+    write_fixture(&dpath, &doctored);
+    sc.accept_probe("object-genuine", "the frozen core object ties its record", sha256_file(&repo.join("goldens").join("shim").join("shim-core.o")).map(|s| s == want).unwrap_or(false));
+    sc.probe("object-doctored", "frozen object with one flipped byte", sha256_file(&dpath).map(|s| s == want).unwrap_or(false));
+
+    let golden = std::fs::read(repo.join("goldens").join("shim").join(GOLDENS[0])).unwrap_or_default();
+    let mut wrapped: Vec<u8> = b"rhu 0.2.0 -- kernel banner\r\n[boot] kernel line\r\n".to_vec();
+    wrapped.extend_from_slice(&golden);
+    wrapped.extend_from_slice(b"[payload] managed Main returned 0\r\n");
+    sc.accept_probe("golden-genuine", "the genuine payload stream inside kernel lines equals the golden", eq_lf_normalized(&payload_stream(&wrapped), &golden));
+    let flipped: Vec<u8> = String::from_utf8_lossy(&wrapped).replace("ALL GOOD", "ALL G00D").into_bytes();
+    sc.probe("golden-flipped", "payload stream with the verdict line's GOOD changed to G00D", eq_lf_normalized(&payload_stream(&flipped), &golden));
+
+    let act_golden = std::fs::read(repo.join("goldens").join("shim").join(GOLDENS[2])).unwrap_or_default();
+    sc.accept_probe("activation-verdict-last", "the activation golden ends on its verdict line", String::from_utf8_lossy(&act_golden).lines().last() == Some(ACT_ALL_GOOD));
+    let act_flipped: Vec<u8> = String::from_utf8_lossy(&act_golden).replace("ALL GOOD", "ALL G00D").into_bytes();
+    sc.probe("activation-golden-flipped", "the activation golden with its verdict line's GOOD changed to G00D", eq_lf_normalized(&act_flipped, &act_golden));
+
+    let mut pinned: Vec<String> = IMPORTS_GLUE.iter().map(|s| s.to_string()).collect();
+    pinned.sort();
+    sc.accept_probe("closure-genuine", "the pinned glue closure accepted exactly", imports_match(&pinned, &IMPORTS_GLUE));
+    let mut extra_name = pinned.clone();
+    extra_name.push("__emutls_get_address".to_string());
+    extra_name.sort();
+    sc.probe("closure-extra", "a closure with one extra import", imports_match(&extra_name, &IMPORTS_GLUE));
+    let missing: Vec<String> = pinned.iter().skip(1).cloned().collect();
+    sc.probe("closure-missing", "a closure with one import vanished", imports_match(&missing, &IMPORTS_GLUE));
+
+    sc.accept_probe("forbidden-clean", "the pinned closure carries no forbidden family", forbidden_import(&pinned).is_none());
+    sc.probe("forbidden-emutls", "a closure importing __emutls_get_address", forbidden_import(&extra_name).is_none());
+
+    let clean_a = "00000000 T malloc\n00000010 T free\n00000000 W weak_one\n";
+    let clean_b = "00000000 T pthread_self\n00000000 W weak_one\n";
+    let dup_b = "00000000 T malloc\n00000000 T pthread_self\n";
+    sc.accept_probe("strong-clean", "two objects with disjoint strong definitions (a shared weak allowed)", duplicate_definitions(&[clean_a, clean_b]).is_empty());
+    sc.probe("strong-duplicate", "two objects both defining malloc strongly", duplicate_definitions(&[clean_a, dup_b]).is_empty());
+
+    let imports = vec![vec!["rhu_now_ns".to_string(), "malloc".to_string()]];
+    let defined = vec![vec!["malloc".to_string()]];
+    let lib = vec!["rhu_now_ns".to_string()];
+    sc.accept_probe("resolve-clean", "imports defined by the objects or the staticlib resolve", unresolved_imports(&imports, &defined, &lib).is_empty());
+    let orphan = vec![vec!["rhu_now_ns".to_string(), "malloc_usable_size".to_string()]];
+    sc.probe("resolve-orphan", "an import that neither the objects nor the staticlib define", unresolved_imports(&orphan, &defined, &lib).is_empty());
+
+    let failing: &[u8] = b"shimtest: ladder\r\nPASS shim-init (x)\r\nFAIL shim-errno-thread (errno leaked across threads)\r\n[payload] managed Main returned 1\r\n";
+    sc.accept_probe("fail-absent", "the genuine golden carries no FAIL line", !contains_fixed(&golden, "FAIL "));
+    sc.probe("fail-present", "a transcript carrying a FAIL line", !contains_fixed(failing, "FAIL "));
+    sc.accept_probe("verdict-last", "the genuine golden ends on the verdict line", String::from_utf8_lossy(&golden).lines().last() == Some(CORE_ALL_GOOD));
+    sc.probe("verdict-missing", "a broken transcript without the verdict line", contains_fixed(failing, CORE_ALL_GOOD));
+    sc.probe("exit-timeout", "a run recorded as exit 124 (a hang) offered as exit 0", 124 == 0);
+
+    sc.finish("genuine inputs accepted");
+}

@@ -852,7 +852,7 @@ const FROZEN_PLAN: [(&str, &str, &[&str]); 27] = [
 /// leading or trailing '/'; root-level names (no '/' at all) are valid
 /// records. The caller treats an empty parse as a broken instrument,
 /// never as "nothing to verify".
-fn parse_vendored_manifest(text: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_vendored_manifest(text: &str) -> Vec<(String, String)> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     for i in 0..lines.len().saturating_sub(1) {
@@ -915,7 +915,7 @@ fn walk_vendor(root: &Path) -> Vec<String> {
 
 /// Undefined-symbol names from an `nm -u`-shaped dump (lines whose
 /// symbol-type column is U), sorted.
-fn parse_undefined(dump: &str) -> Vec<String> {
+pub(crate) fn parse_undefined(dump: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in dump.lines() {
         let mut it = line.split_whitespace();
@@ -1347,9 +1347,9 @@ fn in_order(raw: &[u8], markers: &[&str]) -> bool {
 }
 
 /// A word-split external tool command plus its reported version line.
-struct ToolCmd {
-    words: Vec<String>,
-    version: String,
+pub(crate) struct ToolCmd {
+    pub(crate) words: Vec<String>,
+    pub(crate) version: String,
 }
 
 /// Probe `<command> --version` bounded; first stdout line.
@@ -1385,7 +1385,7 @@ fn probe_version(words: &[String]) -> Result<String, String> {
 /// the command), else a loud refusal naming both. The resolved compiler
 /// must report the pinned 12.2 kit -- a different compiler version is a
 /// world change, a gated migration, never a drift.
-fn resolve_gxx(repo: &Path) -> Result<ToolCmd, String> {
+pub(crate) fn resolve_gxx(repo: &Path) -> Result<ToolCmd, String> {
     let words: Vec<String> = match std::env::var("RHU_GXX") {
         Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(str::to_string).collect(),
         _ => {
@@ -1416,7 +1416,7 @@ fn resolve_gxx(repo: &Path) -> Result<ToolCmd, String> {
 /// The image link driver, shared with the payload gate's world:
 /// RHU_PAYLOAD_LD (a command, word-split) overrides; otherwise rust-lld
 /// from the pinned toolchain's sysroot with `-flavor gnu`.
-fn resolve_ld(facts: &RustcFacts) -> Result<ToolCmd, String> {
+pub(crate) fn resolve_ld(facts: &RustcFacts) -> Result<ToolCmd, String> {
     let words: Vec<String> = match std::env::var("RHU_PAYLOAD_LD") {
         Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(str::to_string).collect(),
         _ => {
@@ -1440,7 +1440,7 @@ fn resolve_ld(facts: &RustcFacts) -> Result<ToolCmd, String> {
 /// Run one external tool with repo-relative arguments, bounded, streams
 /// captured to files; MSYS path conversion disabled (inert for native
 /// and WSL tools, load-bearing for MSYS-shimmed overrides).
-fn run_tool_bounded(
+pub(crate) fn run_tool_bounded(
     repo: &Path,
     tool: &ToolCmd,
     args: &[String],
