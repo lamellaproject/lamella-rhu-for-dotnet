@@ -17,7 +17,12 @@
  * kit; the mirror records below are asserted against those values at
  * compile time, so a library whose layout moved refuses to build this file
  * instead of writing the wrong word.
+ *
+ * The same meeting happens for the standard parsers at the bottom of this
+ * file: the runtime's layer links against them under a versioned spelling
+ * and this image's library defines them under the plain one.
  */
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -101,4 +106,36 @@ int rhu_stdio_line_buffer_stdout(void)
         return 0;
     h->sout->flags = (short)((h->sout->flags & ~RHU_LIBC_STREAM_NOBUF) | RHU_LIBC_STREAM_LINEBUF);
     return (h->sout->flags & RHU_LIBC_STREAM_LINEBUF) != 0 ? 0 : -1;
+}
+
+/* The standard parsers under the names the runtime's platform layer links
+ * against: that layer was compiled against a library that spells them
+ * with a version prefix, and this image's library spells them plainly.
+ * Each forwards its argument list to the library's own parser by the
+ * plain name. The stream type is opaque to this file for the same reason
+ * the stream header is not included. An image that links no C library
+ * never references these two, and the linker leaves them out. */
+int vfscanf(void *stream, const char *format, va_list ap);
+int vsscanf(const char *str, const char *format, va_list ap);
+
+int __isoc99_fscanf(void *stream, const char *format, ...)
+{
+    va_list ap;
+    int n;
+
+    va_start(ap, format);
+    n = vfscanf(stream, format, ap);
+    va_end(ap);
+    return n;
+}
+
+int __isoc99_sscanf(const char *str, const char *format, ...)
+{
+    va_list ap;
+    int n;
+
+    va_start(ap, format);
+    n = vsscanf(str, format, ap);
+    va_end(ap);
+    return n;
 }

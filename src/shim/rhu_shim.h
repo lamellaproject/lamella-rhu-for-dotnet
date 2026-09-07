@@ -31,15 +31,23 @@
 #define RHU_SHIM_FD_DEVICE_LO 64  /* reserved: 64 .. 79 */
 #define RHU_SHIM_FD_STORAGE_LO 80 /* reserved: 80 .. 95 */
 
-/* Every hosted thread the shim spawns runs at one fixed priority inside
- * the kernel's hosted band: equal-priority round-robin, so no priority
- * inversion can exist among them. */
-#define RHU_SHIM_PRIO_FLAT 0x80u
+/* Every hosted thread the shim spawns runs at the one flat priority the
+ * kernel names for the hosted band (rhu.h): the level the payload host
+ * thread itself holds while it runs the entry, so a started thread and
+ * its starter share one level in round-robin and no priority inversion
+ * can exist among them. The shim adopts the kernel's name, never a
+ * literal of its own. */
+#define RHU_SHIM_PRIO_FLAT ((uint32_t)RHU_HOSTED_PRIO_FLAT)
 
 /* Initialization, called once on the main thread before any other shim
  * entry: registers the per-thread block with the kernel's module registry
  * and builds the environment table. Returns 0; a second call is a no-op. */
 int rhu_shim_init(void);
+
+/* The number of thread activations the kernel has delivered to this
+ * image's handler so far (every delivery counts, whichever handler was
+ * recorded); the host prints it at exit. */
+uint32_t rhu_shim_activation_count(void);
 
 /* One diagnostic line on the console, prefixed "[shim] " and terminated,
  * written as one atomic console write. The conversion set is the small

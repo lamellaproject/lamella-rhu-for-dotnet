@@ -2,6 +2,7 @@
 //! mps2-an500, cumulative.
 
 use crate::gate::{write_fixture, CaseRun, GateCtx, Selfcheck};
+use crate::image::{check_records, header_abi, synth_records, HEADER_MAGIC, LAYOUT_MAGIC};
 use crate::results::{chain_json_from_env, validate_results, Results};
 use crate::text::{contains_fixed, cr_count, word_sym_present, word_sym_value};
 use crate::tools::{llvm_tool, resolve_qemu, run_captured, rustc_facts, RustcFacts};
@@ -53,7 +54,7 @@ const MARKERS_C: [&str; 7] = [
 const MARKERS_D: [&str; 10] = [
     "[api] PASS susp-pick (suspended spinner stayed ready with zero progress, woken waiter held until resume)",
     "[api] PASS susp-ctx (planted registers exact in ctx, sp inside the target stack, pc inside kernel text)",
-    "[api] PASS susp-hijack (sp edit refused exact, hijacked pc ran the pad with the planted witness)",
+    "[api] PASS susp-setctx (sp edit refused exact, the edited pc ran the pad with the planted witness)",
     "[api] PASS resume-urgent (resume preempted the caller before its next line)",
     "[api] PASS act-refuse (pre-registration send, null/second registration, self/idle suspends, idle send, unknown tids, unsuspended resume/set-context all refused exact)",
     "[api] PASS act-deliver (handler ran once per send on the target thread and stack, both interrupted flows continued)",
@@ -78,11 +79,37 @@ const MARKERS_F: [&str; 4] = [
     "[api] PASS entropy-honesty (draws filled and distinct, null refused, zero-length trivial, hardware query answers 0 on this class)",
     "[api] exit-door: handing the machine exit to rhu_exit(0)",
 ];
-const CONTRACT_SYMS: [&str; 4] = [
+/// The two debug-facing markers, boot order: the thread-local-base door
+/// check (after tls-blocks: the layout record walked from memory against
+/// the doors) and the thread-id-space check (the LAST check, before the
+/// exit-door line: the last two ids handed out, the spawn past the space
+/// refused).
+const MARKERS_G: [&str; 2] = [
+    "[api] PASS tls-base-door (record walked from memory: module-0 base null on every live thread beside empty template brackets, registered-module bases equal to the door's answers on kmain and both workers, non-live slots null)",
+    "[api] PASS tid-wrap (ids 0x7ffffffe and 0x7fffffff handed out positive, the spawn past the id space refused EAGAIN twice with the counter unmoved, no negative id)",
+];
+/// The host-band marker: the thread that hosts a payload
+/// joins the hosted band for the hosting's life -- a door-spawned child
+/// at the flat priority started through yield alone at one level with
+/// its host, joining re-ran the pick, leaving restored kernel urgency.
+/// Runs after entropy-honesty and before tid-wrap.
+const MARKERS_H: [&str; 1] = [
+    "[api] PASS host-band (the host joined the band and its door-spawned child at the flat priority started through yield alone at one level, joining re-ran the pick, leaving restored kernel urgency and held a band thread until the host blocked)",
+];
+/// The lazy floating-point marker: the activation resume
+/// completes the state the handler armed before it pops the target's
+/// frames -- a basic-frame target yields eight times after its resume
+/// and the switch-entry witness counted no abandoned state. Runs after
+/// act-sleep-rearm.
+const MARKERS_I: [&str; 1] = [
+    "[api] PASS act-lazy-fp (the handler ran one floating-point instruction on a target whose interrupted frame was basic, the target resumed and yielded eight times after it -- eight switch entries with its own frame basic -- and the witness counted no abandoned lazy floating-point state)",
+];
+const CONTRACT_SYMS: [&str; 5] = [
     "__rhu_debug_layout",
     "__rhu_sched",
     "__rhu_ticks",
     "__rhu_switches",
+    "__rhu_lazy_fp_witness",
 ];
 /// The module-root bracket pairs, pinned BY VALUE in the api (base-family)
 /// artifact: each pair must be present AND equal (the zero-length
@@ -199,6 +226,9 @@ impl API {
         markers.extend(MARKERS_D);
         markers.extend(MARKERS_E);
         markers.extend(MARKERS_F);
+        markers.extend(MARKERS_G);
+        markers.extend(MARKERS_H);
+        markers.extend(MARKERS_I);
         self.common_asserts("api", &run, 0, &markers, &["KERNEL PANIC", "EXCEPTION:"]);
         let nm = match llvm_tool(&self.facts, "llvm-nm") {
             Ok(p) => p,
@@ -218,6 +248,9 @@ impl API {
                 self.fail_case("api", code, 0, &sha, &path_rel, &format!("contract symbol '{s}' absent from the artifact"));
             }
         }
+        if word_sym_present(&dump, "rhu_payload_entry") {
+            self.fail_case("api", code, 0, &sha, &path_rel, "rhu_payload_entry present in a base-family artifact (the entry seam belongs to the payload family)");
+        }
         for (lo, hi) in BRACKET_PAIRS.iter() {
             let (Some(vlo), Some(vhi)) = (word_sym_value(&dump, lo), word_sym_value(&dump, hi))
             else {
@@ -227,8 +260,20 @@ impl API {
                 self.fail_case("api", code, 0, &sha, &path_rel, &format!("bracket pair {lo}/{hi} not zero-length in a base-family image ({vlo:#x} != {vhi:#x})"));
             }
         }
+        let header_text = std::fs::read_to_string(self.ctx.repo.join("src/kernel/include/rhu.h")).unwrap_or_default();
+        let Some(abi) = header_abi(&header_text) else {
+            self.ctx.gate_fail("api: src/kernel/include/rhu.h states no RHU_ABI (the contract generation the image header carries)")
+        };
+        let elf_bytes = std::fs::read(&elf).unwrap_or_default();
+        let rec = match check_records(&dump, &elf_bytes, abi) {
+            Ok(r) => r,
+            Err(e) => self.fail_case("api", code, 0, &sha, &path_rel, &format!("image records: {e}")),
+        };
         self.emit_case("api", "pass", code, 0, &sha, &path_rel);
-        println!("== case api: PASS (exit 0, 35 hosting-API checks, contract + API symbols + zero-length module-root brackets in-artifact) ==");
+        println!(
+            "== case api: PASS (exit 0, 39 hosting-API checks, contract + API symbols (the lazy floating-point witness among them) + zero-length module-root brackets in-artifact, no payload-entry seam in this family, the image header at {:#x} stating load address {:#010x} and generation {} and the layout record at {:#x} at version {} for {} threads with {} tls slots of {} bytes at offset {} in a {}-byte TCB, read off the artifact and tied) ==",
+            rec.header_at, rec.load_addr, rec.abi, rec.layout_at, rec.layout_version, rec.max_threads, rec.tls_slots, rec.tls_slot_bytes, rec.tcb_off_tls, rec.tcb_stride
+        );
     }
 
     /// The kheap-loud designed death: the corrupted
@@ -590,6 +635,17 @@ pub fn selfcheck(repo: &Path) -> ! {
         word_sym_present(&std::fs::read(&nof).unwrap_or_default(), "rhu_entropy"),
     );
 
+    let seam = tmp.join("seam-in-base.nm");
+    write_fixture(
+        &seam,
+        b"00000000 T rhu_now_ns\n00000010 T rhu_payload_entry\n00000020 T rhu_sleep_ns\n",
+    );
+    sc.probe(
+        "entry-seam-in-base",
+        "base-family symbol dump carrying rhu_payload_entry (the seam belongs to the payload family)",
+        !word_sym_present(&std::fs::read(&seam).unwrap_or_default(), "rhu_payload_entry"),
+    );
+
     let tunequal = tmp.join("tdata-unequal.nm");
     write_fixture(
         &tunequal,
@@ -696,6 +752,11 @@ pub fn selfcheck(repo: &Path) -> ! {
             .chain(API_SYMS.iter())
             .all(|s| word_sym_present(&goodsym_bytes, s)),
     );
+    sc.accept_probe(
+        "entry-seam-absent-accepted",
+        "genuine base-family dump without rhu_payload_entry accepted by the absence pin",
+        !word_sym_present(&goodsym_bytes, "rhu_payload_entry"),
+    );
     let goodbrackets = tmp.join("brackets-equal.nm");
     write_fixture(
         &goodbrackets,
@@ -711,6 +772,125 @@ pub fn selfcheck(repo: &Path) -> ! {
                 (Some(a), Some(b)) if a == b
             )
         }),
+    );
+
+    let gdoor = tmp.join("one-of-two-g-door.raw");
+    write_fixture(&gdoor, format!("{}\r\n", MARKERS_G[1]).as_bytes());
+    sc.probe(
+        "g-door-marker-gone",
+        "one-of-two transcript missing the tls-base-door marker",
+        MARKERS_G.iter().all(|m| contains_fixed(&std::fs::read(&gdoor).unwrap_or_default(), m)),
+    );
+    let gwrap = tmp.join("one-of-two-g-wrap.raw");
+    write_fixture(&gwrap, format!("{}\r\n", MARKERS_G[0]).as_bytes());
+    sc.probe(
+        "g-wrap-marker-gone",
+        "one-of-two transcript missing the tid-wrap marker",
+        MARKERS_G.iter().all(|m| contains_fixed(&std::fs::read(&gwrap).unwrap_or_default(), m)),
+    );
+
+    let hgone = tmp.join("h-marker-gone.raw");
+    write_fixture(&hgone, format!("{}\r\n{}\r\n", MARKERS_G[0], MARKERS_G[1]).as_bytes());
+    sc.probe(
+        "h-marker-gone",
+        "transcript with the two debug-facing markers and no host-band marker",
+        MARKERS_H.iter().all(|m| contains_fixed(&std::fs::read(&hgone).unwrap_or_default(), m)),
+    );
+    let hgreen = tmp.join("h-marker-present.raw");
+    write_fixture(&hgreen, format!("{}\r\n", MARKERS_H[0]).as_bytes());
+    sc.accept_probe(
+        "h-marker-present",
+        "genuine host-band PASS marker accepted by the H sweep",
+        MARKERS_H.iter().all(|m| contains_fixed(&std::fs::read(&hgreen).unwrap_or_default(), m)),
+    );
+
+    let igone = tmp.join("i-marker-gone.raw");
+    write_fixture(&igone, format!("{}\r\n", MARKERS_H[0]).as_bytes());
+    sc.probe(
+        "i-marker-gone",
+        "transcript with the host-band marker and no act-lazy-fp marker",
+        MARKERS_I.iter().all(|m| contains_fixed(&std::fs::read(&igone).unwrap_or_default(), m)),
+    );
+    let igreen = tmp.join("i-marker-present.raw");
+    write_fixture(&igreen, format!("{}\r\n", MARKERS_I[0]).as_bytes());
+    sc.accept_probe(
+        "i-marker-present",
+        "genuine act-lazy-fp PASS marker accepted by the I sweep",
+        MARKERS_I.iter().all(|m| contains_fixed(&std::fs::read(&igreen).unwrap_or_default(), m)),
+    );
+
+    let header_text = std::fs::read_to_string(repo.join("src/kernel/include/rhu.h")).unwrap_or_default();
+    let abi = header_abi(&header_text).unwrap_or(0);
+    let load: u32 = 0x0800_0000;
+    let good_h: [u32; 16] = [HEADER_MAGIC, 1, 64, load, abi, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let good_l: [u32; 16] = [LAYOUT_MAGIC, 2, 16, 100, 64, 140, 0, 12, 13, 20, 32, 4, 8, 48, 4, 4];
+    let (gd, ge) = synth_records(load, load, &good_h, &good_l);
+    sc.accept_probe(
+        "records-genuine",
+        "synthesized image with the header at load + 0x400 and a version-2 layout record accepted, every tie holding",
+        check_records(&gd, &ge, abi).is_ok(),
+    );
+    let nohdr = format!("{:08x} R __rhu_debug_layout\n", load + 0x800).into_bytes();
+    sc.probe(
+        "records-header-absent",
+        "symbol dump without __rhu_image_header (an image that states nothing)",
+        check_records(&nohdr, &ge, abi).is_ok(),
+    );
+    let mut h = good_h;
+    h[0] = 0x4948_5552;
+    let (d, e) = synth_records(load, load, &h, &good_l);
+    sc.probe("records-magic", "image header with a wrong magic word", check_records(&d, &e, abi).is_ok());
+    let mut h = good_h;
+    h[3] = load + 4;
+    let (d, e) = synth_records(load, load, &h, &good_l);
+    sc.probe(
+        "records-offset",
+        "image header stating a load address whose + 0x400 is not where the header sits",
+        check_records(&d, &e, abi).is_ok(),
+    );
+    let (d, e) = synth_records(load, load - 0x1000, &good_h, &good_l);
+    sc.probe(
+        "records-load-addr",
+        "image whose lowest load segment sits below the header's stated load address",
+        check_records(&d, &e, abi).is_ok(),
+    );
+    let mut h = good_h;
+    h[9] = 1;
+    let (d, e) = synth_records(load, load, &h, &good_l);
+    sc.probe("records-reserved", "image header with a reserved word set", check_records(&d, &e, abi).is_ok());
+    let mut h = good_h;
+    h[4] = abi + 1;
+    let (d, e) = synth_records(load, load, &h, &good_l);
+    sc.probe(
+        "records-abi",
+        "image header stating the next contract generation beside include/rhu.h's",
+        check_records(&d, &e, abi).is_ok(),
+    );
+    let mut l = good_l;
+    l[1] = 3;
+    let (d, e) = synth_records(load, load, &good_h, &l);
+    sc.probe(
+        "records-version-tie",
+        "layout record at version 3 beside a header stating version 2",
+        check_records(&d, &e, abi).is_ok(),
+    );
+    let mut h = good_h;
+    h[5] = 1;
+    let mut l = good_l;
+    l[1] = 1;
+    let (d, e) = synth_records(load, load, &h, &l);
+    sc.probe(
+        "records-predates-door",
+        "version-1 layout record beside a header stating version 1 (no thread-local-base door to read)",
+        check_records(&d, &e, abi).is_ok(),
+    );
+    let mut l = good_l;
+    l[13] = 132;
+    let (d, e) = synth_records(load, load, &good_h, &l);
+    sc.probe(
+        "records-tls-overrun",
+        "layout record whose tls slots run past the TCB stride",
+        check_records(&d, &e, abi).is_ok(),
     );
 
     sc.finish("genuine inputs accepted");

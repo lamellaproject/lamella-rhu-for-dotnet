@@ -1,0 +1,44 @@
+<Project>
+
+  <!-- The feature-switch surface of every hosted program under this
+       directory, in one file. Each knob takes a word, validates it, and maps
+       to the runtime's own build properties below, so a value in a build
+       log says what it means without knowing the polarity underneath.
+
+         knob            values       default   underlying
+         RhuDiag         min | rich   min       StackTraceSupport, UseSystemResourceKeys
+         RhuReflection   on  | off    on        the compiler argument reflectiondata:none -->
+
+  <PropertyGroup>
+    <RhuDiag Condition="'$(RhuDiag)' == ''">min</RhuDiag>
+    <RhuReflection Condition="'$(RhuReflection)' == ''">on</RhuReflection>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- diag: real exception sentences and stack-trace frames in the image. -->
+    <StackTraceSupport Condition="'$(RhuDiag)' == 'rich'">true</StackTraceSupport>
+    <StackTraceSupport Condition="'$(RhuDiag)' == 'min'">false</StackTraceSupport>
+    <UseSystemResourceKeys Condition="'$(RhuDiag)' == 'rich'">false</UseSystemResourceKeys>
+    <UseSystemResourceKeys Condition="'$(RhuDiag)' == 'min'">true</UseSystemResourceKeys>
+    <!-- The fixed posture of every image: invariant culture, no event
+         source, no metrics, no debugger support, size over speed. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EventSourceSupport>false</EventSourceSupport>
+    <MetricsSupport>false</MetricsSupport>
+    <DebuggerSupport>false</DebuggerSupport>
+    <OptimizationPreference>Size</OptimizationPreference>
+  </PropertyGroup>
+
+  <!-- reflection: the compiler takes this one as an argument, not a property. -->
+  <ItemGroup Condition="'$(RhuReflection)' == 'off'">
+    <IlcArg Include="--reflectiondata:none" />
+  </ItemGroup>
+
+  <!-- A knob with a value outside its set refuses the build naming the set,
+       so a typo cannot quietly mean the default. -->
+  <Target Name="RhuValidateKnobs" BeforeTargets="Build">
+    <Error Condition="'$(RhuDiag)' != 'min' and '$(RhuDiag)' != 'rich'" Text="RhuDiag='$(RhuDiag)' is not one of: min, rich" />
+    <Error Condition="'$(RhuReflection)' != 'on' and '$(RhuReflection)' != 'off'" Text="RhuReflection='$(RhuReflection)' is not one of: on, off" />
+  </Target>
+
+</Project>

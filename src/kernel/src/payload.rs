@@ -1,10 +1,11 @@
 //! Feature `payload`: host a minirt no-runtime payload (a frozen ILC
 //! object linked in by the external payload link, `payload-<board>.x`).
 
-use core::ptr::{addr_of, addr_of_mut};
+use core::hint::black_box;
+use core::ptr::{addr_of, addr_of_mut, read_volatile};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::{console, sched, semihost};
+use crate::{api, console, sched, semihost};
 
 /// GC arena, 96 KB. The hosted GC treats [arena_base, arena_base +
 /// arena_bytes) as its whole heap; the golden transcripts' heap-size
@@ -108,12 +109,41 @@ gc_current_sp:
 );
 
 
-/// Stack-guard cookie the payload's /GS-style epilogue checks compare
-/// against. Entry and exit read the same static, so any consistent
-/// constant satisfies the check; this profile has no runtime
-/// randomization source at boot.
-#[unsafe(no_mangle)]
-pub static __security_cookie: usize = 0x5248_5521;
+core::arch::global_asm!(
+    r#"
+    .section .rodata.__security_cookie, "a", %progbits
+    .weak __security_cookie
+    .type __security_cookie, %object
+    .p2align 2
+__security_cookie:
+    .word 0x52485521
+    .size __security_cookie, 4
+
+    .section .text.RhpLLsh, "ax", %progbits
+    .weak RhpLLsh
+    .type RhpLLsh, %function
+    .thumb_func
+RhpLLsh:
+    b.w   __rhu_minirt_llsh
+    .size RhpLLsh, . - RhpLLsh
+
+    .section .text.RhpLRsz, "ax", %progbits
+    .weak RhpLRsz
+    .type RhpLRsz, %function
+    .thumb_func
+RhpLRsz:
+    b.w   __rhu_minirt_lrsz
+    .size RhpLRsz, . - RhpLRsz
+
+    .section .text.RhpLRsh, "ax", %progbits
+    .weak RhpLRsh
+    .type RhpLRsh, %function
+    .thumb_func
+RhpLRsh:
+    b.w   __rhu_minirt_lrsh
+    .size RhpLRsh, . - RhpLRsh
+"#
+);
 
 /// EHABI personality routine named by the payload's unwind tables. The
 /// hosted profile fail-fasts instead of unwinding, so this is
@@ -126,28 +156,113 @@ extern "C" fn __aeabi_unwind_cpp_pr0() -> ! {
 
 
 #[unsafe(no_mangle)]
-extern "C" fn RhpLLsh(value: u64, count: i32) -> u64 {
+extern "C" fn __rhu_minirt_llsh(value: u64, count: i32) -> u64 {
     value << (count & 63)
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn RhpLRsz(value: u64, count: i32) -> u64 {
+extern "C" fn __rhu_minirt_lrsz(value: u64, count: i32) -> u64 {
     value >> (count & 63)
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn RhpLRsh(value: i64, count: i32) -> i64 {
+extern "C" fn __rhu_minirt_lrsh(value: i64, count: i32) -> i64 {
     value >> (count & 63)
 }
 
 
-/// Publish this thread's stack top, run the payload's module
-/// initializers, enter managed Main, and exit the machine with its
-/// return code. Runs on the kmain thread; never returns.
-pub fn run() -> ! {
-    PAYLOAD_STACK_TOP.store(sched::current_stack_top(), Ordering::Relaxed);
+core::arch::global_asm!(
+    r#"
+    .section .text.rhu_payload_entry, "ax", %progbits
+    .weak rhu_payload_entry
+    .type rhu_payload_entry, %function
+    .global __rhu_payload_entry_weak
+    .type __rhu_payload_entry_weak, %function
+    .thumb_func
+rhu_payload_entry:
+    .thumb_func
+__rhu_payload_entry_weak:
+    b.w   rhu_payload_entry_default
+    .size rhu_payload_entry, . - rhu_payload_entry
+    .size __rhu_payload_entry_weak, . - __rhu_payload_entry_weak
 
+    .section .rodata.rhu_payload_abi, "a", %progbits
+    .weak rhu_payload_abi
+    .type rhu_payload_abi, %object
+    .p2align 2
+rhu_payload_abi:
+    .word 0
+    .size rhu_payload_abi, 4
+"#
+);
+
+unsafe extern "C" {
+    fn rhu_payload_entry() -> i32;
+    fn __rhu_payload_entry_weak() -> i32;
+    static rhu_payload_abi: u32;
+}
+
+/// The exit code of a refused entry: the payload states a contract
+/// generation that is not this kernel's, or provides an entry without
+/// stating one. The sentence prints first, so a mismatched peer reports
+/// instead of hanging (the exit is a park on silicon).
+const EXIT_ENTRY_REFUSED: u32 = 4;
+
+/// One constructor array as the map brackets it: the walk's input.
+struct CtorArray {
+    lo: usize,
+    hi: usize,
+}
+
+impl CtorArray {
+    /// The bracket pair, each address through `black_box` (sized extern
+    /// statics that may share an address never sit un-opaque on both
+    /// sides of the arithmetic below), checked against the boot copy
+    /// window: an array outside it holds whatever the RAM held at
+    /// reset, so the refusal is loud and comes before any entry is read.
+    fn checked(name: &str, lo: *const usize, hi: *const usize, window: (usize, usize)) -> CtorArray {
+        let lo = black_box(lo as usize);
+        let hi = black_box(hi as usize);
+        assert!(lo <= hi, "{} brackets inverted", name);
+        assert!(lo >= window.0 && hi <= window.1, "{} outside the boot copy window", name);
+        CtorArray { lo, hi }
+    }
+
+    fn len(&self) -> usize {
+        (self.hi - self.lo) / core::mem::size_of::<usize>()
+    }
+
+    /// Call every entry in order. Each word is a Thumb function pointer
+    /// the linker resolved with its low bit set.
+    fn walk(&self) {
+        for i in 0..self.len() {
+            let f: extern "C" fn() = unsafe {
+                let word = read_volatile((self.lo as *const usize).add(i));
+                core::mem::transmute::<usize, extern "C" fn()>(word)
+            };
+            f();
+        }
+    }
+}
+
+/// The kernel's default entry, reached through the weak trampoline when
+/// no payload provides its own: the placement check on the three
+/// arrays, the pre-init then init constructor walks, one line stating
+/// what ran and what follows, the module list, managed Main -- whose
+/// code it returns.
+#[unsafe(no_mangle)]
+extern "C" fn rhu_payload_entry_default() -> i32 {
     unsafe extern "C" {
+        static __sdata: u32;
+        static __edata: u32;
+        static __preinit_array_start: usize;
+        static __preinit_array_end: usize;
+        static __init_array_start: usize;
+        static __init_array_end: usize;
+        static __fini_array_start: usize;
+        static __fini_array_end: usize;
+        static __start___modules: usize;
+        static __stop___modules: usize;
         fn InitializeModules(
             os_module: usize,
             headers: *const usize,
@@ -156,23 +271,97 @@ pub fn run() -> ! {
             n_classlib: i32,
         );
         fn __managed__Main(argc: i32, argv: *const *const u8) -> i32;
-        static __start___modules: usize;
-        static __stop___modules: usize;
+    }
+    let window = (
+        black_box(addr_of!(__sdata) as usize),
+        black_box(addr_of!(__edata) as usize),
+    );
+    let pre = CtorArray::checked(
+        ".preinit_array",
+        addr_of!(__preinit_array_start),
+        addr_of!(__preinit_array_end),
+        window,
+    );
+    let init = CtorArray::checked(
+        ".init_array",
+        addr_of!(__init_array_start),
+        addr_of!(__init_array_end),
+        window,
+    );
+    let _fini = CtorArray::checked(
+        ".fini_array",
+        addr_of!(__fini_array_start),
+        addr_of!(__fini_array_end),
+        window,
+    );
+    pre.walk();
+    init.walk();
+
+    let start = black_box(addr_of!(__start___modules) as usize);
+    let stop = black_box(addr_of!(__stop___modules) as usize);
+    let modules = (stop - start) / core::mem::size_of::<usize>();
+    kprintln!(
+        "[payload] constructors ran: {} pre-init, {} init; modules to initialize: {}",
+        pre.len(),
+        init.len(),
+        modules
+    );
+    unsafe {
+        InitializeModules(0, start as *const usize, modules as i32, core::ptr::null(), 0);
+        __managed__Main(0, core::ptr::null())
+    }
+}
+
+/// Refuse the entry: one sentence on the console, then the exit -- a
+/// mismatched peer reports, never hangs.
+fn refuse_entry(reason: core::fmt::Arguments) -> ! {
+    kprintln!("[payload] entry REFUSED: {}", reason);
+    semihost::exit(EXIT_ENTRY_REFUSED)
+}
+
+
+/// Publish this thread's stack top, settle the contract handshake, and
+/// hand the thread to the payload entry; exit the machine with the code
+/// it returns. Runs on the kmain thread; never returns.
+pub fn run() -> ! {
+    PAYLOAD_STACK_TOP.store(sched::current_stack_top(), Ordering::Relaxed);
+
+    let provided = black_box(rhu_payload_entry as *const () as usize)
+        != black_box(__rhu_payload_entry_weak as *const () as usize);
+    let stated = unsafe { read_volatile(addr_of!(rhu_payload_abi)) };
+    match (provided, stated) {
+        (false, 0) => kprintln!(
+            "[payload] entry: kernel default (hosting-API contract generation {})",
+            api::ABI
+        ),
+        (false, n) if n == api::ABI => kprintln!(
+            "[payload] entry: kernel default; the payload states hosting-API contract generation {} (this kernel: {})",
+            n,
+            api::ABI
+        ),
+        (true, n) if n == api::ABI => kprintln!(
+            "[payload] entry: payload-provided, built for hosting-API contract generation {} (this kernel: {})",
+            n,
+            api::ABI
+        ),
+        (true, 0) => refuse_entry(format_args!(
+            "the payload provides rhu_payload_entry but states no hosting-API contract generation (rhu_payload_abi)"
+        )),
+        (_, n) => refuse_entry(format_args!(
+            "the payload was built for hosting-API contract generation {}, this kernel serves {}",
+            n,
+            api::ABI
+        )),
     }
 
-    let rc = unsafe {
-        let start = addr_of!(__start___modules) as usize;
-        let stop = addr_of!(__stop___modules) as usize;
-        InitializeModules(
-            0,
-            start as *const usize,
-            ((stop - start) / core::mem::size_of::<usize>()) as i32,
-            core::ptr::null(),
-            0,
-        );
-        __managed__Main(0, core::ptr::null())
-    };
-
+    let kernel_prio = sched::set_current_prio(api::HOSTED_PRIO_FLAT as u8);
+    kprintln!(
+        "[payload] host thread: hosted priority {:#04x} for the entry, kernel urgency {} restored at return",
+        api::HOSTED_PRIO_FLAT,
+        kernel_prio
+    );
+    let rc = unsafe { rhu_payload_entry() };
+    sched::set_current_prio(kernel_prio);
     kprintln!("[payload] managed Main returned {}", rc);
     semihost::exit(rc as u32)
 }

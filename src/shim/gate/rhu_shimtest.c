@@ -12,7 +12,9 @@
  *   RHU_SHIMTEST_LADDER_TLS         the image's thread-local template: the
  *                                   kernel's per-thread copy of module 0
  *   RHU_SHIMTEST_LADDER_HOST        the initialization contract the host runs
- *                                   before managed code, and its order
+ *                                   before managed code, in the host's own
+ *                                   entry: its order, the module handle,
+ *                                   the table by the runtime's export names
  *
  * Every check prints one PASS line; the first failed check prints one
  * FAIL line and ends the run with exit 1. Workers never print, no line
@@ -219,15 +221,24 @@ static int spawn(uint32_t *tid, void *(*fn)(void *), void *arg, uint32_t stack)
 
 #endif /* RHU_SHIMTEST_LADDER_CORE || RHU_SHIMTEST_LADDER_ACTIVATION || _TLS */
 
-/* The managed entry sequence: no modules to initialize here. */
-void InitializeModules(uintptr_t os_module, const uintptr_t *headers, int32_t count,
-                       const uintptr_t *classlib, int32_t n_classlib)
+/* The module-list initializer of the managed entry sequence, spelled as
+ * the runtime's own bootstrapper declares it: no modules to initialize in
+ * any tenant image. The host ladder records the call for its order
+ * check. */
+#ifdef RHU_SHIMTEST_LADDER_HOST
+static void host_record_modules(void *os_module, int count);
+#endif
+void InitializeModules(void *osModule, void **modules, int count, void **pClasslibFunctions, int nClasslibFunctions)
 {
-    (void)os_module;
-    (void)headers;
+    (void)modules;
+    (void)pClasslibFunctions;
+    (void)nClasslibFunctions;
+#ifdef RHU_SHIMTEST_LADDER_HOST
+    host_record_modules(osModule, count);
+#else
+    (void)osModule;
     (void)count;
-    (void)classlib;
-    (void)n_classlib;
+#endif
 }
 
 #ifdef RHU_SHIMTEST_LADDER_CORE
@@ -945,7 +956,7 @@ __attribute__((noinline)) static void spin_in_window(void)
         : "r3", "memory", "cc");
 }
 
-enum act_mode { ACT_DELIVER = 1, ACT_HIJACK = 2, ACT_BLOCK = 3, ACT_COUNT = 4 };
+enum act_mode { ACT_DELIVER = 1, ACT_SETCTX = 2, ACT_BLOCK = 3, ACT_COUNT = 4 };
 static volatile int g_act_mode;
 static volatile uint32_t g_act_count;
 static volatile int g_act_signo;
@@ -969,7 +980,7 @@ static volatile int g_pad_ran;
 
 #define ACT_MAGIC 0xC0DEF00Du
 
-/* The landing function a hijacked thread resumes into: r0 carries the
+/* The landing function a redirected thread resumes into: r0 carries the
  * magic the handler planted; the thread then ends. */
 __attribute__((noinline)) static void landing_pad(uint32_t magic)
 {
@@ -996,7 +1007,7 @@ static void act_handler(int signo, rhu_glibc_siginfo *si, void *ctx)
     g_act_regspace0 = uc->uc_regspace[0];
     g_act_ucflags = uc->uc_flags;
     g_act_sssp = (uint32_t)(uintptr_t)uc->uc_stack.ss_sp;
-    if (g_act_mode == ACT_HIJACK) {
+    if (g_act_mode == ACT_SETCTX) {
         uc->uc_mcontext.arm_r0 = ACT_MAGIC;
         uc->uc_mcontext.arm_pc = (uint32_t)(uintptr_t)landing_pad;
         uc->uc_mcontext.arm_sp += 8;
@@ -1215,22 +1226,22 @@ static int activation_ladder(void)
     wait_done(&g_act_done, 1);
     pass("shim-act-deliver", " (the handler ran on the target's own stack with the process id, the thread's own id, the origin code, and the interrupted registers inside the target's window; the recorded mask rides the context)");
 
-    /* hijack: r0 and pc edited through the context land on the thread */
-    g_act_mode = ACT_HIJACK;
+    /* set-context: r0 and pc edited through the context land on the thread */
+    g_act_mode = ACT_SETCTX;
     g_w_spinning = 0;
     g_spin_release = 0;
     g_pad_ran = 0;
     base_count = g_act_count;
-    CHECK(spawn(&t1, act_spin_worker, NULL, ACT_WORKER_STACK) == 0, "shim-act-hijack", "(spawn refused)");
-    CHECK(poll_flag(&g_w_spinning, 200), "shim-act-hijack", "(the worker never reached the window)");
+    CHECK(spawn(&t1, act_spin_worker, NULL, ACT_WORKER_STACK) == 0, "shim-act-setctx", "(spawn refused)");
+    CHECK(poll_flag(&g_w_spinning, 200), "shim-act-setctx", "(the worker never reached the window)");
     msleep(5);
-    CHECK(pthread_kill(t1, g_actsig) == 0, "shim-act-hijack", "(the send was refused)");
-    CHECK(poll_flag(&g_pad_ran, 100), "shim-act-hijack", "(the landing function never ran)");
-    CHECK(g_act_count == base_count + 1, "shim-act-hijack", "(the handler count)");
-    CHECK(g_pad_magic == ACT_MAGIC, "shim-act-hijack", "(r0 did not carry the planted magic)");
-    CHECK(g_pad_tid == t1, "shim-act-hijack", "(the landing function ran on another thread)");
+    CHECK(pthread_kill(t1, g_actsig) == 0, "shim-act-setctx", "(the send was refused)");
+    CHECK(poll_flag(&g_pad_ran, 100), "shim-act-setctx", "(the landing function never ran)");
+    CHECK(g_act_count == base_count + 1, "shim-act-setctx", "(the handler count)");
+    CHECK(g_pad_magic == ACT_MAGIC, "shim-act-setctx", "(r0 did not carry the planted magic)");
+    CHECK(g_pad_tid == t1, "shim-act-setctx", "(the landing function ran on another thread)");
     msleep(20);
-    pass("shim-act-hijack", " (a pc and r0 edit through the signal context landed on the interrupted thread; a stack-pointer edit was ignored and reported)");
+    pass("shim-act-setctx", " (a pc and r0 edit through the signal context landed on the interrupted thread; a stack-pointer edit was ignored and reported)");
 
     /* a handler that blocks: the interrupted flow waits, then resumes */
     g_act_mode = ACT_BLOCK;
@@ -1469,36 +1480,70 @@ static int tls_ladder(void)
 #ifdef RHU_SHIMTEST_LADDER_HOST
 
 /* The host contract's counterparties, standing in for the runtime so the
- * ORDER can be proven without the runtime present. Each records that it
- * was called and what it was given; the managed program then reports the
- * record, so the transcript proves the sequence rather than just its
- * outcome. The stand-ins carry the prototypes the generated header
- * declares: a stand-in that disagreed with the pin would prove the wrong
- * contract. */
+ * ORDER can be proven without the runtime present, and the class-library
+ * exports standing in for the managed program's, so the table the host
+ * installs can be read from the callee's side by the names the runtime's
+ * bootstrapper installs. Each stand-in records that it was called and
+ * what it was given; the managed entry then reports the record, so the
+ * transcript proves the sequence rather than just its outcome. The
+ * stand-ins carry the prototypes the generated header declares and read
+ * the table by the slot names and export names it declares: a stand-in
+ * that disagreed with the pin would prove the wrong contract. */
 #include "rhu_rt_entry_p7.h"
 
-int32_t rhu_host_main(int32_t argc, const uint8_t *const *argv);
+_Static_assert(RHU_RT_CLASSLIB_SLOTS > RHU_RT_CLASSLIB_SLOT_ResolveDispatch, "the table holds the dispatch slot");
+_Static_assert(RHU_RT_CLASSLIB_EXPORTS == 8, "eight slots carry an export at this pin");
+
+/* The in-image header the kernel states: the module handle the host passes
+ * is the load address it carries. */
+extern const uint32_t __rhu_image_header[16];
 
 static int g_step;
 static int g_rt_init_at;
 static int g_rt_register_at;
+static int g_modules_at;
 static int g_managed_at;
-static void *g_classlib_slot0;
-static void *g_classlib_slot4;
-static uint32_t g_classlib_slots;
 static void *g_registered_module;
+static void *g_modules_module;
+static int g_modules_count;
+static uint32_t g_managed_bytes;
+static uint32_t g_unbox_bytes;
+static uint32_t g_classlib_slots;
+static void *g_classlib[RHU_RT_CLASSLIB_SLOTS];
 
-void *__rhu_classlib_slot0(void);
-void *__rhu_classlib_slot4(void);
-
-void *__rhu_classlib_slot0(void)
+/* The class-library exports, by the names the bootstrapper installs. */
+void GetRuntimeException(void)
 {
-    return NULL;
 }
 
-void *__rhu_classlib_slot4(void)
+void RuntimeFailFast(void)
 {
-    return NULL;
+}
+
+size_t ThreadEntryPoint(void *pContext)
+{
+    (void)pContext;
+    return 0;
+}
+
+void AppendExceptionStackFrame(void)
+{
+}
+
+void ResolveDispatch(void)
+{
+}
+
+void GetSystemArrayEEType(void)
+{
+}
+
+void OnFirstChanceException(void)
+{
+}
+
+void OnUnhandledException(void)
+{
 }
 
 bool RhInitialize(bool isDll)
@@ -1513,71 +1558,86 @@ bool RhRegisterOSModule(void *pModule,
                         void *pvUnboxingStubsStartRange, uint32_t cbUnboxingStubsRange,
                         void **pClasslibFunctions, uint32_t nClasslibFunctions)
 {
+    uint32_t i;
     (void)pvManagedCodeStartRange;
-    (void)cbManagedCodeRange;
     (void)pvUnboxingStubsStartRange;
-    (void)cbUnboxingStubsRange;
     g_rt_register_at = ++g_step;
     g_registered_module = pModule;
+    g_managed_bytes = cbManagedCodeRange;
+    g_unbox_bytes = cbUnboxingStubsRange;
     g_classlib_slots = nClasslibFunctions;
-    if (pClasslibFunctions != NULL && nClasslibFunctions > 4u) {
-        g_classlib_slot0 = pClasslibFunctions[0];
-        g_classlib_slot4 = pClasslibFunctions[4];
-    }
+    for (i = 0; i < nClasslibFunctions && i < (uint32_t)RHU_RT_CLASSLIB_SLOTS; i++)
+        g_classlib[i] = pClasslibFunctions != NULL ? pClasslibFunctions[i] : NULL;
     return true;
+}
+
+static void host_record_modules(void *os_module, int count)
+{
+    g_modules_at = ++g_step;
+    g_modules_module = os_module;
+    g_modules_count = count;
 }
 
 /* The managed program. It runs last, so every record above is complete by
  * the time it checks them. */
-int32_t __rhu_managed_main(int32_t argc, const uint8_t *const *argv);
-int32_t __rhu_managed_main(int32_t argc, const uint8_t *const *argv)
+static int32_t host_checks(int argc)
 {
-    (void)argv;
+    int i;
+
+    out("shimtest: the host's initialization contract, in order");
     g_managed_at = ++g_step;
 
     CHECK(g_rt_init_at == 1, "shim-host-order", "(the runtime was not initialized first)");
     CHECK(g_rt_register_at == 2, "shim-host-order", "(the module was not registered after initialization)");
-    CHECK(g_managed_at == 3, "shim-host-order", "(managed entry did not come last)");
-    pass("shim-host-order", " (initialize, then register, then managed entry)");
+    CHECK(g_modules_at == 3, "shim-host-order", "(the module list was not initialized after the registration)");
+    CHECK(g_managed_at == 4, "shim-host-order", "(managed entry did not come last)");
+    pass("shim-host-order", " (initialize, then register, then the module list, then managed entry)");
 
     CHECK(g_classlib_slots == RHU_RT_CLASSLIB_SLOTS, "shim-host-classlib", "(the table is not twelve slots)");
-    CHECK(g_classlib_slot0 == (void *)(uintptr_t)&__rhu_classlib_slot0, "shim-host-classlib", "(slot 0 is not the entry the host installed)");
-    CHECK(g_classlib_slot4 == (void *)(uintptr_t)&__rhu_classlib_slot4, "shim-host-classlib", "(slot 4 is not the entry the host installed)");
-    pass("shim-host-classlib", " (twelve slots; the dispatch slot carries the entry the host installed)");
+    CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_GetRuntimeException] == (void *)(uintptr_t)&GetRuntimeException, "shim-host-classlib", "(slot 0 is not the runtime-exception export)");
+    CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_FailFast] == (void *)(uintptr_t)&RuntimeFailFast, "shim-host-classlib", "(slot 1 is not the fail-fast export)");
+    CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_ThreadEntryPoint] == (void *)(uintptr_t)&ThreadEntryPoint, "shim-host-classlib", "(slot 2 is not the thread entry point)");
+    CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_AppendExceptionStackFrame] == (void *)(uintptr_t)&AppendExceptionStackFrame, "shim-host-classlib", "(slot 3 is not the stack-frame export)");
+    CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_ResolveDispatch] == (void *)(uintptr_t)&ResolveDispatch, "shim-host-classlib", "(slot 4 is not the dispatch resolver)");
+    CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_GetSystemArrayEEType] == (void *)(uintptr_t)&GetSystemArrayEEType, "shim-host-classlib", "(slot 5 is not the array-type export)");
+    CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_OnFirstChanceException] == (void *)(uintptr_t)&OnFirstChanceException, "shim-host-classlib", "(slot 6 is not the first-chance export)");
+    CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_OnUnhandledException] == (void *)(uintptr_t)&OnUnhandledException, "shim-host-classlib", "(slot 7 is not the unhandled-exception export)");
+    for (i = RHU_RT_CLASSLIB_EXPORTS; i < RHU_RT_CLASSLIB_SLOTS; i++)
+        CHECK(g_classlib[i] == NULL, "shim-host-classlib", "(a slot past the exports is not null)");
+    pass("shim-host-classlib", " (twelve slots; eight exports by the bootstrapper's names, four null)");
 
-    CHECK(g_registered_module != NULL, "shim-host-module", "(the module registered as nothing)");
-    CHECK(argc == 0, "shim-host-module", "(this platform has no command line)");
-    pass("shim-host-module", " (the image registered itself; no command line on this platform)");
+    CHECK(g_registered_module == (void *)(uintptr_t)__rhu_image_header[3], "shim-host-module", "(the module handle is not the image's stated load address)");
+    CHECK(g_modules_module == g_registered_module, "shim-host-module", "(the module list was initialized under another handle)");
+    CHECK(g_managed_bytes == 0u && g_unbox_bytes == 0u, "shim-host-module", "(this tenant carries no managed code, yet a range was registered)");
+    CHECK(g_modules_count == 0, "shim-host-module", "(this tenant carries no module table, yet modules were counted)");
+    CHECK(argc == 1, "shim-host-module", "(the argument vector does not carry the one program name)");
+    pass("shim-host-module", " (the handle is the image's load address; empty ranges; no module; one argument)");
 
     out("SHIMTEST-HOST: ALL GOOD (the initialization contract in order; the class-library table as the pin declares it)");
     return 0;
 }
 
-/* The kernel's payload entry calls this name. Handing straight to the
- * host is what the payload entry itself would do if the boundary between
- * the two sat where the contract wants it. */
-static int32_t host_ladder(void)
-{
-    out("shimtest: the host's initialization contract, in order");
-    rhu_shim_init();
-    return rhu_host_main(0, NULL);
-}
-
 #endif /* RHU_SHIMTEST_LADDER_HOST */
 
-int32_t __managed__Main(int32_t argc, const uint8_t *const *argv)
+/* The managed entry, spelled as the runtime's own bootstrapper declares
+ * it: the kernel's default entry calls it in every ladder but the host's,
+ * where the host does. */
+int __managed__Main(int argc, char *argv[])
 {
-    (void)argc;
     (void)argv;
 #if defined(RHU_SHIMTEST_LADDER_CORE)
+    (void)argc;
     return core_ladder();
 #elif defined(RHU_SHIMTEST_LADDER_FDMAP)
+    (void)argc;
     return fdmap_ladder();
 #elif defined(RHU_SHIMTEST_LADDER_ACTIVATION)
+    (void)argc;
     return activation_ladder();
 #elif defined(RHU_SHIMTEST_LADDER_TLS)
+    (void)argc;
     return tls_ladder();
 #else
-    return host_ladder();
+    return host_checks(argc);
 #endif
 }

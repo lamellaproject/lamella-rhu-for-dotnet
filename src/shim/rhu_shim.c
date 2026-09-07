@@ -205,18 +205,45 @@ int *__errno_location(void)
 #define SET_ERRNO(e) (block()->err = (e))
 
 /* ------------------------------------------------------------------ */
+/* the stack protector                                                 */
+/* ------------------------------------------------------------------ */
+
+/* The guard word every protected frame in the runtime archives stores at
+ * entry and compares at exit (the archives were built with the stack
+ * protector on, and the glibc personality reads the word through this
+ * global). It starts as a fixed pattern and is re-seeded from the entropy
+ * door at initialization, before any protected frame exists; a mismatch
+ * at a frame's exit ends the run through the loud path below, never by
+ * returning into an overwritten frame. Answering both names here keeps
+ * the C library's own stack-protector member, and the signal member it
+ * pulls, out of the image. */
+uintptr_t __stack_chk_guard = 0x52485521u;
+
+void __stack_chk_fail(void) __attribute__((noreturn));
+void __stack_chk_fail(void)
+{
+    rhu_shim_log("stack protector: a frame's guard word was overwritten on thread %d", rhu_thread_self());
+    rhu_shim_exit(134);
+}
+
+/* ------------------------------------------------------------------ */
 /* the environment table                                               */
 /* ------------------------------------------------------------------ */
 
 /* The rows the runtime reads. The collector's aggregate hard limit is
  * generated from the board row's managed region at initialization, so the
  * row header is the one declaration site; the rest are constants of this
- * hosting. */
+ * hosting. The two collector rows name this image's own collector: the
+ * runtime loads a collector by the path row directly, through the loader
+ * seam below, and the name row is stated beside it because the runtime
+ * reads both. */
 static char g_env_hard_limit[48];
 static const char *g_env[] = {
     g_env_hard_limit,
     "DOTNET_gcServer=0",
     "DOTNET_gcConcurrent=0",
+    "DOTNET_GCName=rhu-mgc",
+    "DOTNET_GCPath=rhu-mgc",
     "HOME=/tmp",
     NULL,
 };
@@ -256,6 +283,10 @@ int rhu_shim_init(void)
     }
     g_block_module = h;
     env_build();
+    if (rhu_entropy(&__stack_chk_guard, (uint32_t)sizeof __stack_chk_guard) != 0) {
+        rhu_shim_log("init: the entropy door refused the stack guard's seed");
+        rhu_exit(120);
+    }
     rhu_shim_log("init: per-thread block registered as module %d (%u bytes)", h,
                  (unsigned)sizeof(shim_block));
     return 0;
@@ -740,6 +771,7 @@ static void thread_entry(void *p)
 
 static int spawn_thread(uint32_t stack_bytes, void *(*fn)(void *), void *arg, uint32_t *tid_out)
 {
+    uint32_t asked = stack_bytes;
     if (stack_bytes == 0)
         stack_bytes = MGC_ROW_STACK_DEFAULT;
     if (stack_bytes > MGC_ROW_STACK_CLAMP) {
@@ -752,12 +784,27 @@ static int spawn_thread(uint32_t stack_bytes, void *(*fn)(void *), void *arg, ui
         return RHU_GERR_EAGAIN;
     s->fn = fn;
     s->arg = arg;
+    /* The kernel's refusal is honest and momentary when a thread that was
+     * joined has not yet given its stack back (the join returns before the
+     * thread's last instruction); the retry story is this caller's, so a
+     * refused spawn is asked again for a bounded while before it becomes
+     * the caller's error. */
     int32_t tid = rhu_thread_spawn(thread_entry, s, stack_bytes, RHU_SHIM_PRIO_FLAT, NULL);
+    unsigned retries = 0u;
+    while (tid == RHU_EAGAIN && retries < 100u) {
+        rhu_sleep_ns(1000000ull);
+        retries++;
+        tid = rhu_thread_spawn(thread_entry, s, stack_bytes, RHU_SHIM_PRIO_FLAT, NULL);
+    }
     if (tid < 0) {
         rhu_kheap_free(s);
         rhu_shim_log("pthread_create: the kernel refused the spawn (%d) -> EAGAIN", tid);
         return RHU_GERR_EAGAIN;
     }
+    if (retries != 0u)
+        rhu_shim_log("pthread_create: the spawn was refused and then accepted after %u retries (a stack given back)", retries);
+    rhu_shim_log("pthread_create: stack %u B asked, %u B spawned (tid %d)",
+                 (unsigned)asked, (unsigned)stack_bytes, tid);
     if (tid_out != NULL)
         *tid_out = (uint32_t)tid;
     return 0;
@@ -1033,6 +1080,12 @@ typedef struct sig_disposition {
 
 static sig_disposition g_sig[RHU_GLIBC_NSIG];
 static uint32_t g_activation_armed;
+static uint32_t g_activation_count;
+
+uint32_t rhu_shim_activation_count(void)
+{
+    return g_activation_count;
+}
 static uint32_t g_sp_edit_noted;
 static uint32_t g_status_edit_noted;
 
@@ -1052,6 +1105,7 @@ static void act_costume(rhu_ctx *k)
     rhu_glibc_ucontext uc;
     rhu_glibc_siginfo si;
     shim_block *b = block();
+    g_activation_count++;
     memset(&uc, 0, sizeof uc);
     memset(&si, 0, sizeof si);
     si.si_signo = SHIM_ACTIVATION_SIGNAL;
@@ -1474,11 +1528,63 @@ char *dlerror(void)
     return (char *)"dynamic loading is not available on this platform";
 }
 
+/* The glibc arm32 personality's address-information record: four
+ * pointer-sized fields -- the file name and base of the module holding
+ * the address, then the nearest symbol's name and address. */
+typedef struct rhu_glibc_dl_info {
+    const char *dli_fname;
+    void *dli_fbase;
+    const char *dli_sname;
+    void *dli_saddr;
+} rhu_glibc_dl_info;
+
+/* The in-image header the kernel states at the image base: the module
+ * base every reader of this record shares (the host's registration, a
+ * debugger, this answer). Sixteen words; the magic, the layout version
+ * and the load address are the ones read here. */
+extern const uint32_t __rhu_image_header[16];
+#define RHU_SHIM_IMAGE_MAGIC 0x49554852u
+#define RHU_SHIM_IMAGE_LAYOUT 1u
+
+/* An address inside a registered module's code is answered with the
+ * image's own name and the load address its header states -- the one
+ * number the host registered the module under. This image has no symbol
+ * table to consult, so the nearest-symbol fields are null. Any other
+ * address is not inside a module this hosting knows. */
 int dladdr(const void *addr, void *info)
 {
-    (void)addr;
-    (void)info;
-    return 0;
+    rhu_module_desc d;
+    rhu_glibc_dl_info *out = (rhu_glibc_dl_info *)info;
+    if (out == NULL || rhu_module_find((uint32_t)(uintptr_t)addr, &d) < 0)
+        return 0;
+    if (__rhu_image_header[0] != RHU_SHIM_IMAGE_MAGIC || __rhu_image_header[1] != RHU_SHIM_IMAGE_LAYOUT) {
+        rhu_shim_log("dladdr: the in-image header does not read as layout version 1");
+        return 0;
+    }
+    out->dli_fname = "/rhu";
+    out->dli_fbase = (void *)(uintptr_t)__rhu_image_header[3];
+    out->dli_sname = NULL;
+    out->dli_saddr = NULL;
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* the instruction-stream sync after code is written                   */
+/* ------------------------------------------------------------------ */
+
+/* The runtime calls this after writing a fresh block of call thunks into
+ * memory it then executes. The processor cores this hosting runs on
+ * keep their caches OFF on both silicon boards (the kernel's board
+ * modules state that posture; the emulator models no cache), so nothing
+ * is cleaned or invalidated here: the two barriers order the writes
+ * before any fetch of the new instructions and drain the pipeline of
+ * anything fetched earlier. The day a board's posture turns a cache on,
+ * the kernel's cache-sync door lands beside it and this row calls it. */
+void __clear_cache(void *begin, void *end)
+{
+    (void)begin;
+    (void)end;
+    __asm__ volatile("dsb sy\n\tisb sy" ::: "memory");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1538,6 +1644,28 @@ int statfs64(const char *path, void *buf)
     (void)buf;
     SET_ERRNO(RHU_GERR_ENOSYS);
     return -1;
+}
+
+/* A process-control request: none exists on this platform, and the one
+ * the runtime makes is on its crash-dump path. The option is named so the
+ * line says which request was refused. */
+int __prctl_time64(int option, ...)
+{
+    rhu_shim_log("prctl(%d): not available on this platform (EINVAL)", option);
+    SET_ERRNO(RHU_GERR_EINVAL);
+    return -1;
+}
+
+/* The second unwinding personality routine the runtime's unwind tables
+ * name (the kernel parks the first). This hosting never unwinds a frame
+ * through these routines: a managed exception is dispatched by the
+ * runtime's own tables, and a native fault ends the run. Being entered
+ * means a table was consulted by an unwinder that does not exist here,
+ * so the line says so and the run ends. */
+void __aeabi_unwind_cpp_pr1(void)
+{
+    rhu_shim_log("unwind: personality routine 1 entered; this image never unwinds");
+    rhu_shim_exit(134);
 }
 
 /* ------------------------------------------------------------------ */

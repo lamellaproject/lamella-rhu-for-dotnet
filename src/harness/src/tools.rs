@@ -326,6 +326,19 @@ pub fn status_bounded(
 /// exist to prevent). Combined output goes to `log_path`; the caller
 /// surfaces the log on failure.
 pub fn cargo_build_kernel(repo: &Path, extra: &[&str], log_path: &Path) -> Result<bool, String> {
+    let target_dir = repo.join("src").join("kernel").join("target");
+    cargo_build_kernel_at(repo, &target_dir, extra, log_path)
+}
+
+/// The kernel crate built into a target dir of the caller's choosing: a
+/// board's own staticlib beside the shared per-target one other gates
+/// link against, never over it.
+pub fn cargo_build_kernel_at(
+    repo: &Path,
+    target_dir: &Path,
+    extra: &[&str],
+    log_path: &Path,
+) -> Result<bool, String> {
     let crate_dir = repo.join("src").join("kernel");
     let log = File::create(log_path).map_err(|e| format!("cannot create build log: {e}"))?;
     let log2 = log
@@ -336,7 +349,7 @@ pub fn cargo_build_kernel(repo: &Path, extra: &[&str], log_path: &Path) -> Resul
         .arg("--release")
         .args(extra)
         .current_dir(&crate_dir)
-        .env("CARGO_TARGET_DIR", crate_dir.join("target"))
+        .env("CARGO_TARGET_DIR", target_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log2))

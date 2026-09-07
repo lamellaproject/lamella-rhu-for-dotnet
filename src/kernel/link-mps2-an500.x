@@ -43,6 +43,22 @@ SECTIONS
     KEEP(*(.vector_table.reset));      /* [1]      Reset                 */
     KEEP(*(.vector_table.exceptions)); /* [2..15]  system exceptions     */
     KEEP(*(.vector_table.interrupts)); /* [16..47] external IRQ lines    */
+    /* The table's slot is 0x400 bytes on every board: padded to the
+     * in-image header's fixed offset (zero fill), so the header follows
+     * inside the same load segment and the flash image stays one
+     * contiguous run. A table that outgrows the slot moves the header
+     * and refuses the link at the assert below. */
+    . = ALIGN(0x400);
+  } > CODE
+
+  /* The in-image header (__rhu_image_header): the image's own statement
+   * of its identity and load address, at a fixed offset from the image
+   * base on every board so a reader holding the flash bytes alone finds
+   * it (header.rs states the layout). KEEP: nothing in the image
+   * references the record. The test harness reads it off the artifact. */
+  .rhu_header ORIGIN(CODE) + 0x400 :
+  {
+    KEEP(*(.rhu_header));
   } > CODE
 
   .text : ALIGN(4)
@@ -151,3 +167,13 @@ ASSERT(__rhu_arena_hi - __rhu_arena_lo >= RHU_ARENA_MIN,
  * load/run offset must equal .data's, on every board. */
 ASSERT(LOADADDR(.tdata) - ADDR(.tdata) == LOADADDR(.data) - ADDR(.data),
   "module-0 TLS template outside the boot copy's single load/run offset");
+
+/* The in-image header sits at the fixed offset every reader uses, the
+ * vector table's padded slot ends exactly there, and the record is
+ * layout version 1's sixteen words -- on every board. */
+ASSERT(ADDR(.rhu_header) == ORIGIN(CODE) + 0x400,
+  "image header not at the fixed offset 0x400 from the image base");
+ASSERT(SIZEOF(.vector_table) == 0x400,
+  "vector table slot is not the 0x400 bytes before the image header");
+ASSERT(SIZEOF(.rhu_header) == 64,
+  "image header is not the 64 bytes of layout version 1");

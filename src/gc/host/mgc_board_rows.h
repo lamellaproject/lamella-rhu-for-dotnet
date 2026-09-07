@@ -117,21 +117,20 @@
 #define MGC_ROW_WALL_RETRIES            4u
 #define MGC_ROW_FROZEN_SEGS             8u
 #elif defined(MGC_HOST_ROW_F769)
-/* STM32F769I-DISCO: DATA 384K @ 0x20020000 (DTCM reserved-unused in
- * the map), map floor 128K. The mini row: kheap 16K +
- * region 96K + bitmap 3K + mark stack 8K + foh 4K = 127K inside the
- * floor (slack 1K). The FOH pool is one arena page -- the whole
- * frozen-object budget this floor affords once the other terms are
- * funded: the runtime's segment reservation is served from it, and
- * the commit guard refuses the runtime's first 64K commit into a
- * managed allocation failure at the first cache-missing typeof. A
- * larger pool on this board is a floor change (DTCM tenancy) or a
- * measured region trade, never a bare row edit. Mini sizings scale
- * to the measured high-waters: mark stack 2048 (measured hw 3), finq
- * 256 (measured bound 6), reserve 8K (OOM dispatch allocations are
- * small-object class; the grace round trip is the protocol either
- * way). Cover 512K is minimal: the granule at 0x20000000 ends exactly
- * at the DATA end 0x20080000. */
+/* STM32F769I-DISCO: DATA 512K @ 0x20000000 (the DTCM inside DATA,
+ * contiguous with SRAM1 and SRAM2), map floor 192K. The mini row:
+ * kheap 16K + region 96K + bitmap 3K + mark stack 8K + foh 64K = 187K
+ * inside the floor (slack 5K). The FOH pool is one stock commit unit:
+ * the runtime's frozen-object reservation is served from it and its
+ * first commit lands whole; the commit guard refuses a second commit
+ * into a managed allocation failure. The kernel-heap carve stays at
+ * 16K: the first real hosted program booted to its verdict on carves
+ * down to 8K on the QEMU twin. Mini sizings scale to the measured
+ * high-waters: mark stack 2048 (measured hw 3), finq 256 (measured
+ * bound 6), reserve 8K (OOM dispatch allocations are small-object
+ * class; the grace round trip is the protocol either way). Cover 512K
+ * is minimal: the granule at 0x20000000 is exactly the DATA window
+ * [0x20000000, 0x20080000). */
 #define MGC_ROW_BOARD             "stm32f769i-disco"
 #define MGC_ROW_PROFILE           "mini"
 #define MGC_ROW_BASIS             "floor"
@@ -141,7 +140,7 @@
 #define MGC_ROW_STACK_DEFAULT       16384u
 #define MGC_ROW_STACK_CLAMP         24576u
 #define MGC_ROW_HANDLE_SLOTS           64u
-#define MGC_ROW_FOH_POOL_BYTES       4096u
+#define MGC_ROW_FOH_POOL_BYTES      65536u
 #define MGC_ROW_MARKSTACK_ENTRIES    2048u
 #define MGC_ROW_FINQ_CAP              256u
 #define MGC_ROW_OOM_RESERVE          8192u

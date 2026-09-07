@@ -136,10 +136,11 @@ pub fn wake_order(raw: &[u8]) -> String {
     out
 }
 
-/// The last `gctest: collections=<n> free=<n>` line's captured field, if
-/// any. The golden's own final line is the source of expected values -- no
-/// second copy to drift.
-fn final_summary_field(stream: &[u8], want_free: bool) -> Option<String> {
+/// The last `gctest: collections=<n> free=<n>` line, parsed: the two
+/// captured fields and the rest of that line after the free field (the
+/// verdict's place). The golden's own final line is the source of
+/// expected values -- no second copy to drift.
+fn final_summary(stream: &[u8]) -> Option<(String, String, Vec<u8>)> {
     let lf = lf_normalize(stream);
     let mut found = None;
     for (line, _) in lines_with_endings(&lf) {
@@ -163,22 +164,32 @@ fn final_summary_field(stream: &[u8], want_free: bool) -> Option<String> {
         if free_end == 0 {
             continue;
         }
-        let field = if want_free {
-            &free_digits[..free_end]
-        } else {
-            &rest[..gcs_end]
-        };
-        found = Some(String::from_utf8_lossy(field).into_owned());
+        found = Some((
+            String::from_utf8_lossy(&rest[..gcs_end]).into_owned(),
+            String::from_utf8_lossy(&free_digits[..free_end]).into_owned(),
+            free_digits[free_end..].to_vec(),
+        ));
     }
     found
 }
 
 /// Final free= value of the last gctest summary line.
 pub fn final_free(stream: &[u8]) -> Option<String> {
-    final_summary_field(stream, true)
+    final_summary(stream).map(|(_, free, _)| free)
 }
 
 /// Final collections= value of the last gctest summary line.
 pub fn final_gcs(stream: &[u8]) -> Option<String> {
-    final_summary_field(stream, false)
+    final_summary(stream).map(|(gcs, _, _)| gcs)
+}
+
+/// True when the last gctest summary line carries `needle` after its two
+/// fields: a verdict is read on the verdict line and nowhere else in the
+/// stream -- a diagnostic that merely mentions the words is not one, and
+/// a stream with no summary line has no verdict.
+pub fn final_verdict_has(stream: &[u8], needle: &str) -> bool {
+    match final_summary(stream) {
+        Some((_, _, tail)) => contains_fixed(&tail, needle),
+        None => false,
+    }
 }

@@ -35,8 +35,13 @@ const EE_INTERFACE_MAJOR: u32 = 4;
 
 /// The compile flag set of record for image-tier C++: the pinned kit's
 /// flags + the image ABI half -- hard-float to match
-/// thumbv7em-none-eabihf -- + the include closure.
-const CXX_FLAGS: [&str; 16] = [
+/// thumbv7em-none-eabihf -- + the include closure + the 32-bit
+/// fixed-width types spelled as the runtime archive's C++ mangling
+/// spells them (`int`, `unsigned int`): the collector calls the
+/// runtime's flat interface methods by name, and the kit's C library
+/// would spell those types `long`, moving every mangled name that
+/// carries one.
+const CXX_FLAGS: [&str; 20] = [
     "-c",
     "-O2",
     "-mcpu=cortex-m7",
@@ -53,6 +58,10 @@ const CXX_FLAGS: [&str; 16] = [
     "-Isrc/vendor/gcinterface",
     "-Isrc/vendor/gcenv",
     "-Isrc/kernel/include",
+    "-U__INT32_TYPE__",
+    "-D__INT32_TYPE__=int",
+    "-U__UINT32_TYPE__",
+    "-D__UINT32_TYPE__=unsigned",
 ];
 
 /// The bare skeleton object's EXACT import closure at the pinned kit:
@@ -214,7 +223,7 @@ const IMPORTS_SKEL_COLLECT: [&str; 25] = [
 /// forbidden).
 const IMPORTS_COLLECT: [&str; 29] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
-    "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextmEiiS4_",
+    "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
     "_ZN15GCToEEInterface11GcStartWorkEii",
     "_ZN15GCToEEInterface16AfterGcScanRootsEiiP11ScanContext",
     "_ZN15GCToEEInterface17BeforeGcScanRootsEibb",
@@ -450,7 +459,7 @@ const IMPORTS_HEAP_TUNE_BREAK: [&str; 16] = [
 /// whose suppression drops whole root surfaces from the object).
 const IMPORTS_COLLECT_SWEEP: [&str; 41] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
-    "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextmEiiS4_",
+    "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
     "_ZN15GCToEEInterface11GcStartWorkEii",
     "_ZN15GCToEEInterface14EagerFinalizedEP6Object",
     "_ZN15GCToEEInterface16AfterGcScanRootsEiiP11ScanContext",
@@ -495,7 +504,7 @@ const IMPORTS_COLLECT_SWEEP: [&str; 41] = [
 /// The tune-stage collector: the enum-time window retire joins.
 const IMPORTS_COLLECT_TUNE: [&str; 42] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
-    "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextmEiiS4_",
+    "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
     "_ZN15GCToEEInterface11GcStartWorkEii",
     "_ZN15GCToEEInterface14EagerFinalizedEP6Object",
     "_ZN15GCToEEInterface16AfterGcScanRootsEiiP11ScanContext",
@@ -705,7 +714,7 @@ const TUNE_DRIVE_PINS: &[&str] = &[
     " (4096 B) at alloc #12",
     "[gc-host] alloc #8 size=24 FAST-PATH from the window: zero-born OK, free-object birth stored",
     TN_BOOKS,
-    "[gc-host] waiter spawned: tid=4 prio=0x40 stack=4096 (parks on a go futex between epochs)",
+    "[gc-host] waiter spawned: tid=4 prio=0xC0 stack=4096 (parks on a go futex between epochs)",
     "[gc-host] epoch signal: woken 1 waiter (it was genuinely futex-blocked)",
     "[mgc-heap] allocs=12 bytes=4416 pads=1 null_returns=0 max_size=24 (flags=0x0 at alloc #1)",
     "[mgc-heap] finq: registered_total=6 live=6 freach=0(+0 crit) lost=0 (cap=2048, bound=6)",
@@ -806,7 +815,7 @@ const INTERNAL_CASES: [&str; 1] = [
 /// manifest and the objects together still cannot pass without editing
 /// this reviewed surface). A re-freeze updates objects + manifest + this
 /// pin together in one reviewed commit.
-const SHA_FROZEN_MANIFEST: &str = "ae9d99bd23ffb279f138ead513546b344ead8ef84396e37bfa1d471eba9f9be0";
+const SHA_FROZEN_MANIFEST: &str = "01dad4a54687940183456a94b56dfac81e36deaa670ff6a33cb3fd4fa13047df";
 
 /// The frozen-object plan of record: file name under goldens/gc/, source
 /// TU, extra defines beyond CXX_FLAGS. The manifest's records must tie
@@ -815,7 +824,7 @@ const SHA_FROZEN_MANIFEST: &str = "ae9d99bd23ffb279f138ead513546b344ead8ef84396e
 /// Worlds stage these files where they once compiled them -- the bytes
 /// are frozen inputs, produced by ONE recorded build, never rebuilt by
 /// a consumer.
-const FROZEN_PLAN: [(&str, &str, &[&str]); 27] = [
+const FROZEN_PLAN: [(&str, &str, &[&str]); 29] = [
     ("skel-bare.o", "src/gc/mgc_skeleton.cpp", &[]),
     ("skel-bad.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_SKEL_BAD_VERSION"]),
     ("host.o", "src/gc/host/mgc_host.cpp", &[]),
@@ -843,6 +852,8 @@ const FROZEN_PLAN: [(&str, &str, &[&str]); 27] = [
     ("heap-row-break-cover.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_ARENA_COVER_BYTES=2097152u"]),
     ("collect-row.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE"]),
     ("host-row.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_ROW_AN500"]),
+    ("heap-row-f769.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=98304u", "-DMGC_ARENA_COVER_BYTES=524288u", "-DMGC_FINQ_CAP=256u", "-DMGC_OOM_RESERVE=8192u", "-DMGC_WINDOW_BYTES=4096u", "-DMGC_WINDOW_FLOOR=256u", "-DMGC_WALL_RETRIES=4u"]),
+    ("collect-row-f769.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_MARK_STACK_ENTRIES=2048u", "-DMGC_OOM_RESERVE=8192u"]),
 ];
 
 /// Parse VENDORED.md's per-file sha bullets: a line whose trimmed form is
@@ -1316,6 +1327,35 @@ fn mangled_method_name(sym: &str) -> Option<String> {
     Some(tail[..n].to_string())
 }
 
+/// Defined external names from a `--defined-only --extern-only` dump
+/// (`<value> <type> <name>` lines), sorted and deduplicated.
+fn parse_defined_extern(dump: &str) -> Vec<String> {
+    let mut out: Vec<String> = dump
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            match (it.next(), it.next(), it.next(), it.next()) {
+                (Some(_), Some(_), Some(name), None) => Some(name.to_string()),
+                _ => None,
+            }
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The first demanded spelling the merged runtime object does not
+/// define, or None. A demand the archive spells otherwise -- the 32-bit
+/// fixed-width types are the known case -- is a link refusal waiting at
+/// the hosted-runtime image, caught here on the frozen objects.
+fn seam_spelling_fault(demands: &[String], defined: &[String]) -> Option<String> {
+    demands
+        .iter()
+        .find(|d| !defined.iter().any(|x| x == *d))
+        .map(|d| format!("flat-interface demand '{d}' is not defined in the frozen merged runtime object by that spelling (the archive spells a parameter type differently, or the method is absent)"))
+}
+
 /// Byte offset of the first occurrence of `needle` in `hay`.
 fn find_pos(hay: &[u8], needle: &str) -> Option<usize> {
     let n = needle.as_bytes();
@@ -1735,6 +1775,25 @@ impl Gc {
         parse_undefined(&dump)
     }
 
+    /// The object's defined external names, as the symbol tool prints
+    /// them with `--defined-only --extern-only`.
+    fn defined_extern_of(&mut self, facts: &RustcFacts, case: &str, obj_rel: &str) -> Vec<String> {
+        let nm = match llvm_tool(facts, "llvm-nm") {
+            Ok(p) => p,
+            Err(e) => self.fail(case, &e),
+        };
+        let dump_p = self.out.join(format!("{}.nm-def", Path::new(obj_rel).file_stem().unwrap().to_string_lossy()));
+        let scratch = self.out.join("nm.stderr");
+        let obj_abs = self.repo.join(obj_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let obj_arg = obj_abs.to_string_lossy().into_owned();
+        let run = run_captured(&nm, &["--defined-only", "--extern-only", &obj_arg], &dump_p, &scratch, Duration::from_secs(60));
+        if !matches!(run, Ok(ref o) if o.exit == 0) {
+            self.fail(case, &format!("llvm-nm --defined-only failed on {obj_rel}"));
+        }
+        let dump = std::fs::read_to_string(&dump_p).unwrap_or_default();
+        parse_defined_extern(&dump)
+    }
+
     /// Link objects + the payload-feature staticlib under the payload
     /// board map; returns (sha, repo-relative path) of the ELF.
     fn link_image(&mut self, ld: &ToolCmd, case: &str, objs: &[&str], name: &str) -> (String, String) {
@@ -2105,6 +2164,20 @@ impl Gc {
         println!(
             "   probe surface: {EE_SURFACE} == header declarations == REF sites == object imports (name-level tie; the eighteen host-served methods present)"
         );
+
+        let merged_rel = "goldens/rt/rthello-merged.o";
+        if self.repo.join(merged_rel.replace('/', std::path::MAIN_SEPARATOR_STR)).is_file() {
+            let merged_defined = self.defined_extern_of(facts, "gc.B", merged_rel);
+            if let Some(f) = seam_spelling_fault(&probe_undef, &merged_defined) {
+                self.fail("gc.B", &f);
+            }
+            println!(
+                "   the seam's spellings: {}/{EE_SURFACE} flat-interface demands defined in {merged_rel} by the probe's exact spelling",
+                probe_undef.len()
+            );
+        } else {
+            println!("   the seam's spellings: NOT TIED (the rt tier's frozen merged object is absent: {merged_rel})");
+        }
 
         let skel_heap = self.undefined_of(facts, "gc.B", "goldens/gc/skel-heap.o");
         if !imports_match(&skel_heap, &IMPORTS_SKEL_HEAP) {
@@ -2509,7 +2582,7 @@ impl Gc {
             "[mgc-skel] handle[1] created via store: type=1 obj=0x",
             "[mgc-skel] handle[2] created via store/dependent: type=6 obj=0x",
             "[gc-host] handles: strong(#3) weak-long(#5) dependent(#3 -> #7) created; strong slot dereferences to alloc #3",
-            "[gc-host] worker spawned: tid=3 prio=0x80 stack=4096 (runs only while kmain sleeps)",
+            "[gc-host] worker spawned: tid=3 prio=0xE0 stack=4096 (runs only while kmain sleeps)",
             "[gc-host] worker ready: stack slot published (alloc #2 parked on the worker stack)",
             "[mgc-skel] call IGCHeap::GarbageCollect(gen=2 low_mem=0 mode=0)",
             "[mgc-coll] collect #1 ENTER gen=2 (condemned=2) low_mem=0 mode=0",
@@ -2827,7 +2900,7 @@ impl Gc {
             "[mgc-skel] handle[3] created via store: type=0 obj=0x",
             "[mgc-skel] handle[6] created via store/dependent: type=6 obj=0x",
             scan_line,
-            "[gc-host] worker spawned: tid=3 prio=0x80 stack=4096 (runs only while kmain sleeps)",
+            "[gc-host] worker spawned: tid=3 prio=0xE0 stack=4096 (runs only while kmain sleeps)",
             "[mgc-coll] collect #1 ENTER gen=2 (condemned=2) low_mem=0 mode=0",
             "[mgc-heap] === census (GarbageCollect #1) ===",
             "[mgc-heap] allocs=17 bytes=304 pads=1 null_returns=0 max_size=28 (flags=0x0 at alloc #2)",
@@ -3307,7 +3380,7 @@ impl Gc {
             banner,
             "[mgc-heap] BREAK_WINDOW_FIX: window plug+count SUPPRESSED (negative control)",
             TN_BOOKS_BREAK,
-            "[gc-host] waiter spawned: tid=4 prio=0x40 stack=4096 (parks on a go futex between epochs)",
+            "[gc-host] waiter spawned: tid=4 prio=0xC0 stack=4096 (parks on a go futex between epochs)",
             "[mgc-skel] call IGCHeap::ResetWaitForGCEvent",
             parking1,
             suspend_line,
@@ -3722,6 +3795,37 @@ impl Gc {
         self.results.tally("pass", "positive");
         println!("== rederive: {}/{} objects byte-identical to goldens/gc ==", FROZEN_PLAN.len(), FROZEN_PLAN.len());
 
+        println!("== case gc.f769-shared-control (compile-tier control) ==");
+        let shared_rel = "src/kernel/target/gc-gate/obj/skel-row-f769-control.o";
+        let shared_abs = self.repo.join(shared_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let _ = std::fs::remove_file(&shared_abs);
+        self.compile(
+            gxx,
+            "gc.f769-shared-control",
+            "src/gc/mgc_skeleton.cpp",
+            &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64"],
+            shared_rel,
+        );
+        let shared_got = match sha256_file(&shared_abs) {
+            Ok(s) => s,
+            Err(e) => self.fail("gc.f769-shared-control", &format!("the skeleton's compile under the F769 row produced no object ({e})")),
+        };
+        let shared_want = match sha256_file(&self.repo.join("goldens").join("gc").join("skel-row.o")) {
+            Ok(s) => s,
+            Err(e) => self.fail("gc.f769-shared-control", &format!("goldens/gc/skel-row.o unreadable: {e}")),
+        };
+        if shared_got != shared_want {
+            self.fail(
+                "gc.f769-shared-control",
+                &format!("the skeleton under the F769 row's defines compiled to {shared_got}, not the frozen an500 skel-row.o {shared_want}: the rows no longer share the skeleton, so the F769 image needs its own frozen skeleton object"),
+            );
+        }
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc-rederive\",\"case\":\"gc.f769-shared-control\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"shared_sha\":\"{shared_want}\"}}}}"
+        ));
+        self.results.tally("pass", "positive");
+        println!("== case gc.f769-shared-control: PASS (the skeleton under the F769 row's defines ties the frozen an500 skel-row.o {}: one skeleton object serves both rows) ==", &shared_want[..16]);
+
         println!("== case gc.E-posture-refused (negative control) ==");
         self.compile_expect_fail(
             gxx,
@@ -3878,7 +3982,7 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "GC REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical; posture control refused at compile)  [{}]",
+        "GC REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical; the F769 row's shared skeleton ties the an500 object; posture control refused at compile)  [{}]",
         FROZEN_PLAN.len(),
         FROZEN_PLAN.len(),
         gxx.version
@@ -4232,6 +4336,34 @@ pub fn selfcheck(repo: &Path) -> ! {
         "the genuine mangled shape extracting its method name exactly",
         mangled_method_name("_ZN15GCToEEInterface17StompWriteBarrierEP22WriteBarrierParameters").as_deref()
             == Some("StompWriteBarrier"),
+    );
+
+    let spelled: Vec<String> = [
+        "_ZN15GCToEEInterface9GetThreadEv",
+        "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    sc.accept_probe(
+        "seam-spelling-genuine",
+        "the probe's demands each defined in the merged runtime object by the same spelling",
+        seam_spelling_fault(&spelled, &spelled).is_none(),
+    );
+    let kit_spelled: Vec<String> = vec![
+        spelled[0].clone(),
+        "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextmEiiS4_".to_string(),
+    ];
+    sc.probe(
+        "seam-spelling-kit",
+        "a demand spelling a 32-bit parameter type as unsigned long against the archive's unsigned int",
+        seam_spelling_fault(&kit_spelled, &spelled).is_none(),
+    );
+    let absent: Vec<String> = vec![spelled[0].clone(), "_ZN15GCToEEInterface7MissingEv".to_string()];
+    sc.probe(
+        "seam-spelling-absent",
+        "a demand the merged runtime object does not define at all",
+        seam_spelling_fault(&absent, &spelled).is_none(),
     );
 
     let ctl_with_heap = b"[gc-host] GC ACTIVATION OK\n[mgc-heap] region [0x0,0x0) 2048 KB via shim mmap\n[mgc-skel] FAIL-FAST: first object allocation\n".to_vec();

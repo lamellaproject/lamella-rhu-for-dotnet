@@ -4,7 +4,12 @@
 //! posture pattern: own feature, own image names, own goldens, banner
 //! line from register read-back): the boring HSI 16 MHz default, and
 //! PLL216 (216 MHz, the production posture). Caches and ART stay off
-//! in both -- cache enablement would be its own gated posture.
+//! in both -- cache enablement would be its own gated posture. The
+//! cache posture is a law the hosting tier reads: with the caches off,
+//! the shim's instruction-stream sync after it writes a fresh block of
+//! executable thunks is two barriers and no cache maintenance; the day
+//! a posture turns a cache on, a cache-sync door lands in this kernel
+//! beside it and that sync calls it.
 
 use core::ptr::{read_volatile, write_volatile};
 
@@ -33,14 +38,16 @@ const PCLK2_HZ: u32 = SYSCLK_HZ / 2;
 pub const TICK_HZ: u32 = 1_000;
 
 /// Thread stack pool (lives in .kstacks) -- same budgets as the QEMU
-/// board; 384 K of AXI SRAM leaves wide headroom (the link asserts it).
+/// board; 512 K of contiguous RAM (the DTCM inside DATA) leaves wide
+/// headroom (the link asserts it).
 pub const STACK_POOL_BYTES: usize = 64 * 1024;
 
 /// The boot kheap carve out of the arena (the GC board table's
-/// `kheap_carve` row). Sized conservatively from the window
-/// arithmetic rather than from measured demand: the payload flavor's
-/// 155.7K window over its 128K GC floor caps this board's carve at
-/// 27.7K.
+/// `kheap_carve` row): in a hosted image the C library's whole heap.
+/// 16K is the mini row's carve, funded inside the payload map's 192K
+/// floor beside the 96K region and a frozen-object pool of one stock
+/// commit; the first real hosted program booted to its verdict on
+/// carves down to 8K (measured on the QEMU twin at this revision).
 pub const KHEAP_BYTES: usize = 16 * 1024;
 
 /// Stack for the kmain thread (the boot thread's continuation).
@@ -56,11 +63,9 @@ pub const NIRQ: usize = 110;
 pub const FPU_DP: bool = true;
 
 /// RAM windows a hardware-pushed exception frame may plausibly live in:
-/// SRAM1+SRAM2, the one contiguous window this image uses (stacks live
-/// here; each end backed off by one 8-word frame). The 128 K DTCM at
-/// 0x20000000 is deliberately reserved-unused in this map revision, so
-/// no frame may legitimately point there.
-pub const FRAME_RANGES: [(usize, usize); 1] = [(0x2002_0000, 0x2008_0000 - 32)];
+/// DTCM+SRAM1+SRAM2, the one contiguous 512 K window this image uses
+/// (stacks live here; each end backed off by one 8-word frame).
+pub const FRAME_RANGES: [(usize, usize); 1] = [(0x2000_0000, 0x2008_0000 - 32)];
 
 const RCC: usize = 0x4002_3800;
 const RCC_CR: *mut u32 = RCC as *mut u32;

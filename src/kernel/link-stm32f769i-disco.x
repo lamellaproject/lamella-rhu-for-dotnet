@@ -6,11 +6,15 @@
  *                                 alias with factory option bytes, and the
  *                                 AXIM addresses in the vector table ground
  *                                 execution at 0x08...
- *   0x20000000  DTCM     128 KB   RESERVED-UNUSED in this map revision:
- *                                 adopting it is a future registered step;
- *                                 nothing may land here, code never will
+ *   0x20000000  DTCM     128 KB   the core's zero-wait-state data memory
+ *                                 on its TCM port (the DMA masters reach
+ *                                 it only through the core's slave port);
+ *                                 contiguous with SRAM1: data and stacks
+ *                                 may land here, code never will
  *   0x20020000  SRAM1    368 KB   contiguous with SRAM2:
- *   0x2007C000  SRAM2     16 KB   384 KB of AXI SRAM = this image's DATA
+ *   0x2007C000  SRAM2     16 KB   512 KB of contiguous RAM = this image's
+ *                                 DATA (the vendor's own board template
+ *                                 treats the three as one region)
  *   0x00000000  ITCM RAM  16 KB   unused
  *
  * Region LENGTHs state the physical sizes, so an overflow fails the
@@ -28,7 +32,7 @@ MEMORY
    * land here. 0x08180000 is a 256K-sector boundary, so the slot
    * erases without touching CODE sectors. */
   APP  (rx)  : ORIGIN = 0x08180000, LENGTH = 512K
-  DATA (rwx) : ORIGIN = 0x20020000, LENGTH = 384K
+  DATA (rwx) : ORIGIN = 0x20000000, LENGTH = 512K
 }
 
 /* GC-substrate floor: the arena window this board GUARANTEES after
@@ -50,6 +54,22 @@ SECTIONS
     KEEP(*(.vector_table.reset));      /* [1]       Reset                */
     KEEP(*(.vector_table.exceptions)); /* [2..15]   system exceptions    */
     KEEP(*(.vector_table.interrupts)); /* [16..125] external IRQ lines   */
+    /* The table's slot is 0x400 bytes on every board: padded to the
+     * in-image header's fixed offset (zero fill), so the header follows
+     * inside the same load segment and the flash image stays one
+     * contiguous run. A table that outgrows the slot moves the header
+     * and refuses the link at the assert below. */
+    . = ALIGN(0x400);
+  } > CODE
+
+  /* The in-image header (__rhu_image_header): the image's own statement
+   * of its identity and load address, at a fixed offset from the image
+   * base on every board so a reader holding the flash bytes alone finds
+   * it (header.rs states the layout). KEEP: nothing in the image
+   * references the record. The test harness reads it off the artifact. */
+  .rhu_header ORIGIN(CODE) + 0x400 :
+  {
+    KEEP(*(.rhu_header));
   } > CODE
 
   .text : ALIGN(4)
@@ -158,3 +178,13 @@ ASSERT(__rhu_arena_hi - __rhu_arena_lo >= RHU_ARENA_MIN,
  * load/run offset must equal .data's, on every board. */
 ASSERT(LOADADDR(.tdata) - ADDR(.tdata) == LOADADDR(.data) - ADDR(.data),
   "module-0 TLS template outside the boot copy's single load/run offset");
+
+/* The in-image header sits at the fixed offset every reader uses, the
+ * vector table's padded slot ends exactly there, and the record is
+ * layout version 1's sixteen words -- on every board. */
+ASSERT(ADDR(.rhu_header) == ORIGIN(CODE) + 0x400,
+  "image header not at the fixed offset 0x400 from the image base");
+ASSERT(SIZEOF(.vector_table) == 0x400,
+  "vector table slot is not the 0x400 bytes before the image header");
+ASSERT(SIZEOF(.rhu_header) == 64,
+  "image header is not the 64 bytes of layout version 1");

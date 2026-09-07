@@ -378,6 +378,11 @@ int _kill(int pid, int sig)
     return -1;
 }
 
+/* The handle a shared object's destructors are registered under (the C++
+ * runtime's exit-time registration takes it as its third argument): this
+ * image is the one object there is, so the handle is its own address. */
+void *__dso_handle = &__dso_handle;
+
 /* The library's exit walks its own finalizer array through these; this
  * image has nothing to finalize and says so by having nothing to do. */
 void _init(void)
@@ -386,4 +391,133 @@ void _init(void)
 
 void _fini(void)
 {
+}
+
+/* --- the C library's lock family ------------------------------------ */
+
+/* The library's own lock member carries empty locks, a single-threaded
+ * library's defaults. Hosted threads share one standard output through
+ * the library's line buffer, and under empty locks two threads' lines
+ * interleave inside it. This image answers the whole family here, so the
+ * library's member is never pulled: one lock word per lock over the
+ * kernel futex (free, held, held with a waiter possible), recursion by
+ * the holder's thread id; the named locks the library's internals reach
+ * for are defined below by their library names. A lock the library
+ * never initialized (a null handle) is left as the library left it. */
+struct __lock {
+    uint32_t word;
+    uint32_t owner;
+    uint32_t depth;
+};
+struct __lock __lock___sfp_recursive_mutex;
+struct __lock __lock___atexit_recursive_mutex;
+struct __lock __lock___at_quick_exit_mutex;
+struct __lock __lock___malloc_recursive_mutex;
+struct __lock __lock___env_recursive_mutex;
+struct __lock __lock___tz_mutex;
+struct __lock __lock___dd_hash_mutex;
+struct __lock __lock___arc4random_mutex;
+
+static void lock_take(struct __lock *l)
+{
+    uint32_t c = 0u;
+    if (__atomic_compare_exchange_n(&l->word, &c, 1u, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+        return;
+    if (c != 2u)
+        c = __atomic_exchange_n(&l->word, 2u, __ATOMIC_ACQUIRE);
+    while (c != 0u) {
+        (void)rhu_futex_wait(&l->word, 2u, RHU_DEADLINE_NONE);
+        c = __atomic_exchange_n(&l->word, 2u, __ATOMIC_ACQUIRE);
+    }
+}
+
+static void lock_drop(struct __lock *l)
+{
+    if (__atomic_fetch_sub(&l->word, 1u, __ATOMIC_RELEASE) != 1u) {
+        __atomic_store_n(&l->word, 0u, __ATOMIC_RELEASE);
+        (void)rhu_futex_wake(&l->word, 1);
+    }
+}
+
+static int lock_try(struct __lock *l)
+{
+    uint32_t c = 0u;
+    return __atomic_compare_exchange_n(&l->word, &c, 1u, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED) ? 1 : 0;
+}
+
+void __retarget_lock_init(struct __lock **lock)
+{
+    *lock = (struct __lock *)calloc(1u, sizeof(struct __lock));
+}
+
+void __retarget_lock_init_recursive(struct __lock **lock)
+{
+    *lock = (struct __lock *)calloc(1u, sizeof(struct __lock));
+}
+
+void __retarget_lock_close(struct __lock *lock)
+{
+    free(lock);
+}
+
+void __retarget_lock_close_recursive(struct __lock *lock)
+{
+    free(lock);
+}
+
+void __retarget_lock_acquire(struct __lock *lock)
+{
+    if (lock != NULL)
+        lock_take(lock);
+}
+
+void __retarget_lock_acquire_recursive(struct __lock *lock)
+{
+    if (lock == NULL)
+        return;
+    uint32_t me = (uint32_t)rhu_thread_self();
+    if (lock->depth != 0u && lock->owner == me) {
+        lock->depth++;
+        return;
+    }
+    lock_take(lock);
+    lock->owner = me;
+    lock->depth = 1u;
+}
+
+int __retarget_lock_try_acquire(struct __lock *lock)
+{
+    return lock == NULL ? 1 : lock_try(lock);
+}
+
+int __retarget_lock_try_acquire_recursive(struct __lock *lock)
+{
+    if (lock == NULL)
+        return 1;
+    uint32_t me = (uint32_t)rhu_thread_self();
+    if (lock->depth != 0u && lock->owner == me) {
+        lock->depth++;
+        return 1;
+    }
+    if (!lock_try(lock))
+        return 0;
+    lock->owner = me;
+    lock->depth = 1u;
+    return 1;
+}
+
+void __retarget_lock_release(struct __lock *lock)
+{
+    if (lock != NULL)
+        lock_drop(lock);
+}
+
+void __retarget_lock_release_recursive(struct __lock *lock)
+{
+    if (lock == NULL || lock->depth == 0u)
+        return;
+    if (--lock->depth == 0u) {
+        lock->owner = 0u;
+        lock_drop(lock);
+    }
 }

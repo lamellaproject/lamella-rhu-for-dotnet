@@ -16,6 +16,7 @@ mod boot;
 mod critical;
 mod entropy;
 mod funnel;
+mod header;
 mod kheap;
 #[cfg(feature = "payload")]
 mod payload;
@@ -467,13 +468,14 @@ mod api_smoke {
         check_kheap_basic();
         check_kheap_coalesce();
         check_tls_blocks();
+        check_tls_base_door();
         check_tls_dtors();
         check_thread_abi();
         check_thread_bounds();
         check_registry_basic();
         check_susp_pick();
         check_susp_ctx();
-        check_susp_hijack();
+        check_susp_setctx();
         check_resume_urgent();
         check_act_refuse();
         check_act_deliver();
@@ -481,10 +483,13 @@ mod api_smoke {
         check_act_redeliver();
         check_act_eintr();
         check_act_sleep_rearm();
+        check_act_lazy_fp();
         check_module_find();
         check_module_roots();
         check_console_pair();
         check_entropy();
+        check_host_band();
+        check_tid_wrap();
     }
 
     fn check_monotonic() {
@@ -1000,6 +1005,97 @@ mod api_smoke {
         kprintln!("[api] PASS tls-blocks (per-thread blocks distinct, init image + zero fill honored, no cross-thread bleed)");
     }
 
+    static DOOR_PARK: AtomicU32 = AtomicU32::new(0);
+    static DOOR_READY: AtomicU32 = AtomicU32::new(0);
+    static DOOR_TID: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
+    static DOOR_BASE: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+
+    extern "C" fn door_worker(arg: *mut c_void) {
+        let me = arg as usize;
+        DOOR_TID[me].store(api::rhu_thread_self(), Ordering::Release);
+        DOOR_BASE[me].store(api::rhu_tls_get(TLS_H1.load(Ordering::Acquire)) as usize, Ordering::Release);
+        DOOR_READY.fetch_add(1, Ordering::Release);
+        api::rhu_futex_wake(DOOR_READY.as_ptr(), u32::MAX);
+        while DOOR_PARK.load(Ordering::Acquire) == 0 {
+            let _ = api::rhu_futex_wait(DOOR_PARK.as_ptr(), 0, sched::DEADLINE_NONE);
+        }
+    }
+
+    fn check_tls_base_door() {
+        kprintln!("[api] tls-base-door: the layout record walked from memory against the doors armed");
+        unsafe extern "C" {
+            static __rhu_sched: u8;
+            static __rhu_tdata_lo: u32;
+            static __rhu_tdata_hi: u32;
+        }
+        let lay = addr_of!(sched::__rhu_debug_layout) as *const u32;
+        let w = |i: usize| unsafe { read_volatile(lay.add(i)) };
+        assert!(w(0) == 0x4448_5552, "tls-base-door: layout magic {:#x}", w(0));
+        assert!(w(1) >= 2, "tls-base-door: layout version {} predates the door", w(1));
+        let (max_threads, off_tcbs, off_current, stride) = (w(2), w(3), w(4), w(5));
+        let (off_state, off_tid) = (w(7), w(9));
+        let (off_tls, slots, slot_bytes) = (w(13), w(14), w(15));
+        assert!(
+            slots == registry::MAX_MODULES as u32 && slot_bytes == 4,
+            "tls-base-door: {} slots of {} bytes recorded",
+            slots,
+            slot_bytes
+        );
+        assert!(off_tls + slots * slot_bytes <= stride, "tls-base-door: the slots overrun the TCB stride");
+        let rd32 = |a: u32| unsafe { read_volatile(a as *const u32) };
+        let rd8 = |a: u32| unsafe { read_volatile(a as *const u8) };
+
+        let h1 = TLS_H1.load(Ordering::Acquire);
+        let h2 = TLS_H2.load(Ordering::Acquire);
+        assert!(h1 > 0 && h2 > 0 && (h1 as u32) < slots && (h2 as u32) < slots, "tls-base-door: no registered modules on record");
+        let t0 = api::rhu_thread_spawn(Some(door_worker), 0 as *mut c_void, 4 * 1024, 0x40, c"doorw0".as_ptr());
+        let t1 = api::rhu_thread_spawn(Some(door_worker), 1 as *mut c_void, 4 * 1024, 0x40, c"doorw1".as_ptr());
+        assert!(t0 >= 1 && t1 >= 1 && t0 != t1, "tls-base-door: spawn failed");
+        wait_until(|| DOOR_READY.load(Ordering::Acquire) == 2, "door workers ready");
+
+        let me = api::rhu_thread_self();
+        let g1 = api::rhu_tls_get(h1) as u32;
+        let g2 = api::rhu_tls_get(h2) as u32;
+        let tlo = core::hint::black_box(addr_of!(__rhu_tdata_lo) as u32);
+        let thi = core::hint::black_box(addr_of!(__rhu_tdata_hi) as u32);
+        assert!(thi == tlo, "tls-base-door: this family's template brackets are not empty");
+
+        let base = addr_of!(__rhu_sched) as u32;
+        let cur = rd32(base + off_current);
+        let (mut live, mut seen_me, mut seen_w) = (0u32, false, [false; 2]);
+        for i in 0..max_threads {
+            let tcb = base + off_tcbs + i * stride;
+            let state = rd8(tcb + off_state);
+            let tid = rd32(tcb + off_tid) as i32;
+            let slot = |m: u32| rd32(tcb + off_tls + m * slot_bytes);
+            if state == 1 || state == 2 {
+                live += 1;
+                assert!(slot(0) == 0, "tls-base-door: a module-0 block on a live thread beside empty template brackets");
+                if tid == me {
+                    assert!(i == cur, "tls-base-door: the running thread is not the recorded current slot");
+                    assert!(slot(h1 as u32) == g1 && slot(h2 as u32) == g2, "tls-base-door: kmain's blocks through the record differ from the door's answers");
+                    seen_me = true;
+                }
+                for k in 0..2 {
+                    if tid == DOOR_TID[k].load(Ordering::Acquire) {
+                        assert!(slot(h1 as u32) == DOOR_BASE[k].load(Ordering::Acquire) as u32, "tls-base-door: a worker's block through the record differs from its own answer");
+                        seen_w[k] = true;
+                    }
+                }
+            } else {
+                for m in 0..slots {
+                    assert!(slot(m) == 0, "tls-base-door: a non-live slot holds a block pointer");
+                }
+            }
+        }
+        assert!(seen_me && seen_w[0] && seen_w[1], "tls-base-door: a thread on record was not found in the walk");
+        assert!(live >= 4, "tls-base-door: {} live threads walked (want idle, kmain, two workers at least)", live);
+        release(&DOOR_PARK);
+        join_tid(t0);
+        join_tid(t1);
+        kprintln!("[api] PASS tls-base-door (record walked from memory: module-0 base null on every live thread beside empty template brackets, registered-module bases equal to the door's answers on kmain and both workers, non-live slots null)");
+    }
+
     static DTOR_SEQ: AtomicU32 = AtomicU32::new(0);
     static DTOR_ORDER: [AtomicU32; 8] = [
         AtomicU32::new(0),
@@ -1169,6 +1265,109 @@ mod api_smoke {
             (spawned - accepted) * 1024
         );
         kprintln!("[api] PASS thread-abi (round trip clean, tids unique, exact-fit stack reused, slot exhaustion refused honest)");
+    }
+
+    static HB_STARTED: AtomicU32 = AtomicU32::new(0);
+    static HB_CHILD_PRIO: AtomicU32 = AtomicU32::new(0xFFFF);
+    static HB_CHILD_TID: AtomicI32 = AtomicI32::new(0);
+    static HB_PEER_RAN: AtomicU32 = AtomicU32::new(0);
+    static HB_LATE_RAN: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn band_child(_: *mut c_void) {
+        HB_CHILD_PRIO.store(sched::probe_current_prio() as u32, Ordering::Release);
+        HB_CHILD_TID.store(api::rhu_thread_self(), Ordering::Release);
+        HB_STARTED.store(1, Ordering::Release);
+    }
+
+    extern "C" fn band_peer(_: *mut c_void) {
+        HB_PEER_RAN.store(1, Ordering::Release);
+    }
+
+    extern "C" fn band_late(_: *mut c_void) {
+        HB_LATE_RAN.store(1, Ordering::Release);
+    }
+
+    /// Spawn one band thread through the C door at `prio`, 4K stack.
+    fn spawn_band(entry: extern "C" fn(*mut c_void), prio: u32, name: &'static core::ffi::CStr) -> i32 {
+        let t = api::rhu_thread_spawn(Some(entry), core::ptr::null_mut(), 4096, prio, name.as_ptr());
+        assert!(t >= 1, "host-band: spawn returned {}", t);
+        t
+    }
+
+    fn check_host_band() {
+        kprintln!("[api] host-band: door-spawned child at the flat priority + yield-only start wait armed");
+        let kernel_prio = sched::probe_current_prio();
+        assert!(
+            (kernel_prio as u32) < api::HOSTED_PRIO_LO,
+            "host-band: this thread holds priority {} (not kernel urgency)",
+            kernel_prio
+        );
+        let flat = api::HOSTED_PRIO_FLAT as u8;
+
+        let prev = sched::set_current_prio(flat);
+        assert!(prev == kernel_prio, "host-band: the join returned {} (not the priority held)", prev);
+        let tc = spawn_band(band_child, api::HOSTED_PRIO_FLAT, c"bandchild");
+        let t0 = sched::now_ms();
+        while HB_STARTED.load(Ordering::Acquire) == 0 {
+            assert!(
+                sched::now_ms().wrapping_sub(t0) < 2000,
+                "host-band: the started signal never arrived through yield alone (the host cannot release its child)"
+            );
+            api::rhu_thread_yield();
+        }
+        assert!(HB_CHILD_TID.load(Ordering::Acquire) == tc, "host-band: the started signal came from another thread");
+        let mine = sched::probe_current_prio();
+        assert!(mine == flat, "host-band: the host reads priority {} inside the band", mine);
+        assert!(
+            HB_CHILD_PRIO.load(Ordering::Acquire) == mine as u32,
+            "host-band: the child ran at priority {} beside its host at {} (not one level)",
+            HB_CHILD_PRIO.load(Ordering::Acquire),
+            mine
+        );
+        join_tid(tc);
+
+        assert!(sched::set_current_prio(kernel_prio) == flat, "host-band: the leave returned another priority");
+        let tp = spawn_band(band_peer, api::HOSTED_PRIO_LO, c"bandpeer");
+        for _ in 0..50 {
+            api::rhu_thread_yield();
+        }
+        assert!(HB_PEER_RAN.load(Ordering::Acquire) == 0, "host-band: a band thread ran while its host held kernel urgency");
+        let _ = sched::set_current_prio(flat);
+        assert!(
+            HB_PEER_RAN.load(Ordering::Acquire) == 1,
+            "host-band: joining the band did not re-run the pick (the more urgent band thread still waits)"
+        );
+        join_tid(tp);
+
+        assert!(sched::set_current_prio(kernel_prio) == flat, "host-band: the second leave returned another priority");
+        assert!(sched::probe_current_prio() == kernel_prio, "host-band: kernel urgency not restored");
+        let tl = spawn_band(band_late, api::HOSTED_PRIO_FLAT, c"bandlate");
+        for _ in 0..50 {
+            api::rhu_thread_yield();
+        }
+        assert!(HB_LATE_RAN.load(Ordering::Acquire) == 0, "host-band: a band thread ran after the host left the band");
+        join_tid(tl);
+        assert!(HB_LATE_RAN.load(Ordering::Acquire) == 1, "host-band: the band thread never ran once the host blocked");
+        kprintln!("[api] PASS host-band (the host joined the band and its door-spawned child at the flat priority started through yield alone at one level, joining re-ran the pick, leaving restored kernel urgency and held a band thread until the host blocked)");
+    }
+
+    fn check_tid_wrap() {
+        kprintln!("[api] tid-wrap: the id space's last two ids + the refusal past it armed");
+        sched::probe_tid_seek(0x7FFF_FFFE);
+        let a = spawn_probe(probe_return, 1024);
+        let b = spawn_probe(probe_return, 1024);
+        assert!(a == 0x7FFF_FFFE, "tid-wrap: the second-to-last id read {:#x}", a);
+        assert!(b == 0x7FFF_FFFF, "tid-wrap: the last id read {:#x}", b);
+        let c = spawn_probe(probe_return, 1024);
+        assert!(c == sched::ERR_AGAIN, "tid-wrap: the spawn past the id space returned {}", c);
+        assert!(sched::probe_next_tid() == 0x8000_0000, "tid-wrap: the counter moved on a refused spawn");
+        assert!(spawn_probe(probe_return, 1024) == sched::ERR_AGAIN, "tid-wrap: the refusal is not stable");
+        assert!(sched::probe_next_tid() == 0x8000_0000, "tid-wrap: the counter moved on the second refusal");
+        release(&ABI_PARK);
+        join_tid(a);
+        join_tid(b);
+        ABI_PARK.store(0, Ordering::Release);
+        kprintln!("[api] PASS tid-wrap (ids 0x7ffffffe and 0x7fffffff handed out positive, the spawn past the id space refused EAGAIN twice with the counter unmoved, no negative id)");
     }
 
     static PEER_LOCAL: AtomicUsize = AtomicUsize::new(0);
@@ -1437,43 +1636,43 @@ mod api_smoke {
         kprintln!("[api] PASS susp-ctx (planted registers exact in ctx, sp inside the target stack, pc inside kernel text)");
     }
 
-    static HJ_WITNESS: AtomicU32 = AtomicU32::new(0);
-    static HJ_TID: AtomicI32 = AtomicI32::new(0);
+    static SC_WITNESS: AtomicU32 = AtomicU32::new(0);
+    static SC_TID: AtomicI32 = AtomicI32::new(0);
 
-    extern "C" fn hijack_pad(magic: usize) -> ! {
-        HJ_WITNESS.store(magic as u32, Ordering::Release);
-        HJ_TID.store(api::rhu_thread_self(), Ordering::Release);
+    extern "C" fn setctx_pad(magic: usize) -> ! {
+        SC_WITNESS.store(magic as u32, Ordering::Release);
+        SC_TID.store(api::rhu_thread_self(), Ordering::Release);
         api::rhu_thread_exit()
     }
 
-    fn check_susp_hijack() {
-        kprintln!("[api] susp-hijack: set-context landing pad + sp-refusal armed");
+    fn check_susp_setctx() {
+        kprintln!("[api] susp-setctx: landing pad + sp-refusal armed");
         CTX_REL.store(0, Ordering::Release);
         let (_slot, tid) =
-            sched::try_spawn("dhij", ctx_planter, 0, 3, 4096).ok().expect("susp-hijack: spawn");
+            sched::try_spawn("dsctx", ctx_planter, 0, 3, 4096).ok().expect("susp-setctx: spawn");
         api::rhu_sleep_ns(2_000_000);
         let mut ctx = zctx();
-        assert!(api::rhu_thread_suspend(tid, &mut ctx) == 0, "susp-hijack: suspend refused");
+        assert!(api::rhu_thread_suspend(tid, &mut ctx) == 0, "susp-setctx: suspend refused");
         let mut c2 = zctx();
         assert!(
             api::rhu_thread_suspend(tid, &mut c2) == sched::ERR_AGAIN,
-            "susp-hijack: double suspend not EAGAIN"
+            "susp-setctx: double suspend not EAGAIN"
         );
         let good_sp = ctx.sp;
         ctx.sp = good_sp.wrapping_add(8);
         assert!(
             api::rhu_thread_set_context(tid, &ctx) == sched::ERR_INVAL,
-            "susp-hijack: sp edit not refused EINVAL"
+            "susp-setctx: sp edit not refused EINVAL"
         );
         ctx.sp = good_sp;
-        ctx.pc = hijack_pad as *const () as usize as u32;
+        ctx.pc = setctx_pad as *const () as usize as u32;
         ctx.r[0] = 0xC0DE_FACE;
-        assert!(api::rhu_thread_set_context(tid, &ctx) == 0, "susp-hijack: hijack edit refused");
-        assert!(api::rhu_thread_resume(tid) == 0, "susp-hijack: resume refused");
-        wait_until(|| HJ_WITNESS.load(Ordering::Acquire) == 0xC0DE_FACE, "pad to run");
-        assert!(HJ_TID.load(Ordering::Acquire) == tid, "susp-hijack: pad ran off-thread");
+        assert!(api::rhu_thread_set_context(tid, &ctx) == 0, "susp-setctx: the context edit refused");
+        assert!(api::rhu_thread_resume(tid) == 0, "susp-setctx: resume refused");
+        wait_until(|| SC_WITNESS.load(Ordering::Acquire) == 0xC0DE_FACE, "pad to run");
+        assert!(SC_TID.load(Ordering::Acquire) == tid, "susp-setctx: pad ran off-thread");
         join_tid(tid);
-        kprintln!("[api] PASS susp-hijack (sp edit refused exact, hijacked pc ran the pad with the planted witness)");
+        kprintln!("[api] PASS susp-setctx (sp edit refused exact, the edited pc ran the pad with the planted witness)");
     }
 
     static RU_WORD: AtomicU32 = AtomicU32::new(0);
@@ -1513,7 +1712,7 @@ mod api_smoke {
     static ACT_SNAP: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
     static H_MS: AtomicU32 = AtomicU32::new(0);
 
-    extern "C" fn act_handler(_ctx: *mut sched::RhuCtx) {
+    extern "C" fn act_handler(ctx: *mut sched::RhuCtx) {
         let n = ACT_COUNT.fetch_add(1, Ordering::AcqRel);
         ACT_TID.store(api::rhu_thread_self(), Ordering::Release);
         let probe = 0u32;
@@ -1530,6 +1729,11 @@ mod api_smoke {
             }
             2 => {
                 H_MS.store(sched::now_ms(), Ordering::Release);
+            }
+            3 => {
+                unsafe { core::arch::asm!("vmov.f32 s0, s0", out("s0") _, options(nomem, nostack)) };
+                LZ_FLAGS.store(unsafe { (*ctx).flags }, Ordering::Release);
+                LZ_CTX.store(ctx as u32, Ordering::Release);
             }
             _ => {}
         }
@@ -1789,6 +1993,52 @@ mod api_smoke {
         ACT_MODE.store(0, Ordering::Release);
         join_tid(tid);
         kprintln!("[api] PASS act-sleep-rearm (the handler ran early, the sleep still returned not-early)");
+    }
+
+    static LZ_FLAGS: AtomicU32 = AtomicU32::new(0xFFFF);
+    static LZ_CTX: AtomicU32 = AtomicU32::new(0);
+    static LZ_SWITCHES: AtomicU32 = AtomicU32::new(0);
+    static LZ_DONE: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn lazy_target(_: usize) {
+        let sw0 = sched::switch_count();
+        for _ in 0..8 {
+            api::rhu_thread_yield();
+        }
+        LZ_SWITCHES.store(sched::switch_count().wrapping_sub(sw0), Ordering::Release);
+        LZ_DONE.store(1, Ordering::Release);
+    }
+
+    fn check_act_lazy_fp() {
+        kprintln!("[api] act-lazy-fp: floating-point handler + basic-frame target + the switch-entry witness armed");
+        let (w0, _, _) = sched::probe_lazy_fp_witness();
+        assert!(w0 == 0, "act-lazy-fp: {} abandoned lazy floating-point states seen before the check", w0);
+        ACT_MODE.store(3, Ordering::Release);
+        let c0 = ACT_COUNT.load(Ordering::Acquire);
+        LZ_DONE.store(0, Ordering::Release);
+        let (_slot, tid) =
+            sched::try_spawn("dlazy", lazy_target, 0, 4, 4096).ok().expect("act-lazy-fp: spawn");
+        assert!(api::rhu_activation_send(tid) == 0, "act-lazy-fp: send refused");
+        api::rhu_sleep_ns(2_000_000);
+        wait_until(|| LZ_DONE.load(Ordering::Acquire) == 1, "the target's yields after its resume");
+        join_tid(tid);
+        ACT_MODE.store(0, Ordering::Release);
+        assert!(ACT_COUNT.load(Ordering::Acquire) == c0 + 1, "act-lazy-fp: handler run count wrong");
+        assert!(ACT_TID.load(Ordering::Acquire) == tid, "act-lazy-fp: handler ran off-target");
+        let flags = LZ_FLAGS.load(Ordering::Acquire);
+        assert!(flags == 0, "act-lazy-fp: the target's interrupted frame was not basic (ctx flags {:#x})", flags);
+        let sw = LZ_SWITCHES.load(Ordering::Acquire);
+        assert!(sw >= 8, "act-lazy-fp: the target switched out {} times after its resume (wanted at least 8)", sw);
+        let (count, fpcar, psp) = sched::probe_lazy_fp_witness();
+        assert!(
+            count == 0,
+            "act-lazy-fp: {} abandoned lazy floating-point states seen at basic-frame switch entries after the resume (the last pending save at {:#010x}, the outgoing psp {:#010x}; the handler's ctx at {:#010x})",
+            count,
+            fpcar,
+            psp,
+            LZ_CTX.load(Ordering::Acquire)
+        );
+        kprintln!("[api] PASS act-lazy-fp (the handler ran one floating-point instruction on a target whose interrupted frame was basic, the target resumed and yielded eight times after it -- eight switch entries with its own frame basic -- and the witness counted no abandoned lazy floating-point state)");
     }
 
     /// The whole desc as bytes for the miss-writes-nothing and

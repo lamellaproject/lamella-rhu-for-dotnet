@@ -241,6 +241,8 @@ intptr_t SystemNative_MemfdCreate(const char* name, int32_t isReadonly);
 intptr_t SystemNative_ShmOpen(const char* name, int32_t flags, int32_t mode);
 int32_t SystemNative_ShmUnlink(const char* name);
 int32_t SystemNative_IsMemfdSupported(void);
+int32_t SystemNative_FcntlGetIsNonBlocking(intptr_t fd, int32_t* isNonBlocking);
+int32_t SystemNative_ReadFromNonblocking(intptr_t fd, void* buffer, int32_t bufferSize);
 #ifdef __cplusplus
 }
 #endif

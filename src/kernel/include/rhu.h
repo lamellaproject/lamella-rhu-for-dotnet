@@ -19,6 +19,16 @@ extern "C" {
  * nanoseconds on the rhu_now_ns clock, never relative. */
 #define RHU_DEADLINE_NONE UINT64_MAX
 
+/* The hosting-API contract generation this header describes. A change
+ * a compiled consumer could feel -- a signature, a struct layout, an
+ * error value, a function added or removed -- bumps it by one. Its
+ * value today is the header's function count; the two part ways at the
+ * first signature-only change. A payload that provides its own entry
+ * states the generation it was built against (rhu_payload_abi, at the
+ * end of this header), and the kernel refuses a mismatch before that
+ * entry runs. */
+#define RHU_ABI 31
+
 /* Error surface (RHU-owned values, errno-mirroring by convention). */
 #define RHU_EAGAIN (-11)    /* *addr != expected at entry; no sleep    */
 #define RHU_ETIMEDOUT (-110) /* the deadline passed                    */
@@ -144,16 +154,37 @@ void *rhu_tls_get(int32_t module);
 #define RHU_ATEXIT_SLOTS 8
 int32_t rhu_thread_atexit(void (*fn)(void *), void *arg);
 
+/* The hosted priority band (numerically lower is more urgent): a spawn's
+ * `prio` clamps into [RHU_HOSTED_PRIO_LO, RHU_HOSTED_PRIO_HI]; the flat
+ * value is the one level every hosted thread shares, the payload host
+ * thread included while it runs the entry. Spelled here, once, and
+ * mirrored by the kernel; a shim adopts these names rather than a
+ * literal of its own. */
+#define RHU_HOSTED_PRIO_LO 0x10
+#define RHU_HOSTED_PRIO_HI 0xE0
+#define RHU_HOSTED_PRIO_FLAT 0x80
+
 /* Spawn a hosted thread -> tid >= 1, or RHU_EAGAIN (no TCB slot, stack
  * pool exhausted, or a TLS block refused -- an honest refusal; hosted
  * callers own their retry story, kernel-internal birth errors stay
- * loud panics). `prio` clamps into the hosted band [0x10, 0xE0] (the
- * kernel's urgent band and idle stay unreachable from C; the
- * managed-priority mapping INTO the band is the hosting shim's).
- * `name` must outlive the thread; NULL reads as "hosted". Stacks come
- * from the .kstacks pool with exact-fit reuse of retired stacks. Tid
- * numbering in a hosted image: kmain holds tid 1 and the payload host
- * thread tid 2, so the first hosted spawn lands tid 3. */
+ * loud panics). `prio` clamps into the hosted band [RHU_HOSTED_PRIO_LO,
+ * RHU_HOSTED_PRIO_HI] (the kernel's urgent band and idle stay
+ * unreachable from C; the managed-priority mapping INTO the band is the
+ * hosting shim's). RHU_HOSTED_PRIO_FLAT is the one priority every
+ * hosted thread runs at: the thread that runs the payload entry moves
+ * to it for the entry's life (rhu_payload_entry, below), so a shim that
+ * spawns at this value lands its threads level with their host --
+ * equal-priority round-robin, and a start waited for by yield alone
+ * completes. `name` must outlive the thread; NULL reads as "hosted".
+ * Stacks come from the .kstacks pool with exact-fit reuse of retired
+ * stacks. Tid numbering in a hosted image: the idle thread holds tid 1
+ * and the payload host thread (the kernel's main thread) tid 2, so the
+ * first hosted spawn lands tid 3. Tids are
+ * process-unique and monotonic, never reused within a run: a stale tid
+ * resolves RHU_ESRCH and never to a newer thread. The id space is the
+ * positive int32_t range: a spawn that would exceed it is refused
+ * RHU_EAGAIN with nothing committed, never handed a negative id (the
+ * counter does not wrap). */
 int32_t rhu_thread_spawn(void (*entry)(void *), void *arg,
                          uint32_t stack_bytes, uint32_t prio,
                          const char *name);
@@ -208,8 +239,8 @@ typedef struct rhu_ctx {
  * caller's bookkeeping is broken and hears so). */
 int32_t rhu_thread_suspend(int32_t tid, rhu_ctx *out_ctx);
 
-/* Edit a SUSPENDED thread's context in place (hijack: registers and
- * pc, never geometry). ctx->sp must equal the suspension snapshot's
+/* Edit a SUSPENDED thread's context in place (registers and pc, never
+ * geometry). ctx->sp must equal the suspension snapshot's
  * sp or the whole edit is refused RHU_EINVAL and nothing is written.
  * The restore is always an exception return -- no path in this
  * kernel restores a context inline. Refusals: RHU_EINVAL null ctx or
@@ -230,7 +261,10 @@ int32_t rhu_thread_resume(int32_t tid);
  * kernel, never kernel shape). The handler runs ON the target thread
  * with a pointer to the interrupted context, which it may edit in
  * place under the set-context rules; on return the (possibly edited)
- * context is resumed by exception return. Refusals: RHU_EINVAL null
+ * context is resumed by exception return. The handler may use the
+ * floating-point unit: lazy floating-point state its instructions
+ * leave pending is completed before the interrupted context resumes,
+ * whatever that context's own frame type. Refusals: RHU_EINVAL null
  * handler or second registration. */
 int32_t rhu_activation_register(void (*handler)(rhu_ctx *));
 
@@ -321,6 +355,45 @@ void rhu_exit(int32_t code);
  * story. */
 int32_t rhu_entropy(void *buf, uint32_t n);
 int32_t rhu_entropy_is_hardware(void);
+
+/* --- The payload entry seam: the one member of this surface the
+ * kernel CALLS rather than serves. After the platform is up (the
+ * initialized data copied, the arena, the kernel heap, module 0, the
+ * scheduler and the kmain thread, the console) the payload flavor
+ * calls exactly one function, on the kmain thread, and exits the
+ * machine with the code it returns. For the entry's life that thread
+ * runs at RHU_HOSTED_PRIO_FLAT -- inside the hosted band, level with
+ * every thread the payload starts at that value -- and it takes the
+ * kernel's own urgency back when the entry returns; one console line
+ * ("[payload] host thread: ...") states both values at every boot. */
+
+/* The entry. The kernel provides a WEAK default that runs, in order:
+ * the placement check on the constructor and destructor arrays (the
+ * payload maps place .preinit_array, .init_array and .fini_array
+ * inside the boot copy window under the standard bracket names
+ * __preinit_array_start/end, __init_array_start/end and
+ * __fini_array_start/end; an array outside the window refuses loudly),
+ * the .preinit_array walk, the .init_array walk in priority order, the
+ * managed module list, then managed Main, whose code it returns.
+ * Nothing in the kernel runs the destructor array: the machine exit
+ * runs no destructors. A payload that defines this name strongly
+ * displaces the default and owns the whole order -- constructors,
+ * runtime, module list, arguments, the managed program -- and the
+ * default never runs. */
+int32_t rhu_payload_entry(void);
+
+/* The generation handshake. A payload that provides its own
+ * rhu_payload_entry also defines this object, strongly, as the RHU_ABI
+ * of the header it compiled against:
+ *     const uint32_t rhu_payload_abi = RHU_ABI;
+ * The kernel reads it before calling the entry. A stated generation
+ * that is not the kernel's, or a provided entry with no stated
+ * generation, is refused with one sentence on the console and exit
+ * code 4 (a park on silicon): the entry never runs, and a mismatched
+ * peer reports instead of hanging. A payload that keeps the default
+ * entry may leave this undefined (the kernel's weak sentinel reads 0,
+ * "no generation stated"). */
+extern const uint32_t rhu_payload_abi;
 
 #ifdef __cplusplus
 }

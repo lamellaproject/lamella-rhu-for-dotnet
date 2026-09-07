@@ -1,7 +1,7 @@
 //! The RHU hosting API -- the C-ABI waistline between the kernel and
-//! hosted payloads. Thirty functions, `rhu_`-prefixed, mirrored
-//! exactly by `include/rhu.h`; the shim backend is the intended
-//! consumer and nothing else links against it yet. One standing rule
+//! hosted payloads. Thirty-one functions, `rhu_`-prefixed, mirrored
+//! exactly by `include/rhu.h` (contract generation `ABI`, at the end
+//! of this file); the shim backend is the intended consumer. One rule
 //! binds this surface: no second blocking primitive ever joins it, and
 //! new needs are shim recipes over the blocking four (join, for one,
 //! is a futex recipe on a thread-exit word -- never a verb here).
@@ -92,11 +92,11 @@ pub extern "C" fn rhu_thread_atexit(f: Option<extern "C" fn(*mut c_void)>, arg: 
     sched::atexit_push(f, arg)
 }
 
-/// The hosted priority band: idle (0xFF) and the kernel's urgent band
-/// stay unreachable from C; the managed-priority mapping INTO the band
-/// is the hosting shim's business.
-const HOSTED_PRIO_LO: u32 = 0x10;
-const HOSTED_PRIO_HI: u32 = 0xE0;
+/// The hosted band and its one flat level, spelled once (mirrored by
+/// `include/rhu.h`, which carries the consumer text).
+pub const HOSTED_PRIO_LO: u32 = 0x10;
+pub const HOSTED_PRIO_HI: u32 = 0xE0;
+#[allow(dead_code)] pub const HOSTED_PRIO_FLAT: u32 = 0x80;
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.rhu_api")]
@@ -287,3 +287,11 @@ pub extern "C" fn rhu_entropy(buf: *mut u8, n: u32) -> i32 {
 pub extern "C" fn rhu_entropy_is_hardware() -> i32 {
     entropy::is_hardware()
 }
+
+/// The hosting-API contract generation this kernel serves: `RHU_ABI`
+/// in `include/rhu.h`, the two moving together or not at all. A
+/// payload that provides its own `rhu_payload_entry` states the
+/// generation it was built against in `rhu_payload_abi`, and the
+/// payload flavor refuses a mismatch before that entry runs
+/// (payload.rs).
+pub const ABI: u32 = 31;

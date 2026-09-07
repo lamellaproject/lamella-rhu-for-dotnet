@@ -2,11 +2,13 @@
  * (librhu_kernel.a, feature `payload`) merged with one frozen ILC
  * payload object under an external `ld -T`. Same machine map as
  * link-stm32f769i-disco.x -- keep the two in sync BY HAND -- plus the
- * managed sections an ILC object carries: __managedcode into text, the
- * __modules table bracketed for the module-initializer walk, frozen/
- * metadata blobs into rodata, hydrated data into .data, and the ARM
- * unwind tables KEPT (managed code emits them; the base script's
- * panic=abort discard does not apply here).
+ * managed sections an ILC object carries: managed code and unboxing stubs
+ * bracketed inside text, the __modules table bracketed for the
+ * module-initializer walk, frozen/metadata blobs into rodata, the
+ * rehydrated-data region zero-filled and bracketed inside .bss, the GOT
+ * inside the boot copy window, and the ARM unwind tables KEPT (managed
+ * code emits them; the base script's panic=abort discard does not apply
+ * here).
  *
  * Geometry discipline: every output section lands inside a declared
  * MEMORY region, so overflow fails the LINK loudly; the payload gate
@@ -21,18 +23,27 @@ MEMORY
   /* Reserved for the split-image app slot: nothing from this image may
    * land here. 0x08180000 is a 256K-sector boundary. */
   APP  (rx)  : ORIGIN = 0x08180000, LENGTH = 512K
-  /* 0x20000000 DTCM 128K: RESERVED-UNUSED in this map revision. */
-  DATA (rwx) : ORIGIN = 0x20020000, LENGTH = 384K
+  /* DTCM 128K at 0x20000000 + SRAM1 368K at 0x20020000 + SRAM2 16K at
+   * 0x2007C000: one contiguous 512K window, the whole of it this
+   * image's DATA (data and stacks only; no code is ever placed in RAM).
+   * The DTCM is the core's own zero-wait-state data memory on its TCM
+   * port, reachable by the DMA masters only through the core's slave
+   * port; the vendor's own board template treats the three as one
+   * region, as this map does. */
+  DATA (rwx) : ORIGIN = 0x20000000, LENGTH = 512K
 }
 
 /* GC-substrate floor: the arena window this board GUARANTEES after
  * statics + .kstacks + the boot-stack reserve (link-enforced by the
- * window asserts at the bottom of this map). PAYLOAD-map value: the
- * payload flavor carries ~100K of payload .data/.bss the boot flavor
- * does not, so this map's ceiling is ~155K today -- 128K covers the
- * mini-tier 96K-region class with aux headroom and leaves ~27K of
- * static growth. The kernel map keeps 192K. */
-RHU_ARENA_MIN = 128K;
+ * window asserts at the bottom of this map). PAYLOAD-map value: with
+ * the DTCM inside DATA, the window under the FULL hosted image (the
+ * runtime, the shim, the collector and the C library beside the
+ * kernel) reads ~251K, so 192K -- the kernel map's own floor, the two
+ * flavors' floors equal again -- funds the board's GC row (the 16K
+ * kernel-heap carve, the 96K region with its bitmap and mark stack,
+ * and a frozen-object pool of one stock commit) and leaves ~59K of
+ * static growth. */
+RHU_ARENA_MIN = 192K;
 
 ENTRY(Reset);
 
@@ -48,6 +59,22 @@ SECTIONS
     KEEP(*(.vector_table.reset));      /* [1]       Reset                */
     KEEP(*(.vector_table.exceptions)); /* [2..15]   system exceptions    */
     KEEP(*(.vector_table.interrupts)); /* [16..125] external IRQ lines   */
+    /* The table's slot is 0x400 bytes on every board: padded to the
+     * in-image header's fixed offset (zero fill), so the header follows
+     * inside the same load segment and the flash image stays one
+     * contiguous run. A table that outgrows the slot moves the header
+     * and refuses the link at the assert below. */
+    . = ALIGN(0x400);
+  } > CODE
+
+  /* The in-image header (__rhu_image_header): the image's own statement
+   * of its identity and load address, at a fixed offset from the image
+   * base on every board so a reader holding the flash bytes alone finds
+   * it (header.rs states the layout). KEEP: nothing in the image
+   * references the record. The test harness reads it off the artifact. */
+  .rhu_header ORIGIN(CODE) + 0x400 :
+  {
+    KEEP(*(.rhu_header));
   } > CODE
 
   .text : ALIGN(4)
@@ -58,7 +85,19 @@ SECTIONS
      * fully-inlined one away. The test harness asserts all four. */
     KEEP(*(.text.rhu_api));
     *(.text .text.*);
-    *(__managedcode*);
+    /* The hosted program's managed code and its unboxing stubs, each
+     * bracketed: the runtime's module registration takes both ranges by
+     * address (the host reads the brackets), so the two are KEPT and the
+     * pairs exact; both stay inside [__stext, __etext), module 0's code
+     * bracket. Empty pairs until a hosted object carries the sections. */
+    . = ALIGN(4);
+    __rhu_managedcode_lo = .;
+    KEEP(*(__managedcode*));
+    __rhu_managedcode_hi = .;
+    . = ALIGN(4);
+    __rhu_unbox_lo = .;
+    KEEP(*(__unbox*));
+    __rhu_unbox_hi = .;
     . = ALIGN(4);
     __etext = .;
   } > CODE
@@ -95,10 +134,6 @@ SECTIONS
     __rhu_frozen_hi = .;
   } > CODE
 
-  /* Static-link GOT: any GOT-relative references in the payload object
-   * resolve to link-time constants parked here, read-only. */
-  .got : ALIGN(4) { *(.got) *(.got.plt) } > CODE
-
   /* ARM unwind tables, kept: managed code emits an exidx/extab pair
    * per code section. PREL31 entries reach +/-1 GB, so they stay in
    * CODE beside the text they describe. */
@@ -114,10 +149,61 @@ SECTIONS
   {
     __sdata = .;
     *(.data .data.*);
-    *(.hydrated*);
     . = ALIGN(8);
   } > DATA AT> CODE
   __sidata = LOADADDR(.data);
+
+  /* The static-link GOT (GOT-relative references a hosted object
+   * carries resolve to link-time constants): inside the boot copy window
+   * at .data's load/run offset (asserted at the bottom of this map), so
+   * the linker's read-only-after-relocation run -- the GOT, the three
+   * arrays and the TLS template -- is one run of neighboring sections,
+   * the shape it requires. Empty until a hosted object carries such
+   * references; the 8-aligned tail keeps the arrays' offset. */
+  .got : ALIGN(4)
+  {
+    *(.got) *(.got.plt);
+    . = ALIGN(8);
+  } > DATA AT> CODE
+
+  /* The constructor and destructor arrays, inside the boot copy window:
+   * a hosted image's static constructors register here (.preinit_array,
+   * then .init_array in priority order; .fini_array holds the
+   * destructors), and the payload entry walks the brackets before the
+   * module list. Each array loads from CODE at .data's load/run offset
+   * (asserted at the bottom of this map) so the boot's single copy lands
+   * it: an array left outside the window holds whatever the RAM held at
+   * reset -- a defect an emulator that writes sections straight into
+   * memory hides and flash-resident silicon exposes. KEEP: the arrays
+   * are consumed by address through the brackets, never by symbol
+   * reference. Each tail aligns to 8 so the next section keeps the
+   * offset. The brackets are exact: an image with no constructors reads
+   * three empty pairs. Nothing in the kernel runs the destructor array
+   * (the machine exit runs no destructors); a host that owns the entry
+   * owns that walk. */
+  .preinit_array : ALIGN(4)
+  {
+    __preinit_array_start = .;
+    KEEP(*(.preinit_array .preinit_array.*));
+    __preinit_array_end = .;
+    . = ALIGN(8);
+  } > DATA AT> CODE
+
+  .init_array : ALIGN(4)
+  {
+    __init_array_start = .;
+    KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*) .init_array));
+    __init_array_end = .;
+    . = ALIGN(8);
+  } > DATA AT> CODE
+
+  .fini_array : ALIGN(4)
+  {
+    __fini_array_start = .;
+    KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*) .fini_array));
+    __fini_array_end = .;
+    . = ALIGN(8);
+  } > DATA AT> CODE
 
   /* Module 0's TLS template, in its own output section: the assembler
    * marks .tdata/.tbss input thread-local and the linker refuses that
@@ -147,6 +233,15 @@ SECTIONS
   {
     __sbss = .;
     *(.bss .bss.* COMMON);
+    /* The hosted runtime's rehydrated-data region: zero-filled RAM the
+     * runtime fills at startup from its compact form, bracketed and
+     * 8-aligned as the runtime lays it out, inside the zero-fill and
+     * statics windows. Reference-retained (the compact form points into
+     * it); an empty pair until a hosted object carries the region. */
+    . = ALIGN(8);
+    __rhu_hydrated_lo = .;
+    *(.hydrated*);
+    __rhu_hydrated_hi = .;
     . = ALIGN(4);
     __ebss = .;
   } > DATA
@@ -182,3 +277,46 @@ ASSERT(__rhu_arena_hi - __rhu_arena_lo >= RHU_ARENA_MIN,
  * load/run offset must equal .data's, on every board. */
 ASSERT(LOADADDR(.tdata) - ADDR(.tdata) == LOADADDR(.data) - ADDR(.data),
   "module-0 TLS template outside the boot copy's single load/run offset");
+
+/* The constructor and destructor arrays ride the same copy: each at
+ * .data's load/run offset, on every board. */
+ASSERT(LOADADDR(.preinit_array) - ADDR(.preinit_array) == LOADADDR(.data) - ADDR(.data),
+  ".preinit_array outside the boot copy's single load/run offset");
+ASSERT(LOADADDR(.init_array) - ADDR(.init_array) == LOADADDR(.data) - ADDR(.data),
+  ".init_array outside the boot copy's single load/run offset");
+ASSERT(LOADADDR(.fini_array) - ADDR(.fini_array) == LOADADDR(.data) - ADDR(.data),
+  ".fini_array outside the boot copy's single load/run offset");
+
+/* The in-image header sits at the fixed offset every reader uses, the
+ * vector table's padded slot ends exactly there, and the record is
+ * layout version 1's sixteen words -- on every board. */
+ASSERT(ADDR(.rhu_header) == ORIGIN(CODE) + 0x400,
+  "image header not at the fixed offset 0x400 from the image base");
+ASSERT(SIZEOF(.vector_table) == 0x400,
+  "vector table slot is not the 0x400 bytes before the image header");
+ASSERT(SIZEOF(.rhu_header) == 64,
+  "image header is not the 64 bytes of layout version 1");
+
+/* The hosted runtime's demand as the frozen tier states it (goldens/rt:
+ * the merged program object's section classes by llvm-size -- the code
+ * class, the copied data, the zero-filled data). The regions must hold
+ * that demand beside the kernel's own reserves on every board: a region
+ * shrunk under it refuses the link whatever the image at hand carries.
+ * The kernel reserves are declared allowances, not measurements. */
+RHU_RT_CODE_BYTES = 933510;
+RHU_RT_COPY_BYTES = 6365;
+RHU_RT_ZERO_BYTES = 105936;
+RHU_KERNEL_CODE_RESERVE = 128K;
+RHU_KERNEL_RAM_RESERVE = 16K;
+ASSERT(LENGTH(CODE) >= RHU_RT_CODE_BYTES + RHU_RT_COPY_BYTES + RHU_KERNEL_CODE_RESERVE,
+  "CODE region under the hosted runtime's code class and copied data beside the kernel's code reserve");
+ASSERT(LENGTH(DATA) >= RHU_RT_COPY_BYTES + RHU_RT_ZERO_BYTES + SIZEOF(.kstacks) + RHU_BOOT_STACK_RESERVE + RHU_ARENA_MIN + RHU_KERNEL_RAM_RESERVE,
+  "DATA region under the hosted runtime's data beside the thread stacks, the boot-stack reserve, the arena floor and the kernel's RAM reserve");
+
+/* The GOT rides the boot's single copy: at .data's load/run offset. */
+ASSERT(LOADADDR(.got) - ADDR(.got) == LOADADDR(.data) - ADDR(.data),
+  ".got outside the boot copy's single load/run offset");
+
+/* The rehydrated-data region lies inside the zero-fill window. */
+ASSERT(__rhu_hydrated_lo >= __sbss && __rhu_hydrated_hi <= __ebss,
+  "rehydrated-data region outside the zero-fill window");

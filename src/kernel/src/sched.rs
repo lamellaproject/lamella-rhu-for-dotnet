@@ -243,13 +243,52 @@ static NOW_LAST_HI: AtomicU32 = AtomicU32::new(0);
 #[unsafe(export_name = "__rhu_switches")]
 pub static SWITCHES: AtomicU32 = AtomicU32::new(0);
 
-/// The debug-visible layout contract, v1: how external tooling reads
+/// The switch-entry witness of the lazy floating-point discipline (the
+/// frame-type note above the suspension + activation seam): how many
+/// PendSV entries found lazy floating-point state still pending while
+/// their OWN frame was basic -- the outgoing thread held no
+/// floating-point context, so the pending save belongs to no live frame
+/// and is aimed at whatever now occupies the address an abandoned frame
+/// held -- with the pending save's address and the outgoing thread's
+/// stack pointer from the last such entry. Zero in a correct kernel.
+/// Only the PendSV entry writes it; the api smoke reads it.
+#[repr(C)]
+pub struct LazyFpWitness {
+    pub count: AtomicU32,
+    pub fpcar: AtomicU32,
+    pub psp: AtomicU32,
+}
+#[unsafe(export_name = "__rhu_lazy_fp_witness")]
+pub static LAZY_FP_WITNESS: LazyFpWitness = LazyFpWitness {
+    count: AtomicU32::new(0),
+    fpcar: AtomicU32::new(0),
+    psp: AtomicU32::new(0),
+};
+
+/// The version of the debug-visible layout record this kernel emits.
+/// Fields never move or change meaning across versions; later versions
+/// append, and a reader accepts any record whose version is at least
+/// the one it knows.
+pub const DEBUG_LAYOUT_VERSION: u32 = 2;
+
+/// The debug-visible layout contract: how external tooling reads
 /// kernel state from memory with no target-resident agent. A debugger
 /// resolves three symbols -- `__rhu_debug_layout` (this record),
 /// `__rhu_sched`, `__rhu_ticks` -- then walks the TCB table using the
 /// offsets recorded here. Offsets are computed by the compiler, so they
 /// cannot drift from the structs. State values: 0 Free, 1 Ready,
 /// 2 Sleeping, 3 Exited. `name` is a (pointer, length) string pair.
+///
+/// Version 2 appends the thread-local-base door: `tcb_off_tls` is the
+/// offset of a thread's per-module block pointer array, `tls_slots` its
+/// length and `tls_slot_bytes` one entry, so module `m`'s block for the
+/// thread whose control block starts at `tcb` is the pointer-sized word
+/// at `tcb + tcb_off_tls + m * tls_slot_bytes` -- 0 when the module has
+/// no thread-local state or the slot holds no live thread. Module 0 is
+/// the merged image's own thread-local template (the `.tdata` brackets):
+/// a thread-static at template offset X lives at that thread's module-0
+/// block plus X, the same arithmetic the hosting shim's
+/// `__tls_get_addr` performs for the running thread.
 #[repr(C)]
 pub struct DebugLayout {
     pub magic: u32,
@@ -265,6 +304,9 @@ pub struct DebugLayout {
     pub tcb_off_name: u32,
     pub tcb_off_stack_base: u32,
     pub tcb_off_stack_top: u32,
+    pub tcb_off_tls: u32,
+    pub tls_slots: u32,
+    pub tls_slot_bytes: u32,
 }
 
 #[used]
@@ -272,7 +314,7 @@ pub struct DebugLayout {
 #[unsafe(link_section = ".rhu_debug")]
 pub static __rhu_debug_layout: DebugLayout = DebugLayout {
     magic: 0x4448_5552,
-    version: 1,
+    version: DEBUG_LAYOUT_VERSION,
     max_threads: MAX_THREADS as u32,
     sched_off_tcbs: offset_of!(Sched, tcbs) as u32,
     sched_off_current: offset_of!(Sched, current) as u32,
@@ -284,6 +326,9 @@ pub static __rhu_debug_layout: DebugLayout = DebugLayout {
     tcb_off_name: offset_of!(Tcb, name) as u32,
     tcb_off_stack_base: offset_of!(Tcb, stack_base) as u32,
     tcb_off_stack_top: offset_of!(Tcb, stack_top) as u32,
+    tcb_off_tls: offset_of!(Tcb, tls) as u32,
+    tls_slots: registry::MAX_MODULES as u32,
+    tls_slot_bytes: core::mem::size_of::<*mut u8>() as u32,
 };
 
 #[allow(clippy::mut_from_ref)]
@@ -360,11 +405,15 @@ pub fn current_stack_top() -> u32 {
 }
 
 /// Why a spawn was refused. Kernel callers turn each into its loud
-/// panic; the C door maps all three onto one honest RHU_EAGAIN.
+/// panic; the C door maps all four onto one honest RHU_EAGAIN.
 pub enum SpawnErr {
     NoSlot,
     PoolExhausted,
     TlsExhausted,
+    /// The thread-id space (the positive `i32` range) is spent: the
+    /// counter never wraps, so a stale id can never alias a newer
+    /// thread.
+    TidExhausted,
 }
 
 /// Fallible thread spawn from the .kstacks pool: `(slot, tid)` or the
@@ -383,6 +432,9 @@ pub fn try_spawn(
 ) -> Result<(usize, i32), SpawnErr> {
     let stack_bytes = (stack_bytes + 7) & !7;
     let r = with_cs(|| unsafe {
+        if NEXT_TID.load(Ordering::Relaxed) > i32::MAX as u32 {
+            return Err(SpawnErr::TidExhausted);
+        }
         let (demands, nmod) = registry::tls_demands();
         let s = sched();
         let Some(slot) = (0..MAX_THREADS).find(|&i| s.tcbs[i].state == State::Free) else {
@@ -505,6 +557,7 @@ pub fn spawn(
         Err(SpawnErr::NoSlot) => panic!("out of TCB slots"),
         Err(SpawnErr::PoolExhausted) => panic!("stack pool exhausted"),
         Err(SpawnErr::TlsExhausted) => panic!("TLS exhausted at spawn"),
+        Err(SpawnErr::TidExhausted) => panic!("thread ids exhausted"),
     }
 }
 
@@ -915,6 +968,7 @@ pub fn stack_bounds_by_tid(tid: i32) -> Option<(u32, u32)> {
 }
 
 
+
 /// The C-ABI `rhu_ctx` (include/rhu.h) -- layout mirrored exactly.
 /// sp is the post-pop stack pointer, a SNAPSHOT: refused on write by
 /// set_context, ignored by the activation-return door.
@@ -1026,8 +1080,8 @@ pub fn suspend_by_tid(tid: i32, out: *mut RhuCtx) -> i32 {
     })
 }
 
-/// Hijack a SUSPENDED thread's saved context (registers and pc, never
-/// geometry): ctx->sp must equal the snapshot's or the whole edit is
+/// Edit a SUSPENDED thread's saved context in place (registers and pc,
+/// never geometry): ctx->sp must equal the snapshot's or the whole edit is
 /// refused writing nothing.
 pub fn set_context_by_tid(tid: i32, ctx: *const RhuCtx) -> i32 {
     with_cs(|| unsafe {
@@ -1190,7 +1244,9 @@ unsafe fn deliver_activation(s: &mut Sched, i: usize) { unsafe {
 /// re-deliver if a send landed during the handler (same ctx storage,
 /// the cost never nests), else apply the possibly-edited ctx to the
 /// original frames (activation door: ctx.sp ignored) and restore.
-/// Returns the psp to pop from; the asm arm pops the PendSV shape.
+/// Returns the psp to pop from; the asm arm pops the PendSV shape. The
+/// arm completes its own frame's pending lazy floating-point state
+/// BEFORE calling here (the frame-type note above the seam).
 #[unsafe(no_mangle)]
 extern "C" fn __rhu_act_resume(_psp: u32) -> u32 {
     with_cs(|| unsafe {
@@ -1280,6 +1336,25 @@ pub fn probe_retired() -> (u32, u32, u32) {
         let s = sched();
         (s.retired_n, s.leak_drops, s.leak_bytes)
     })
+}
+
+/// Seek the thread-id counter to `next` (the id the next spawn takes),
+/// for the api smoke's id-space arm ONLY: the refusal at the end of the
+/// id space cannot be reached by spawning. Forward only -- the
+/// monotonic law holds inside the smoke too.
+#[cfg(feature = "api-smoke")]
+pub fn probe_tid_seek(next: u32) {
+    with_cs(|| {
+        let cur = NEXT_TID.load(Ordering::Relaxed);
+        assert!(next >= cur, "tid seek backwards (probe bug)");
+        NEXT_TID.store(next, Ordering::Relaxed);
+    })
+}
+
+/// The id the next spawn takes (see `probe_tid_seek`).
+#[cfg(feature = "api-smoke")]
+pub fn probe_next_tid() -> u32 {
+    NEXT_TID.load(Ordering::Relaxed)
 }
 
 /// Round-robin pick of the most urgent Ready thread: walk the ready
@@ -1458,10 +1533,19 @@ SvcHandler:
     msr   psp, r0
     bx    lr
 
-2:  /* Activation resume: the kernel half decides re-delivery vs final
-       restore and returns the psp to pop; the pop is the PendSV
-       restore shape verbatim. The trampoline's own SVC-pushed frame
-       becomes dead space above the restored sp by construction. */
+2:  /* Activation resume. The handler ran on the target's stack; when it
+       executed a floating-point instruction this SVC's own frame is
+       extended (EXC_RETURN bit 4 clear) with its lazy s0-s15 save still
+       pending, aimed at the floating-point area of that frame -- dead
+       space once the original frames are popped below. Complete it
+       here, while the frame is live, so the pop never abandons a frame
+       with lazy state armed (the discipline the context switch keeps):
+       one floating-point instruction does it. The kernel half then
+       decides re-delivery vs final restore and returns the psp to pop;
+       the pop is the PendSV restore shape verbatim. */
+    tst   lr, #0x10
+    it    eq
+    vmoveq.f32 s0, s0
     bl    __rhu_act_resume
     ldmia r0!, {{r4-r11, lr}}
     tst   lr, #0x10
@@ -1476,7 +1560,29 @@ SvcHandler:
     .type PendSvHandler, %function
     .thumb_func
 PendSvHandler:
-    /* Save the outgoing thread: s16-s31 only if its frame is extended
+    /* The switch-entry witness (LazyFpWitness): an entry whose own frame
+       is basic -- the outgoing thread holds no floating-point context --
+       must find no lazy state pending (FPCCR.LSPACT clear); one that
+       does records the count, the pending save's address (FPCAR) and
+       the outgoing psp, and continues. r1-r3 are the entry's scratch
+       registers (stacked by the hardware, restored at the return). */
+    tst   lr, #0x10
+    beq   9f
+    movw  r1, #0xef34
+    movt  r1, #0xe000
+    ldr   r2, [r1]
+    tst   r2, #1
+    beq   9f
+    movw  r3, #:lower16:__rhu_lazy_fp_witness
+    movt  r3, #:upper16:__rhu_lazy_fp_witness
+    ldr   r2, [r3]
+    adds  r2, #1
+    str   r2, [r3]
+    ldr   r2, [r1, #4]
+    str   r2, [r3, #4]
+    mrs   r2, psp
+    str   r2, [r3, #8]
+9:  /* Save the outgoing thread: s16-s31 only if its frame is extended
        (EXC_RETURN bit 4 clear; the FP store itself completes any
        pending lazy s0-s15 stacking first, so no frame is ever abandoned
        with lazy state armed), then r4-r11 + EXC_RETURN. */
@@ -1495,3 +1601,50 @@ PendSvHandler:
     .size PendSvHandler, . - PendSvHandler
 "#
 );
+
+/// Move the CALLING thread to `prio` and re-run the pick before
+/// returning: a thread that became less urgent yields at once to every
+/// Ready peer now equal or more urgent than it (round-robin puts the
+/// caller last among equals), and a thread that became more urgent
+/// simply continues. Returns the priority the caller held. The one
+/// consumer is the hosting seam: the thread that runs a payload's entry
+/// joins the hosted band for the entry's life and takes its own urgency
+/// back when the entry returns (payload.rs); the api smoke exercises the
+/// same door. No other kernel thread changes priority, and no hosted
+/// thread reaches this -- there is no C door to it.
+#[cfg(any(feature = "payload", feature = "api-smoke"))]
+pub fn set_current_prio(prio: u8) -> u8 {
+    let prev = with_cs(|| unsafe {
+        let s = sched();
+        let cur = s.current;
+        let prev = s.tcbs[cur].prio;
+        s.tcbs[cur].prio = prio;
+        prev
+    });
+    pend_switch();
+    prev
+}
+
+/// The calling thread's priority as the scheduler holds it, for the api
+/// smoke's host-band check ONLY (see `probe_futex_waiting` for the probe
+/// rules).
+#[cfg(feature = "api-smoke")]
+pub fn probe_current_prio() -> u8 {
+    with_cs(|| unsafe {
+        let s = sched();
+        s.tcbs[s.current].prio
+    })
+}
+
+/// The switch-entry witness's three words (count, the last pending
+/// save's address, the last outgoing psp), for the api smoke's
+/// act-lazy-fp check ONLY (see `probe_futex_waiting` for the probe
+/// rules).
+#[cfg(feature = "api-smoke")]
+pub fn probe_lazy_fp_witness() -> (u32, u32, u32) {
+    (
+        LAZY_FP_WITNESS.count.load(Ordering::Acquire),
+        LAZY_FP_WITNESS.fpcar.load(Ordering::Acquire),
+        LAZY_FP_WITNESS.psp.load(Ordering::Acquire),
+    )
+}

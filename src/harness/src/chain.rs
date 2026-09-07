@@ -8,7 +8,7 @@ use std::process::{exit, Command};
 
 /// The chain verdict line: gate count, gate names, and the declared
 /// absence of every frozen-input tier whose inputs are not present
-/// (payload, gc and shim), in leg order. Byte-identical to the chain of
+/// (payload, gc, shim and rt), in leg order. Byte-identical to the chain of
 /// record's line -- the drop pipeline parses it into the manifest --
 /// and byte-identical to the pre-generalization rendering for the
 /// zero- and payload-declared shapes (the core selfcheck pins all
@@ -63,6 +63,12 @@ pub fn run(repo: &Path) -> ! {
     } else {
         declared.push(("shim", "goldens/shim"));
         say("==== chain: shim tier frozen inputs absent (goldens/shim) -- tier DECLARED, not run ====");
+    }
+    if repo.join("goldens").join("rt").is_dir() {
+        legs.push("rt");
+    } else {
+        declared.push(("rt", "goldens/rt"));
+        say("==== chain: rt tier frozen inputs absent (goldens/rt) -- tier DECLARED, not run ====");
     }
 
     let chain_id = format!("chain-{}", std::process::id());

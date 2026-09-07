@@ -2,8 +2,10 @@
  * at this hosting: error identities in both directions, the file surface
  * (the console at descriptors 0-2, a RAM-backed file store at 3-15),
  * memory mapping with the frozen-object reservation guard, the malloc
- * family, the threading primitives on the kernel futex, time, and random
- * bytes. Managed callers pass and receive the PAL's own constants and
+ * family, the threading primitives on the kernel futex, time, random
+ * bytes, and what the class library asks about the process it runs in:
+ * its identity, its working directory, its environment and its log
+ * streams. Managed callers pass and receive the PAL's own constants and
  * structure layouts (the generated headers), never a platform's; errno
  * crosses the boundary through the generated mapping in both directions.
  * Every descriptor belongs to exactly one band, and the console never
@@ -23,13 +25,17 @@
 #include "rhu.h"
 #include "rhu_glibc_arm32.h"
 #include "rhu_pal_console_p7.h"
+#include "rhu_pal_environment_p7.h"
 #include "rhu_pal_errno_p7.h"
 #include "rhu_pal_io_p7.h"
+#include "rhu_pal_log_p7.h"
 #include "rhu_pal_memory_p7.h"
+#include "rhu_pal_process_p7.h"
 #include "rhu_pal_random_p7.h"
 #include "rhu_pal_signal_p7.h"
 #include "rhu_pal_threading_p7.h"
 #include "rhu_pal_time_p7.h"
+#include "rhu_pal_uid_p7.h"
 
 #ifndef RHU_SHIM_BREAK_FD_BASE
 _Static_assert(RHU_SHIM_FD_FILE_LO >= RHU_SHIM_FD_CONSOLE_HI, "the file band starts above the console band");
@@ -50,6 +56,7 @@ int strncmp(const char *a, const char *b, size_t n);
 char *strchr(const char *s, int c);
 char *strrchr(const char *s, int c);
 char *strcpy(char *dst, const char *src);
+char *getenv(const char *name);
 int pthread_mutex_init(void *slot, const void *attr);
 int pthread_mutex_lock(void *slot);
 int pthread_mutex_unlock(void *slot);
@@ -1515,4 +1522,115 @@ int32_t SystemNative_SetSignalForBreak(int32_t signalForBreak)
 {
     g_signal_for_break = signalForBreak != 0 ? 1 : 0;
     return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* the process as the class library sees it: descriptor mode, the      */
+/* working directory, identity, the environment, the log streams       */
+/* ------------------------------------------------------------------ */
+
+/* No served descriptor is ever non-blocking: the console answers what it
+ * has and a file in the store is always ready. The query reports that,
+ * and the non-blocking read is the plain read. */
+int32_t SystemNative_FcntlGetIsNonBlocking(intptr_t fd, int32_t *isNonBlocking)
+{
+    if (!(fd_is_console(fd) || fd_file(fd) != NULL)) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    *isNonBlocking = 0;
+    return 0;
+}
+
+int32_t SystemNative_ReadFromNonblocking(intptr_t fd, void *buffer, int32_t bufferSize)
+{
+    return SystemNative_Read(fd, buffer, bufferSize);
+}
+
+/* The working directory is the root of the file store: the one directory
+ * this hosting has, so a relative path resolves under it. */
+char *SystemNative_GetCwd(char *buffer, int32_t bufferSize)
+{
+    if (buffer == NULL || bufferSize < 2) {
+        ERRNO = RHU_GERR_ERANGE;
+        return NULL;
+    }
+    buffer[0] = '/';
+    buffer[1] = 0;
+    return buffer;
+}
+
+/* The one principal of a single-program device. Its identity is 0, and
+ * its password entry names it and its home directory (the directory the
+ * environment table names) and nothing else; any other identity has no
+ * entry. */
+#define RHU_SHIM_UID 0u
+static const char g_principal_name[] = "rhu";
+
+uint32_t SystemNative_GetEUid(void)
+{
+    return RHU_SHIM_UID;
+}
+
+/* One string of the record copied into the caller's buffer, advancing
+ * the cursor; null when the buffer cannot hold it. */
+static char *pw_put(char **at, const char *end, const char *s)
+{
+    size_t n = strlen(s) + 1u;
+    char *p = *at;
+    if ((size_t)(end - p) < n)
+        return NULL;
+    memcpy(p, s, n);
+    *at = p + n;
+    return p;
+}
+
+/* The record's string fields are copied into the caller's buffer, as the
+ * library function this row stands for does; a buffer too small answers
+ * the range error as a positive number, the row's own contract, and an
+ * identity without an entry answers -1. */
+int32_t SystemNative_GetPwUidR(uint32_t uid, rhu_pal_passwd *pwd, char *buf, int32_t buflen)
+{
+    char *at = buf;
+    const char *end;
+    const char *home;
+    if (pwd == NULL || buf == NULL || buflen < 0)
+        return RHU_GERR_EINVAL;
+    if (uid != RHU_SHIM_UID)
+        return -1;
+    end = buf + buflen;
+    home = getenv("HOME");
+    memset(pwd, 0, sizeof *pwd);
+    pwd->Name = pw_put(&at, end, g_principal_name);
+    pwd->Password = pw_put(&at, end, "");
+    pwd->UserId = uid;
+    pwd->GroupId = uid;
+    pwd->UserInfo = pw_put(&at, end, "");
+    pwd->HomeDirectory = pw_put(&at, end, home != NULL ? home : "/");
+    pwd->Shell = pw_put(&at, end, "");
+    if (pwd->Name == NULL || pwd->Password == NULL || pwd->UserInfo == NULL
+        || pwd->HomeDirectory == NULL || pwd->Shell == NULL)
+        return RHU_GERR_ERANGE;
+    return 0;
+}
+
+/* The environment is the shim's own table. */
+char *SystemNative_GetEnv(const char *variable)
+{
+    return getenv(variable);
+}
+
+/* The two log streams are the console: the bytes go out as given, no
+ * line ending added, exactly as the library function this row stands
+ * for writes them. */
+void SystemNative_Log(uint8_t *buffer, int32_t length)
+{
+    if (length > 0)
+        rhu_console_write(buffer, (uint32_t)length);
+}
+
+void SystemNative_LogError(uint8_t *buffer, int32_t length)
+{
+    if (length > 0)
+        rhu_console_write(buffer, (uint32_t)length);
 }

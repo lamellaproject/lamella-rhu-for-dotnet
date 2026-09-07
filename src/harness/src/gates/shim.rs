@@ -48,14 +48,14 @@ const CC_FLAGS: [&str; 19] = [
 /// goldens/shim/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates objects + goldens + manifest + this pin
 /// together in one reviewed commit.
-const SHA_FROZEN_MANIFEST: &str = "b8cc8bafd609ea5a1537a982f129e8c6fc62a620e04c29cb257b63fc5664e91b";
+const SHA_FROZEN_MANIFEST: &str = "0b0b63b986accee6478c0d120796af985330fd23fec88d3936b9014157ce066d";
 
 /// The frozen-object plan of record: file name under goldens/shim/,
 /// source TU, extra defines beyond CC_FLAGS. The manifest's records must
 /// tie this table by name both directions; 'rhu-gate shim rederive'
 /// recompiles every row and byte-asserts the output against the frozen
 /// bytes.
-const FROZEN_PLAN: [(&str, &str, &[&str]); 18] = [
+const FROZEN_PLAN: [(&str, &str, &[&str]); 19] = [
     ("shim-core.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500"]),
     ("shim-core-break-sipid.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SIPID"]),
     ("shim-core-break-ctxpc.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_CTXPC"]),
@@ -74,6 +74,7 @@ const FROZEN_PLAN: [(&str, &str, &[&str]); 18] = [
     ("shimtest-activation.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_ACTIVATION"]),
     ("shimtest-tls.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_TLS"]),
     ("shimtest-host.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_HOST"]),
+    ("shim-core-f769.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_F769"]),
 ];
 
 /// The frozen goldens: the payload stream of each positive image, class
@@ -87,14 +88,16 @@ const GOLDENS: [&str; 5] = [
 ];
 
 /// The core object's EXACT import closure: the kernel verbs it consumes
-/// (the activation pair since the costume), the two arena-window link
-/// symbols, the compiler builtins and the 64-bit division helper (the
-/// loader-seam hooks are weak references, not imports, and stay outside
-/// the pin).
-const IMPORTS_CORE: [&str; 30] = [
+/// (the activation pair since the costume, the module-find door since
+/// the address answer), the two arena-window link symbols, the in-image
+/// header the address answer reads, the compiler builtins and the 64-bit
+/// division helper (the loader-seam hooks are weak references, not
+/// imports, and stay outside the pin).
+const IMPORTS_CORE: [&str; 32] = [
     "__aeabi_uldivmod",
     "__rhu_arena_hi",
     "__rhu_arena_lo",
+    "__rhu_image_header",
     "memcmp",
     "memcpy",
     "memset",
@@ -110,6 +113,7 @@ const IMPORTS_CORE: [&str; 30] = [
     "rhu_futex_wake",
     "rhu_kheap_alloc",
     "rhu_kheap_free",
+    "rhu_module_find",
     "rhu_module_register",
     "rhu_module_roots",
     "rhu_now_ns",
@@ -125,13 +129,15 @@ const IMPORTS_CORE: [&str; 30] = [
 ];
 
 /// The PAL object's EXACT import closure: the kernel verbs, the glue's
-/// allocator, the core's errno, diagnostics, thread and mmap paths, the
-/// mutex recipe, the string functions, the division helpers.
-const IMPORTS_SYSNATIVE: [&str; 34] = [
+/// allocator, the core's errno, environment table, diagnostics, thread and
+/// mmap paths, the mutex recipe, the string functions, the division
+/// helpers.
+const IMPORTS_SYSNATIVE: [&str; 35] = [
     "__aeabi_ldivmod",
     "__aeabi_uldivmod",
     "__errno_location",
     "free",
+    "getenv",
     "malloc",
     "malloc_usable_size",
     "memalign",
@@ -166,13 +172,15 @@ const IMPORTS_SYSNATIVE: [&str; 34] = [
 
 /// The glue object's EXACT import closure: the kernel heap and console
 /// doors, the exit door, the core's errno and diagnostics, the builtins.
-const IMPORTS_GLUE: [&str; 11] = [
+const IMPORTS_GLUE: [&str; 13] = [
     "__errno_location",
     "memcpy",
     "memset",
     "rhu_console_read",
     "rhu_console_write",
     "rhu_exit",
+    "rhu_futex_wait",
+    "rhu_futex_wake",
     "rhu_kheap_alloc",
     "rhu_kheap_free",
     "rhu_shim_exit",
@@ -180,22 +188,89 @@ const IMPORTS_GLUE: [&str; 11] = [
     "rhu_thread_self",
 ];
 
+/// The host object's EXACT import closure: the runtime's two entry points,
+/// the module-list initializer, the managed entry and the eight
+/// class-library exports by the bootstrapper's names, the map's and the
+/// linker's brackets it reads, the in-image header, the kernel's console,
+/// exit and arena doors, the shim's initialization and stream bridge.
+const IMPORTS_HOST: [&str; 36] = [
+    "AppendExceptionStackFrame",
+    "GetRuntimeException",
+    "GetSystemArrayEEType",
+    "InitializeModules",
+    "OnFirstChanceException",
+    "OnUnhandledException",
+    "ResolveDispatch",
+    "RhInitialize",
+    "RhRegisterOSModule",
+    "RuntimeFailFast",
+    "ThreadEntryPoint",
+    "__edata",
+    "__fini_array_end",
+    "__fini_array_start",
+    "__init_array_end",
+    "__init_array_start",
+    "__managed__Main",
+    "__preinit_array_end",
+    "__preinit_array_start",
+    "__rhu_image_header",
+    "__rhu_managedcode_hi",
+    "__rhu_managedcode_lo",
+    "__rhu_unbox_hi",
+    "__rhu_unbox_lo",
+    "__sdata",
+    "__sidata",
+    "__start___modules",
+    "__stop___modules",
+    "rhu_arena_headroom",
+    "rhu_arena_report",
+    "rhu_console_write",
+    "rhu_exit",
+    "rhu_shim_activation_count",
+    "rhu_shim_init",
+    "rhu_stdio_bind_stderr",
+    "rhu_stdio_line_buffer_stdout",
+];
+
+/// The stream bridge's EXACT import closure: the C library's two parsers
+/// its forwarders call by the plain names (its task-record accessors are
+/// weak references, not imports).
+const IMPORTS_STDIO: [&str; 2] = ["vfscanf", "vsscanf"];
+
+/// The one named group of C-library imports the every-import-resolves
+/// check accepts as resolved elsewhere: the stream bridge's parsers,
+/// defined by the C library at the hosted runtime's link (where the rt
+/// gate asserts every import resolved) and by nothing in these images,
+/// whose linker discards the unreferenced forwarders. A C-library name
+/// outside this group is a residue, as before.
+const LIBC_IMPORTS: [&str; 2] = ["vfscanf", "vsscanf"];
+
 /// Symbols no object and no staticlib member carries, because they are
 /// the LINK's own. Two sources, and the difference matters when one of
 /// them is wrong: the board map declares the first group deliberately,
 /// while the second is synthesized by the linker for any image that
 /// mentions it -- which is why the host checks where the constructor
 /// array actually landed rather than trusting that it exists.
-const MAP_SYMBOLS: [&str; 9] = [
+const MAP_SYMBOLS: [&str; 19] = [
     "__rhu_arena_lo",
     "__rhu_arena_hi",
     "__rhu_tdata_lo",
     "__rhu_tdata_hi",
+    "__rhu_managedcode_lo",
+    "__rhu_managedcode_hi",
+    "__rhu_unbox_lo",
+    "__rhu_unbox_hi",
+    "__start___modules",
+    "__stop___modules",
     "__sdata",
     "__edata",
     "__sidata",
+    "__preinit_array_start",
+    "__preinit_array_end",
     "__init_array_start",
     "__init_array_end",
+    "__fini_array_start",
+    "__fini_array_end",
 ];
 
 /// Import families that must never appear in a shim object: C++ runtime
@@ -257,14 +332,16 @@ const NO_TEMPLATE: u64 = 0;
 /// asserts this sequence, not merely that each line is somewhere in the
 /// capture: a host that bound its streams after registering its module
 /// would satisfy presence and violate the contract.
-const HOST_MARKERS: [&str; 8] = [
+const HOST_MARKERS: [&str; 10] = [
     "[host] stdio: standard error bound to the C library's stream",
     "[host] stdio: standard output line buffered",
     "[host] data: initialized region verified against its load image",
     "[host] ctors: none (this image carries no static constructor)",
     "[host] runtime: initialized",
+    "[host] runtime: managed code 0 bytes, unboxing stubs 0 bytes",
     "[host] runtime: module registered, class-library slots: 12",
-    "[host] argv: 0",
+    "[host] runtime: modules initialized: 0",
+    "[host] argv: 1",
     "[host] entering managed entry",
 ];
 
@@ -277,7 +354,7 @@ const HOST_ALL_GOOD: &str = "SHIMTEST-HOST: ALL GOOD (the initialization contrac
 const HOST_FAIL_VERIFY: &str = "[host] FAIL initialized data does not match the image it was loaded from";
 
 /// Symbols the host image must carry beyond the common contract.
-const HOST_SYMBOLS: [&str; 3] = ["rhu_host_main", "RhInitialize", "RhRegisterOSModule"];
+const HOST_SYMBOLS: [&str; 6] = ["rhu_host_main", "rhu_payload_entry", "rhu_payload_abi", "RhInitialize", "RhRegisterOSModule", "InitializeModules"];
 
 /// The C-library members the retarget must keep OUT of a linked image:
 /// the allocator member's own imports -- the heap break it needs to start
@@ -286,6 +363,17 @@ const HOST_SYMBOLS: [&str; 3] = ["rhu_host_main", "RhInitialize", "RhRegisterOSM
 /// as the reentrant names this image defines strongly, so they are not
 /// what an arrival would look like.)
 const RETARGET_FORBIDDEN: [&str; 3] = ["_sbrk_r", "__malloc_lock", "__malloc_unlock"];
+
+/// The names this image's glue defines and the library also carries a
+/// member for: the allocation family and its reentrant spellings, the
+/// heap break, the descriptor-level calls and the process exit. The
+/// library's version of any of them arriving would mean two heaps or two
+/// consoles; the glue's strong definitions keep the members out, and the
+/// retarget control asserts that none arrived.
+const RETARGET_LAYER: [&str; 19] = [
+    "_calloc_r", "_close", "_exit", "_free_r", "_fstat", "_getpid", "_isatty", "_kill", "_lseek",
+    "_malloc_r", "_memalign_r", "_read", "_realloc_r", "_sbrk", "_write", "calloc", "free", "malloc", "realloc",
+];
 
 /// The compile-tier probe for the generated C-library layout header: the
 /// kit's own stream and task-record headers beside the generated one, and
@@ -329,6 +417,12 @@ int rhu_newlib_header_probe;
 const NEWLIB_DOCTOR_FROM: &str = "#define RHU_NEWLIB_STREAM_LINEBUF 0x0001";
 const NEWLIB_DOCTOR_TO: &str = "#define RHU_NEWLIB_STREAM_LINEBUF 0x0200";
 
+/// The class-library order control: the generated runtime-entry header's
+/// unhandled-exception slot moved from 7 to 6 -- the index that slot has in
+/// a table laid out without the dispatch resolver, one slot shifted.
+const RT_ENTRY_DOCTOR_FROM: &str = "#define RHU_RT_CLASSLIB_SLOT_OnUnhandledException 7";
+const RT_ENTRY_DOCTOR_TO: &str = "#define RHU_RT_CLASSLIB_SLOT_OnUnhandledException 6";
+
 /// A translation unit that genuinely consumes the toolchain's C library,
 /// so the retarget case runs against a link that really reaches it.
 const PROBE_SOURCE: &[u8] = b"#include <stdio.h>\nvoid rhu_newlib_consumer(void);\nvoid rhu_newlib_consumer(void) { printf(\"%d\\n\", 1); }\n";
@@ -341,10 +435,12 @@ const FORBIDDEN_PATTERNS: [&str; 6] = ["FAIL ", "KERNEL PANIC", "EXCEPTION:", "R
 /// the gate grows next.
 const PENDING: [&str; 0] = [];
 
-const INTERNAL_CASES: [&str; 3] = [
+const INTERNAL_CASES: [&str; 5] = [
     "shim.foreign-errno-refused -- compile-tier; runs under 'rhu-gate shim rederive' at the pinned kit",
     "shim.newlib-header-ties-kit -- compile-tier; runs under 'rhu-gate shim rederive' at the pinned kit: the generated C-library layout header against the kit's own headers",
+    "shim.classlib-order-ties-pin -- compile-tier; runs under 'rhu-gate shim rederive' at the pinned kit: the host against a copy of the generated runtime-entry header with one class-library slot shifted, refused at the assertion that names the slot",
     "shim.newlib-retarget -- link-tier; runs under 'rhu-gate shim rederive' when the kit's C library is resolved",
+    "shim.f769-shared-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' at the pinned kit: the sysnative and host objects under the F769 selector tie the frozen an500 objects, the F769 core differs from the an500 core",
 ];
 
 /// The module-root template brackets, read from a linked artifact: the
@@ -371,7 +467,7 @@ fn template_span_fault(lo: Option<u64>, hi: Option<u64>, want: u64) -> Option<St
 /// to the ones before it. Returns None when every marker appears exactly
 /// in the order given. Presence is not order: a contract whose steps
 /// depend on each other is only proven by the sequence.
-fn markers_out_of_order(raw: &[u8], markers: &[&str]) -> Option<String> {
+pub(crate) fn markers_out_of_order(raw: &[u8], markers: &[&str]) -> Option<String> {
     let mut from = 0usize;
     for m in markers {
         match find_fixed_from(raw, m, from) {
@@ -410,7 +506,7 @@ fn find_fixed_from(raw: &[u8], needle: &str, from: usize) -> Option<usize> {
 /// which on a desk whose compiler lives behind a translation layer is not
 /// the form the compiler prints; that is why it is a recorded
 /// machine-local fact and not a derivation.
-fn resolve_newlib_dir(repo: &Path) -> Option<String> {
+pub(crate) fn resolve_newlib_dir(repo: &Path) -> Option<String> {
     if let Ok(v) = std::env::var("RHU_NEWLIB") {
         if !v.trim().is_empty() {
             return Some(v.trim().to_string());
@@ -473,7 +569,7 @@ fn defined_names(dump: &str) -> Vec<String> {
 }
 
 /// Imports of the linked objects that neither the objects themselves, the
-/// kernel staticlib, nor the board map define. The linker's section garbage collection
+/// kernel staticlib, the board map nor the named C-library group define. The linker's section garbage collection
 /// never reports a reference from a function nothing references, so a
 /// missing definition would otherwise surface only in the image that
 /// first calls it.
@@ -482,7 +578,7 @@ fn unresolved_imports(imports: &[Vec<String>], defined: &[Vec<String>], lib_defi
     for list in imports {
         for name in list {
             let here = defined.iter().any(|d| d.contains(name));
-            let by_map = MAP_SYMBOLS.contains(&name.as_str());
+            let by_map = MAP_SYMBOLS.contains(&name.as_str()) || LIBC_IMPORTS.contains(&name.as_str());
             if !here && !by_map && !lib_defined.contains(name) && !out.contains(name) {
                 out.push(name.clone());
             }
@@ -490,6 +586,25 @@ fn unresolved_imports(imports: &[Vec<String>], defined: &[Vec<String>], lib_defi
     }
     out.sort();
     out
+}
+
+/// The definitions the C library adds to an image that reaches it only
+/// through the stream bridge (no consumer forced in): every one the
+/// library's own, none of the allocator's, the heap break's, the lock
+/// pair's or the descriptor layer's -- the reentrancy record and the
+/// stream objects the bridge's weak references bind are what the design
+/// expects -- and nothing of the image's own gone.
+fn retarget_added_fault(added: &[String], removed: &[String], lib_defined: &[String]) -> Option<String> {
+    if let Some(r) = removed.first() {
+        return Some(format!("the library's arrival removed a definition of this image's own: '{r}'"));
+    }
+    if let Some(a) = added.iter().find(|a| !lib_defined.contains(a)) {
+        return Some(format!("the library's arrival added '{a}', which the library does not define"));
+    }
+    if let Some(a) = added.iter().find(|a| RETARGET_FORBIDDEN.contains(&a.as_str()) || RETARGET_LAYER.contains(&a.as_str())) {
+        return Some(format!("the library's own '{a}' arrived: two heaps or two consoles would answer"));
+    }
+    None
 }
 
 /// Names defined strongly in more than one dump (sorted, deduplicated).
@@ -1043,6 +1158,16 @@ impl Shim {
         if let Some(hit) = forbidden_import(&tenant) {
             self.fail("shim.host", &format!("the tenant imports forbidden family symbol '{hit}'"));
         }
+        let host = self.pin_closure(facts, "shim.host", "shim-host.o", &IMPORTS_HOST);
+        let bridge = self.pin_closure(facts, "shim.host", "shim-stdio-sym.o", &IMPORTS_STDIO);
+        println!(
+            "   import closures: host {}/{}, stream bridge {}/{} pinned (the bridge's parsers resolve at the hosted runtime's link); tenant {} names; forbidden families absent",
+            host.len(),
+            IMPORTS_HOST.len(),
+            bridge.len(),
+            IMPORTS_STDIO.len(),
+            tenant.len()
+        );
         let world = [
             "goldens/shim/shim-core.o",
             "goldens/shim/shim-sysnative.o",
@@ -1113,10 +1238,15 @@ impl Shim {
     /// image. Two measurements, because either alone can be satisfied by
     /// an accident:
     ///
-    ///   (a) the image linked WITH the library is byte-identical to the
-    ///       image linked without it -- nothing of the library is
-    ///       pulled in, because this file set already defines everything
-    ///       the image references;
+    ///   (a) the image linked WITH the library on the line differs from
+    ///       the image linked without it by the library's own definitions
+    ///       only -- the reentrancy record and the stream objects the
+    ///       stream bridge's weak references bind once the library's
+    ///       parser members its forwarders name are fetched -- and by
+    ///       none of the allocator's, the heap break's, the lock pair's or
+    ///       the descriptor layer's, with nothing of the image's own gone
+    ///       (an image that mentions no library name at all comes out
+    ///       byte-identical, the stronger reading of the same fact);
     ///   (b) with a genuine consumer of that library FORCED into the
     ///       link, the library's own members do arrive -- and the
     ///       allocator that answers is still this image's, the heap break
@@ -1125,7 +1255,7 @@ impl Shim {
     ///
     /// (a) without (b) would pass on a link line that never reached the
     /// library at all; (b) without (a) would not show that the ordinary
-    /// image is untouched.
+    /// image takes only what the bridge is built to take.
     fn run_newlib_retarget(&mut self, gxx: &ToolCmd, facts: &RustcFacts, ld: &ToolCmd, dir: &str) {
         const CASE: &str = "shim.newlib-retarget";
         println!("== case {CASE} (link-tier control) ==");
@@ -1137,13 +1267,32 @@ impl Shim {
             "goldens/shim/shim-stdio-sym.o",
             "goldens/shim/shimtest-host.o",
         ];
-        let (bare_sha, _) = self.link_image(ld, CASE, &world, "shim-newlib-bare");
+        let (bare_sha, rel_bare) = self.link_image(ld, CASE, &world, "shim-newlib-bare");
         let lib_args = [format!("-L{dir}"), "-lc_nano".to_string()];
-        let (with_sha, _) = self.link_image_extra(ld, CASE, &world, "shim-newlib-linked", &lib_args, &[]);
-        if bare_sha != with_sha {
-            self.fail(CASE, "the image changed when the toolchain's C library joined the link line: something of it was pulled into an image that carries its own runtime");
+        let (with_sha, rel_with) = self.link_image_extra(ld, CASE, &world, "shim-newlib-linked", &lib_args, &[]);
+        let bare_def = defined_names(&self.nm_dump(facts, CASE, &rel_bare, false));
+        let with_def = defined_names(&self.nm_dump(facts, CASE, &rel_with, false));
+        let lib_def = defined_names(&self.nm_dump(facts, CASE, &format!("{dir}/libc_nano.a"), false));
+        let mut added: Vec<String> = with_def.iter().filter(|n| !bare_def.contains(n)).cloned().collect();
+        added.sort();
+        added.dedup();
+        let mut removed: Vec<String> = bare_def.iter().filter(|n| !with_def.contains(n)).cloned().collect();
+        removed.sort();
+        removed.dedup();
+        if let Some(f) = retarget_added_fault(&added, &removed, &lib_def) {
+            self.fail(CASE, &f);
         }
-        println!("   (a) the image is byte-identical with and without the library on the link line ({})", &bare_sha[..16]);
+        if bare_sha == with_sha {
+            println!("   (a) the image is byte-identical with and without the library on the link line ({})", &bare_sha[..16]);
+        } else {
+            println!(
+                "   (a) with the library on the link line the image gains the library's own definitions only, {} of them, none of its allocator, heap break, lock pair or descriptor layer, nothing of its own gone: [{}] ({} -> {})",
+                added.len(),
+                added.join(" "),
+                &bare_sha[..16],
+                &with_sha[..16]
+            );
+        }
 
         let probe_rel = "src/kernel/target/shim-gate/obj/newlib-consumer.c";
         write_fixture(
@@ -1239,6 +1388,54 @@ impl Shim {
         println!("== case shim.foreign-errno-refused: PASS (the generated errno header refused a foreign errno.h at compile with the designed message) ==");
 
         self.run_newlib_header_control(gxx);
+        self.run_classlib_order_control(gxx);
+        self.run_f769_shared_control(gxx);
+    }
+
+    /// The compile-tier control for the F769 rider's shared objects: the
+    /// sysnative and host translation units compiled under the F769 row
+    /// selector must tie the frozen an500 objects byte for byte (neither
+    /// consumes a field that differs between the rows), which is the fact
+    /// that lets the rider link them from the an500 line; and the frozen
+    /// F769 core object must differ from the an500 core (the core consumes
+    /// the row's region), which is why the tier carries it as its own
+    /// object rather than a second copy of the same bytes.
+    fn run_f769_shared_control(&mut self, gxx: &ToolCmd) {
+        const CASE: &str = "shim.f769-shared-ties-an500";
+        println!("== case {CASE} (compile-tier control) ==");
+        for (src, frozen, tag) in [("src/shim/rhu_sysnative.c", "shim-sysnative.o", "sysnative"), ("src/shim/rhu_host.c", "shim-host.o", "host")] {
+            let out_rel = format!("src/kernel/target/shim-gate/obj/{tag}-f769-control.o");
+            let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let _ = std::fs::remove_file(&out_abs);
+            self.compile(gxx, CASE, src, &["-DMGC_HOST_ROW_F769"], &out_rel);
+            let got = match sha256_file(&out_abs) {
+                Ok(s) => s,
+                Err(e) => self.fail(CASE, &format!("{src} under the F769 selector produced no object ({e})")),
+            };
+            let want = match sha256_file(&self.repo.join("goldens").join("shim").join(frozen)) {
+                Ok(s) => s,
+                Err(e) => self.fail(CASE, &format!("goldens/shim/{frozen} unreadable: {e}")),
+            };
+            if got != want {
+                self.fail(CASE, &format!("{src} under the F769 selector compiled to {got}, not the frozen an500 {frozen} {want}: the rows no longer share this object, so the F769 image needs its own frozen copy"));
+            }
+            println!("   {frozen}: the compile under the F769 selector ties the frozen an500 object ({})", &got[..16]);
+        }
+        let core = sha256_file(&self.repo.join("goldens").join("shim").join("shim-core.o")).unwrap_or_default();
+        let core_f769 = sha256_file(&self.repo.join("goldens").join("shim").join("shim-core-f769.o")).unwrap_or_default();
+        if core.is_empty() || core_f769.is_empty() {
+            self.fail(CASE, "the two frozen core objects are not both readable");
+        }
+        if core == core_f769 {
+            self.fail(CASE, "shim-core-f769.o ties shim-core.o byte for byte: the F769 row moves nothing in the core object, so a separate frozen object is unfounded");
+        }
+        println!("   shim-core.o ({}) and shim-core-f769.o ({}) differ: the row's region reaches the core, and the tier carries both", &core[..16], &core_f769[..16]);
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"shared\":2}}}}",
+            self.gate_id
+        ));
+        self.results.tally("pass", "positive");
+        println!("== case {CASE}: PASS (two objects shared with the an500 line tie under the F769 selector; the core object differs and is frozen for the row) ==");
     }
 
     /// The compile-tier control for the generated C-library layout header
@@ -1309,6 +1506,83 @@ impl Shim {
         ));
         self.results.tally("pass", "negative");
         println!("== case {CASE}: PASS (the generated C-library layout header ties the kit's own headers; a moved value refused) ==");
+    }
+
+    /// The compile-tier control for the class-library table's order: the
+    /// host itself, compiled as a copy placed where a header written beside
+    /// it is what its quoted include finds first. Both halves, because a
+    /// refusal alone cannot be told from a compile that fails for another
+    /// reason: (a) with nothing beside it the copy reads the genuine
+    /// generated header through the include path, compiles, and its object
+    /// ties the frozen host object byte for byte -- the copy IS the host;
+    /// (b) with a copy of the generated runtime-entry header beside it in
+    /// which one slot is shifted, the same compile must be REFUSED at the
+    /// assertion that names that slot. The doctored copy is removed
+    /// afterwards.
+    fn run_classlib_order_control(&mut self, gxx: &ToolCmd) {
+        const CASE: &str = "shim.classlib-order-ties-pin";
+        println!("== case {CASE} (compile-tier control) ==");
+        let dir = self.out.join("obj").join("classlib-order");
+        if std::fs::create_dir_all(&dir).is_err() {
+            self.fail(CASE, "cannot create the control's directory");
+        }
+        let doctored = dir.join("rhu_rt_entry_p7.h");
+        let _ = std::fs::remove_file(&doctored);
+        let host = match std::fs::read(self.repo.join("src").join("shim").join("rhu_host.c")) {
+            Ok(b) => b,
+            Err(e) => self.fail(CASE, &format!("src/shim/rhu_host.c unreadable: {e}")),
+        };
+        let copy_rel = "src/kernel/target/shim-gate/obj/classlib-order/rhu_host.c";
+        write_fixture(&self.repo.join(copy_rel.replace('/', std::path::MAIN_SEPARATOR_STR)), &host);
+        let out_rel = "src/kernel/target/shim-gate/obj/classlib-order/rhu_host.o";
+        self.compile(gxx, CASE, copy_rel, &["-DMGC_HOST_ROW_AN500"], out_rel);
+        let got = match sha256_file(&self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR))) {
+            Ok(s) => s,
+            Err(e) => self.fail(CASE, &format!("the copy's compile produced no object ({e})")),
+        };
+        let want = match sha256_file(&self.repo.join("goldens").join("shim").join("shim-host.o")) {
+            Ok(s) => s,
+            Err(e) => self.fail(CASE, &format!("goldens/shim/shim-host.o unreadable: {e}")),
+        };
+        if got != want {
+            self.fail(CASE, &format!("the host's copy compiled to {got}, not the frozen host object {want}: the copy is not the host, so a refusal would prove nothing about it"));
+        }
+        println!("   (a) the host's copy compiles against the genuine generated header and ties the frozen host object ({})", &got[..16]);
+
+        let genuine = std::fs::read_to_string(self.repo.join("src").join("shim").join("rhu_rt_entry_p7.h")).unwrap_or_default();
+        if !genuine.contains(RT_ENTRY_DOCTOR_FROM) {
+            self.fail(CASE, "the doctored copy cannot be made: the unhandled-exception slot is not where the control expects it");
+        }
+        let moved = genuine.replace(RT_ENTRY_DOCTOR_FROM, RT_ENTRY_DOCTOR_TO);
+        write_fixture(&doctored, moved.as_bytes());
+        let stdout_p = self.out.join("classlib-order-doctored.cc.stdout");
+        let stderr_p = self.out.join("classlib-order-doctored.cc.stderr");
+        let mut args: Vec<String> = CC_FLAGS.iter().map(|s| s.to_string()).collect();
+        args.push("-DMGC_HOST_ROW_AN500".to_string());
+        args.push(copy_rel.to_string());
+        args.push("-o".to_string());
+        args.push("src/kernel/target/shim-gate/obj/classlib-order/rhu_host-doctored.o".to_string());
+        let want_err = "the unhandled-exception slot ties the pin";
+        let outcome = run_tool_bounded(&self.repo, gxx, &args, &stdout_p, &stderr_p);
+        let _ = std::fs::remove_file(&doctored);
+        match outcome {
+            Ok(true) => self.fail(CASE, "the host COMPILED against a header with a shifted slot -- the shape assertion did not bite"),
+            Ok(false) => {
+                let err = std::fs::read_to_string(&stderr_p).unwrap_or_default();
+                if !err.contains(want_err) {
+                    echo_file(&stderr_p, "");
+                    self.fail(CASE, &format!("the shifted header refused for the WRONG reason (stderr lacks '{want_err}')"));
+                }
+            }
+            Err(e) => self.fail(CASE, &e),
+        }
+        println!("   (b) a copy of the generated runtime-entry header with the unhandled-exception slot shifted by one is refused at the assertion that names it");
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"negative\",\"image\":null,\"broke\":\"one class-library slot of the generated runtime-entry header shifted\"}}",
+            self.gate_id
+        ));
+        self.results.tally("pass", "negative");
+        println!("== case {CASE}: PASS (the host pins the class-library table's shape against the generated header; a shifted slot refused) ==");
     }
 }
 
@@ -1427,6 +1701,7 @@ pub fn rederive(repo: &Path) -> ! {
         }
     }
     shim.run_rederive(&gxx);
+    shim.build_staticlib();
     let retarget = match (resolve_newlib_dir(repo), rustc_facts()) {
         (Some(dir), Ok(facts)) => match resolve_ld(&facts) {
             Ok(ld) => {
@@ -1453,7 +1728,7 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical; foreign-errno control refused at compile; C-library layout header ties the kit; C-library retarget {})  [{}]",
+        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical; foreign-errno control refused at compile; C-library layout header ties the kit; class-library order ties the pin; the F769 row's shared objects tie the an500 bytes; C-library retarget {})  [{}]",
         FROZEN_PLAN.len(),
         FROZEN_PLAN.len(),
         retarget,
@@ -1596,6 +1871,17 @@ pub fn selfcheck(repo: &Path) -> ! {
     sc.accept_probe("resolve-clean", "imports defined by the objects or the staticlib resolve", unresolved_imports(&imports, &defined, &lib).is_empty());
     let orphan = vec![vec!["rhu_now_ns".to_string(), "malloc_usable_size".to_string()]];
     sc.probe("resolve-orphan", "an import that neither the objects nor the staticlib define", unresolved_imports(&orphan, &defined, &lib).is_empty());
+    let libc_group = vec![vec!["rhu_now_ns".to_string(), "vfscanf".to_string()]];
+    sc.accept_probe("resolve-libc-group", "the stream bridge's C-library parser, in its named group, accepted as resolved at the hosted runtime's link", unresolved_imports(&libc_group, &defined, &lib).is_empty());
+    let libc_stray = vec![vec!["rhu_now_ns".to_string(), "fprintf".to_string()]];
+    sc.probe("resolve-libc-stray", "a C-library name outside the named group", unresolved_imports(&libc_stray, &defined, &lib).is_empty());
+
+    let lib_def: Vec<String> = ["__sf", "_impure_data", "_impure_ptr", "_malloc_r", "_write"].iter().map(|s| s.to_string()).collect();
+    let bridge_added: Vec<String> = ["__sf", "_impure_data", "_impure_ptr"].iter().map(|s| s.to_string()).collect();
+    sc.accept_probe("retarget-added-genuine", "the library's reentrancy record and stream objects added through the bridge", retarget_added_fault(&bridge_added, &[], &lib_def).is_none());
+    sc.probe("retarget-added-foreign", "an added definition the library does not define", retarget_added_fault(&["stray_symbol".to_string()], &[], &lib_def).is_none());
+    sc.probe("retarget-added-allocator", "the library's own allocator entry arriving", retarget_added_fault(&["_malloc_r".to_string()], &[], &lib_def).is_none());
+    sc.probe("retarget-removed", "a definition of the image's own vanishing when the library joins", retarget_added_fault(&[], &["rhu_host_main".to_string()], &lib_def).is_none());
 
     let failing: &[u8] = b"shimtest: ladder\r\nPASS shim-init (x)\r\nFAIL shim-errno-thread (errno leaked across threads)\r\n[payload] managed Main returned 1\r\n";
     sc.accept_probe("fail-absent", "the genuine golden carries no FAIL line", !contains_fixed(&golden, "FAIL "));

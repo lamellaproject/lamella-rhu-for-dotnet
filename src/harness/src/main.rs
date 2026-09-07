@@ -3,6 +3,7 @@
 mod chain;
 mod gate;
 mod gates;
+mod image;
 mod results;
 mod selfcheck;
 mod sha256;
@@ -12,7 +13,7 @@ mod tools;
 use std::process::exit;
 
 fn usage() -> ! {
-    println!("usage: rhu-gate <base | sched | payload | api | gc | shim | chain | selfcheck> [selfcheck]");
+    println!("usage: rhu-gate <base | sched | payload | api | gc | shim | rt | chain | selfcheck> [selfcheck | rederive]");
     exit(2);
 }
 
@@ -40,6 +41,9 @@ fn main() {
         (Some("shim"), None, 1) => gates::shim::run(&repo),
         (Some("shim"), Some("selfcheck"), 2) => gates::shim::selfcheck(&repo),
         (Some("shim"), Some("rederive"), 2) => gates::shim::rederive(&repo),
+        (Some("rt"), None, 1) => gates::rt::run(&repo),
+        (Some("rt"), Some("selfcheck"), 2) => gates::rt::selfcheck(&repo),
+        (Some("rt"), Some("rederive"), 2) => gates::rt::rederive(&repo),
         (Some("selfcheck"), None, 1) => selfcheck::run(&repo),
         (Some("chain"), None, 1) => chain::run(&repo),
         _ => usage(),

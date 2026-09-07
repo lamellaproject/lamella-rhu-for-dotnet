@@ -37,9 +37,16 @@ In the tree today:
 - A garbage collector running against the .NET runtime's GC interface:
   allocation, stop-the-world mark and sweep, finalization, and per-board memory
   configurations
+- Hosted-runtime bring-up: a real .NET program (NativeAOT) is linked with the
+  runtime, the shim and the collector into one image and booted on the
+  emulator by the hosted-runtime gate; two programs ship as its fixtures, a
+  hello program and an eight-section runtime suite (collections, text,
+  exceptions, GC, time, dispatch, threads)
+- An in-image header at a fixed offset stating each image's load address, ABI
+  generation and debug-layout version, for flash tooling and debuggers
 - Supported boards: STM32F769I-DISCO, NUCLEO-U5A5ZJ-Q
 
-Further hardware board support and the full runtime bring-up land incrementally.
+Further board support and the remaining runtime surface land incrementally.
 
 To be notified when releases are available, click **Watch** at the top of this
 repo, select **Custom**, and check **Releases**.

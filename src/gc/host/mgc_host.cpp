@@ -585,6 +585,27 @@ static void coll_host_die(const char* what)
     abort();
 }
 
+/* The drive's two hosted threads sit at fixed levels below the host,
+ * a strict order every observation window below relies on. The host
+ * drives at the flat hosted level (RHU_HOSTED_PRIO_FLAT, the level the
+ * payload host thread holds for the entry's life); the waiter sits at
+ * a level less urgent than that; the worker sits at the band's least
+ * urgent level. So the worker runs only while the host sleeps and
+ * nothing more urgent is runnable, and the waiter, whenever it is
+ * runnable, runs before the worker and blocks quickly. Each value is
+ * printed from the same definition the spawn uses, and the order is
+ * asserted against the kernel's band at compile time. */
+#define GC_HOST_WAITER_PRIO 0xC0
+#define GC_HOST_WORKER_PRIO RHU_HOSTED_PRIO_HI
+#define GC_HOST_STR_(x) #x
+#define GC_HOST_STR(x) GC_HOST_STR_(x)
+static_assert(RHU_HOSTED_PRIO_FLAT < GC_HOST_WAITER_PRIO,
+              "the waiter must be less urgent than the host's flat level");
+static_assert(GC_HOST_WAITER_PRIO < GC_HOST_WORKER_PRIO,
+              "the waiter must be more urgent than the worker");
+static_assert(GC_HOST_WORKER_PRIO <= RHU_HOSTED_PRIO_HI,
+              "the worker must lie inside the hosted band");
+
 /* The worker: the one thread the stop-the-world actually stops. It
  * parks a root slot on its own stack (published so GcScanRoots can
  * report the SLOT ADDRESS -- the precise-scan shape), then counts a
@@ -592,10 +613,11 @@ static void coll_host_die(const char* what)
  * touches GC state, so suspending it at any instruction is safe --
  * which is exactly what lets the kernel verb's own contract (stop =
  * never picked; context snapshot; resume = exception return) be the
- * thing under test rather than EE parking policy. Spawned at hosted
- * prio 0x80 while kmain runs at kernel prio 3 (more urgent than the
- * whole hosted band): the worker runs ONLY while kmain sleeps, so
- * every observation window below is deterministic. */
+ * thing under test rather than EE parking policy. Spawned at the
+ * band's least urgent level (GC_HOST_WORKER_PRIO) under a host that
+ * drives at the flat level: the worker runs ONLY while kmain sleeps
+ * and nothing more urgent is runnable, so every observation window
+ * below is deterministic. */
 static volatile uint32_t   g_counter;
 /* Both levels volatile: the VARIABLE is written by the worker and read
  * by kmain (an unqualified static here lets the compiler prove kmain
@@ -649,9 +671,10 @@ static void gc_activation_handler(rhu_ctx* ctx)
  * windows belong to the counter), and inside an epoch it sleeps on
  * the skeleton's futex-backed GC-done event through the same vtable
  * call the EE's trapped-thread loop makes. EAGAIN/EINTR on the go
- * wait re-check the epoch word, the standard recipe. Spawned at prio
- * 0x40 -- more urgent than the counter's 0x80 -- so whenever it is
- * runnable it runs first in a window and blocks quickly. */
+ * wait re-check the epoch word, the standard recipe. Spawned at
+ * GC_HOST_WAITER_PRIO -- less urgent than the host, more urgent than
+ * the counter -- so whenever it is runnable it runs first in a window
+ * and blocks quickly. */
 static void gc_waiter(void* arg)
 {
     (void)arg;
@@ -1321,10 +1344,12 @@ static int32_t drive_allocator(IGCHeap* heap)
 #endif
 #endif /* MGC_HOST_DRIVE_SWEEP */
 
-    g_worker_tid = rhu_thread_spawn(&gc_worker, (void*)o2, 4096u, 0x80u,
+    g_worker_tid = rhu_thread_spawn(&gc_worker, (void*)o2, 4096u,
+                                    GC_HOST_WORKER_PRIO,
                                     "gcmut");
     drive_check(g_worker_tid >= 1, "worker spawn refused");
-    printf("[gc-host] worker spawned: tid=%d prio=0x80 stack=4096 (runs only while kmain sleeps)\n",
+    printf("[gc-host] worker spawned: tid=%d prio=" GC_HOST_STR(GC_HOST_WORKER_PRIO)
+           " stack=4096 (runs only while kmain sleeps)\n",
            (int)g_worker_tid);
     {
         unsigned tries = 0;
@@ -1365,10 +1390,12 @@ static int32_t drive_allocator(IGCHeap* heap)
     drive_check(rhu_activation_register(&gc_activation_handler) == 0,
                 "activation handler registration refused");
     g_heap_ee = heap;
-    g_waiter_tid = rhu_thread_spawn(&gc_waiter, nullptr, 4096u, 0x40u,
+    g_waiter_tid = rhu_thread_spawn(&gc_waiter, nullptr, 4096u,
+                                    GC_HOST_WAITER_PRIO,
                                     "gcwait");
     drive_check(g_waiter_tid >= 1, "waiter spawn refused");
-    printf("[gc-host] waiter spawned: tid=%d prio=0x40 stack=4096 (parks on a go futex between epochs)\n",
+    printf("[gc-host] waiter spawned: tid=%d prio=" GC_HOST_STR(GC_HOST_WAITER_PRIO)
+           " stack=4096 (parks on a go futex between epochs)\n",
            (int)g_waiter_tid);
     rhu_sleep_ns(2000000ull);   /* a window: the waiter parks on the go word */
     g_waiter_go = 1;
