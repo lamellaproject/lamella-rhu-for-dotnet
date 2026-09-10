@@ -56,14 +56,14 @@ const CC_FLAGS: [&str; 21] = [
 /// goldens/shim/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates objects + goldens + manifest + this pin
 /// together in one reviewed commit.
-const SHA_FROZEN_MANIFEST: &str = "0a6b9c0ffd41f9159376c62e8a06bad2da01aad95364594246876220ae72f66c";
+const SHA_FROZEN_MANIFEST: &str = "00d76982a1b8606c0815b105183be4aaef49bd41e60beb305624933267b15e7f";
 
 /// The frozen-object plan of record: file name under goldens/shim/,
 /// source TU, extra defines beyond CC_FLAGS. The manifest's records must
 /// tie this table by name both directions; 'rhu-gate shim rederive'
 /// recompiles every row and byte-asserts the output against the frozen
 /// bytes.
-const FROZEN_PLAN: [(&str, &str, &[&str]); 19] = [
+const FROZEN_PLAN: [(&str, &str, &[&str]); 27] = [
     ("shim-core.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500"]),
     ("shim-core-break-sipid.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SIPID"]),
     ("shim-core-break-ctxpc.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_CTXPC"]),
@@ -71,6 +71,14 @@ const FROZEN_PLAN: [(&str, &str, &[&str]); 19] = [
     ("shim-core-break-tlscache.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_TLSCACHE"]),
     ("shim-sysnative.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500"]),
     ("shim-sysnative-break-fdbase.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_FD_BASE"]),
+    ("shim-sysnative-break-store-bounds.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_BOUNDS"]),
+    ("shim-sysnative-break-store-lifetime.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_LIFETIME"]),
+    ("shim-sysnative-break-store-open-order.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_OPEN_ORDER"]),
+    ("shim-sysnative-break-store-access.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_ACCESS"]),
+    ("shim-sysnative-break-store-flock.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_FLOCK"]),
+    ("shim-sysnative-break-store-slash.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_SLASH"]),
+    ("shim-sysnative-break-store-times.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_TIMES"]),
+    ("shim-sysnative-break-store-lock.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_LOCK"]),
     ("shim-libc-glue.o", "src/shim/rhu_libc_glue.c", &[]),
     ("shim-host.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN500"]),
     ("shim-host-break-dataverify.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_DATAVERIFY"]),
@@ -455,7 +463,7 @@ const PENDING: [&str; 0] = [];
 /// only floating-point sites are the PAL's CPU-utilization function, which
 /// returns a double by its own signature, and the core tenant's check of
 /// it. A moved count means the source, a flag or the compiler changed.
-const FP_CENSUS: [(&str, u32); 19] = [
+const FP_CENSUS: [(&str, u32); 27] = [
     ("shim-core.o", 0),
     ("shim-core-break-sipid.o", 0),
     ("shim-core-break-ctxpc.o", 0),
@@ -463,6 +471,14 @@ const FP_CENSUS: [(&str, u32); 19] = [
     ("shim-core-break-tlscache.o", 0),
     ("shim-sysnative.o", 1),
     ("shim-sysnative-break-fdbase.o", 1),
+    ("shim-sysnative-break-store-bounds.o", 1),
+    ("shim-sysnative-break-store-lifetime.o", 1),
+    ("shim-sysnative-break-store-open-order.o", 1),
+    ("shim-sysnative-break-store-access.o", 1),
+    ("shim-sysnative-break-store-flock.o", 1),
+    ("shim-sysnative-break-store-slash.o", 1),
+    ("shim-sysnative-break-store-times.o", 1),
+    ("shim-sysnative-break-store-lock.o", 1),
     ("shim-libc-glue.o", 0),
     ("shim-host.o", 0),
     ("shim-host-break-dataverify.o", 0),
@@ -1162,6 +1178,26 @@ impl Shim {
         self.assert_control("shim.fdmap-break-fdbase", &raw_b, code_b, 1, broke, &sha_b, &rel_b, GOLDENS[1], "FAIL shim-fdmap-open-fstat", FDMAP_ALL_GOOD);
         self.emit_pass("shim.fdmap-break-fdbase", 1, "negative", broke, &sha_b, &rel_b, None);
         println!("== case shim.fdmap-break-fdbase: PASS (exit 1; the console answered for a file and the ladder refused it) ==");
+
+        const STORE_CONTROLS: [(&str, &str, &str, &str); 7] = [
+            ("shim.fdmap-break-store-bounds", "shim-sysnative-break-store-bounds.o", "a positioned transfer's offset cut to 32 bits (RHU_SHIM_BREAK_STORE_BOUNDS)", "FAIL shim-fdmap-bounds"),
+            ("shim.fdmap-break-store-lifetime", "shim-sysnative-break-store-lifetime.o", "an unlink releasing an open object (RHU_SHIM_BREAK_STORE_LIFETIME)", "FAIL shim-fdmap-lifetime"),
+            ("shim.fdmap-break-store-open-order", "shim-sysnative-break-store-open-order.o", "an open creating and truncating before the descriptor search (RHU_SHIM_BREAK_STORE_OPEN_ORDER)", "FAIL shim-fdmap-open-order"),
+            ("shim.fdmap-break-store-access", "shim-sysnative-break-store-access.o", "a write-only descriptor readable (RHU_SHIM_BREAK_STORE_ACCESS)", "FAIL shim-fdmap-access"),
+            ("shim.fdmap-break-store-flock", "shim-sysnative-break-store-flock.o", "every lock request granted (RHU_SHIM_BREAK_STORE_FLOCK)", "FAIL shim-fdmap-flock"),
+            ("shim.fdmap-break-store-slash", "shim-sysnative-break-store-slash.o", "a trailing slash kept in a path (RHU_SHIM_BREAK_STORE_SLASH)", "FAIL shim-fdmap-dir-slash"),
+            ("shim.fdmap-break-store-times", "shim-sysnative-break-store-times.o", "a nanosecond field unchecked (RHU_SHIM_BREAK_STORE_TIMES)", "FAIL shim-fdmap-times-range"),
+        ];
+        for (case, obj, broke, expect) in STORE_CONTROLS {
+            println!("== case {case} (negative control) ==");
+            let obj_rel = format!("goldens/shim/{obj}");
+            let image = case.replace('.', "-");
+            let (sha_s, rel_s) = self.link_image(ld, case, &[world[0], obj_rel.as_str(), world[2], "goldens/shim/shimtest-fdmap.o"], &image);
+            let (raw_s, code_s) = self.run_qemu(qemu, case, &rel_s);
+            self.assert_control(case, &raw_s, code_s, 1, broke, &sha_s, &rel_s, GOLDENS[1], expect, FDMAP_ALL_GOOD);
+            self.emit_pass(case, 1, "negative", broke, &sha_s, &rel_s, None);
+            println!("== case {case}: PASS (exit 1; the ladder refused the restored defect at its own check) ==");
+        }
     }
 
     fn run_activation(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
@@ -1521,7 +1557,7 @@ impl Shim {
         let probe_rel = "src/kernel/target/shim-gate/obj/foreign-errno-probe.c";
         write_fixture(
             &self.repo.join(probe_rel.replace('/', std::path::MAIN_SEPARATOR_STR)),
-            b"#include <errno.h>\n#include \"rhu_pal_errno_p7.h\"\nint rhu_probe_value = RHU_GERR_ETIMEDOUT;\n",
+            b"#include <errno.h>\n#include \"rhu_pal_errno_net11_rc1.h\"\nint rhu_probe_value = RHU_GERR_ETIMEDOUT;\n",
         );
         let out_rel = "src/kernel/target/shim-gate/obj/foreign-errno-probe.o";
         let stdout_p = self.out.join("foreign-errno-probe.cc.stdout");
@@ -1681,7 +1717,7 @@ impl Shim {
         if std::fs::create_dir_all(&dir).is_err() {
             self.fail(CASE, "cannot create the control's directory");
         }
-        let doctored = dir.join("rhu_rt_entry_p7.h");
+        let doctored = dir.join("rhu_rt_entry_net11_rc1.h");
         let _ = std::fs::remove_file(&doctored);
         let host = match std::fs::read(self.repo.join("src").join("shim").join("rhu_host.c")) {
             Ok(b) => b,
@@ -1704,7 +1740,7 @@ impl Shim {
         }
         println!("   (a) the host's copy compiles against the genuine generated header and ties the frozen host object ({})", &got[..16]);
 
-        let genuine = std::fs::read_to_string(self.repo.join("src").join("shim").join("rhu_rt_entry_p7.h")).unwrap_or_default();
+        let genuine = std::fs::read_to_string(self.repo.join("src").join("shim").join("rhu_rt_entry_net11_rc1.h")).unwrap_or_default();
         if !genuine.contains(RT_ENTRY_DOCTOR_FROM) {
             self.fail(CASE, "the doctored copy cannot be made: the unhandled-exception slot is not where the control expects it");
         }
@@ -1804,7 +1840,7 @@ pub fn run(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "{DISPLAY}: PASS (15/15 cases incl. 8 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        "{DISPLAY}: PASS (22/22 cases incl. 15 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
         PENDING.len(),
         INTERNAL_CASES.len(),
         qemu_v,

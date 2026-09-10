@@ -8,16 +8,16 @@ re-recorded hashes.
 `src/vendor/**` is `-text` in `.gitattributes`, so these files stay byte-exact
 in the working tree and the hashes below hold on any platform.
 
-## src/vendor/gcinterface/ (7 files) + src/vendor/gcenv/ (3 files) -- vendored 2026-08-31
+## src/vendor/gcinterface/ (7 files) + src/vendor/gcenv/ (3 files) -- vendored 2026-09-09
 
 - **Source:** the public `dotnet/runtime` repository at commit
-  **`253bde0a42aff6d8e99e039db1e710c5e1f5436a`**, tag
-  **`v11.0.0-preview.7.26381.103`** -- the .NET runtime version RHU builds
+  **`ab19415702aa8139d5369e47c73edb47343c34ad`**, tag
+  **`v11.0.0-rc.1.26425.128`** -- the .NET runtime version RHU builds
   against.
 - **Method:** copied with sha256 verification from a read-only clone of that
   tag: bytes taken from the committed blobs, the hash computed at copy time and
   re-verified against the working-tree file. Equivalent fetch:
-  `https://raw.githubusercontent.com/dotnet/runtime/253bde0a42aff6d8e99e039db1e710c5e1f5436a/src/coreclr/gc/<file>`
+  `https://raw.githubusercontent.com/dotnet/runtime/ab19415702aa8139d5369e47c73edb47343c34ad/src/coreclr/gc/<file>`
   (the gcenv files live under `src/coreclr/gc/env/`).
 - **What it is:** the runtime-to-GC interface contract -- `IGCHeap`,
   `IGCHandleManager`, `IGCToCLR`, `GC_VersionInfo`, `GcDacVars`, the flat
@@ -25,15 +25,15 @@ in the working tree and the hashes below hold on any platform.
   GC-visible `ObjHeader`/`MethodTable`/`Object`/`ArrayBase` mirrors, and the
   CGCDesc/CGCDescSeries reference-tracing format. Version constants at this
   commit: `GC_INTERFACE_MAJOR_VERSION 5`, `GC_INTERFACE_MINOR_VERSION 8`,
-  `EE_INTERFACE_MAJOR_VERSION 4`.
+  `EE_INTERFACE_MAJOR_VERSION 5`.
 - **Layout:** two include directories (`gcdesc.h` sits with the gcenv set);
   consumers compile with both on the include path
   (`-Isrc/vendor/gcinterface -Isrc/vendor/gcenv`).
 - **Files + sha256 at vendoring** (upstream path prefix `src/coreclr/gc/`):
   - `gcinterface/gcinterface.h`
-    `e7334b483a3eedfa404b1d8a2cc7ece962684f54eb83c1919ac3c1cafe45f8a7`
+    `a6888ea2bc376d9d0a90911476dcbb9b32be932dd556229e95379bbb466aa9d8`
   - `gcinterface/gcinterface.ee.h`
-    `3e4519f8622e33484b3fc52313b37120f035d8b0a06408ba6ed00424fe29561f`
+    `1b77b32d0ef3f4088bb26930870ca430459f5f6e7ecd8302b88bea03999ccb38`
   - `gcinterface/gcinterface.dac.h`
     `eb9397631446a083f5d12f66a078ebefbaf73519a82a3e78e9f4780ef32931d5`
   - `gcinterface/handletableconstants.h`
@@ -45,7 +45,7 @@ in the working tree and the hashes below hold on any platform.
   - `gcinterface/gcinterface.dacvars.def`
     `31c3574a8e163f56aaab9f4d7aac2b7450e32c99d18320d370c4b98a9b3de022`
   - `gcenv/gcenv.ee.h` (upstream `env/gcenv.ee.h`)
-    `e9a0ef77394fa45cc047a7056dd812ce313b2da437bb3219f9a00f0e7f4a7202`
+    `b46f2d5d3888ab328f006ca468251b13c9b1cd4163b171b5266dc996cba350ea`
   - `gcenv/gcenv.object.h` (upstream `env/gcenv.object.h`)
     `507884c48576de19e1af06b263644b2fa72cd00d09c955ef9550cdd58f9ab5d3`
   - `gcenv/gcdesc.h`

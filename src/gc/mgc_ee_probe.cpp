@@ -73,6 +73,7 @@ fn_t volatile g_mgc_ee_surface[] = {
     REF(DiagAddNewRegion),
     REF(LogErrorToHost),
     REF(GetThreadOSThreadId),
+    REF(IsClientBridgeProcessingActive),
 };
 
 extern "C" unsigned mgc_ee_probe_count(void)

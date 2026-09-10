@@ -109,17 +109,27 @@ pub extern "C" fn rhu_thread_spawn(
 ) -> i32 {
     let entry = entry.expect("thread spawn: null entry (caller bug)");
     let entry: extern "C" fn(usize) = unsafe { core::mem::transmute(entry) };
+    if (stack_bytes as usize) < sched::THREAD_STACK_MIN || stack_bytes > u32::MAX - 7 {
+        return sched::ERR_INVAL;
+    }
     let prio = prio.clamp(HOSTED_PRIO_LO, HOSTED_PRIO_HI) as u8;
-    let name: &'static str = if name.is_null() {
+    let mut name_bytes = [0u8; sched::NAME_BYTES];
+    let name: &str = if name.is_null() {
         "hosted"
     } else {
+        let mut n = 0usize;
         unsafe {
-            let mut n = 0usize;
-            while *name.add(n) != 0 {
+            while n < sched::NAME_BYTES - 1 && *name.add(n) != 0 {
+                name_bytes[n] = *name.add(n) as u8;
                 n += 1;
             }
-            core::str::from_utf8(core::slice::from_raw_parts(name as *const u8, n))
-                .unwrap_or("hosted")
+        }
+        match core::str::from_utf8(&name_bytes[..n]) {
+            Ok(s) => s,
+            Err(e) if e.error_len().is_none() => {
+                core::str::from_utf8(&name_bytes[..e.valid_up_to()]).unwrap_or("hosted")
+            }
+            Err(_) => "hosted",
         }
     };
     match sched::try_spawn(name, entry, arg as usize, prio, stack_bytes as usize) {
@@ -168,7 +178,7 @@ pub extern "C" fn rhu_thread_stack_bounds(tid: i32, lo: *mut u32, bytes: *mut u3
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.rhu_api")]
 pub extern "C" fn rhu_thread_suspend(tid: i32, out_ctx: *mut sched::RhuCtx) -> i32 {
-    if out_ctx.is_null() {
+    if out_ctx.is_null() || (out_ctx as usize) & 3 != 0 {
         return sched::ERR_INVAL;
     }
     sched::suspend_by_tid(tid, out_ctx)
@@ -177,7 +187,7 @@ pub extern "C" fn rhu_thread_suspend(tid: i32, out_ctx: *mut sched::RhuCtx) -> i
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.rhu_api")]
 pub extern "C" fn rhu_thread_set_context(tid: i32, ctx: *const sched::RhuCtx) -> i32 {
-    if ctx.is_null() {
+    if ctx.is_null() || (ctx as usize) & 3 != 0 {
         return sched::ERR_INVAL;
     }
     sched::set_context_by_tid(tid, ctx)
@@ -238,10 +248,17 @@ pub extern "C" fn rhu_module_roots(handle: i32, out: *mut ModuleDesc) -> i32 {
 }
 
 
+/// The console write door's bound: one write is at most this many bytes
+/// (`RHU_CONSOLE_MAX_WRITE` in the header states it to the consumer); a
+/// larger request is refused, and a larger buffer is written in bounded
+/// pieces by the caller. Half the console ring, so a bounded write always
+/// fits once the wire has drained.
+pub const CONSOLE_MAX_WRITE: u32 = 4096;
+
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.rhu_api")]
 pub extern "C" fn rhu_console_write(buf: *const u8, n: u32) -> i32 {
-    if (buf.is_null() && n > 0) || n > i32::MAX as u32 {
+    if (buf.is_null() && n > 0) || n > CONSOLE_MAX_WRITE {
         return sched::ERR_INVAL;
     }
     if n == 0 {

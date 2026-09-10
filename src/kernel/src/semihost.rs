@@ -23,6 +23,7 @@ unsafe fn call(op: u32, param: u32) -> u32 { unsafe {
 /// plain SYS_EXIT follows for semihosting hosts without it (the code is
 /// lost there).
 pub fn exit(code: u32) -> ! {
+    crate::sched::tick_witness_print();
     #[cfg(feature = "qemu-exit")]
     unsafe {
         let block = [ADP_STOPPED_APPLICATION_EXIT, code];

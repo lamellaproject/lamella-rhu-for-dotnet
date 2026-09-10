@@ -18,14 +18,17 @@ const TIMEOUT_S: u64 = 60;
 
 const MARKER_QUIESCENT: &str =
     "[api] PASS tick-quiescent (solo busy 30 ms: 0 switches, clock advanced)";
-/// The eight [api] boot markers, boot order.
-const MARKERS_A: [&str; 8] = [
+/// The ten [api] boot markers, boot order (the far-deadline marker after
+/// futex-timeout, the wake-priority marker after futex-wake-all).
+const MARKERS_A: [&str; 10] = [
     "[api] PASS ns-monotonic (5000 paired reads + cs wrap + saturated pend windows)",
     "[api] PASS sleep-ns-floor (25 ms request: never early)",
     "[api] PASS futex-eagain (changed value refused: no sleep, 0 switches)",
     "[api] PASS futex-timeout (10 ms deadline honored: never early)",
+    "[api] PASS far-deadline (a futex wait 2^32 ticks out held three ticks and woke with 0 on the wake, a sleep 2^31+1 ticks out held three ticks: never early past the 32-bit tick window)",
     "[api] PASS futex-wake-one (3 blocked: readied exactly 1, ran 0)",
     "[api] PASS futex-wake-all (released remaining 2, count exact, all ran after)",
+    "[api] PASS wake-priority (wake(1) readied the more urgent of two waiters though the less urgent one's slot came first in the rotation, the rest released after)",
     "[api] PASS futex-mutex (4x300 stress: counter 1200 exact, overlap-free, slow path fired)",
     MARKER_QUIESCENT,
 ];
@@ -38,14 +41,18 @@ const MARKERS_B: [&str; 5] = [
     "[api] PASS arena-audit (two sites attributed exactly: rows, counts, bytes)",
     "[api] PASS arena-headroom (exact fit taken, further alloc refused NULL, headroom 0)",
 ];
-/// The seven kheap/TLS/thread/registry markers, boot order (this
-/// family appends after the arena family's exhaustion check).
-const MARKERS_C: [&str; 7] = [
+/// The nine kheap/TLS/thread/registry markers, boot order (this
+/// family appends after the arena family's exhaustion check; the
+/// kheap-bound marker after kheap-coalesce, the stack-min marker after
+/// thread-abi).
+const MARKERS_C: [&str; 9] = [
     "[api] PASS kheap-basic (freed block reused at the same address, alignment honored)",
     "[api] PASS kheap-coalesce (adjacent frees merged whole: the summed span reallocated at the first block)",
+    "[api] PASS kheap-bound (a request that wraps the rounding and a request over the heap refused NULL and said so, the heap intact after: a later alloc and free succeeded)",
     "[api] PASS tls-blocks (per-thread blocks distinct, init image + zero fill honored, no cross-thread bleed)",
     "[api] PASS tls-dtors (dtors ran LIFO exactly once on the exiting thread, TLS live inside, cap refused honest)",
-    "[api] PASS thread-abi (round trip clean, tids unique, exact-fit stack reused, slot exhaustion refused honest)",
+    "[api] PASS thread-abi (round trip clean, tids unique, exact-fit stack reused, the name a kernel copy cut at the buffer, slot exhaustion refused honest)",
+    "[api] PASS stack-min (0, 1, 8, 64 and 511 refused EINVAL, the sizes whose round-up wraps refused EINVAL, the largest non-wrapping size refused EAGAIN by the pool, nothing moved by a refusal, the floor itself spawned, parked and joined)",
     "[api] PASS thread-bounds (own and peer locals bracketed, windows inside kstacks, reaped tid refused ESRCH)",
     "[api] PASS registry-basic (handles distinct, stored desc survives caller clobber, full table refused honest)",
 ];
@@ -56,7 +63,7 @@ const MARKERS_D: [&str; 10] = [
     "[api] PASS susp-ctx (planted registers exact in ctx, sp inside the target stack, pc inside kernel text)",
     "[api] PASS susp-setctx (sp edit refused exact, the edited pc ran the pad with the planted witness)",
     "[api] PASS resume-urgent (resume preempted the caller before its next line)",
-    "[api] PASS act-refuse (pre-registration send, null/second registration, self/idle suspends, idle send, unknown tids, unsuspended resume/set-context all refused exact)",
+    "[api] PASS act-refuse (pre-registration send, null/second registration, self/idle suspends, idle send, unknown tids, misaligned contexts, unsuspended resume/set-context all refused exact)",
     "[api] PASS act-deliver (handler ran once per send on the target thread and stack, both interrupted flows continued)",
     "[api] PASS act-coalesce (three sends delivered exactly one handler run)",
     "[api] PASS act-redeliver (the handler re-entered before the interrupted flow resumed, then the flow continued)",
@@ -75,7 +82,7 @@ const MARKERS_E: [&str; 2] = [
 /// exit itself then rides rhu_exit(0), asserted via the exit status.
 const MARKERS_F: [&str; 4] = [
     "[api] console-door: this line reached the wire through rhu_console_write",
-    "[api] PASS console-pair (door write returned exact and hit the wire, no-input read returned 0 writing nothing, null and oversize refused)",
+    "[api] PASS console-pair (door write returned exact and hit the wire, no-input read returned 0 writing nothing, null, oversize and over-bound refused)",
     "[api] PASS entropy-honesty (draws filled and distinct, null refused, zero-length trivial, hardware query answers 0 on this class)",
     "[api] exit-door: handing the machine exit to rhu_exit(0)",
 ];
@@ -104,6 +111,11 @@ const MARKERS_H: [&str; 1] = [
 const MARKERS_I: [&str; 1] = [
     "[api] PASS act-lazy-fp (the handler ran one floating-point instruction on a target whose interrupted frame was basic, the target resumed and yielded eight times after it -- eight switch entries with its own frame basic -- and the witness counted no abandoned lazy floating-point state)",
 ];
+/// The observation of record for the low-address question: pinned as a
+/// required line, counted among no PASS -- red by design, not a check.
+const MARKER_OBSERVED_NULL: &str = "[api] OBSERVED null-read: the record of address 0 on this row follows (the observation of record: red by design, not a check)";
+/// The emulator row's record: address 0 readable (its own vector table).
+const MARKER_OBS_ROW: &str = "[obs] address 0 on this row: readable -- the read returned without a fault; a hosted null dereference does not trap here";
 const CONTRACT_SYMS: [&str; 5] = [
     "__rhu_debug_layout",
     "__rhu_sched",
@@ -229,6 +241,8 @@ impl API {
         markers.extend(MARKERS_G);
         markers.extend(MARKERS_H);
         markers.extend(MARKERS_I);
+        markers.push(MARKER_OBSERVED_NULL);
+        markers.push(MARKER_OBS_ROW);
         self.common_asserts("api", &run, 0, &markers, &["KERNEL PANIC", "EXCEPTION:"]);
         let nm = match llvm_tool(&self.facts, "llvm-nm") {
             Ok(p) => p,
@@ -271,7 +285,7 @@ impl API {
         };
         self.emit_case("api", "pass", code, 0, &sha, &path_rel);
         println!(
-            "== case api: PASS (exit 0, 39 hosting-API checks, contract + API symbols (the lazy floating-point witness among them) + zero-length module-root brackets in-artifact, no payload-entry seam in this family, the image header at {:#x} stating load address {:#010x} and generation {} and the layout record at {:#x} at version {} for {} threads with {} tls slots of {} bytes at offset {} in a {}-byte TCB, read off the artifact and tied) ==",
+            "== case api: PASS (exit 0, 43 hosting-API checks + the null-read observation (address 0 readable, no fault: the observation of record, not a check), contract + API symbols (the lazy floating-point witness among them) + zero-length module-root brackets in-artifact, no payload-entry seam in this family, the image header at {:#x} stating load address {:#010x} and generation {} and the layout record at {:#x} at version {} for {} threads with {} tls slots of {} bytes at offset {} in a {}-byte TCB, read off the artifact and tied) ==",
             rec.header_at, rec.load_addr, rec.abi, rec.layout_at, rec.layout_version, rec.max_threads, rec.tls_slots, rec.tls_slot_bytes, rec.tcb_off_tls, rec.tcb_stride
         );
     }

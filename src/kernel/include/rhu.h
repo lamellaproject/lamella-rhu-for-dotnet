@@ -40,14 +40,18 @@ extern "C" {
 uint64_t rhu_now_ns(void);
 
 /* Sleep at least ns nanoseconds (relative request). NEVER returns
- * early; may return up to ~2 ms late at the 1 kHz tick. */
+ * early, however long the request (a target beyond the scheduler's
+ * 32-bit tick window is re-armed at the window's edge until it lies
+ * inside); may return up to ~2 ms late at the 1 kHz tick. */
 void rhu_sleep_ns(uint64_t ns);
 
 /* Atomically (with respect to rhu_futex_wake) compare *addr against
  * expected and block while they match. Returns 0 when woken by
  * rhu_futex_wake, RHU_EAGAIN when *addr != expected at entry (no sleep
  * happened -- the caller re-reads its state and decides), RHU_ETIMEDOUT
- * when deadline_ns passed (never early), RHU_EINVAL on a bad address.
+ * when deadline_ns passed (never early -- a deadline beyond the
+ * scheduler's 32-bit tick window is honored to the tick, re-armed at the
+ * window's edge until it lies inside), RHU_EINVAL on a bad address.
  * addr must be 4-aligned, non-null, and mapped for the life of the
  * wait. RHU_EINTR means an activation was delivered during the wait;
  * the wait may not have been satisfied -- re-evaluate the predicate
@@ -56,8 +60,9 @@ int32_t rhu_futex_wait(const uint32_t *addr, uint32_t expected,
                        uint64_t deadline_ns);
 
 /* Ready up to n threads blocked on addr; returns the count readied
- * (0 when no thread waits there). Selection is rotation-fair in
- * scheduler slot order, never FIFO. A readied thread that is equal or
+ * (0 when no thread waits there). Selection is priority-first among
+ * the waiters on addr (the most urgent readied first; ties in scheduler
+ * slot rotation order), never FIFO. A readied thread that is equal or
  * more urgent than the caller preempts immediately. */
 int32_t rhu_futex_wake(const uint32_t *addr, uint32_t n);
 
@@ -106,8 +111,11 @@ void rhu_arena_report(void);
  * block headers carry a state word and a canary, and a corrupt or
  * double-freed header dies LOUD through the funnel -- heap corruption
  * is never a quiet survivor. No realloc/calloc here: shim recipes over
- * this pair. NULL = honest exhaustion; align must be a power of two
- * <= 4096 and bytes nonzero (else: caller bug, loud). */
+ * this pair. NULL = honest exhaustion, or a request the heap could never
+ * hold (its rounding wraps, or its span with the header exceeds the
+ * heap's own size) -- refused with a console line, nothing touched;
+ * align must be a power of two <= 4096 and bytes nonzero (else: caller
+ * bug, loud). */
 void *rhu_kheap_alloc(uint32_t bytes, uint32_t align);
 void rhu_kheap_free(void *p);   /* NULL is a no-op */
 
@@ -164,7 +172,17 @@ int32_t rhu_thread_atexit(void (*fn)(void *), void *arg);
 #define RHU_HOSTED_PRIO_HI 0xE0
 #define RHU_HOSTED_PRIO_FLAT 0x80
 
-/* Spawn a hosted thread -> tid >= 1, or RHU_EAGAIN (no TCB slot, stack
+/* The smallest stack a hosted thread may be spawned with, bytes: the
+ * frames the birth writes (32 + 36), an extended floating-point frame's
+ * extra 104 and an activation delivery's 140 sum to 312, rounded up to
+ * the next power of two. A floor for the kernel's own frames, not a
+ * budget for the thread's code: a caller sizes above it for what the
+ * thread runs. */
+#define RHU_THREAD_STACK_MIN 512
+
+/* Spawn a hosted thread -> tid >= 1, RHU_EINVAL (stack_bytes below
+ * RHU_THREAD_STACK_MIN, or a size whose 8-byte round-up wraps -- refused
+ * before anything moves), or RHU_EAGAIN (no TCB slot, stack
  * pool exhausted, or a TLS block refused -- an honest refusal; hosted
  * callers own their retry story, kernel-internal birth errors stay
  * loud panics). `prio` clamps into the hosted band [RHU_HOSTED_PRIO_LO,
@@ -175,7 +193,9 @@ int32_t rhu_thread_atexit(void (*fn)(void *), void *arg);
  * to it for the entry's life (rhu_payload_entry, below), so a shim that
  * spawns at this value lands its threads level with their host --
  * equal-priority round-robin, and a start waited for by yield alone
- * completes. `name` must outlive the thread; NULL reads as "hosted".
+ * completes. `name` is copied at the door (at most 15 bytes kept, cut
+ * at a character boundary), so the caller's buffer may go away once the
+ * door returns; NULL reads as "hosted".
  * Stacks come from the .kstacks pool with exact-fit reuse of retired
  * stacks. Tid numbering in a hosted image: the idle thread holds tid 1
  * and the payload host thread (the kernel's main thread) tid 2, so the
@@ -236,7 +256,8 @@ typedef struct rhu_ctx {
  * picked until resumed. A thread inside the kernel critical section
  * can never be caught by this (it is never switched out mid-CS), so
  * the suspend-vs-kernel-lock deadlock class is closed by
- * construction. Refusals: RHU_EINVAL null out_ctx, self, or idle;
+ * construction. Refusals: RHU_EINVAL null or not 4-aligned out_ctx,
+ * self, or idle;
  * RHU_ESRCH unknown or dead tid; RHU_EAGAIN already suspended (the
  * caller's bookkeeping is broken and hears so). */
 int32_t rhu_thread_suspend(int32_t tid, rhu_ctx *out_ctx);
@@ -245,8 +266,9 @@ int32_t rhu_thread_suspend(int32_t tid, rhu_ctx *out_ctx);
  * geometry). ctx->sp must equal the suspension snapshot's
  * sp or the whole edit is refused RHU_EINVAL and nothing is written.
  * The restore is always an exception return -- no path in this
- * kernel restores a context inline. Refusals: RHU_EINVAL null ctx or
- * sp mismatch; RHU_ESRCH unknown or dead tid; RHU_EAGAIN not
+ * kernel restores a context inline. Refusals: RHU_EINVAL null or not
+ * 4-aligned ctx, or sp mismatch; RHU_ESRCH unknown or dead tid;
+ * RHU_EAGAIN not
  * suspended. */
 int32_t rhu_thread_set_context(int32_t tid, const rhu_ctx *ctx);
 
@@ -322,12 +344,18 @@ int32_t rhu_module_roots(int32_t handle, rhu_module_desc *out);
 
 /* Write n bytes to the kernel console as ONE atomic write (concurrent
  * writers never tear it; size lines accordingly). Bytes pass through
- * the kernel's wire grammar: every '\n' goes out as "\r\n". Polled
- * transmit -- the call returns when the last byte entered the
- * transmitter, bounded by hardware drain, never by the scheduler.
- * Returns n. Refusals: RHU_EINVAL for NULL buf with n > 0, or n
- * beyond INT32_MAX (the return must carry the count honestly);
- * n == 0 writes nothing and returns 0. */
+ * the kernel's wire grammar: every '\n' goes out as "\r\n". The call
+ * returns when the last byte entered the kernel's transmit path: on a
+ * board whose console is driven by a transmit ring that is the ring,
+ * and the call first waits -- outside the kernel's critical section,
+ * with interrupts open -- until the ring has room for the write's wire
+ * length; on a polled board it is the transmitter itself. Either way
+ * the wait is bounded by hardware drain, never by the scheduler.
+ * Returns n. Refusals: RHU_EINVAL for NULL buf with n > 0, or n beyond
+ * RHU_CONSOLE_MAX_WRITE (one write is bounded; a larger buffer is
+ * written in bounded pieces by the caller); n == 0 writes nothing and
+ * returns 0. */
+#define RHU_CONSOLE_MAX_WRITE 4096
 int32_t rhu_console_write(const void *buf, uint32_t n);
 
 /* Drain up to n pending console input bytes into buf and return the

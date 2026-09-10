@@ -7,7 +7,9 @@
 //! inside the image's first 4 KB and enters through the vector table at
 //! the image base.
 
-use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
+use core::ptr::{read_volatile, write_volatile};
+
+use super::ring;
 
 /// The crystal on every board built on this chip.
 const XOSC_HZ: u32 = 12_000_000;
@@ -48,6 +50,10 @@ pub const NIRQ: usize = 52;
 /// context-switch code (lazy stacking is FP-shape-agnostic).
 #[allow(dead_code)]
 pub const FPU_DP: bool = false;
+/// The cycle counter the lost-tick witness reads: the core's data
+/// watchpoint and trace unit counts processor cycles, enabled and
+/// verified to advance at the scheduler's init.
+pub const CYCLE_COUNTER: bool = true;
 
 /// RAM windows a hardware-pushed exception frame may plausibly live in:
 /// the one contiguous SRAM window this image uses as DATA (the eight
@@ -70,100 +76,6 @@ pub const FRAME_RANGES: [(usize, usize); 1] = [(0x2000_0000, 0x2008_2000 - 32)];
 pub static __rhu_rp2350_boot_block: [u32; 5] =
     [0xffff_ded3, 0x1021_0142, 0x0000_01ff, 0x0000_0000, 0xab12_3579];
 
-/// The console mirror's buffer: twice the largest flavor transcript.
-pub const CONSOLE_LOG_BYTES: usize = 16 * 1024;
-/// "RLOG" in a byte dump.
-pub const CONSOLE_LOG_MAGIC: u32 = 0x474f_4c52;
-
-/// The console mirror: every byte the console transmits is appended here
-/// first, so a debug probe reads the whole transcript out of RAM over the
-/// debug port -- no serial wiring needed, nothing lost at reset -- and the
-/// transmit ring drains the wire from the same bytes. Layout
-/// (little-endian words): the magic, the buffer size, the count of bytes
-/// written since the clock came up (a count past the size means the
-/// buffer wrapped and the earliest bytes are gone), a reserved zero, then
-/// the bytes. The block sits in its own section after the thread stacks
-/// and outside the kernel's zero-fill and statics windows (a conservative
-/// statics scan never walks transcript text); `clock_init` writes the
-/// header once per boot, and a console re-init on the panic path leaves
-/// it alone so a panic transcript appends to the boot's.
-#[repr(C)]
-pub struct ConsoleLog {
-    pub magic: u32,
-    pub size: u32,
-    pub written: u32,
-    pub reserved: u32,
-    pub bytes: [u8; CONSOLE_LOG_BYTES],
-}
-
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".rhu_console_log")]
-pub static mut __rhu_console_log: ConsoleLog = ConsoleLog {
-    magic: 0,
-    size: 0,
-    written: 0,
-    reserved: 0,
-    bytes: [0; CONSOLE_LOG_BYTES],
-};
-
-/// The transmit ring's state, beside the mirror for a debug probe to read
-/// by symbol: the driver mode (0 = not started; 1 = the transmit
-/// interrupt drains the ring; 2 = polled, the mode the panic and fault
-/// paths switch to), the count of bytes handed to the transmitter (equal
-/// to the mirror's `written` once the wire has caught up), the count of
-/// bytes the wire never carried because the writer lapped the ring (zero
-/// in every gated transcript), and the count of transmit interrupts
-/// taken. Plain statics in the zero-fill window: read and written by the
-/// producer under the kernel critical section and by the interrupt that
-/// section masks, so the two halves never interleave.
-#[repr(C)]
-pub struct ConsoleRing {
-    pub mode: u32,
-    pub drained: u32,
-    pub dropped: u32,
-    pub irqs: u32,
-}
-
-#[unsafe(no_mangle)]
-pub static mut __rhu_console_ring: ConsoleRing = ConsoleRing {
-    mode: 0,
-    drained: 0,
-    dropped: 0,
-    irqs: 0,
-};
-
-const RING_MODE_IRQ: u32 = 1;
-const RING_MODE_POLLED: u32 = 2;
-
-/// Set by `clock_init` (the boot path only) and consumed by the first
-/// `console_init` after it: that call is the boot's and arms the transmit
-/// interrupt; any later call is a re-init from the panic or fault path
-/// and switches the driver to the polled mode.
-static mut CONSOLE_BOOT_PENDING: u32 = 0;
-
-/// Write the mirror's header: the count first (so a reader that sees the
-/// magic never sees a stale count beside it), then the size and the magic.
-fn console_log_arm() {
-    unsafe {
-        let log = addr_of_mut!(__rhu_console_log);
-        write_volatile(addr_of_mut!((*log).written), 0);
-        write_volatile(addr_of_mut!((*log).reserved), 0);
-        write_volatile(addr_of_mut!((*log).size), CONSOLE_LOG_BYTES as u32);
-        write_volatile(addr_of_mut!((*log).magic), CONSOLE_LOG_MAGIC);
-    }
-}
-
-/// Append one byte to the mirror (the byte lands before the count moves,
-/// so a reader never sees a count that runs past written bytes).
-fn console_log_push(b: u8) {
-    unsafe {
-        let log = addr_of_mut!(__rhu_console_log);
-        let written = read_volatile(addr_of!((*log).written));
-        let bytes = addr_of_mut!((*log).bytes) as *mut u8;
-        write_volatile(bytes.add(written as usize % CONSOLE_LOG_BYTES), b);
-        write_volatile(addr_of_mut!((*log).written), written.wrapping_add(1));
-    }
-}
 
 const CLOCKS: usize = 0x4001_0000;
 const CLK_REF_CTRL: *mut u32 = (CLOCKS + 0x30) as *mut u32;
@@ -391,9 +303,8 @@ unsafe fn clocks_to_xosc() {
 fn clock_init_tail() {
     unsafe {
         release_reset(RESET_SYSINFO);
-        write_volatile(addr_of_mut!(CONSOLE_BOOT_PENDING), 1);
     }
-    console_log_arm();
+    ring::boot_mark();
 }
 
 /// Enforce the crystal posture, then the shared tail.
@@ -549,77 +460,48 @@ unsafe fn console_hw_init() {
 }
 
 /// The console driver's init. The first call configures the hardware.
-/// The call the boot path makes (marked by `clock_init`) arms the
-/// transmit interrupt -- its priority byte, its enable bit, the UART's
-/// mask -- and takes the interrupt mode; any later call is the panic or
-/// fault path's re-init and switches the driver to the polled mode with
-/// the interrupt masked, so the report that follows goes through the
-/// wire synchronously. The console mirror is not touched here (see
-/// `clock_init`), so a panic transcript appends to the boot's.
+/// The call the boot path makes (marked by `clock_init` through the ring
+/// module) arms the transmit interrupt -- its priority byte, its enable
+/// bit, the UART's mask -- and takes the interrupt mode; any later call
+/// is the panic or fault path's re-init and switches the driver to the
+/// polled mode with the interrupt masked, so the report that follows
+/// goes through the wire synchronously. The console mirror is not
+/// touched here (see `clock_init`), so a panic transcript appends to the
+/// boot's.
 pub fn console_init() {
     unsafe {
-        let ring = addr_of_mut!(__rhu_console_ring);
-        if read_volatile(addr_of!((*ring).mode)) == 0 {
+        if ring::mode() == 0 {
             console_hw_init();
         }
-        if read_volatile(addr_of!(CONSOLE_BOOT_PENDING)) != 0 {
-            write_volatile(addr_of_mut!(CONSOLE_BOOT_PENDING), 0);
+        if ring::take_boot_mark() {
             write_volatile(NVIC_IPR.add(UART0_IRQ), UART0_IRQ_PRIO);
             write_volatile(NVIC_ICPR1, 1 << (UART0_IRQ - 32));
             write_volatile(NVIC_ISER1, 1 << (UART0_IRQ - 32));
             write_volatile(UART0_IMSC, UART_TX_INT);
-            write_volatile(addr_of_mut!((*ring).mode), RING_MODE_IRQ);
+            ring::set_mode(ring::MODE_IRQ);
         } else {
             write_volatile(UART0_IMSC, 0);
-            write_volatile(addr_of_mut!((*ring).mode), RING_MODE_POLLED);
+            ring::set_mode(ring::MODE_POLLED);
         }
     }
 }
 
-/// The ring's consumer half, shared by the transmit interrupt and the
-/// polled fallback: move bytes from the mirror into the transmit FIFO
-/// while it has room (at most one FIFO's worth of register writes, never
-/// a wait). A writer that lapped the ring -- more than the buffer's worth
-/// ahead of the wire -- has overwritten the oldest undrained bytes; those
-/// are skipped and counted, never sent out of order.
-unsafe fn console_drain_fifo() {
-    unsafe {
-        let log = addr_of_mut!(__rhu_console_log);
-        let ring = addr_of_mut!(__rhu_console_ring);
-        let written = read_volatile(addr_of!((*log).written));
-        let mut drained = read_volatile(addr_of!((*ring).drained));
-        let behind = written.wrapping_sub(drained);
-        if behind > CONSOLE_LOG_BYTES as u32 {
-            let lost = behind - CONSOLE_LOG_BYTES as u32;
-            let dropped = read_volatile(addr_of!((*ring).dropped));
-            write_volatile(addr_of_mut!((*ring).dropped), dropped.wrapping_add(lost));
-            drained = drained.wrapping_add(lost);
-        }
-        let bytes = addr_of!((*log).bytes) as *const u8;
-        while drained != written && read_volatile(UART0_FR) & FR_TXFF == 0 {
-            let b = read_volatile(bytes.add(drained as usize % CONSOLE_LOG_BYTES));
-            write_volatile(UART0_DR, b as u32);
-            drained = drained.wrapping_add(1);
-        }
-        write_volatile(addr_of_mut!((*ring).drained), drained);
-    }
+/// The ring's four hooks on this UART: the transmit FIFO takes a byte
+/// while its full flag is clear; a byte goes into the data register; the
+/// transmit interrupt is latched and cleared through the interrupt-clear
+/// register; and the interrupt is transition-shaped (it fires when the
+/// FIFO falls through its trigger level), so its mask stays set for the
+/// driver's life and the level-shaped enable is a no-op here.
+pub unsafe fn ring_tx_room() -> bool {
+    unsafe { read_volatile(UART0_FR) & FR_TXFF == 0 }
 }
-
-/// The polled fallback: the ring pushed through the wire to the last
-/// byte written, waiting on the FIFO's full flag between refills.
-unsafe fn console_drain_polled() {
-    unsafe {
-        let log = addr_of!(__rhu_console_log);
-        let ring = addr_of!(__rhu_console_ring);
-        loop {
-            console_drain_fifo();
-            if read_volatile(addr_of!((*ring).drained)) == read_volatile(addr_of!((*log).written)) {
-                return;
-            }
-            while read_volatile(UART0_FR) & FR_TXFF != 0 {}
-        }
-    }
+pub unsafe fn ring_tx_put(b: u8) {
+    unsafe { write_volatile(UART0_DR, b as u32) }
 }
+pub unsafe fn ring_tx_ack() {
+    unsafe { write_volatile(UART0_ICR, UART_TX_INT) }
+}
+pub unsafe fn ring_tx_irq(_enabled: bool) {}
 
 /// UART0's transmit interrupt: the ring's drain in the interrupt mode.
 /// Raised when the transmit FIFO falls through its trigger level; the
@@ -630,32 +512,21 @@ unsafe fn console_drain_polled() {
 /// switch; the FIFO's remaining half keeps the wire busy meanwhile.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __rhu_rp2350_uart0_irq() {
-    unsafe {
-        let ring = addr_of_mut!(__rhu_console_ring);
-        let n = read_volatile(addr_of!((*ring).irqs));
-        write_volatile(addr_of_mut!((*ring).irqs), n.wrapping_add(1));
-        write_volatile(UART0_ICR, UART_TX_INT);
-        console_drain_fifo();
-    }
+    unsafe { ring::irq() }
 }
 
-/// Byte transmit: the byte appended to the mirror (the ring's storage),
-/// then the transmitter primed from the ring while its FIFO has room --
-/// a bounded register loop, never a wait on the wire; the transmit
-/// interrupt drains whatever the FIFO could not take. In the polled mode
-/// (the panic and fault paths) the ring is drained to the wire here,
-/// synchronously. The caller holds the kernel critical section
-/// (console.rs's line lock), which masks the interrupt.
+/// Byte transmit through the shared ring (the mirror, the primed FIFO,
+/// the interrupt drain; the polled drain on the panic and fault paths).
+/// The caller holds the kernel critical section (the console's line
+/// lock), which masks the interrupt.
 pub fn console_putb(b: u8) {
-    console_log_push(b);
-    unsafe {
-        let ring = addr_of!(__rhu_console_ring);
-        if read_volatile(addr_of!((*ring).mode)) == RING_MODE_POLLED {
-            console_drain_polled();
-        } else {
-            console_drain_fifo();
-        }
-    }
+    ring::putb(b)
+}
+
+/// The room the ring has for a writer, in bytes (the door's back-pressure
+/// reads it outside the critical section).
+pub fn console_room() -> usize {
+    ring::room()
 }
 
 /// Non-blocking byte receive: one pending byte, or None immediately. A
@@ -675,3 +546,11 @@ pub fn console_getb() -> Option<u8> {
         Some(word as u8)
     }
 }
+
+/// Whether address 0 is readable memory on this row -- the low-address
+/// question's per-row record, MEASURED on the part (a read that returns
+/// a word, or a bus fault): the api flavor's observation reads it before
+/// it touches the address.
+/// This row: the boot ROM at 0.
+#[allow(dead_code)]
+pub const ADDRESS_ZERO_READABLE: bool = true;

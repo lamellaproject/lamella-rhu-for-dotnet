@@ -47,6 +47,11 @@ const SYST_CVR: *mut u32 = 0xE000_E018 as *mut u32;
 /// identically (the boundary-identity assert below is the tripwire),
 /// and within a tick the floor of a monotone product stays monotone.
 const CYCLES_PER_TICK: u32 = board::SYSCLK_HZ / board::TICK_HZ;
+/// The wake-target arithmetic (pure; the host tier compiles it from the
+/// same file).
+#[path = "wake.rs"]
+pub(crate) mod wake;
+
 const NS_PER_TICK: u64 = 1_000_000_000 / board::TICK_HZ as u64;
 const NS_GCD: u64 = gcd(1_000_000_000, board::SYSCLK_HZ as u64);
 const NS_NUM: u64 = 1_000_000_000 / NS_GCD;
@@ -79,6 +84,28 @@ enum State {
     Exited = 3,
 }
 
+/// The thread stack floor, bytes: the frames the birth writes (32 + 36),
+/// an extended floating-point frame's extra 104 and an activation
+/// delivery's 140 sum to 312, rounded up to the next power of two.
+/// Mirrored by `include/rhu.h` (RHU_THREAD_STACK_MIN) for the C door,
+/// which refuses below it; a kernel-internal spawn below it is a bug.
+pub const THREAD_STACK_MIN: usize = 512;
+
+/// The name buffer a control block carries: at most `NAME_BYTES - 1`
+/// bytes of the spawn name, cut at a character boundary, NUL after.
+pub const NAME_BYTES: usize = 16;
+
+/// The name as the layout record reads it: a (pointer, length) pair
+/// pointing into the control block's own `name_buf` -- the caller's
+/// bytes are copied at birth and may go away once the spawn returns.
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+struct NameRef {
+    ptr: *const u8,
+    len: usize,
+}
+
 /// One thread's control block. `repr(C)`: the field layout is part of
 /// the debug-visible layout contract (offsets exported below).
 #[repr(C)]
@@ -92,7 +119,7 @@ struct Tcb {
     tid: i32,
     entry: Option<extern "C" fn(usize)>,
     arg: usize,
-    name: &'static str,
+    name: NameRef,
     /// Futex wait channel: the address this thread blocks on (0 = not a
     /// futex wait -- a futex waiter is `Sleeping` with this set, so the
     /// debug-layout state values stay v1). The WAKER clears it before
@@ -130,6 +157,15 @@ struct Tcb {
     /// The interrupted context's saved-frame sp, held across the
     /// handler run so SVC #1 can rebuild the restore from it.
     act_saved_sp: u32,
+    /// The 64-bit tick a sleep or a timed wait truly targets (0 = none).
+    /// The armed `wake_tick` is this target inside the timer walk's
+    /// 32-bit window, or the window's far edge with a re-arm at expiry
+    /// -- a deadline past the window is never early.
+    wake_far: u64,
+    /// The spawn name's bytes (appended, the Tcb append rule; `name`
+    /// points here), NUL after the kept bytes.
+    #[allow(dead_code)]
+    name_buf: [u8; NAME_BYTES],
 }
 
 const TCB_INIT: Tcb = Tcb {
@@ -142,7 +178,7 @@ const TCB_INIT: Tcb = Tcb {
     tid: 0,
     entry: None,
     arg: 0,
-    name: "",
+    name: NameRef { ptr: ptr::null(), len: 0 },
     wait_addr: 0,
     wait_deadline: false,
     tls: [ptr::null_mut(); registry::MAX_MODULES],
@@ -153,6 +189,8 @@ const TCB_INIT: Tcb = Tcb {
     act_in_handler: false,
     act_interrupted: false,
     act_saved_sp: 0,
+    wake_far: 0,
+    name_buf: [0; NAME_BYTES],
 };
 
 static NEXT_TID: AtomicU32 = AtomicU32::new(1);
@@ -243,6 +281,79 @@ static NOW_LAST_HI: AtomicU32 = AtomicU32::new(0);
 #[unsafe(export_name = "__rhu_switches")]
 pub static SWITCHES: AtomicU32 = AtomicU32::new(0);
 
+/// The lost-tick witness: in the tick handler, the cycle counter's
+/// reading against the previous entry's, so a tick that fired while
+/// the kernel critical section masked it -- coalesced into one pending
+/// bit -- becomes a number the transcript carries. An entry is LATE when
+/// more than a period and a half elapsed since the last (a normal
+/// entry's jitter never counts, a coalesced tick always does); the ticks
+/// it LOST are the whole periods beyond the first. Counting, never
+/// crediting: the tick is the scheduler's quantum, and a kernel with a
+/// masked tick must not look healthy by its own clock. Seven words,
+/// exported for a probe beside `__rhu_ticks`: the source (0 = no cycle
+/// counter on this row, 1 = counting, 2 = expected but the counter did
+/// not advance), the period in cycles, the entries, the late entries,
+/// the lost ticks, the maximum elapsed, the previous reading. Written
+/// by SysTick alone; the census line every gated transcript ends with
+/// prints the two counts (`tick_witness_print`, from the exit funnel).
+#[repr(C)]
+pub struct TickWitness {
+    pub source: u32,
+    pub period: u32,
+    pub entries: u32,
+    pub late: u32,
+    pub lost: u32,
+    pub max: u32,
+    pub prev: u32,
+}
+
+#[unsafe(export_name = "__rhu_tick_witness")]
+pub static mut TICK_WITNESS: TickWitness = TickWitness {
+    source: WITNESS_NONE,
+    period: 0,
+    entries: 0,
+    late: 0,
+    lost: 0,
+    max: 0,
+    prev: 0,
+};
+
+const WITNESS_NONE: u32 = 0;
+const WITNESS_DWT: u32 = 1;
+const WITNESS_STATIC: u32 = 2;
+
+/// The debug architecture's cycle counter (the data watchpoint and trace
+/// unit, ARMv7-M and ARMv8-M): the trace enable in the debug exception
+/// and monitor control register, the unit's lock register where a core
+/// implements it, its control word and the counter.
+const DEMCR: *mut u32 = 0xE000_EDFC as *mut u32;
+const DEMCR_TRCENA: u32 = 1 << 24;
+const DWT_CTRL: *mut u32 = 0xE000_1000 as *mut u32;
+const DWT_CYCCNT: *mut u32 = 0xE000_1004 as *mut u32;
+const DWT_LAR: *mut u32 = 0xE000_1FB0 as *mut u32;
+const DWT_LAR_UNLOCK: u32 = 0xC5AC_CE55;
+const DWT_CTRL_CYCCNTENA: u32 = 1;
+
+/// The census line every gated transcript ends with (the exit funnel
+/// calls it): the two counts on a counting row, or why there are none.
+pub fn tick_witness_print() {
+    let (source, period, late, lost) = unsafe {
+        let w = &*core::ptr::addr_of!(TICK_WITNESS);
+        (
+            read_volatile(&w.source),
+            read_volatile(&w.period),
+            read_volatile(&w.late),
+            read_volatile(&w.lost),
+        )
+    };
+    match source {
+        WITNESS_DWT => kprintln!("[tick] witness: {} lost, {} late (> 1/2 period), cycle counter DWT", lost, late),
+        WITNESS_STATIC => kprintln!("[tick] witness: not counted (the cycle counter did not advance)"),
+        _ if board::CYCLE_COUNTER && period == 0 => kprintln!("[tick] witness: not counted (the tick never started)"),
+        _ => kprintln!("[tick] witness: not counted (no cycle counter on this row)"),
+    }
+}
+
 /// The switch-entry witness of the lazy floating-point discipline (the
 /// frame-type note above the suspension + activation seam): how many
 /// PendSV entries found lazy floating-point state still pending while
@@ -277,7 +388,10 @@ pub const DEBUG_LAYOUT_VERSION: u32 = 2;
 /// `__rhu_sched`, `__rhu_ticks` -- then walks the TCB table using the
 /// offsets recorded here. Offsets are computed by the compiler, so they
 /// cannot drift from the structs. State values: 0 Free, 1 Ready,
-/// 2 Sleeping, 3 Exited. `name` is a (pointer, length) string pair.
+/// 2 Sleeping, 3 Exited. `name` is a (pointer, length) string pair
+/// pointing into the control block's own buffer (appended past the
+/// version-2 fields: at most 15 bytes, NUL after), so a name never
+/// outlives its thread's block.
 ///
 /// Version 2 appends the thread-local-base door: `tcb_off_tls` is the
 /// offset of a thread's per-module block pointer array, `tls_slots` its
@@ -419,6 +533,16 @@ pub enum SpawnErr {
     TidExhausted,
 }
 
+/// The byte count of `name` a control block keeps: at most
+/// `NAME_BYTES - 1`, cut back to a character boundary.
+fn name_cut(name: &str) -> usize {
+    let mut n = name.len().min(NAME_BYTES - 1);
+    while !name.is_char_boundary(n) {
+        n -= 1;
+    }
+    n
+}
+
 /// Fallible thread spawn from the .kstacks pool: `(slot, tid)` or the
 /// refusal reason with NOTHING committed (a taken retired stack is put
 /// back, a bump is un-bumped, partial TLS blocks are freed). Stacks
@@ -427,12 +551,17 @@ pub enum SpawnErr {
 /// registered module (the other eager direction
 /// lives in `tls_on_register`).
 pub fn try_spawn(
-    name: &'static str,
+    name: &str,
     entry: extern "C" fn(usize),
     arg: usize,
     prio: u8,
     stack_bytes: usize,
 ) -> Result<(usize, i32), SpawnErr> {
+    assert!(
+        (THREAD_STACK_MIN..=usize::MAX - 7).contains(&stack_bytes),
+        "spawn: a stack of {} bytes is below the floor or wraps the rounding",
+        stack_bytes
+    );
     let stack_bytes = (stack_bytes + 7) & !7;
     let r = with_cs(|| unsafe {
         if NEXT_TID.load(Ordering::Relaxed) > i32::MAX as u32 {
@@ -453,7 +582,7 @@ pub fn try_spawn(
             from_retired = true;
             b as usize
         } else {
-            if s.pool_used + stack_bytes > board::STACK_POOL_BYTES {
+            if stack_bytes > board::STACK_POOL_BYTES - s.pool_used {
                 return Err(SpawnErr::PoolExhausted);
             }
             let b = addr_of!(STACK_POOL.0) as usize + s.pool_used;
@@ -508,6 +637,10 @@ pub fn try_spawn(
         }
         sw.add(8).write(0xFFFF_FFFD);
 
+        let mut name_buf = [0u8; NAME_BYTES];
+        let name_len = name_cut(name);
+        name_buf[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
+        let name = NameRef { ptr: addr_of!(s.tcbs[slot].name_buf) as *const u8, len: name_len };
         let tid = NEXT_TID.fetch_add(1, Ordering::Relaxed) as i32;
         s.tcbs[slot] = Tcb {
             sp: sw as u32,
@@ -530,6 +663,8 @@ pub fn try_spawn(
             act_in_handler: false,
             act_interrupted: false,
             act_saved_sp: 0,
+            wake_far: 0,
+            name_buf,
         };
         sync_bits(s, slot);
         Ok((slot, tid, s.started && prio < s.tcbs[s.current].prio))
@@ -549,7 +684,7 @@ pub fn try_spawn(
 /// panics (hosted callers go through the C door, which refuses
 /// honestly instead). Returns the slot index.
 pub fn spawn(
-    name: &'static str,
+    name: &str,
     entry: extern "C" fn(usize),
     arg: usize,
     prio: u8,
@@ -663,6 +798,7 @@ pub fn sleep_ms(ms: u32) {
                 let s = sched();
                 let cur = s.current;
                 s.tcbs[cur].wake_tick = deadline;
+                s.tcbs[cur].wake_far = 0;
                 set_state(s, cur, State::Sleeping);
                 false
             }
@@ -741,15 +877,29 @@ pub fn now_ns() -> u64 {
     })
 }
 
-/// The tick at which `now_ns() >= deadline_ns` is guaranteed: ceil to
-/// the next tick boundary, +1 for the arm-race margin (a tick firing
+/// The 64-bit tick at which `now_ns() >= deadline_ns` is guaranteed: ceil
+/// to the next tick boundary, +1 for the arm-race margin (a tick firing
 /// between the deadline computation and the arm). Ticks and `now_ns`
 /// share the SysTick clock, so ceil alone is already never-early; the
 /// negative control that reds the never-early checks is FLOORING this
-/// conversion. Truncation to u32 is the wrapping
-/// tick arithmetic.
-fn tick_for_deadline(deadline_ns: u64) -> u32 {
-    (deadline_ns.div_ceil(NS_PER_TICK) as u32).wrapping_add(1)
+/// conversion. The wake module carries the arithmetic.
+fn tick_for_deadline(deadline_ns: u64) -> u64 {
+    wake::tick_for_deadline(deadline_ns, NS_PER_TICK)
+}
+
+/// The 64-bit tick now: the counter's two words, read under the kernel
+/// critical section (the tick cannot move between them there).
+fn now_tick64() -> u64 {
+    ((TICKS_HI.load(Ordering::Relaxed) as u64) << 32) | TICKS.load(Ordering::Relaxed) as u64
+}
+
+/// Arm slot `i`'s timer at a 64-bit target tick: the target itself when
+/// it lies inside the timer walk's window, else the window's far edge
+/// with the target kept for the walk's re-arm at expiry.
+fn arm_target(s: &mut Sched, i: usize, target: u64) {
+    let (armed, _clamped) = wake::arm(now_tick64(), target);
+    s.tcbs[i].wake_tick = armed;
+    s.tcbs[i].wake_far = target;
 }
 
 /// Nanosecond-request sleep: never early (gate check 2's contract), up
@@ -768,7 +918,7 @@ pub fn sleep_ns(ns: u64) {
             let cur = s.current;
             s.tcbs[cur].wait_addr = 0;
             s.tcbs[cur].wait_deadline = false;
-            s.tcbs[cur].wake_tick = tick_for_deadline(target);
+            arm_target(s, cur, tick_for_deadline(target));
             set_state(s, cur, State::Sleeping);
             false
         });
@@ -808,7 +958,7 @@ pub fn futex_wait(addr: *const u32, expected: u32, deadline_ns: u64) -> i32 {
         s.tcbs[cur].wait_addr = addr as usize;
         s.tcbs[cur].wait_deadline = deadline_ns != DEADLINE_NONE;
         if s.tcbs[cur].wait_deadline {
-            s.tcbs[cur].wake_tick = tick_for_deadline(deadline_ns);
+            arm_target(s, cur, tick_for_deadline(deadline_ns));
         }
         set_state(s, cur, State::Sleeping);
         Armed::Slept
@@ -835,9 +985,10 @@ pub fn futex_wait(addr: *const u32, expected: u32, deadline_ns: u64) -> i32 {
 }
 
 /// Ready up to `n` waiters blocked on `addr`; returns the count.
-/// Rotation-fair in slot order from the caller's slot (pick's split
-/// walk -- allocation-free, no per-address queue state; slot rotation,
-/// never FIFO). Every wake path pends explicitly, per the
+/// Priority first: each pick readies the most urgent waiter on the
+/// word, ties in rotation order from the caller's slot (pick's split
+/// walk -- allocation-free, no per-address queue state; never FIFO).
+/// Every wake path pends explicitly, per the
 /// conditional-tick policy: an equal-or-more-urgent woken thread runs
 /// now, not at the next tick.
 pub fn futex_wake(addr: *const u32, n: u32) -> i32 {
@@ -849,24 +1000,30 @@ pub fn futex_wake(addr: *const u32, n: u32) -> i32 {
         let split = (1u32 << (s.current + 1)).wrapping_sub(1);
         let mut count = 0u32;
         let mut urgent = false;
-        'outer: for part in [s.futex_mask & !split, s.futex_mask & split] {
-            let mut m = part;
-            while m != 0 {
-                if count == n {
-                    break 'outer;
-                }
-                let i = m.trailing_zeros() as usize;
-                m &= m - 1;
-                if s.tcbs[i].wait_addr == addr as usize {
-                    s.tcbs[i].wait_addr = 0;
-                    s.tcbs[i].wait_deadline = false;
-                    set_state(s, i, State::Ready);
-                    if !s.tcbs[i].suspended && s.tcbs[i].prio <= s.tcbs[s.current].prio {
-                        urgent = true;
+        while count < n {
+            let mut best: Option<usize> = None;
+            for part in [s.futex_mask & !split, s.futex_mask & split] {
+                let mut m = part;
+                while m != 0 {
+                    let i = m.trailing_zeros() as usize;
+                    m &= m - 1;
+                    if s.tcbs[i].wait_addr == addr as usize
+                        && best.is_none_or(|b| s.tcbs[i].prio < s.tcbs[b].prio)
+                    {
+                        best = Some(i);
                     }
-                    count += 1;
                 }
             }
+            let Some(i) = best else {
+                break;
+            };
+            s.tcbs[i].wait_addr = 0;
+            s.tcbs[i].wait_deadline = false;
+            set_state(s, i, State::Ready);
+            if !s.tcbs[i].suspended && s.tcbs[i].prio <= s.tcbs[s.current].prio {
+                urgent = true;
+            }
+            count += 1;
         }
         (count, urgent)
     });
@@ -1234,7 +1391,12 @@ unsafe fn deliver_activation(s: &mut Sched, i: usize) { unsafe {
     let old_sp = s.tcbs[i].sp;
     let ctx_base = (old_sp - 72) & !7;
     let new_sp = ctx_base - 68;
-    assert!(new_sp >= s.tcbs[i].stack_base, "activation: target stack exhausted");
+    assert!(
+        new_sp >= s.tcbs[i].stack_base,
+        "activation: tid {} has {} bytes of stack below its saved frame, a delivery needs 140",
+        s.tcbs[i].tid,
+        old_sp.wrapping_sub(s.tcbs[i].stack_base)
+    );
     (ctx_base as *mut RhuCtx).write(fill_ctx(old_sp));
     let built = build_tramp_frames(ctx_base);
     s.tcbs[i].act_saved_sp = old_sp;
@@ -1341,6 +1503,30 @@ pub fn probe_retired() -> (u32, u32, u32) {
     })
 }
 
+/// The stack pool's bump, bytes -- the smoke's "a refusal moved
+/// nothing" read.
+#[cfg(feature = "api-smoke")]
+pub fn probe_pool_used() -> u32 {
+    with_cs(|| unsafe { sched().pool_used as u32 })
+}
+
+/// A live thread's name as the record reads it: the pair proven to
+/// point into the thread's own control block (else None), its bytes
+/// copied out under the CS, the kept count returned.
+#[cfg(feature = "api-smoke")]
+pub fn probe_thread_name(tid: i32, out: &mut [u8; NAME_BYTES]) -> Option<usize> {
+    with_cs(|| unsafe {
+        let s = sched();
+        let i = find_live(s, tid)?;
+        let t = &s.tcbs[i];
+        if t.name.ptr != addr_of!(t.name_buf) as *const u8 || t.name.len >= NAME_BYTES {
+            return None;
+        }
+        *out = t.name_buf;
+        Some(t.name.len)
+    })
+}
+
 /// Seek the thread-id counter to `next` (the id the next spawn takes),
 /// for the api smoke's id-space arm ONLY: the refusal at the end of the
 /// id space cannot be reached by spawning. Forward only -- the
@@ -1402,6 +1588,8 @@ extern "C" fn __rhu_switch(sp: u32) -> u32 {
         {
             deliver_activation(s, next);
         }
+        #[cfg(armv8m)]
+        core::arch::asm!("msr PSPLIM, {}", in(reg) s.tcbs[next].stack_base, options(nomem, nostack));
         s.tcbs[next].sp
     })
 }
@@ -1411,6 +1599,8 @@ extern "C" fn __rhu_first_sp() -> u32 {
     with_cs(|| unsafe {
         let s = sched();
         s.started = true;
+        #[cfg(armv8m)]
+        core::arch::asm!("msr PSPLIM, {}", in(reg) s.tcbs[s.current].stack_base, options(nomem, nostack));
         s.tcbs[s.current].sp
     })
 }
@@ -1445,6 +1635,24 @@ fn ready_peer_at_or_above(s: &Sched) -> bool {
 /// below the zero-latency band; kernel CS holders delay it wholesale,
 /// so scheduler state is never seen torn.
 pub unsafe extern "C" fn systick_vector() { unsafe {
+    if board::CYCLE_COUNTER {
+        let w = &mut *core::ptr::addr_of_mut!(TICK_WITNESS);
+        if w.source == WITNESS_DWT {
+            let cyc = read_volatile(DWT_CYCCNT);
+            if w.entries != 0 {
+                let elapsed = cyc.wrapping_sub(w.prev);
+                if elapsed > w.max {
+                    w.max = elapsed;
+                }
+                if elapsed > w.period + w.period / 2 {
+                    w.late += 1;
+                    w.lost += (elapsed + w.period / 2) / w.period - 1;
+                }
+            }
+            w.prev = cyc;
+            w.entries = w.entries.wrapping_add(1);
+        }
+    }
     let now = TICKS.fetch_add(1, Ordering::Release).wrapping_add(1);
     if now == 0 {
         TICKS_HI.fetch_add(1, Ordering::Release);
@@ -1458,7 +1666,12 @@ pub unsafe extern "C" fn systick_vector() { unsafe {
     while m != 0 {
         let i = m.trailing_zeros() as usize;
         m &= m - 1;
-        if (now.wrapping_sub(s.tcbs[i].wake_tick) as i32) >= 0 {
+        if wake::expired(now, s.tcbs[i].wake_tick) {
+            let now64 = ((TICKS_HI.load(Ordering::Relaxed) as u64) << 32) | now as u64;
+            if s.tcbs[i].wake_far > now64 {
+                s.tcbs[i].wake_tick = wake::arm(now64, s.tcbs[i].wake_far).0;
+                continue;
+            }
             set_state(s, i, State::Ready);
             if !s.tcbs[i].suspended {
                 fired = true;
@@ -1484,6 +1697,24 @@ pub fn init() {
         write_volatile(SYST_RVR, board::SYSCLK_HZ / board::TICK_HZ - 1);
         write_volatile(SYST_CVR, 0);
         write_volatile(SYST_CSR, 0b111);
+        #[cfg(armv8m)]
+        core::arch::asm!("msr MSPLIM, {}", in(reg) board::arena_window().1 as u32, options(nomem, nostack));
+    }
+    if board::CYCLE_COUNTER {
+        unsafe {
+            write_volatile(DEMCR, read_volatile(DEMCR) | DEMCR_TRCENA);
+            write_volatile(DWT_LAR, DWT_LAR_UNLOCK);
+            write_volatile(DWT_CYCCNT, 0);
+            write_volatile(DWT_CTRL, read_volatile(DWT_CTRL) | DWT_CTRL_CYCCNTENA);
+            let first = read_volatile(DWT_CYCCNT);
+            let mut last = first;
+            for _ in 0..16 {
+                last = read_volatile(DWT_CYCCNT);
+            }
+            let w = &mut *core::ptr::addr_of_mut!(TICK_WITNESS);
+            w.period = board::SYSCLK_HZ / board::TICK_HZ;
+            w.source = if last != first { WITNESS_DWT } else { WITNESS_STATIC };
+        }
     }
     let idle = spawn("idle", idle_entry, 0, 0xFF, 1024);
     IDLE_SLOT.store(idle as u32, Ordering::Relaxed);

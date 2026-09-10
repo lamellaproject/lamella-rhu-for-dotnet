@@ -19,6 +19,16 @@ pub struct ClockReadback {
     pub overdrive: bool,
 }
 
+/// The console ring shared by the boards driven the ring way (the two
+/// emulator rows keep their polled console and answer unbounded room).
+#[cfg(any(
+    feature = "board-stm32f769i-disco",
+    feature = "board-nucleo-u5a5zj-q",
+    feature = "board-pico-2",
+    feature = "board-pico-plus-2"
+))]
+pub mod ring;
+
 #[cfg(feature = "board-mps2-an500")]
 mod mps2_an500;
 #[cfg(feature = "board-mps2-an500")]
@@ -53,10 +63,10 @@ mod pico_plus_2;
 pub use pico_plus_2::*;
 
 /// The interrupt lines a board claims with its own handlers (the line and
-/// the handler), folded into the vector table by the boot module. A board
-/// module that claims none inherits this empty list; a board that claims
-/// lines states its own list and is named here so the two never collide.
-#[cfg(not(any(feature = "board-pico-2", feature = "board-pico-plus-2")))]
+/// the handler), folded into the vector table by the boot module. The two
+/// emulator rows claim none and inherit this empty list; every silicon
+/// board states its own list (its console ring's transmit drain).
+#[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
 pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[];
 
 /// Exactly one board feature: the count of selected boards, asserted at
@@ -80,3 +90,18 @@ compile_error!("pico-2-pll150 is a posture of board-pico-2 -- select that board"
 
 #[cfg(all(feature = "pico-plus-2-pll150", not(feature = "board-pico-plus-2")))]
 compile_error!("pico-plus-2-pll150 is a posture of board-pico-plus-2 -- select that board");
+
+/// The arena's window: the link-defined NOLOAD slack between the last
+/// kernel section and the boot-stack reserve, bracketed by the two map
+/// symbols on every board. Behind the facade so a host build of the pure
+/// modules supplies a window of its own.
+pub fn arena_window() -> (usize, usize) {
+    unsafe extern "C" {
+        static __rhu_arena_lo: u32;
+        static __rhu_arena_hi: u32;
+    }
+    (
+        core::ptr::addr_of!(__rhu_arena_lo) as usize,
+        core::ptr::addr_of!(__rhu_arena_hi) as usize,
+    )
+}

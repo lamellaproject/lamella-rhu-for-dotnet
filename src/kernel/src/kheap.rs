@@ -65,6 +65,17 @@ unsafe fn validate(h: usize) { unsafe {
     assert!(ok, "kheap: corrupt block header");
 }}
 
+/// The rounded payload span of a request, or None when the rounding
+/// wraps or the span with its header exceeds the heap's own size -- the
+/// cap that keeps every later sum in the walk finite (a request the heap
+/// could never hold is refused before any arithmetic on it). Pure: the
+/// host tier exercises its boundaries.
+pub(crate) fn rounded_request(bytes: u32, heap_bytes: u32) -> Option<u32> {
+    let need = bytes.checked_add(7)? & !7;
+    let span = HDR_BYTES.checked_add(need)?;
+    if span > heap_bytes { None } else { Some(need) }
+}
+
 /// Carve the heap from the arena and shape it as one free block.
 /// Called from `kmain` right after `arena::init()`: single-threaded,
 /// silent on the console. A carve the arena cannot cover is a
@@ -95,9 +106,12 @@ pub fn alloc(bytes: u32, align: u32) -> *mut u8 {
         align
     );
     assert!(bytes != 0, "kheap: zero-byte alloc (caller bug)");
-    let need_payload = (bytes + 7) & !7;
     with_cs(|| unsafe {
         let k = kheap();
+        let Some(need_payload) = rounded_request(bytes, (k.hi - k.lo) as u32) else {
+            kprintln!("[kheap] refused: a request of {} bytes wraps the rounding or exceeds the heap", bytes);
+            return ptr::null_mut();
+        };
         let mut prev: usize = 0;
         let mut p = k.free_head;
         while p != 0 {

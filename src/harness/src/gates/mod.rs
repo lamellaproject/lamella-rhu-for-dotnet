@@ -7,3 +7,4 @@ pub mod api;
 pub mod gc;
 pub mod shim;
 pub mod rt;
+pub mod host;

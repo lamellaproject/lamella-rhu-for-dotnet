@@ -33,6 +33,11 @@ pub const NIRQ: usize = 32;
 /// stacking of S0-S31 is FP-shape-agnostic).
 #[allow(dead_code)]
 pub const FPU_DP: bool = true;
+/// The cycle counter the lost-tick witness reads: this emulator row
+/// models no data watchpoint and trace unit (its registers read as
+/// zero and ignore writes, measured), so the witness says so on its
+/// census line instead of counting.
+pub const CYCLE_COUNTER: bool = false;
 
 /// RAM windows a hardware-pushed exception frame may plausibly live in
 /// (SSRAM2/3 and PSRAM; each end backed off by one 8-word frame). The
@@ -82,6 +87,13 @@ pub fn console_putb(b: u8) {
     }
 }
 
+/// The room the console has for a writer: a polled transmitter takes
+/// every byte at the wire's pace inside the critical section, so the
+/// door's back-pressure never waits here.
+pub fn console_room() -> usize {
+    usize::MAX
+}
+
 /// Non-blocking byte receive: one pending byte, or None immediately.
 pub fn console_getb() -> Option<u8> {
     unsafe {
@@ -92,3 +104,11 @@ pub fn console_getb() -> Option<u8> {
         }
     }
 }
+
+/// Whether address 0 is readable memory on this row -- the low-address
+/// question's per-row record, MEASURED on the part (a read that returns
+/// a word, or a bus fault): the api flavor's observation reads it before
+/// it touches the address.
+/// This row: the image's own vector table lives at 0.
+#[allow(dead_code)]
+pub const ADDRESS_ZERO_READABLE: bool = true;

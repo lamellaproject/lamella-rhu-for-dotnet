@@ -5,15 +5,10 @@
 //! **rezero** is the recycling story -- the decommit contract on a flat
 //! address space.
 
-use core::ptr::{self, addr_of};
+use core::ptr;
 
 use crate::critical::with_cs;
 use crate::sched;
-
-unsafe extern "C" {
-    static __rhu_arena_lo: u32;
-    static __rhu_arena_hi: u32;
-}
 
 /// Fixed audit capacity: enough for the kernel's own registered callers
 /// plus the hosted consumers' call sites; growth past it lands in the
@@ -69,8 +64,7 @@ pub mod sites {
 /// `kmain` immediately before `sched::init()`: single-threaded, before
 /// any thread exists, and deliberately silent on the console.
 pub fn init() {
-    let lo = addr_of!(__rhu_arena_lo) as usize;
-    let hi = addr_of!(__rhu_arena_hi) as usize;
+    let (lo, hi) = crate::board::arena_window();
     #[cfg(feature = "api-smoke")]
     unsafe {
         ptr::write_bytes(lo as *mut u8, 0xA5, hi - lo);

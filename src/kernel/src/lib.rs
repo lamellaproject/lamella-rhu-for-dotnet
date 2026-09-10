@@ -34,8 +34,8 @@ const FLAVOR: &str = if cfg!(feature = "test-panic") {
     "test-fault"
 } else if cfg!(feature = "test-kheap-loud") {
     "test-kheap-loud"
-} else if cfg!(feature = "test-tickcost") {
-    "test-tickcost"
+} else if cfg!(feature = "test-tickcost") { "test-tickcost"
+} else if cfg!(feature = "test-stkof") { "test-stkof"
 } else if cfg!(feature = "sched-smoke") {
     "sched-smoke"
 } else if cfg!(feature = "api-smoke") {
@@ -115,7 +115,7 @@ pub extern "C" fn kmain() -> ! {
 }
 
 #[cfg_attr(
-    any(feature = "test-panic", feature = "test-fault", feature = "payload", feature = "test-kheap-loud", feature = "test-tickcost", feature = "api-smoke"),
+    any(feature = "test-panic", feature = "test-fault", feature = "payload", feature = "test-kheap-loud", feature = "test-tickcost", feature = "test-stkof", feature = "api-smoke"),
     allow(unreachable_code)
 )]
 extern "C" fn kthread_main(_: usize) {
@@ -138,6 +138,9 @@ extern "C" fn kthread_main(_: usize) {
         kprintln!("[test-fault] executing udf #0 -- expect a UsageFault dump");
         unsafe { core::arch::asm!("udf #0") };
     }
+
+    #[cfg(feature = "test-stkof")]
+    stkof::run();
 
     #[cfg(feature = "test-kheap-loud")]
     {
@@ -457,7 +460,9 @@ mod api_smoke {
         check_sleep();
         check_eagain();
         check_timeout();
+        check_far_deadline();
         check_wake();
+        check_wake_priority();
         check_mutex();
         check_quiescent();
         check_arena_carve();
@@ -467,10 +472,12 @@ mod api_smoke {
         check_arena_headroom();
         check_kheap_basic();
         check_kheap_coalesce();
+        check_kheap_bound();
         check_tls_blocks();
         check_tls_base_door();
         check_tls_dtors();
         check_thread_abi();
+        check_stack_min();
         check_thread_bounds();
         check_registry_basic();
         check_susp_pick();
@@ -490,6 +497,7 @@ mod api_smoke {
         check_entropy();
         check_host_band();
         check_tid_wrap();
+        check_null_read();
     }
 
     fn check_monotonic() {
@@ -562,6 +570,41 @@ mod api_smoke {
         kprintln!("[api] PASS futex-timeout (10 ms deadline honored: never early)");
     }
 
+    static FAR_WORD: AtomicU32 = AtomicU32::new(0);
+    static FAR_RESULT: AtomicU32 = AtomicU32::new(u32::MAX);
+    static FAR_SLEPT: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn far_waiter(_: usize) {
+        let deadline = api::rhu_now_ns() + (1u64 << 32) * 1_000_000;
+        let r = api::rhu_futex_wait(FAR_WORD.as_ptr(), 0, deadline);
+        FAR_RESULT.store(r as u32, Ordering::Release);
+    }
+
+    extern "C" fn far_sleeper(_: usize) {
+        api::rhu_sleep_ns(((1u64 << 31) + 1) * 1_000_000);
+        FAR_SLEPT.store(1, Ordering::Release);
+    }
+
+    fn check_far_deadline() {
+        kprintln!("[api] far-deadline: a futex wait and a sleep past the 32-bit tick window armed");
+        sched::spawn("farw", far_waiter, 0, 4, 4 * 1024);
+        wait_until(
+            || sched::probe_futex_waiting(FAR_WORD.as_ptr()) == 1 || FAR_RESULT.load(Ordering::Acquire) != u32::MAX,
+            "far waiter parked or returned",
+        );
+        api::rhu_sleep_ns(3_000_000);
+        assert!(
+            sched::probe_futex_waiting(FAR_WORD.as_ptr()) == 1 && FAR_RESULT.load(Ordering::Acquire) == u32::MAX,
+            "far-deadline: the far futex wait timed out at once"
+        );
+        sched::spawn("fars", far_sleeper, 0, 4, 4 * 1024);
+        api::rhu_sleep_ns(3_000_000);
+        assert!(FAR_SLEPT.load(Ordering::Acquire) == 0, "far-deadline: the far sleep returned at once");
+        assert!(api::rhu_futex_wake(FAR_WORD.as_ptr(), 1) == 1, "far-deadline: the far waiter was not woken");
+        wait_until(|| FAR_RESULT.load(Ordering::Acquire) == 0, "far waiter woken with 0");
+        kprintln!("[api] PASS far-deadline (a futex wait 2^32 ticks out held three ticks and woke with 0 on the wake, a sleep 2^31+1 ticks out held three ticks: never early past the 32-bit tick window)");
+    }
+
     static WAKE_WORD: AtomicU32 = AtomicU32::new(0);
     static RAN: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
 
@@ -598,6 +641,35 @@ mod api_smoke {
             api::rhu_sleep_ns(1_000_000);
         }
         kprintln!("[api] PASS futex-wake-all (released remaining 2, count exact, all ran after)");
+    }
+
+    static PRIO_WORD: AtomicU32 = AtomicU32::new(0);
+    static PRIO_RAN: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn prio_waiter(_: usize) {
+        let r = api::rhu_futex_wait(PRIO_WORD.as_ptr(), 0, sched::DEADLINE_NONE);
+        assert!(r == 0, "prio waiter woke with {}", r);
+        PRIO_RAN.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn check_wake_priority() {
+        kprintln!("[api] wake-priority: two waiters at different priorities, the less urgent first in the rotation armed");
+        let less = sched::spawn("wp6", prio_waiter, 0, 6, 4 * 1024);
+        let more = sched::spawn("wp5", prio_waiter, 0, 5, 4 * 1024);
+        assert!(less < more, "wake-priority: the less urgent waiter's slot is not first in the rotation");
+        while sched::probe_futex_waiting(PRIO_WORD.as_ptr()) != 2 {
+            api::rhu_sleep_ns(1_000_000);
+        }
+        let woken = api::rhu_futex_wake(PRIO_WORD.as_ptr(), 1);
+        assert!(woken == 1, "wake-priority: wake(1) readied {}", woken);
+        assert!(sched::probe_ready_among(&[more]) == 1, "wake-priority: the less urgent waiter was woken first");
+        assert!(sched::probe_ready_among(&[less]) == 0, "wake-priority: both waiters readied by wake(1)");
+        let rest = api::rhu_futex_wake(PRIO_WORD.as_ptr(), u32::MAX);
+        assert!(rest == 1, "wake-priority: the rest readied {}", rest);
+        while PRIO_RAN.load(Ordering::Acquire) != 2 {
+            api::rhu_sleep_ns(1_000_000);
+        }
+        kprintln!("[api] PASS wake-priority (wake(1) readied the more urgent of two waiters though the less urgent one's slot came first in the rotation, the rest released after)");
     }
 
     static LOCK: AtomicU32 = AtomicU32::new(0);
@@ -884,6 +956,16 @@ mod api_smoke {
         api::rhu_kheap_free(w);
         api::rhu_kheap_free(g);
         kprintln!("[api] PASS kheap-coalesce (adjacent frees merged whole: the summed span reallocated at the first block)");
+    }
+
+    fn check_kheap_bound() {
+        kprintln!("[api] kheap-bound: a wrapping request and an over-heap request armed");
+        assert!(api::rhu_kheap_alloc(0xFFFF_FFF7, 8).is_null(), "kheap-bound: a wrapping request was not refused");
+        assert!(api::rhu_kheap_alloc(0x7000_0000, 8).is_null(), "kheap-bound: an over-heap request was not refused");
+        let p = api::rhu_kheap_alloc(40, 8);
+        assert!(!p.is_null(), "kheap-bound: a plain alloc failed after the refusals");
+        api::rhu_kheap_free(p);
+        kprintln!("[api] PASS kheap-bound (a request that wraps the rounding and a request over the heap refused NULL and said so, the heap intact after: a later alloc and free succeeded)");
     }
 
     static TLS_H1: AtomicI32 = AtomicI32::new(-1);
@@ -1221,6 +1303,42 @@ mod api_smoke {
         join_tid(t2);
         ABI_PARK.store(0, Ordering::Release);
 
+        let mut local = *b"clobbered-name-longer-than-15\0";
+        let tn = api::rhu_thread_spawn(
+            Some(probe_return),
+            core::ptr::null_mut(),
+            1536,
+            0x40,
+            local.as_ptr() as *const core::ffi::c_char,
+        );
+        assert!(tn >= 1, "thread-abi: the named spawn returned {}", tn);
+        local.fill(b'#');
+        let mut got = [0u8; sched::NAME_BYTES];
+        let n = sched::probe_thread_name(tn, &mut got)
+            .expect("thread-abi: the named thread's record does not point into its own block");
+        assert!(&got[..n] == b"clobbered-name-" && got[n] == 0, "thread-abi: the copied name reads {:?}", &got[..n]);
+        wait_until(|| sched::probe_futex_waiting(ABI_PARK.as_ptr()) == 1, "the named probe parked");
+        release(&ABI_PARK);
+        join_tid(tn);
+        ABI_PARK.store(0, Ordering::Release);
+        let mut local2 = *b"abcdefghijklmn\xc3\xa9\0";
+        let tn2 = api::rhu_thread_spawn(
+            Some(probe_return),
+            core::ptr::null_mut(),
+            1536,
+            0x40,
+            local2.as_ptr() as *const core::ffi::c_char,
+        );
+        assert!(tn2 >= 1, "thread-abi: the second named spawn returned {}", tn2);
+        local2.fill(b'#');
+        let n2 = sched::probe_thread_name(tn2, &mut got)
+            .expect("thread-abi: the second named thread's record does not point into its own block");
+        assert!(&got[..n2] == b"abcdefghijklmn" && got[n2] == 0, "thread-abi: the cut name reads {:?}", &got[..n2]);
+        wait_until(|| sched::probe_futex_waiting(ABI_PARK.as_ptr()) == 1, "the second named probe parked");
+        release(&ABI_PARK);
+        join_tid(tn2);
+        ABI_PARK.store(0, Ordering::Release);
+
         let (live0, free0) = sched::probe_slot_states();
         assert!(
             live0 + free0 == sched::MAX_THREADS as u32,
@@ -1235,9 +1353,9 @@ mod api_smoke {
                 break;
             }
             assert!(t >= 1, "thread-abi: spawn returned {}", t);
+            assert!((spawned as usize) < tids.len(), "thread-abi: spawn never refused");
             tids[spawned as usize] = t;
             spawned += 1;
-            assert!(spawned <= sched::MAX_THREADS as u32, "thread-abi: spawn never refused");
         }
         assert!(spawned == free0, "thread-abi: refused at {} spawns, {} slots were free", spawned, free0);
         assert!(
@@ -1264,7 +1382,33 @@ mod api_smoke {
             bytes1 - bytes0,
             (spawned - accepted) * 1024
         );
-        kprintln!("[api] PASS thread-abi (round trip clean, tids unique, exact-fit stack reused, slot exhaustion refused honest)");
+        kprintln!("[api] PASS thread-abi (round trip clean, tids unique, exact-fit stack reused, the name a kernel copy cut at the buffer, slot exhaustion refused honest)");
+    }
+
+    fn check_stack_min() {
+        kprintln!("[api] stack-min: sizes below the floor, sizes whose round-up wraps, the floor itself armed");
+        let floor = sched::THREAD_STACK_MIN as u32;
+        let census0 = (sched::probe_slot_states(), sched::probe_retired().0, sched::probe_pool_used());
+        for bytes in [0u32, 1, 8, 64, floor - 1, 0xFFFF_FFF9, 0xFFFF_FFFE, u32::MAX] {
+            assert!(
+                spawn_probe(probe_return, bytes) == sched::ERR_INVAL,
+                "stack-min: a stack of {} bytes was not refused EINVAL",
+                bytes
+            );
+        }
+        assert!(
+            spawn_probe(probe_return, 0xFFFF_FFF8) == sched::ERR_AGAIN,
+            "stack-min: the largest non-wrapping size was not refused EAGAIN by the pool"
+        );
+        let census1 = (sched::probe_slot_states(), sched::probe_retired().0, sched::probe_pool_used());
+        assert!(census1 == census0, "stack-min: a refusal moved state");
+        let t = spawn_probe(probe_return, floor);
+        assert!(t >= 1, "stack-min: the floor itself refused {}", t);
+        wait_until(|| sched::probe_futex_waiting(ABI_PARK.as_ptr()) == 1, "the floor-stack probe parked");
+        release(&ABI_PARK);
+        join_tid(t);
+        ABI_PARK.store(0, Ordering::Release);
+        kprintln!("[api] PASS stack-min (0, 1, 8, 64 and 511 refused EINVAL, the sizes whose round-up wraps refused EINVAL, the largest non-wrapping size refused EAGAIN by the pool, nothing moved by a refusal, the floor itself spawned, parked and joined)");
     }
 
     static HB_STARTED: AtomicU32 = AtomicU32::new(0);
@@ -1790,6 +1934,15 @@ mod api_smoke {
             api::rhu_thread_set_context(tp, core::ptr::null()) == sched::ERR_INVAL,
             "act-refuse: null ctx not EINVAL"
         );
+        let mis = (addr_of_mut!(c) as usize + 2) as *mut sched::RhuCtx;
+        assert!(
+            api::rhu_thread_suspend(tp, mis) == sched::ERR_INVAL,
+            "act-refuse: misaligned out_ctx not EINVAL"
+        );
+        assert!(
+            api::rhu_thread_set_context(tp, mis) == sched::ERR_INVAL,
+            "act-refuse: misaligned ctx not EINVAL"
+        );
         assert!(
             api::rhu_thread_resume(tp) == sched::ERR_AGAIN,
             "act-refuse: resume(not-suspended) not EAGAIN"
@@ -1809,7 +1962,7 @@ mod api_smoke {
             api::rhu_activation_send(tp) == sched::ERR_SRCH,
             "act-refuse: send(dead) not ESRCH"
         );
-        kprintln!("[api] PASS act-refuse (pre-registration send, null/second registration, self/idle suspends, idle send, unknown tids, unsuspended resume/set-context all refused exact)");
+        kprintln!("[api] PASS act-refuse (pre-registration send, null/second registration, self/idle suspends, idle send, unknown tids, misaligned contexts, unsuspended resume/set-context all refused exact)");
     }
 
     static D_PROG: AtomicU32 = AtomicU32::new(0);
@@ -2225,6 +2378,11 @@ mod api_smoke {
             api::rhu_console_write(line.as_ptr(), (i32::MAX as u32) + 1) == sched::ERR_INVAL,
             "console-pair: oversize write not refused EINVAL"
         );
+        static OVER_BOUND: [u8; api::CONSOLE_MAX_WRITE as usize + 1] = [b'x'; api::CONSOLE_MAX_WRITE as usize + 1];
+        assert!(
+            api::rhu_console_write(OVER_BOUND.as_ptr(), OVER_BOUND.len() as u32) == sched::ERR_INVAL,
+            "console-pair: over-bound write not refused EINVAL"
+        );
         assert!(api::rhu_console_write(line.as_ptr(), 0) == 0, "console-pair: zero write not 0");
         let mut buf = [0xA5u8; 16];
         assert!(
@@ -2236,7 +2394,7 @@ mod api_smoke {
             api::rhu_console_read(core::ptr::null_mut(), 4) == sched::ERR_INVAL,
             "console-pair: null read not refused EINVAL"
         );
-        kprintln!("[api] PASS console-pair (door write returned exact and hit the wire, no-input read returned 0 writing nothing, null and oversize refused)");
+        kprintln!("[api] PASS console-pair (door write returned exact and hit the wire, no-input read returned 0 writing nothing, null, oversize and over-bound refused)");
     }
 
     fn check_entropy() {
@@ -2255,4 +2413,20 @@ mod api_smoke {
         assert!(api::rhu_entropy_is_hardware() == 0, "entropy: hardware claim on a software-stream board");
         kprintln!("[api] PASS entropy-honesty (draws filled and distinct, null refused, zero-length trivial, hardware query answers 0 on this class)");
     }
+
+    fn check_null_read() {
+        kprintln!("[api] OBSERVED null-read: the record of address 0 on this row follows (the observation of record: red by design, not a check)");
+        if board::ADDRESS_ZERO_READABLE {
+            let zero = core::hint::black_box(0usize) as *const u32;
+            let word = unsafe { core::ptr::read_volatile(zero) };
+            core::hint::black_box(word);
+            kprintln!("[obs] address 0 on this row: readable -- the read returned without a fault; a hosted null dereference does not trap here");
+        } else {
+            kprintln!("[obs] address 0 on this row: a bus fault -- the board states it (measured on the silicon) and the read is not attempted; a hosted null dereference traps into the funnel here");
+        }
+    }
 }
+
+/// The stack-overflow designed death (the v8-M rows' stack limit).
+#[cfg(feature = "test-stkof")]
+mod stkof;

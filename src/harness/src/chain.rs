@@ -52,6 +52,7 @@ pub fn run(repo: &Path) -> ! {
         say("==== chain: payload tier frozen inputs absent (goldens/payload) -- tier DECLARED, not run ====");
     }
     legs.push("api");
+    legs.push("host");
     if repo.join("goldens").join("gc").is_dir() {
         legs.push("gc");
     } else {

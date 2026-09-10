@@ -31,12 +31,12 @@ const RUN_TIMEOUT_S: u64 = 300;
 /// goldens/rt/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates the objects, the lists, the manifest
 /// and this pin together in one reviewed commit.
-pub(crate) const SHA_FROZEN_MANIFEST: &str = "c8ce278fde142abb7b2b3558567b2991ec34a660c15e98677cb0152520d14991";
+pub(crate) const SHA_FROZEN_MANIFEST: &str = "327f6438e7e5a94ad089e318bc8895c54eae30da8a942e7641caee8d3ab4d56c";
 
 /// The archive set the frozen merge consumed. The manifest's `archives:`
 /// line and the frozen set file must both name it; a merge recorded under
 /// another set is refused before its bytes are trusted.
-const ARCHIVE_SET: &str = "p7-rhu-cortex-m7-sgc-enabled";
+const ARCHIVE_SET: &str = "rc1-rhu-cortex-m7-sgc-enabled";
 
 /// The frozen tier: the file names under goldens/rt/ and what each is.
 const FROZEN_FILES: [(&str, &str); 15] = [
@@ -45,7 +45,7 @@ const FROZEN_FILES: [(&str, &str); 15] = [
     ("rthello-merged.o", "the merged object: the program object, the surgery object and the runtime archives, the descriptor rooted, attributes neutralized"),
     ("attr-donor-v7em.bin", "the build-attributes blob the merges apply (a donor compiled at the image ABI)"),
     ("control-attr-a-profile.bin", "the archives' own merged attributes (application profile), the negative control's input"),
-    ("archives-p7-rhu-cortex-m7-sgc-enabled.txt", "the archive set's identity: what built it, each archive by size and sha256, the set's demand and surface shas"),
+    ("archives-rc1-rhu-cortex-m7-sgc-enabled.txt", "the archive set's identity: what built it, each archive by size and sha256, the set's demand and surface shas"),
     ("rthello-merged.undef.txt", "the merged object's undefined names, sorted: the demand surface pinned exactly"),
     ("rt-libc.o", "the C and math libraries' closure merged into one relocatable, attributes neutralized"),
     ("rt-libc.members.txt", "the closure's member list by archive and name, with the kit's two libraries by size and sha256"),
@@ -61,7 +61,7 @@ const SURGERY: &str = "startup-cookie-copied.o";
 const MERGED: &str = "rthello-merged.o";
 const DONOR: &str = "attr-donor-v7em.bin";
 const CONTROL_ATTRS: &str = "control-attr-a-profile.bin";
-const SET_FILE: &str = "archives-p7-rhu-cortex-m7-sgc-enabled.txt";
+const SET_FILE: &str = "archives-rc1-rhu-cortex-m7-sgc-enabled.txt";
 const UNDEF_FILE: &str = "rthello-merged.undef.txt";
 const LIBC: &str = "rt-libc.o";
 const LIBC_MEMBERS: &str = "rt-libc.members.txt";
@@ -250,7 +250,7 @@ const BOOT_MARKERS: [&str; 24] = [
     "[mgc] dlsym(\"GC_Initialize\")",
     "[mgc-skel] call IGCHeap::Initialize -> S_OK",
     "[host] runtime: initialized",
-    "[host] runtime: managed code 385282 bytes, unboxing stubs 734 bytes",
+    "[host] runtime: managed code 389414 bytes, unboxing stubs 766 bytes",
     "[host] runtime: module registered, class-library slots: 12",
     "[host] runtime: modules initialized: 1",
     "[host] argv: 1",
@@ -332,7 +332,7 @@ const F769_GC_OBJECTS: [&str; 3] = ["goldens/gc/skel-row.o", "goldens/gc/heap-ro
 /// The section classes the suite's frozen merged object carries at the
 /// merge (read off its linked image's brackets at the freeze; the maps'
 /// brackets read them exactly).
-const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 423_190, unbox: 958, hydrated: 93_080, tdata: 160, init_array: 24, modules: 4 };
+const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 427_378, unbox: 998, hydrated: 93_152, tdata: 152, init_array: 24, modules: 4 };
 const INTERNAL_CASES: [&str; 2] = [
     "rt.rederive-selector-control -- link-tier; runs under 'rhu-gate rt rederive' when the archive set is resolved: the same merge with the standalone-GC-disabled selector must not tie the frozen object",
     "rt.rederive-census -- link-tier; runs under 'rhu-gate rt rederive' when the archive set is resolved: every member of the five archives decoded, no compiled function naming a double register above d15 (the pinned assembly pair the only ones), the ARM-state code exactly the pinned pair",
@@ -1286,7 +1286,7 @@ impl Rt {
     fn control_set(&mut self) {
         let case = "rt.merge-set-control";
         println!("== case {case} (negative control) ==");
-        let doctored = self.manifest_text.replace(&format!("archives: {ARCHIVE_SET} "), "archives: p7-rhu-cortex-m7-sgc-disabled ");
+        let doctored = self.manifest_text.replace(&format!("archives: {ARCHIVE_SET} "), "archives: rc1-rhu-cortex-m7-sgc-disabled ");
         if doctored == self.manifest_text {
             self.fail(case, "the control could not doctor the manifest's archives line");
         }
@@ -2538,6 +2538,21 @@ pub fn attrs(_repo: &Path, args: &[String]) -> ! {
     }
 }
 
+/// A frozen input of the selfcheck's own probes, read whole from the rt
+/// tier -- or a loud refusal naming the file. The probes doctor REAL frozen
+/// bytes; an empty default in their place would let a doctored input
+/// compare equal to a genuine one and report the checker broken when it is
+/// the tier that is absent.
+fn selfcheck_frozen(repo: &Path, name: &str) -> Vec<u8> {
+    match std::fs::read(repo.join("goldens").join("rt").join(name)) {
+        Ok(b) => b,
+        Err(e) => {
+            println!("rhu-gate rt selfcheck: goldens/rt/{name} unreadable: {e}");
+            exit(1);
+        }
+    }
+}
+
 pub fn selfcheck(repo: &Path) -> ! {
     let facts = match rustc_facts() {
         Ok(f) => f,
@@ -2546,6 +2561,10 @@ pub fn selfcheck(repo: &Path) -> ! {
             exit(1);
         }
     };
+    if !repo.join("goldens").join("rt").join("MANIFEST.md").is_file() {
+        println!("rhu-gate rt selfcheck: frozen inputs missing (goldens/rt)");
+        exit(1);
+    }
     let out = repo.join("src").join("kernel").join("target").join("rt-gate");
     let _ = std::fs::create_dir_all(&out);
     let results = match Results::create(&out.join("rt-selfcheck.results.jsonl")) {
@@ -2583,10 +2602,10 @@ pub fn selfcheck(repo: &Path) -> ! {
     let missing: Vec<String> = ["a", "c"].iter().map(|s| s.to_string()).collect();
     sc.probe("undef-missing", "an undefined set with one VANISHED name must be refused", undef_fault(&missing, &want).is_none());
 
-    let manifest = "# goldens/rt\n\narchives: p7-rhu-cortex-m7-sgc-enabled abcd\n\n- `goldens/rt/x.o`\n  `0000000000000000000000000000000000000000000000000000000000000000`\n";
-    let set_file = "set-id: p7-rhu-cortex-m7-sgc-enabled\narchive libRuntime.WorkstationGC.a 1 ff\narchives-sha256: abcd\n";
+    let manifest = "# goldens/rt\n\narchives: rc1-rhu-cortex-m7-sgc-enabled abcd\n\n- `goldens/rt/x.o`\n  `0000000000000000000000000000000000000000000000000000000000000000`\n";
+    let set_file = "set-id: rc1-rhu-cortex-m7-sgc-enabled\narchive libRuntime.WorkstationGC.a 1 ff\narchives-sha256: abcd\n";
     sc.accept_probe("set-genuine", "a manifest and set file naming the consumed set with equal shas accepted", set_fault(manifest, set_file, ARCHIVE_SET).is_none());
-    sc.probe("set-other-id", "a manifest naming another archive set must be refused", set_fault(&manifest.replace("p7-rhu-cortex-m7-sgc-enabled", "p7-rhu-cortex-m7-sgc-disabled"), set_file, ARCHIVE_SET).is_none());
+    sc.probe("set-other-id", "a manifest naming another archive set must be refused", set_fault(&manifest.replace("rc1-rhu-cortex-m7-sgc-enabled", "rc1-rhu-cortex-m7-sgc-disabled"), set_file, ARCHIVE_SET).is_none());
     sc.probe("set-sha-disagree", "a set file whose archives sha disagrees with the manifest must be refused", set_fault(manifest, &set_file.replace("archives-sha256: abcd", "archives-sha256: abce"), ARCHIVE_SET).is_none());
 
     let records: Vec<(String, String)> = FROZEN_FILES.iter().map(|(n, _)| (format!("goldens/rt/{n}"), "0".repeat(64))).collect();
@@ -2650,7 +2669,7 @@ pub fn selfcheck(repo: &Path) -> ! {
     rich_image.extend_from_slice(&utf16le(FLAVOUR_MARK));
     sc.probe("flavour-present", "an image carrying the resource sentence as UTF-16 must be refused", flavour_fault(&rich_image).is_none());
 
-    let golden = std::fs::read(repo.join("goldens").join("rt").join(GOLDEN)).unwrap_or_default();
+    let golden = selfcheck_frozen(repo, GOLDEN);
     let mut wrapped: Vec<u8> = b"rhu 0.2.0 -- kernel banner\r\n[boot] kernel line\r\n[mgc] a collector line\r\n".to_vec();
     wrapped.extend_from_slice(&golden);
     wrapped.extend_from_slice(b"[payload] managed Main returned 0\r\n");
@@ -2709,8 +2728,8 @@ pub fn selfcheck(repo: &Path) -> ! {
     sc.accept_probe("arm-mode-none", "a symbol table with Thumb mapping symbols only reads zero", arm_mode_symbols(&syms_thumb).is_empty());
     let syms_stray = syms_arm.replace("__unw_getcontext", "SomeOtherFunction");
     sc.probe("arm-mode-unpinned", "an ARM-state mapping symbol at an unpinned function must be refused", arm_mode_fault(&arm_mode_symbols(&syms_stray), &syms_stray, 1).is_none());
-    let merged = std::fs::read(repo.join("goldens").join("rt").join(MERGED)).unwrap_or_default();
-    let donor = std::fs::read(repo.join("goldens").join("rt").join(DONOR)).unwrap_or_default();
+    let merged = selfcheck_frozen(repo, MERGED);
+    let donor = selfcheck_frozen(repo, DONOR);
     let once = attrs_update(&merged, &donor);
     let twice = attrs_update(&merged, &donor);
     sc.accept_probe("attrs-update-deterministic", "the runner's attributes update gives the same bytes twice on the frozen merged object", once.is_ok() && once == twice);

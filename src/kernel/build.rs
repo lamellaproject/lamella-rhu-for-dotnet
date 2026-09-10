@@ -21,4 +21,8 @@ fn main() {
     };
     println!("cargo:rustc-link-arg=-T{script}");
     println!("cargo:rerun-if-changed={script}");
+    println!("cargo:rustc-check-cfg=cfg(armv8m)");
+    if std::env::var("TARGET").map(|t| t.starts_with("thumbv8m")).unwrap_or(false) {
+        println!("cargo:rustc-cfg=armv8m");
+    }
 }

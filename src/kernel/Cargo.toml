@@ -5,6 +5,12 @@ edition = "2024"
 description = "The Lamella RHU kernel: a runtime-hosting unikernel for .NET (NativeAOT) on Cortex-M microcontrollers."
 license = "MIT OR Apache-2.0"
 
+# A manifest of its own: the empty workspace table stops cargo's upward
+# search, so a checkout placed under a directory that carries a workspace
+# manifest still builds (the crates of this tree target different machines
+# and share nothing; a root workspace is refused by design).
+[workspace]
+
 [[bin]]
 name = "rhu-kernel"
 path = "src/main.rs"
@@ -75,6 +81,10 @@ test-panic = []
 test-fault = []
 # The designed death: corrupt a free kheap header, walk, die loud.
 test-kheap-loud = []
+# The stack-overflow designed death (v8-M rows only; a v7-M target refuses
+# the flavor at compile time): a thread descends past its stack floor and
+# the limit register must raise the UsageFault with the overflow line.
+test-stkof = []
 # The tick-cost measurement flavor (QEMU an500 + the
 # Deterministic icount profile only): raw dns/dms/dsw numbers, never a
 # gate case, never golden'd, never a silicon flavor.

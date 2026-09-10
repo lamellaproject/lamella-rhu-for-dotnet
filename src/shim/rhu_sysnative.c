@@ -24,18 +24,18 @@
 #include "mgc_board_rows.h"
 #include "rhu.h"
 #include "rhu_glibc_arm32.h"
-#include "rhu_pal_console_p7.h"
-#include "rhu_pal_environment_p7.h"
-#include "rhu_pal_errno_p7.h"
-#include "rhu_pal_io_p7.h"
-#include "rhu_pal_log_p7.h"
-#include "rhu_pal_memory_p7.h"
-#include "rhu_pal_process_p7.h"
-#include "rhu_pal_random_p7.h"
-#include "rhu_pal_signal_p7.h"
-#include "rhu_pal_threading_p7.h"
-#include "rhu_pal_time_p7.h"
-#include "rhu_pal_uid_p7.h"
+#include "rhu_pal_console_net11_rc1.h"
+#include "rhu_pal_environment_net11_rc1.h"
+#include "rhu_pal_errno_net11_rc1.h"
+#include "rhu_pal_io_net11_rc1.h"
+#include "rhu_pal_log_net11_rc1.h"
+#include "rhu_pal_memory_net11_rc1.h"
+#include "rhu_pal_process_net11_rc1.h"
+#include "rhu_pal_random_net11_rc1.h"
+#include "rhu_pal_signal_net11_rc1.h"
+#include "rhu_pal_threading_net11_rc1.h"
+#include "rhu_pal_time_net11_rc1.h"
+#include "rhu_pal_uid_net11_rc1.h"
 
 #ifndef RHU_SHIM_BREAK_FD_BASE
 _Static_assert(RHU_SHIM_FD_FILE_LO >= RHU_SHIM_FD_CONSOLE_HI, "the file band starts above the console band");
@@ -163,9 +163,26 @@ const char *SystemNative_StrErrorR(int32_t platformErrno, char *buffer, int32_t 
 #define RFS_DIRS 8
 #define RFS_PATH 64
 #define RFS_MODE_MASK 0x1FFu
+/* The store's stated maximum file size. Every offset, count and length
+ * is checked against it in 64-bit arithmetic before the store mutates:
+ * no position wraps, the growth doubles up to it and no further, and no
+ * gap clear runs past a buffer. A write or truncation beyond it is
+ * EFBIG; a seek beyond it, or below zero, is EINVAL. */
+#define RFS_MAX_FILE 1048576ll
+#define RFS_LOCK_NONE 0u
+#define RFS_LOCK_SH 1u
+#define RFS_LOCK_EX 2u
 
+/* An object exists from its creation to its last close once it has no
+ * name: unlink and rename-over take the name away at once and leave the
+ * bytes to the descriptors that hold them; a slot is reused only after
+ * the last close. */
 typedef struct rfs_file {
     uint8_t used;
+    uint8_t linked;
+    uint8_t opens;
+    uint8_t lock_ex;
+    uint8_t lock_sh;
     char path[RFS_PATH];
     uint8_t *data;
     uint32_t size;
@@ -183,6 +200,7 @@ typedef struct rfs_dir {
 typedef struct rfs_fd {
     uint8_t used;
     uint8_t file;
+    uint8_t lock;
     int32_t access;
     uint32_t pos;
 } rfs_fd;
@@ -190,6 +208,31 @@ typedef struct rfs_fd {
 static rfs_file g_files[RFS_FILES];
 static rfs_dir g_dirs[RFS_DIRS];
 static rfs_fd g_fds[RHU_SHIM_FD_FILE_COUNT];
+
+/* One store, one lock: every verb that reads or writes the file,
+ * directory or descriptor tables holds the shim's own mutex, allocation
+ * included; the console paths and the waits inside Poll run outside it.
+ * An all-zero slot is a valid unlocked mutex of the shim's family. */
+static uint8_t g_store_mutex[24];
+
+#ifdef RHU_SHIM_BREAK_STORE_LOCK
+static void store_lock(void)
+{
+    (void)g_store_mutex;
+}
+static void store_unlock(void)
+{
+}
+#else
+static void store_lock(void)
+{
+    pthread_mutex_lock(g_store_mutex);
+}
+static void store_unlock(void)
+{
+    pthread_mutex_unlock(g_store_mutex);
+}
+#endif
 
 static int fd_is_console(intptr_t fd)
 {
@@ -204,10 +247,30 @@ static rfs_fd *fd_file(intptr_t fd)
     return h->used != 0 ? h : NULL;
 }
 
+/* A path as the store keys it: absolute as given, one trailing slash
+ * dropped (the root keeps its one character). The copy lives in the
+ * caller's buffer; a path too long for the store is left to the length
+ * check of the verb that follows. */
+static const char *path_norm(const char *path, char *buf)
+{
+#ifdef RHU_SHIM_BREAK_STORE_SLASH
+    (void)buf;
+    return path;
+#else
+    size_t n = strlen(path);
+    if (n < 2 || path[n - 1] != '/' || n >= RFS_PATH)
+        return path;
+    memcpy(buf, path, n - 1);
+    buf[n - 1] = 0;
+    return buf;
+#endif
+}
+
+/* The named objects only: an unlinked object has no name to find. */
 static int file_find(const char *path)
 {
     for (int i = 0; i < RFS_FILES; i++) {
-        if (g_files[i].used != 0 && strcmp(g_files[i].path, path) == 0)
+        if (g_files[i].used != 0 && g_files[i].linked != 0 && strcmp(g_files[i].path, path) == 0)
             return i;
     }
     return -1;
@@ -259,13 +322,15 @@ static const char *child_of(const char *full, const char *dir)
     return strchr(leaf, '/') != NULL ? NULL : leaf;
 }
 
+/* `need` is at most the maximum file size (the callers check), so the
+ * doubling reaches it and stops. */
 static int file_grow(rfs_file *f, uint32_t need)
 {
     if (need <= f->cap)
         return 0;
     uint32_t cap = f->cap != 0 ? f->cap : 256u;
     while (cap < need)
-        cap *= 2u;
+        cap = cap < (uint32_t)RFS_MAX_FILE / 2u ? cap * 2u : (uint32_t)RFS_MAX_FILE;
     uint8_t *nb = (uint8_t *)realloc(f->data, cap);
     if (nb == NULL)
         return -1;
@@ -280,50 +345,126 @@ static void file_release(rfs_file *f)
     memset(f, 0, sizeof *f);
 }
 
-static int32_t file_pread(rfs_fd *h, void *buf, int32_t count, uint32_t at)
+/* The name goes; the object stays while a descriptor holds it. */
+static void file_unlink(int fi)
+{
+    rfs_file *f = &g_files[fi];
+#ifdef RHU_SHIM_BREAK_STORE_LIFETIME
+    file_release(f);
+#else
+    if (f->opens > 0) {
+        f->linked = 0;
+        f->path[0] = 0;
+    } else {
+        file_release(f);
+    }
+#endif
+}
+
+/* The advisory lock a descriptor holds, given back. */
+static void fd_unlock(rfs_fd *h, rfs_file *f)
+{
+    if (h->lock == RFS_LOCK_EX)
+        f->lock_ex = 0;
+    else if (h->lock == RFS_LOCK_SH && f->lock_sh > 0)
+        f->lock_sh--;
+    h->lock = RFS_LOCK_NONE;
+}
+
+/* A descriptor closes: its lock is given back, its object is released
+ * at the last close of a nameless object. */
+static void fd_close(rfs_fd *h)
 {
     rfs_file *f = &g_files[h->file];
-    if (at >= f->size)
+    fd_unlock(h, f);
+    memset(h, 0, sizeof *h);
+    if (f->opens > 0)
+        f->opens--;
+    if (f->opens == 0 && f->linked == 0)
+        file_release(f);
+}
+
+static int32_t file_pread(rfs_fd *h, void *buf, int32_t count, int64_t at)
+{
+    rfs_file *f = &g_files[h->file];
+#ifndef RHU_SHIM_BREAK_STORE_ACCESS
+    if (h->access == RHU_PAL_O_WRONLY) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+#endif
+    if (at < 0 || count < 0) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    if (at >= (int64_t)f->size || count == 0)
         return 0;
-    uint32_t n = f->size - at;
+    uint32_t n = f->size - (uint32_t)at;
     if ((uint32_t)count < n)
         n = (uint32_t)count;
-    memcpy(buf, f->data + at, n);
+    memcpy(buf, f->data + (uint32_t)at, n);
     f->atime_ns = (int64_t)rhu_now_ns();
     return (int32_t)n;
 }
 
-static int32_t file_pwrite(rfs_fd *h, const void *buf, int32_t count, uint32_t at)
+static int32_t file_pwrite(rfs_fd *h, const void *buf, int32_t count, int64_t at)
 {
     rfs_file *f = &g_files[h->file];
     if (h->access == RHU_PAL_O_RDONLY) {
         ERRNO = RHU_GERR_EBADF;
         return -1;
     }
-    if (file_grow(f, at + (uint32_t)count) != 0) {
+    if (at < 0 || count < 0) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    if (at + (int64_t)count > RFS_MAX_FILE) {
+        ERRNO = RHU_GERR_EFBIG;
+        return -1;
+    }
+    if (count == 0)
+        return 0;
+    uint32_t end = (uint32_t)(at + (int64_t)count);
+    if (file_grow(f, end) != 0) {
         ERRNO = RHU_GERR_ENOSPC;
         return -1;
     }
-    if (at > f->size)
-        memset(f->data + f->size, 0, at - f->size);
-    memcpy(f->data + at, buf, (uint32_t)count);
-    if (at + (uint32_t)count > f->size)
-        f->size = at + (uint32_t)count;
+    if ((uint32_t)at > f->size)
+        memset(f->data + f->size, 0, (uint32_t)at - f->size);
+    memcpy(f->data + (uint32_t)at, buf, (uint32_t)count);
+    if (end > f->size)
+        f->size = end;
     f->mtime_ns = (int64_t)rhu_now_ns();
     return count;
+}
+
+/* A positioned transfer's offset arrives whole; the store as it stood
+ * cut it to 32 bits, and the control restores that cut. */
+static int64_t positioned(int64_t fileOffset)
+{
+#ifdef RHU_SHIM_BREAK_STORE_BOUNDS
+    return (int64_t)(uint32_t)fileOffset;
+#else
+    return fileOffset;
+#endif
 }
 
 /* ------------------------------------------------------------------ */
 /* the file surface                                                     */
 /* ------------------------------------------------------------------ */
 
-intptr_t SystemNative_Open(const char *path, int32_t flags, int32_t mode)
+/* The resources first -- a descriptor, and for a new object a slot --
+ * so a refused open leaves the store as it was; the object is created or
+ * truncated only once both are in hand. */
+static intptr_t open_locked(const char *path, int32_t flags, int32_t mode)
 {
+    char nb[RFS_PATH];
     int32_t access = flags & RHU_PAL_O_ACCESS_MODE_MASK;
     if (path == NULL) {
         ERRNO = RHU_GERR_EFAULT;
         return -1;
     }
+    path = path_norm(path, nb);
     if (dir_exists(path)) {
         ERRNO = RHU_GERR_EISDIR;
         return -1;
@@ -342,51 +483,80 @@ intptr_t SystemNative_Open(const char *path, int32_t flags, int32_t mode)
             ERRNO = RHU_GERR_ENOENT;
             return -1;
         }
-        for (int i = 0; i < RFS_FILES && fi < 0; i++) {
-            if (g_files[i].used == 0)
-                fi = i;
-        }
-        if (fi < 0) {
-            ERRNO = RHU_GERR_ENOSPC;
-            return -1;
-        }
-        memset(&g_files[fi], 0, sizeof g_files[fi]);
-        g_files[fi].used = 1;
-        strcpy(g_files[fi].path, path);
-        g_files[fi].mode = (uint32_t)mode & RFS_MODE_MASK;
-        g_files[fi].atime_ns = (int64_t)rhu_now_ns();
-        g_files[fi].mtime_ns = g_files[fi].atime_ns;
     } else if ((flags & RHU_PAL_O_EXCL) != 0) {
         ERRNO = RHU_GERR_EEXIST;
         return -1;
     }
-    if ((flags & RHU_PAL_O_TRUNC) != 0 && access != RHU_PAL_O_RDONLY) {
-        g_files[fi].size = 0;
-        g_files[fi].mtime_ns = (int64_t)rhu_now_ns();
+    int di = -1;
+    for (int i = 0; i < RHU_SHIM_FD_FILE_COUNT && di < 0; i++) {
+        if (g_fds[i].used == 0)
+            di = i;
     }
-    for (int i = 0; i < RHU_SHIM_FD_FILE_COUNT; i++) {
-        if (g_fds[i].used == 0) {
-            g_fds[i].used = 1;
-            g_fds[i].file = (uint8_t)fi;
-            g_fds[i].access = access;
-            g_fds[i].pos = 0;
-            return RHU_SHIM_FD_FILE_LO + i;
+#ifndef RHU_SHIM_BREAK_STORE_OPEN_ORDER
+    if (di < 0) {
+        ERRNO = RHU_GERR_EMFILE;
+        return -1;
+    }
+#endif
+    int ni = fi;
+    if (ni < 0) {
+        for (int i = 0; i < RFS_FILES && ni < 0; i++) {
+            if (g_files[i].used == 0)
+                ni = i;
+        }
+        if (ni < 0) {
+            ERRNO = RHU_GERR_ENOSPC;
+            return -1;
         }
     }
-    ERRNO = RHU_GERR_EMFILE;
-    return -1;
+    if (fi < 0) {
+        memset(&g_files[ni], 0, sizeof g_files[ni]);
+        g_files[ni].used = 1;
+        g_files[ni].linked = 1;
+        strcpy(g_files[ni].path, path);
+        g_files[ni].mode = (uint32_t)mode & RFS_MODE_MASK;
+        g_files[ni].atime_ns = (int64_t)rhu_now_ns();
+        g_files[ni].mtime_ns = g_files[ni].atime_ns;
+    } else if ((flags & RHU_PAL_O_TRUNC) != 0 && access != RHU_PAL_O_RDONLY) {
+        g_files[ni].size = 0;
+        g_files[ni].mtime_ns = (int64_t)rhu_now_ns();
+    }
+#ifdef RHU_SHIM_BREAK_STORE_OPEN_ORDER
+    if (di < 0) {
+        ERRNO = RHU_GERR_EMFILE;
+        return -1;
+    }
+#endif
+    g_fds[di].used = 1;
+    g_fds[di].file = (uint8_t)ni;
+    g_fds[di].lock = RFS_LOCK_NONE;
+    g_fds[di].access = access;
+    g_fds[di].pos = 0;
+    g_files[ni].opens++;
+    return RHU_SHIM_FD_FILE_LO + di;
+}
+
+intptr_t SystemNative_Open(const char *path, int32_t flags, int32_t mode)
+{
+    store_lock();
+    intptr_t r = open_locked(path, flags, mode);
+    store_unlock();
+    return r;
 }
 
 int32_t SystemNative_Close(intptr_t fd)
 {
     if (fd_is_console(fd))
         return 0;
+    store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
+        store_unlock();
         ERRNO = RHU_GERR_EBADF;
         return -1;
     }
-    memset(h, 0, sizeof *h);
+    fd_close(h);
+    store_unlock();
     return 0;
 }
 
@@ -396,7 +566,10 @@ intptr_t SystemNative_Dup(intptr_t oldfd)
 {
     if (fd_is_console(oldfd))
         return oldfd;
-    if (fd_file(oldfd) != NULL) {
+    store_lock();
+    int is_file = fd_file(oldfd) != NULL;
+    store_unlock();
+    if (is_file) {
         rhu_shim_log("dup: a file descriptor has no second name at this hosting (ENOTSUP)");
         ERRNO = RHU_GERR_ENOTSUP;
         return -1;
@@ -409,14 +582,17 @@ int32_t SystemNative_Read(intptr_t fd, void *buffer, int32_t bufferSize)
 {
     if (fd == 0)
         return rhu_console_read(buffer, (uint32_t)bufferSize);
+    store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
+        store_unlock();
         ERRNO = RHU_GERR_EBADF;
         return -1;
     }
-    int32_t n = file_pread(h, buffer, bufferSize, h->pos);
+    int32_t n = file_pread(h, buffer, bufferSize, (int64_t)h->pos);
     if (n > 0)
         h->pos += (uint32_t)n;
+    store_unlock();
     return n;
 }
 
@@ -424,35 +600,46 @@ int32_t SystemNative_Write(intptr_t fd, const void *buffer, int32_t bufferSize)
 {
     if (fd == 1 || fd == 2)
         return rhu_console_write(buffer, (uint32_t)bufferSize);
+    store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
+        store_unlock();
         ERRNO = RHU_GERR_EBADF;
         return -1;
     }
-    int32_t n = file_pwrite(h, buffer, bufferSize, h->pos);
+    int32_t n = file_pwrite(h, buffer, bufferSize, (int64_t)h->pos);
     if (n > 0)
         h->pos += (uint32_t)n;
+    store_unlock();
     return n;
 }
 
 int32_t SystemNative_PRead(intptr_t fd, void *buffer, int32_t bufferSize, int64_t fileOffset)
 {
+    store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
+        store_unlock();
         ERRNO = fd_is_console(fd) ? RHU_GERR_ESPIPE : RHU_GERR_EBADF;
         return -1;
     }
-    return file_pread(h, buffer, bufferSize, (uint32_t)fileOffset);
+    int32_t n = file_pread(h, buffer, bufferSize, positioned(fileOffset));
+    store_unlock();
+    return n;
 }
 
 int32_t SystemNative_PWrite(intptr_t fd, void *buffer, int32_t bufferSize, int64_t fileOffset)
 {
+    store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
+        store_unlock();
         ERRNO = fd_is_console(fd) ? RHU_GERR_ESPIPE : RHU_GERR_EBADF;
         return -1;
     }
-    return file_pwrite(h, buffer, bufferSize, (uint32_t)fileOffset);
+    int32_t n = file_pwrite(h, buffer, bufferSize, positioned(fileOffset));
+    store_unlock();
+    return n;
 }
 
 /* Vectored transfers run over the scalar paths: a short transfer ends the
@@ -503,10 +690,14 @@ int64_t SystemNative_PWriteV(intptr_t fd, rhu_pal_iovector *vectors, int32_t vec
     return vectored(fd, vectors, vectorCount, fileOffset, 1, 1);
 }
 
+/* A position may sit past the end of the object (a later write zero-fills
+ * the gap) but never past the maximum file size, and never below zero. */
 int64_t SystemNative_LSeek(intptr_t fd, int64_t offset, int32_t whence)
 {
+    store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
+        store_unlock();
         ERRNO = fd_is_console(fd) ? RHU_GERR_ESPIPE : RHU_GERR_EBADF;
         return -1;
     }
@@ -515,12 +706,15 @@ int64_t SystemNative_LSeek(intptr_t fd, int64_t offset, int32_t whence)
                  : whence == RHU_PAL_SEEK_CUR ? (int64_t)h->pos
                  : whence == RHU_PAL_SEEK_END ? (int64_t)f->size
                                               : -1;
-    if (base < 0 || base + offset < 0 || base + offset > 0xFFFFFFFFll) {
+    if (base < 0 || offset < -RFS_MAX_FILE || offset > RFS_MAX_FILE || base + offset < 0 || base + offset > RFS_MAX_FILE) {
+        store_unlock();
         ERRNO = RHU_GERR_EINVAL;
         return -1;
     }
     h->pos = (uint32_t)(base + offset);
-    return (int64_t)h->pos;
+    int64_t r = (int64_t)h->pos;
+    store_unlock();
+    return r;
 }
 
 static void status_times(rhu_pal_filestatus *st, int64_t atime_ns, int64_t mtime_ns)
@@ -541,7 +735,7 @@ static void status_of_file(rhu_pal_filestatus *st, int index)
     st->Size = (int64_t)f->size;
     st->Ino = (int64_t)index + 1;
     st->Dev = 1;
-    st->HardLinkCount = 1;
+    st->HardLinkCount = f->linked != 0 ? 1 : 0;
     status_times(st, f->atime_ns, f->mtime_ns);
 }
 
@@ -563,24 +757,33 @@ int32_t SystemNative_FStat(intptr_t fd, rhu_pal_filestatus *output)
         output->HardLinkCount = 1;
         return 0;
     }
+    store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
+        store_unlock();
         memset(output, 0, sizeof *output);
         ERRNO = RHU_GERR_EBADF;
         return -1;
     }
     status_of_file(output, h->file);
+    store_unlock();
     return 0;
 }
 
 int32_t SystemNative_Stat(const char *path, rhu_pal_filestatus *output)
 {
+    char nb[RFS_PATH];
+    path = path_norm(path, nb);
+    store_lock();
     int fi = file_find(path);
     if (fi >= 0) {
         status_of_file(output, fi);
+        store_unlock();
         return 0;
     }
-    if (dir_exists(path)) {
+    int is_dir = dir_exists(path);
+    store_unlock();
+    if (is_dir) {
         status_of_dir(output);
         return 0;
     }
@@ -596,18 +799,23 @@ int32_t SystemNative_LStat(const char *path, rhu_pal_filestatus *output)
 
 int32_t SystemNative_Unlink(const char *path)
 {
+    char nb[RFS_PATH];
+    path = path_norm(path, nb);
+    store_lock();
     int fi = file_find(path);
     if (fi < 0) {
-        ERRNO = dir_exists(path) ? RHU_GERR_EISDIR : RHU_GERR_ENOENT;
+        int is_dir = dir_exists(path);
+        store_unlock();
+        ERRNO = is_dir ? RHU_GERR_EISDIR : RHU_GERR_ENOENT;
         return -1;
     }
-    file_release(&g_files[fi]);
+    file_unlink(fi);
+    store_unlock();
     return 0;
 }
 
-int32_t SystemNative_MkDir(const char *path, int32_t mode)
+static int32_t mkdir_locked(const char *path)
 {
-    (void)mode;
     if (dir_exists(path) || file_find(path) >= 0) {
         ERRNO = RHU_GERR_EEXIST;
         return -1;
@@ -631,10 +839,21 @@ int32_t SystemNative_MkDir(const char *path, int32_t mode)
     return -1;
 }
 
+int32_t SystemNative_MkDir(const char *path, int32_t mode)
+{
+    char nb[RFS_PATH];
+    (void)mode;
+    path = path_norm(path, nb);
+    store_lock();
+    int32_t r = mkdir_locked(path);
+    store_unlock();
+    return r;
+}
+
 static int dir_has_children(const char *path)
 {
     for (int i = 0; i < RFS_FILES; i++) {
-        if (g_files[i].used != 0 && child_of(g_files[i].path, path) != NULL)
+        if (g_files[i].used != 0 && g_files[i].linked != 0 && child_of(g_files[i].path, path) != NULL)
             return 1;
     }
     for (int i = 0; i < RFS_DIRS; i++) {
@@ -644,7 +863,7 @@ static int dir_has_children(const char *path)
     return 0;
 }
 
-int32_t SystemNative_RmDir(const char *path)
+static int32_t rmdir_locked(const char *path)
 {
     int di = dir_find(path);
     if (di < 0) {
@@ -659,7 +878,17 @@ int32_t SystemNative_RmDir(const char *path)
     return 0;
 }
 
-int32_t SystemNative_Rename(const char *oldPath, const char *newPath)
+int32_t SystemNative_RmDir(const char *path)
+{
+    char nb[RFS_PATH];
+    path = path_norm(path, nb);
+    store_lock();
+    int32_t r = rmdir_locked(path);
+    store_unlock();
+    return r;
+}
+
+static int32_t rename_locked(const char *oldPath, const char *newPath)
 {
     int fi = file_find(oldPath);
     if (fi < 0) {
@@ -685,39 +914,141 @@ int32_t SystemNative_Rename(const char *oldPath, const char *newPath)
     }
     int over = file_find(newPath);
     if (over >= 0 && over != fi)
-        file_release(&g_files[over]);
+        file_unlink(over);
     strcpy(g_files[fi].path, newPath);
     return 0;
 }
 
+int32_t SystemNative_Rename(const char *oldPath, const char *newPath)
+{
+    char ob[RFS_PATH];
+    char nb[RFS_PATH];
+    oldPath = path_norm(oldPath, ob);
+    newPath = path_norm(newPath, nb);
+    store_lock();
+    int32_t r = rename_locked(oldPath, newPath);
+    store_unlock();
+    return r;
+}
+
 int32_t SystemNative_FSync(intptr_t fd)
 {
-    if (fd_is_console(fd) || fd_file(fd) != NULL)
+    if (fd_is_console(fd))
+        return 0;
+    store_lock();
+    int ok = fd_file(fd) != NULL;
+    store_unlock();
+    if (ok)
         return 0;
     ERRNO = RHU_GERR_EBADF;
     return -1;
 }
 
-/* One process, one store: every lock request succeeds. */
+/* Advisory locks per object, held per descriptor: exclusive excludes
+ * every other holder, shared holders coexist. The store has no waiters,
+ * so a conflicting request is refused with EWOULDBLOCK whether or not the
+ * caller asked not to block -- an honest refusal in place of a wait that
+ * nothing would end. A descriptor's lock goes back at unlock and at
+ * close. */
+static int32_t flock_locked(intptr_t fd, int32_t operation)
+{
+    if (fd_is_console(fd))
+        return 0;
+    rfs_fd *h = fd_file(fd);
+    if (h == NULL) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+#ifdef RHU_SHIM_BREAK_STORE_FLOCK
+    (void)operation;
+    return 0;
+#else
+    rfs_file *f = &g_files[h->file];
+    int32_t kind = operation & ~RHU_PAL_LOCK_NB;
+    if (kind == RHU_PAL_LOCK_UN) {
+        fd_unlock(h, f);
+        return 0;
+    }
+    if (kind != RHU_PAL_LOCK_SH && kind != RHU_PAL_LOCK_EX) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    int other_ex = f->lock_ex != 0 && h->lock != RFS_LOCK_EX;
+    int other_sh = (int)f->lock_sh - (h->lock == RFS_LOCK_SH ? 1 : 0);
+    if (kind == RHU_PAL_LOCK_EX ? (other_ex || other_sh > 0) : other_ex) {
+        ERRNO = RHU_GERR_EAGAIN;
+        return -1;
+    }
+    fd_unlock(h, f);
+    if (kind == RHU_PAL_LOCK_EX) {
+        f->lock_ex = 1;
+        h->lock = RFS_LOCK_EX;
+    } else {
+        f->lock_sh++;
+        h->lock = RFS_LOCK_SH;
+    }
+    return 0;
+#endif
+}
+
 int32_t SystemNative_FLock(intptr_t fd, int32_t operation)
 {
-    (void)operation;
-    if (fd_is_console(fd) || fd_file(fd) != NULL)
-        return 0;
-    ERRNO = RHU_GERR_EBADF;
-    return -1;
+    store_lock();
+    int32_t r = flock_locked(fd, operation);
+    store_unlock();
+    return r;
+}
+
+/* Path canonicalization over the store, for the runtime's portability
+ * layer (it resolves the executable's path through it). The store keys
+ * every file and directory by its absolute path as given and holds no
+ * symbolic links and no relative segments, so a path that exists is
+ * already canonical, and a path that does not is ENOENT. A null buffer
+ * asks for a heap copy the caller frees, as the C library's contract
+ * says; a caller's buffer is taken to hold the path (the store's paths
+ * are short, and the contract's minimum buffer is far longer). */
+char *realpath(const char *path, char *resolved)
+{
+    char nb[RFS_PATH];
+    if (path == NULL) {
+        ERRNO = RHU_GERR_EINVAL;
+        return NULL;
+    }
+    path = path_norm(path, nb);
+    store_lock();
+    int present = file_find(path) >= 0 || dir_exists(path);
+    store_unlock();
+    if (!present) {
+        ERRNO = RHU_GERR_ENOENT;
+        return NULL;
+    }
+    size_t n = strlen(path) + 1;
+    if (resolved == NULL) {
+        resolved = (char *)malloc(n);
+        if (resolved == NULL) {
+            ERRNO = RHU_GERR_ENOMEM;
+            return NULL;
+        }
+    }
+    memcpy(resolved, path, n);
+    return resolved;
 }
 
 int32_t SystemNative_Access(const char *path, int32_t mode)
 {
+    char nb[RFS_PATH];
     (void)mode;
-    if (file_find(path) >= 0 || dir_exists(path))
+    path = path_norm(path, nb);
+    store_lock();
+    int present = file_find(path) >= 0 || dir_exists(path);
+    store_unlock();
+    if (present)
         return 0;
     ERRNO = RHU_GERR_ENOENT;
     return -1;
 }
 
-int32_t SystemNative_FTruncate(intptr_t fd, int64_t length)
+static int32_t ftruncate_locked(intptr_t fd, int64_t length)
 {
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
@@ -728,8 +1059,12 @@ int32_t SystemNative_FTruncate(intptr_t fd, int64_t length)
         ERRNO = RHU_GERR_EBADF;
         return -1;
     }
-    if (length < 0 || length > 0xFFFFFFFFll) {
+    if (length < 0) {
         ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    if (length > RFS_MAX_FILE) {
+        ERRNO = RHU_GERR_EFBIG;
         return -1;
     }
     rfs_file *f = &g_files[h->file];
@@ -746,6 +1081,14 @@ int32_t SystemNative_FTruncate(intptr_t fd, int64_t length)
     return 0;
 }
 
+int32_t SystemNative_FTruncate(intptr_t fd, int64_t length)
+{
+    store_lock();
+    int32_t r = ftruncate_locked(fd, length);
+    store_unlock();
+    return r;
+}
+
 typedef struct rfs_iter {
     char dir[RFS_PATH];
     int idx;
@@ -754,10 +1097,16 @@ typedef struct rfs_iter {
 
 void *SystemNative_OpenDir(const char *path)
 {
+    char nb[RFS_PATH];
+    path = path_norm(path, nb);
+    store_lock();
     if (!dir_exists(path)) {
-        ERRNO = file_find(path) >= 0 ? RHU_GERR_ENOTDIR : RHU_GERR_ENOENT;
+        int is_file = file_find(path) >= 0;
+        store_unlock();
+        ERRNO = is_file ? RHU_GERR_ENOTDIR : RHU_GERR_ENOENT;
         return NULL;
     }
+    store_unlock();
     if (strlen(path) >= RFS_PATH) {
         ERRNO = RHU_GERR_ENAMETOOLONG;
         return NULL;
@@ -779,8 +1128,9 @@ int32_t SystemNative_CloseDir(void *dir)
 }
 
 /* The entry's name lives in the iterator until the next call; the index
- * walks the file table, then the directory table. Returns 0 with an entry,
- * -1 at the end of the stream, and an errno value on a broken iterator. */
+ * walks the file table (the named objects), then the directory table.
+ * Returns 0 with an entry, -1 at the end of the stream, and an errno
+ * value on a broken iterator. */
 int32_t SystemNative_ReadDir(void *dir, rhu_pal_directoryentry *outputEntry)
 {
     rfs_iter *it = (rfs_iter *)dir;
@@ -788,12 +1138,13 @@ int32_t SystemNative_ReadDir(void *dir, rhu_pal_directoryentry *outputEntry)
         memset(outputEntry, 0, sizeof *outputEntry);
         return RHU_GERR_EBADF;
     }
+    store_lock();
     while (it->idx < RFS_FILES + RFS_DIRS) {
         int i = it->idx++;
         const char *full = NULL;
         int32_t type = RHU_PAL_DT_REG;
         if (i < RFS_FILES) {
-            if (g_files[i].used != 0)
+            if (g_files[i].used != 0 && g_files[i].linked != 0)
                 full = g_files[i].path;
         } else if (g_dirs[i - RFS_FILES].used != 0) {
             full = g_dirs[i - RFS_FILES].path;
@@ -805,11 +1156,13 @@ int32_t SystemNative_ReadDir(void *dir, rhu_pal_directoryentry *outputEntry)
         if (leaf == NULL)
             continue;
         strcpy(it->name, leaf);
+        store_unlock();
         outputEntry->Name = it->name;
         outputEntry->NameLength = -1;
         outputEntry->InodeType = type;
         return 0;
     }
+    store_unlock();
     memset(outputEntry, 0, sizeof *outputEntry);
     return -1;
 }
@@ -826,7 +1179,7 @@ int32_t SystemNative_Pipe(int32_t pipefd[2], int32_t flags)
 /* The console output descriptors and every file are always ready; the
  * console input is never reported ready (nothing waits on it); a
  * descriptor from no band is invalid. Waiting is done in short sleeps up
- * to the deadline. */
+ * to the deadline, outside the store lock. */
 int32_t SystemNative_Poll(rhu_pal_pollevent *pollEvents, uint32_t eventCount, int32_t milliseconds, uint32_t *triggered)
 {
     if (pollEvents == NULL || triggered == NULL)
@@ -834,6 +1187,7 @@ int32_t SystemNative_Poll(rhu_pal_pollevent *pollEvents, uint32_t eventCount, in
     uint64_t deadline = milliseconds < 0 ? 0u : rhu_now_ns() + (uint64_t)milliseconds * 1000000ull;
     for (;;) {
         uint32_t n = 0;
+        store_lock();
         for (uint32_t i = 0; i < eventCount; i++) {
             rhu_pal_pollevent *e = &pollEvents[i];
             int32_t fd = e->FileDescriptor;
@@ -852,6 +1206,7 @@ int32_t SystemNative_Poll(rhu_pal_pollevent *pollEvents, uint32_t eventCount, in
             if (e->TriggeredEvents != 0)
                 n++;
         }
+        store_unlock();
         uint64_t now = rhu_now_ns();
         if (n != 0 || milliseconds == 0 || (deadline != 0 && now >= deadline)) {
             *triggered = n;
@@ -864,12 +1219,18 @@ int32_t SystemNative_Poll(rhu_pal_pollevent *pollEvents, uint32_t eventCount, in
 
 int32_t SystemNative_ChMod(const char *path, int32_t mode)
 {
+    char nb[RFS_PATH];
+    path = path_norm(path, nb);
+    store_lock();
     int fi = file_find(path);
     if (fi >= 0) {
         g_files[fi].mode = (uint32_t)mode & RFS_MODE_MASK;
+        store_unlock();
         return 0;
     }
-    if (dir_exists(path))
+    int is_dir = dir_exists(path);
+    store_unlock();
+    if (is_dir)
         return 0;
     ERRNO = RHU_GERR_ENOENT;
     return -1;
@@ -879,17 +1240,21 @@ int32_t SystemNative_FChMod(intptr_t fd, int32_t mode)
 {
     if (fd_is_console(fd))
         return 0;
+    store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
+        store_unlock();
         ERRNO = RHU_GERR_EBADF;
         return -1;
     }
     g_files[h->file].mode = (uint32_t)mode & RFS_MODE_MASK;
+    store_unlock();
     return 0;
 }
 
 /* The times a file carries: the pair is access then modification; a null
- * pair means now. Directories carry no times. */
+ * pair means now; a nanosecond field outside its range is refused before
+ * either time moves. Directories carry no times. */
 static int32_t set_times(int fi, const rhu_pal_timespec *times)
 {
     int64_t now = (int64_t)rhu_now_ns();
@@ -898,6 +1263,14 @@ static int32_t set_times(int fi, const rhu_pal_timespec *times)
         g_files[fi].mtime_ns = now;
         return 0;
     }
+#ifndef RHU_SHIM_BREAK_STORE_TIMES
+    for (int i = 0; i < 2; i++) {
+        if (times[i].tv_nsec < 0 || times[i].tv_nsec >= (int64_t)NS_PER_S) {
+            ERRNO = RHU_GERR_EINVAL;
+            return -1;
+        }
+    }
+#endif
     g_files[fi].atime_ns = times[0].tv_sec * (int64_t)NS_PER_S + times[0].tv_nsec;
     g_files[fi].mtime_ns = times[1].tv_sec * (int64_t)NS_PER_S + times[1].tv_nsec;
     return 0;
@@ -905,10 +1278,18 @@ static int32_t set_times(int fi, const rhu_pal_timespec *times)
 
 int32_t SystemNative_UTimensat(const char *path, rhu_pal_timespec *times)
 {
+    char nb[RFS_PATH];
+    path = path_norm(path, nb);
+    store_lock();
     int fi = file_find(path);
-    if (fi >= 0)
-        return set_times(fi, times);
-    if (dir_exists(path))
+    if (fi >= 0) {
+        int32_t r = set_times(fi, times);
+        store_unlock();
+        return r;
+    }
+    int is_dir = dir_exists(path);
+    store_unlock();
+    if (is_dir)
         return 0;
     ERRNO = RHU_GERR_ENOENT;
     return -1;
@@ -916,12 +1297,16 @@ int32_t SystemNative_UTimensat(const char *path, rhu_pal_timespec *times)
 
 int32_t SystemNative_FUTimens(intptr_t fd, rhu_pal_timespec *times)
 {
+    store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
+        store_unlock();
         ERRNO = RHU_GERR_EBADF;
         return -1;
     }
-    return set_times(h->file, times);
+    int32_t r = set_times(h->file, times);
+    store_unlock();
+    return r;
 }
 
 int32_t SystemNative_IsMemfdSupported(void)

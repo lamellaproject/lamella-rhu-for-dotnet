@@ -2,5 +2,6 @@
 * text=auto eol=lf
 # Gate goldens hold authentic wire bytes (CRLF included); never normalized.
 /src/scripts/goldens/** -text
+/goldens/** -text
 # Protected paths ship byte-exact; never normalized.
 /src/vendor/** -text

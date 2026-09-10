@@ -10,3 +10,4 @@ rhu 0.2.0 -- Lamella RHU: runtime-hosting unikernel for .NET on Cortex-M
 [selftest] SysTick advances + sleep(25 ms) never early: OK
 [base] ALL GOOD (boot + console + panic/fault funnel armed)
 [sched] ALL GOOD (threads + timers + preemption online)
+[tick] witness: not counted (no cycle counter on this row)

@@ -32,7 +32,7 @@ const TOOL_TIMEOUT_S: u64 = 120;
 /// the tree together still cannot move these without failing here.
 const GC_INTERFACE_MAJOR: u32 = 5;
 const GC_INTERFACE_MINOR: u32 = 8;
-const EE_INTERFACE_MAJOR: u32 = 4;
+const EE_INTERFACE_MAJOR: u32 = 5;
 
 /// The compile flag set of record for image-tier C++: clang, the compiler
 /// of record (the version the runtime archives at the pin
@@ -164,11 +164,11 @@ const IMPORTS_HOST_DRIVE: [&str; 6] = [
     "sh_write0",
 ];
 
-/// The flat GCToEEInterface surface at the pinned tag: 52 methods (the
+/// The flat GCToEEInterface surface at the pinned tag: 53 methods (the
 /// IGCToCLR virtual count). The gc.B artifact
 /// check ties this three ways -- header declarations, probe REF sites,
 /// probe-object undefined symbols -- at the NAME level.
-const EE_SURFACE: usize = 52;
+const EE_SURFACE: usize = 53;
 
 /// The init-time call inventory of the activation boot (the union of
 /// the skeleton's logged calls over gc.A's positive run -- and over the
@@ -919,7 +919,7 @@ const INTERNAL_CASES: [&str; 1] = [
 /// manifest and the objects together still cannot pass without editing
 /// this reviewed surface). A re-freeze updates objects + manifest + this
 /// pin together in one reviewed commit.
-const SHA_FROZEN_MANIFEST: &str = "83dad0aa9009d8ee111b4ae8e8177d459b2a9b9d9d19a5f2f23e0f76008458b7";
+const SHA_FROZEN_MANIFEST: &str = "e6a812222bf421a9c26251fd8f31d047629fd7831be789e534b0c3bc97ab8c23";
 
 /// The frozen-object plan of record: file name under goldens/gc/, source
 /// TU, extra defines beyond CXX_FLAGS. The manifest's records must tie

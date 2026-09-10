@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #include "rhu.h"
-#include "rhu_pal_errno_p7.h"
+#include "rhu_pal_errno_net11_rc1.h"
 #include "rhu_shim.h"
 
 extern int *__errno_location(void);

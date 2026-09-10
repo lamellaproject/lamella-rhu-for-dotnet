@@ -90,15 +90,17 @@ chain may report correspondingly-different results.
 
 ### Which gates a checkout runs
 
-The chain has seven gates. Three of them -- the base, scheduler and
-hosting-API gates -- need only this repository, Rust and QEMU. The other four
--- the payload, garbage-collector, shim and hosted-runtime gates -- also
-need a directory of frozen inputs under `goldens/` (compiled objects and
-golden transcripts whose bytes the gate pins). The chain runs every gate
-whose inputs are present and names each tier it could not run on its verdict
-line: a passing chain never overstates what it checked. This repository
-does not carry `goldens/`, so a run from it exercises the base, scheduler
-and hosting-API gates and declares the other four as not run.
+The chain has eight gates, published in this repository and driven through
+Rust (cargo). Three of them -- the base, scheduler and hosting-api gates --
+run the kernel under QEMU. The host gate runs the kernel's arithmetic
+modules (the heap's sizing, the wake deadlines, the arena's bounds) through
+Rust's own test runner on your machine; they are hardware-independent, so
+it needs no emulator. The remaining four -- the payload, garbage-collector,
+shim and hosted-runtime gates -- run under QEMU and also need the directory of
+frozen inputs published under `goldens/` (compiled objects and golden
+transcripts whose bytes the gate pins). The chain runs every gate whose
+inputs are present and names each tier it could not run on its verdict line:
+a passing chain never overstates what it checked.
 
 ### Re-deriving the frozen objects
 
@@ -112,20 +114,31 @@ From `src/harness`:
     cargo run --release -- rt rederive
 
 The garbage-collector and shim legs compile with clang 22.1.8; the C library
-and headers they compile against are the Arm GNU Toolchain 12.2's
-(arm-none-eabi), used only as that sysroot, never as a compiler. A clang
-reporting another version is refused. Name the compiler and the sysroot
-through environment variables:
+and headers they compile against are the Arm GNU Toolchain 12.2.MPACBTI-Rel1's
+(arm-none-eabi). That kit is used only as the sysroot, never as a compiler,
+and the shim leg refuses another release of it. A clang reporting another
+version is refused.
+
+Choose the compiler and the sysroot through environment variables:
 
     RHU_CLANG=<the clang 22.1.8 command>
     RHU_CLANG_SYSROOT=<the toolchain's arm-none-eabi directory>
-    RHU_NEWLIB=<the toolchain's arm-none-eabi/lib/thumb/v7e-m+dp/hard directory>
+    RHU_NEWLIB=<the kit's directory holding libc_nano.a for v7e-m+dp/hard>
     RHU_RT_ARCHIVES=<the directory of runtime archives described below>
 
 or through untracked pointer files under `tools/toolchains/`, one value per
 line: `clang.local` (two lines: the command, then the sysroot),
 `newlib.local` and `rtarchives.local`. The shim leg's C-library case needs
-`RHU_NEWLIB`; the hosted-runtime leg needs `RHU_RT_ARCHIVES`.
+`RHU_NEWLIB`; the hosted-runtime leg needs `RHU_RT_ARCHIVES`. The kit's
+directory layout differs by host: the Linux kit keeps that library under
+`arm-none-eabi/lib/thumb/v7e-m+dp/hard`, whereas the Windows kit keeps it
+under `lib/gcc/arm-none-eabi/12.2.1/thumb/v7e-m+dp/hard`.
+
+The legs check byte identity against the objects the compiler BUILD of
+record produced (the LLVM 22.1.8 release from llvm.org, run on Linux).
+Another build of clang 22.1.8 will differ at least in the producer string the
+objects carry, so its rebuild reads as a difference on that leg even when
+the code it generates is the same.
 
 On Windows, the Arm GNU Toolchain unpacks to paths longer than the default
 260-character limit: enable long paths, or unpack it under WSL.
@@ -143,7 +156,7 @@ on a project with `PublishAot` set, and the gate links the object the SDK
 writes under `obj/Release/net11.0/linux-arm/native/`.
 
 Lamella RHU builds the runtime archives itself from the dotnet/runtime
-source at its pinned tag (.NET 11 preview 7 today), with clang 22.1.8,
+source at its pinned tag (.NET 11 RC1 today), with clang 22.1.8,
 through the runtime repository's own build entry in a cross environment
 whose target sysroot is Ubuntu 22.04's armhf packages:
 

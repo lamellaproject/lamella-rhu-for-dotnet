@@ -117,8 +117,10 @@ unsafe extern "C" fn __rhu_reset() -> ! { unsafe {
     ptr::write_bytes(sbss, 0, ebss as usize - sbss as usize);
 
     SCB_VTOR.write_volatile(addr_of!(__vector_table) as usize as u32);
+    core::arch::asm!("dsb sy", "isb sy", options(nostack, preserves_flags));
 
     SCB_SHCSR.write_volatile(SCB_SHCSR.read_volatile() | (0b111 << 16));
+    core::arch::asm!("dsb sy", "isb sy", options(nostack, preserves_flags));
 
     crate::board::clock_init();
     crate::console::init();

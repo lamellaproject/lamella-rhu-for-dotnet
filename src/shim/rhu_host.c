@@ -44,7 +44,7 @@
 #include "rhu_shim.h"
 
 #include "rhu.h"
-#include "rhu_rt_entry_p7.h"
+#include "rhu_rt_entry_net11_rc1.h"
 
 /* The stream-shaped surface the C runtime offers. Declared here rather
  * than included: the standard header spells the stream names as macros,

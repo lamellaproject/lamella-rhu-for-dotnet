@@ -172,22 +172,22 @@ pub fn run(repo: &Path) -> ! {
     sc.accept_probe(
         "chain-line-full",
         "seven-gate chain verdict line matches the chain of record",
-        chain_verdict(&["rhu-gate-base", "rhu-gate-sched", "rhu-gate-payload", "rhu-gate-api", "rhu-gate-gc", "rhu-gate-shim", "rhu-gate-rt"], &[])
-            == "CHAIN: PASS (7 gates: rhu-gate-base rhu-gate-sched rhu-gate-payload rhu-gate-api rhu-gate-gc rhu-gate-shim rhu-gate-rt)",
+        chain_verdict(&["rhu-gate-base", "rhu-gate-sched", "rhu-gate-payload", "rhu-gate-api", "rhu-gate-host", "rhu-gate-gc", "rhu-gate-shim", "rhu-gate-rt"], &[])
+            == "CHAIN: PASS (8 gates: rhu-gate-base rhu-gate-sched rhu-gate-payload rhu-gate-api rhu-gate-host rhu-gate-gc rhu-gate-shim rhu-gate-rt)",
     );
     sc.accept_probe(
         "chain-line-declared",
         "declared-tier chain verdict line matches the chain of record",
-        chain_verdict(&["rhu-gate-base", "rhu-gate-sched", "rhu-gate-api", "rhu-gate-gc", "rhu-gate-shim", "rhu-gate-rt"], &[("payload", "goldens/payload")])
-            == "CHAIN: PASS (6 gates: rhu-gate-base rhu-gate-sched rhu-gate-api rhu-gate-gc rhu-gate-shim rhu-gate-rt) + payload tier NOT RUN (frozen inputs absent: goldens/payload)",
+        chain_verdict(&["rhu-gate-base", "rhu-gate-sched", "rhu-gate-api", "rhu-gate-host", "rhu-gate-gc", "rhu-gate-shim", "rhu-gate-rt"], &[("payload", "goldens/payload")])
+            == "CHAIN: PASS (7 gates: rhu-gate-base rhu-gate-sched rhu-gate-api rhu-gate-host rhu-gate-gc rhu-gate-shim rhu-gate-rt) + payload tier NOT RUN (frozen inputs absent: goldens/payload)",
     );
     sc.accept_probe(
         "chain-line-both-declared",
         "drop-shaped chain verdict line (payload + gc + shim + rt tiers declared) matches",
         chain_verdict(
-            &["rhu-gate-base", "rhu-gate-sched", "rhu-gate-api"],
+            &["rhu-gate-base", "rhu-gate-sched", "rhu-gate-api", "rhu-gate-host"],
             &[("payload", "goldens/payload"), ("gc", "goldens/gc"), ("shim", "goldens/shim"), ("rt", "goldens/rt")],
-        ) == "CHAIN: PASS (3 gates: rhu-gate-base rhu-gate-sched rhu-gate-api) + payload tier NOT RUN (frozen inputs absent: goldens/payload) + gc tier NOT RUN (frozen inputs absent: goldens/gc) + shim tier NOT RUN (frozen inputs absent: goldens/shim) + rt tier NOT RUN (frozen inputs absent: goldens/rt)",
+        ) == "CHAIN: PASS (4 gates: rhu-gate-base rhu-gate-sched rhu-gate-api rhu-gate-host) + payload tier NOT RUN (frozen inputs absent: goldens/payload) + gc tier NOT RUN (frozen inputs absent: goldens/gc) + shim tier NOT RUN (frozen inputs absent: goldens/shim) + rt tier NOT RUN (frozen inputs absent: goldens/rt)",
     );
 
     sc.accept_probe(

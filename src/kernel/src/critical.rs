@@ -9,15 +9,17 @@ use core::sync::atomic::{compiler_fence, Ordering};
 /// interrupt priorities and leaves 0x00..0x3F unmasked.
 pub const BASEPRI_CEILING: u32 = 0x40;
 
-/// Run `f` with kernel-band interrupts masked. Nests safely; restores
-/// the previous BASEPRI on exit. Single-core: this is also the kernel's
-/// lock primitive.
+/// Run `f` with kernel-band interrupts masked. Nests safely: the entry
+/// raises the mask with the monotone form (BASEPRI_MAX only ever
+/// tightens, so a section entered under a stricter mask never loosens
+/// it) and the exit restores the value read at entry. Single-core: this
+/// is also the kernel's lock primitive.
 #[inline(always)]
 pub fn with_cs<R>(f: impl FnOnce() -> R) -> R {
     let old: u32;
     unsafe {
         asm!("mrs {}, BASEPRI", out(reg) old, options(nomem, nostack));
-        asm!("msr BASEPRI, {}", in(reg) BASEPRI_CEILING, options(nomem, nostack));
+        asm!("msr BASEPRI_MAX, {}", in(reg) BASEPRI_CEILING, options(nomem, nostack));
     }
     compiler_fence(Ordering::SeqCst);
     let r = f();

@@ -40,13 +40,13 @@
 
 #include "rhu.h"
 #include "rhu_glibc_arm32.h"
-#include "rhu_pal_errno_p7.h"
-#include "rhu_pal_io_p7.h"
-#include "rhu_pal_memory_p7.h"
-#include "rhu_pal_random_p7.h"
-#include "rhu_pal_signal_p7.h"
-#include "rhu_pal_threading_p7.h"
-#include "rhu_pal_time_p7.h"
+#include "rhu_pal_errno_net11_rc1.h"
+#include "rhu_pal_io_net11_rc1.h"
+#include "rhu_pal_memory_net11_rc1.h"
+#include "rhu_pal_random_net11_rc1.h"
+#include "rhu_pal_signal_net11_rc1.h"
+#include "rhu_pal_threading_net11_rc1.h"
+#include "rhu_pal_time_net11_rc1.h"
 
 #if !defined(RHU_SHIMTEST_LADDER_CORE) && !defined(RHU_SHIMTEST_LADDER_FDMAP) \
     && !defined(RHU_SHIMTEST_LADDER_ACTIVATION) && !defined(RHU_SHIMTEST_LADDER_TLS) \
@@ -67,6 +67,8 @@ void *memcpy(void *dst, const void *src, size_t n);
 int memcmp(const void *a, const void *b, size_t n);
 size_t strlen(const char *s);
 int strcmp(const char *a, const char *b);
+unsigned long getauxval(unsigned long type);
+char *realpath(const char *path, char *resolved);
 char *getenv(const char *name);
 void *mmap64(void *addr, size_t len, int prot, int flags, int fd, int64_t off);
 long sysconf(int name);
@@ -172,6 +174,20 @@ static int fail(const char *name, const char *detail)
             return fail(name, detail); \
     } while (0)
 
+/* The file-store groups use this form. In the PROBE build (never
+ * frozen) a failed check prints its FAIL line and the ladder continues,
+ * so one run over a store reports every clause it gets wrong; in every
+ * other build it is CHECK. */
+#ifdef RHU_SHIMTEST_STORE_PROBE
+#define SCHECK(cond, name, detail) \
+    do {                           \
+        if (!(cond))               \
+            (void)fail(name, detail); \
+    } while (0)
+#else
+#define SCHECK(cond, name, detail) CHECK(cond, name, detail)
+#endif
+
 /* Named positively: only the ladders that measure elapsed time carry
  * this, and a ladder added later must say so rather than inherit it. */
 #if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_FDMAP)
@@ -183,7 +199,7 @@ static uint64_t now_ns(void)
 }
 #endif
 
-#if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_ACTIVATION) \
+#if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_ACTIVATION) || defined(RHU_SHIMTEST_LADDER_FDMAP) \
     || defined(RHU_SHIMTEST_LADDER_TLS)
 
 static void msleep(int ms)
@@ -420,6 +436,14 @@ static int core_ladder(void)
         const char *m = SystemNative_StrErrorR(RHU_GERR_EAGAIN, msg, (int32_t)sizeof msg);
         CHECK(m != NULL && strcmp(m, "EAGAIN (11)") == 0, "shim-errno-pal", "(StrErrorR did not name the errno)");
         pass("shim-errno-pal", " (80 pairs round-trip; unknown values map to the nonstandard code and back to EINVAL)");
+    }
+
+    /* the auxiliary vector: absent on this platform, answered by contract */
+    {
+        *__errno_location() = 0;
+        CHECK(getauxval(16) == 0 && *__errno_location() == RHU_GERR_ENOENT, "shim-auxv", "(the capability entry did not answer 0 with ENOENT)");
+        CHECK(getauxval(31) == 0, "shim-auxv", "(the executable-path entry did not answer 0)");
+        pass("shim-auxv", " (no auxiliary vector: the capability and path entries absent, 0 with ENOENT)");
     }
 
     /* per-thread errno */
@@ -720,6 +744,43 @@ static int core_ladder(void)
 
 #ifdef RHU_SHIMTEST_LADDER_FDMAP
 
+/* Two of these churn the store's tables at once, each through its own
+ * file: create with truncation, write a tag, close, reopen, read the tag
+ * back, close, unlink; a mismatch or a refused step counts against the
+ * worker. */
+#define CHURN_ROUNDS 400u
+#define CHURN_STACK 4096u
+static volatile int g_churn_done;
+static uint32_t g_churn_bad[2];
+static void *churn_worker(void *a)
+{
+    unsigned id = (unsigned)(uintptr_t)a;
+    const char *path = id == 0 ? "/tmp/churn-0.txt" : "/tmp/churn-1.txt";
+    uint8_t out[64];
+    uint8_t in[64];
+    memset(out, id == 0 ? 0x11 : 0x22, sizeof out);
+    for (uint32_t r = 0; r < CHURN_ROUNDS; r++) {
+        intptr_t fd = SystemNative_Open(path, RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        if (fd < 0 || SystemNative_Write(fd, out, 64) != 64 || SystemNative_Close(fd) != 0) {
+            g_churn_bad[id]++;
+            continue;
+        }
+        fd = SystemNative_Open(path, RHU_PAL_O_RDONLY, 0);
+        if (fd < 0) {
+            g_churn_bad[id]++;
+            continue;
+        }
+        memset(in, 0, sizeof in);
+        if (SystemNative_Read(fd, in, 64) != 64 || memcmp(in, out, 64) != 0)
+            g_churn_bad[id]++;
+        SystemNative_Close(fd);
+        if (SystemNative_Unlink(path) != 0)
+            g_churn_bad[id]++;
+    }
+    __atomic_add_fetch(&g_churn_done, 1, __ATOMIC_ACQ_REL);
+    return NULL;
+}
+
 static int is_type(const rhu_pal_filestatus *st, int32_t type)
 {
     return (st->Mode & RHU_PAL_S_IFMT) == type;
@@ -742,7 +803,7 @@ static int fdmap_ladder(void)
 
     /* the first file lands in the file band and answers as a file */
     {
-        intptr_t fd = SystemNative_Open("/tmp/a.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        intptr_t fd = SystemNative_Open("/tmp/a.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
         CHECK(fd >= 0, "shim-fdmap-open-fstat", "(open refused)");
         CHECK(SystemNative_Write(fd, "0123456789", 10) == 10, "shim-fdmap-open-fstat", "(write short)");
         CHECK(SystemNative_FStat(fd, &st) == 0 && is_type(&st, RHU_PAL_S_IFREG), "shim-fdmap-open-fstat", "(the console shape answered for a file)");
@@ -781,6 +842,18 @@ static int fdmap_ladder(void)
         CHECK(SystemNative_Stat("/tmp/a.txt", &st) == 0 && is_type(&st, RHU_PAL_S_IFREG) && st.Size == 10, "shim-fdmap-paths", "(stat)");
         CHECK(SystemNative_Access("/tmp/a.txt", RHU_PAL_R_OK) == 0, "shim-fdmap-paths", "(access)");
         CHECK(SystemNative_Stat("/tmp", &st) == 0 && is_type(&st, RHU_PAL_S_IFDIR), "shim-fdmap-paths", "(the root is not a directory)");
+        {
+            char canon[64];
+            char *r = realpath("/tmp/a.txt", canon);
+            CHECK(r == canon && strcmp(canon, "/tmp/a.txt") == 0, "shim-fdmap-paths", "(a present file did not resolve to itself)");
+            char *h = realpath("/tmp/a.txt", NULL);
+            CHECK(h != NULL && strcmp(h, "/tmp/a.txt") == 0, "shim-fdmap-paths", "(the heap copy did not carry the path)");
+            free(h);
+            r = realpath("/tmp", canon);
+            CHECK(r == canon && strcmp(canon, "/tmp") == 0, "shim-fdmap-paths", "(a directory did not resolve to itself)");
+            *__errno_location() = 0;
+            CHECK(realpath("/tmp/nothere.txt", canon) == NULL && *__errno_location() == RHU_GERR_ENOENT, "shim-fdmap-paths", "(an absent path did not answer ENOENT)");
+        }
         CHECK(SystemNative_Rename("/tmp/a.txt", "/tmp/b.txt") == 0, "shim-fdmap-paths", "(rename)");
         CHECK(SystemNative_Stat("/tmp/a.txt", &st) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOENT, "shim-fdmap-paths", "(the old name survives)");
         CHECK(SystemNative_Unlink("/tmp/b.txt") == 0, "shim-fdmap-paths", "(unlink)");
@@ -902,6 +975,147 @@ static int fdmap_ladder(void)
         CHECK(SystemNative_Poll(ev, 1, 0, &triggered) == RHU_PAL_SUCCESS && triggered == 1 && ev[0].TriggeredEvents == RHU_PAL_POLLNVAL, "shim-fdmap-poll", "(a descriptor from no band was not invalid)");
         CHECK(SystemNative_Close(fd) == 0, "shim-fdmap-poll", "(close)");
         pass("shim-fdmap-poll", " (console output and files ready at once; the console input waits out its timeout; a foreign descriptor invalid)");
+    }
+
+    /* the file store's contract: an object's name and its descriptors are separate */
+    {
+        intptr_t fa = SystemNative_Open("/tmp/life-a.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        SCHECK(fa >= 0 && SystemNative_Write(fa, "AAAA", 4) == 4, "shim-fdmap-lifetime", "(open, write)");
+        SCHECK(SystemNative_Unlink("/tmp/life-a.txt") == 0, "shim-fdmap-lifetime", "(unlink of an open file refused)");
+        SCHECK(SystemNative_Stat("/tmp/life-a.txt", &st) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOENT, "shim-fdmap-lifetime", "(the unlinked name still resolves)");
+        intptr_t fb = SystemNative_Open("/tmp/life-b.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        SCHECK(fb >= 0 && SystemNative_Write(fb, "BBBB", 4) == 4, "shim-fdmap-lifetime", "(a second file)");
+        SCHECK(SystemNative_PRead(fa, buf, 4, 0) == 4 && memcmp(buf, "AAAA", 4) == 0, "shim-fdmap-lifetime", "(the unlinked object's descriptor reads another file)");
+        SCHECK(SystemNative_FStat(fa, &st) == 0 && st.Size == 4 && st.HardLinkCount == 0, "shim-fdmap-lifetime", "(the unlinked object's status is not four bytes with no link)");
+        SCHECK(SystemNative_Close(fa) == 0, "shim-fdmap-lifetime", "(close of the unlinked object)");
+        intptr_t fc = SystemNative_Open("/tmp/life-c.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        SCHECK(fc >= 0 && SystemNative_Write(fc, "CCCC", 4) == 4, "shim-fdmap-lifetime", "(a third file)");
+        SCHECK(SystemNative_Rename("/tmp/life-b.txt", "/tmp/life-c.txt") == 0, "shim-fdmap-lifetime", "(rename over an open target refused)");
+        SCHECK(SystemNative_PRead(fc, buf, 4, 0) == 4 && memcmp(buf, "CCCC", 4) == 0, "shim-fdmap-lifetime", "(the replaced object's descriptor reads the replacement)");
+        intptr_t fd2 = SystemNative_Open("/tmp/life-c.txt", RHU_PAL_O_RDONLY, 0);
+        SCHECK(fd2 >= 0 && SystemNative_Read(fd2, buf, 4) == 4 && memcmp(buf, "BBBB", 4) == 0, "shim-fdmap-lifetime", "(the new name does not read the renamed bytes)");
+        SCHECK(SystemNative_Close(fc) == 0 && SystemNative_Close(fd2) == 0 && SystemNative_Close(fb) == 0, "shim-fdmap-lifetime", "(closes)");
+        SCHECK(SystemNative_Unlink("/tmp/life-c.txt") == 0, "shim-fdmap-lifetime", "(unlink)");
+        pass("shim-fdmap-lifetime", " (an unlinked or replaced object stays with its descriptors until the last close; its name is gone at once)");
+    }
+
+    /* a refused open changes nothing: the descriptor comes before the object is created or truncated */
+    {
+        intptr_t fd = SystemNative_Open("/tmp/order.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        SCHECK(fd >= 0 && SystemNative_Write(fd, "KEEP", 4) == 4 && SystemNative_Close(fd) == 0, "shim-fdmap-open-order", "(the file to keep)");
+        intptr_t held[RHU_SHIM_FD_FILE_COUNT];
+        int n = 0;
+        for (; n < RHU_SHIM_FD_FILE_COUNT; n++) {
+            held[n] = SystemNative_Open("/tmp/order.txt", RHU_PAL_O_RDONLY, 0);
+            if (held[n] < 0)
+                break;
+        }
+        SCHECK(n == RHU_SHIM_FD_FILE_COUNT, "shim-fdmap-open-order", "(the descriptor band did not fill)");
+        SCHECK(SystemNative_Open("/tmp/order.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_TRUNC, 0) == -1 && SystemNative_GetErrNo() == RHU_PAL_EMFILE, "shim-fdmap-open-order", "(an open past the band succeeded)");
+        SCHECK(SystemNative_Stat("/tmp/order.txt", &st) == 0 && st.Size == 4, "shim-fdmap-open-order", "(a refused open truncated the file)");
+        SCHECK(SystemNative_Open("/tmp/order-new.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4) == -1 && SystemNative_GetErrNo() == RHU_PAL_EMFILE, "shim-fdmap-open-order", "(an open with create past the band succeeded)");
+        SCHECK(SystemNative_Stat("/tmp/order-new.txt", &st) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOENT, "shim-fdmap-open-order", "(a refused open created the file)");
+        for (int i = 0; i < n; i++)
+            SystemNative_Close(held[i]);
+        SCHECK(SystemNative_Unlink("/tmp/order.txt") == 0, "shim-fdmap-open-order", "(unlink)");
+        pass("shim-fdmap-open-order", " (with the descriptor band full an open is refused with EMFILE before it truncates or creates)");
+    }
+
+    /* the access mode at the read boundary */
+    {
+        intptr_t fd = SystemNative_Open("/tmp/wo.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        SCHECK(fd >= 0 && SystemNative_Write(fd, "WO", 2) == 2, "shim-fdmap-access", "(open write-only, write)");
+        SCHECK(SystemNative_Read(fd, buf, 2) == -1 && SystemNative_GetErrNo() == RHU_PAL_EBADF, "shim-fdmap-access", "(a write-only descriptor read)");
+        SCHECK(SystemNative_PRead(fd, buf, 2, 0) == -1 && SystemNative_GetErrNo() == RHU_PAL_EBADF, "shim-fdmap-access", "(a write-only descriptor read positionally)");
+        SCHECK(SystemNative_Close(fd) == 0 && SystemNative_Unlink("/tmp/wo.txt") == 0, "shim-fdmap-access", "(close, unlink)");
+        pass("shim-fdmap-access", " (a write-only descriptor refuses reads with EBADF, as a read-only one refuses writes)");
+    }
+
+    /* advisory locks per object, held per descriptor */
+    {
+        intptr_t f1 = SystemNative_Open("/tmp/lock.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        intptr_t f2 = SystemNative_Open("/tmp/lock.txt", RHU_PAL_O_RDWR, 0);
+        SCHECK(f1 >= 0 && f2 >= 0, "shim-fdmap-flock", "(two descriptors)");
+        SCHECK(SystemNative_FLock(f1, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == 0, "shim-fdmap-flock", "(an exclusive lock refused)");
+        SCHECK(SystemNative_FLock(f2, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == -1 && SystemNative_GetErrNo() == RHU_PAL_EWOULDBLOCK, "shim-fdmap-flock", "(a second exclusive lock succeeded)");
+        SCHECK(SystemNative_FLock(f2, RHU_PAL_LOCK_SH | RHU_PAL_LOCK_NB) == -1 && SystemNative_GetErrNo() == RHU_PAL_EWOULDBLOCK, "shim-fdmap-flock", "(a shared lock under an exclusive one succeeded)");
+        SCHECK(SystemNative_FLock(f1, RHU_PAL_LOCK_UN) == 0, "shim-fdmap-flock", "(unlock refused)");
+        SCHECK(SystemNative_FLock(f2, RHU_PAL_LOCK_SH | RHU_PAL_LOCK_NB) == 0 && SystemNative_FLock(f1, RHU_PAL_LOCK_SH | RHU_PAL_LOCK_NB) == 0, "shim-fdmap-flock", "(shared locks do not coexist)");
+        SCHECK(SystemNative_FLock(f1, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == -1 && SystemNative_GetErrNo() == RHU_PAL_EWOULDBLOCK, "shim-fdmap-flock", "(an exclusive lock over another's shared one succeeded)");
+        SCHECK(SystemNative_Close(f2) == 0 && SystemNative_FLock(f1, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == 0, "shim-fdmap-flock", "(a close did not release its lock)");
+        SCHECK(SystemNative_FLock(f1, 16) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-flock", "(an unknown operation accepted)");
+        SCHECK(SystemNative_Close(f1) == 0 && SystemNative_Unlink("/tmp/lock.txt") == 0, "shim-fdmap-flock", "(close, unlink)");
+        pass("shim-fdmap-flock", " (exclusive and shared advisory locks per object; a conflicting request is refused with EWOULDBLOCK; a close releases)");
+    }
+
+    /* a trailing slash names the same directory */
+    {
+        SCHECK(SystemNative_MkDir("/tmp/slash", 0x1ED) == 0, "shim-fdmap-dir-slash", "(mkdir)");
+        intptr_t fd = SystemNative_Open("/tmp/slash/one.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4);
+        SCHECK(fd >= 0 && SystemNative_Close(fd) == 0, "shim-fdmap-dir-slash", "(a file in it)");
+        SCHECK(SystemNative_Stat("/tmp/slash/", &st) == 0 && is_type(&st, RHU_PAL_S_IFDIR), "shim-fdmap-dir-slash", "(stat with a trailing slash)");
+        void *dir = SystemNative_OpenDir("/tmp/slash/");
+        SCHECK(dir != NULL, "shim-fdmap-dir-slash", "(opendir with a trailing slash refused)");
+        rhu_pal_directoryentry e;
+        int n = 0;
+        int seen = 0;
+        while (dir != NULL && SystemNative_ReadDir(dir, &e) == 0) {
+            n++;
+            if (strcmp(e.Name, "one.txt") == 0)
+                seen = 1;
+        }
+        SCHECK(n == 1 && seen, "shim-fdmap-dir-slash", "(the listing through a trailing slash is not the one entry)");
+        if (dir != NULL)
+            SystemNative_CloseDir(dir);
+        SCHECK(SystemNative_Unlink("/tmp/slash/one.txt") == 0 && SystemNative_RmDir("/tmp/slash/") == 0, "shim-fdmap-dir-slash", "(unlink, rmdir with a trailing slash)");
+        pass("shim-fdmap-dir-slash", " (a trailing slash names the same directory for stat, opendir and rmdir; the listing is whole)");
+    }
+
+    /* file times: a nanosecond field outside its range is refused */
+    {
+        intptr_t fd = SystemNative_Open("/tmp/t.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        SCHECK(fd >= 0, "shim-fdmap-times-range", "(open)");
+        rhu_pal_timespec bad[2] = {{1000, 1000000000}, {2000, 7}};
+        SCHECK(SystemNative_FUTimens(fd, bad) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-times-range", "(a nanosecond field of one second accepted)");
+        rhu_pal_timespec neg[2] = {{1000, 5}, {2000, -1}};
+        SCHECK(SystemNative_UTimensat("/tmp/t.txt", neg) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-times-range", "(a negative nanosecond field accepted)");
+        rhu_pal_timespec good[2] = {{1000, 999999999}, {2000, 0}};
+        SCHECK(SystemNative_FUTimens(fd, good) == 0 && SystemNative_FStat(fd, &st) == 0 && st.ATimeNsec == 999999999 && st.MTime == 2000 && st.MTimeNsec == 0, "shim-fdmap-times-range", "(the edge values did not stick)");
+        SCHECK(SystemNative_Close(fd) == 0 && SystemNative_Unlink("/tmp/t.txt") == 0, "shim-fdmap-times-range", "(close, unlink)");
+        pass("shim-fdmap-times-range", " (a nanosecond field outside 0..999999999 is EINVAL; the edges stick)");
+    }
+
+    /* the store under two threads: each worker churns its own file through the tables */
+    {
+        g_churn_bad[0] = 0;
+        g_churn_bad[1] = 0;
+        uint32_t t1 = 0;
+        uint32_t t2 = 0;
+        SCHECK(spawn(&t1, churn_worker, (void *)0, CHURN_STACK) == 0 && spawn(&t2, churn_worker, (void *)1, CHURN_STACK) == 0, "shim-fdmap-lock", "(spawn refused)");
+        wait_done(&g_churn_done, 2);
+        SCHECK(g_churn_bad[0] == 0 && g_churn_bad[1] == 0, "shim-fdmap-lock", "(a worker read bytes it did not write, or lost its file)");
+        SCHECK(SystemNative_Stat("/tmp/churn-0.txt", &st) == -1 && SystemNative_Stat("/tmp/churn-1.txt", &st) == -1, "shim-fdmap-lock", "(a churned file survived)");
+        pass("shim-fdmap-lock", " (two threads churning the tables: every read returned its writer's bytes and every name came and went)");
+    }
+
+    /* the store's bounds: positions, counts and lengths checked in 64 bits against the stated maximum */
+    {
+        intptr_t fd = SystemNative_Open("/tmp/bounds.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        SCHECK(fd >= 0 && SystemNative_Write(fd, "0123", 4) == 4, "shim-fdmap-bounds", "(open, write)");
+#if !defined(RHU_SHIMTEST_STORE_PROBE) || defined(RHU_SHIMTEST_STORE_PROBE_GROW)
+        SCHECK(SystemNative_FTruncate(fd, 2147483649ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a truncation past the maximum was accepted)");
+#endif
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 4, 4294967296ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a write at 4 GiB was not refused with EFBIG)");
+        SCHECK(SystemNative_PRead(fd, buf, 4, 0) == 4 && memcmp(buf, "0123", 4) == 0, "shim-fdmap-bounds", "(a write at 4 GiB reached byte 0)");
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 4, -4294967296ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-bounds", "(a negative write offset was not refused)");
+        SCHECK(SystemNative_PRead(fd, buf, 4, -1) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-bounds", "(a negative read offset was not refused)");
+        SCHECK(SystemNative_FTruncate(fd, -1) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-bounds", "(a negative truncation was accepted)");
+        SCHECK(SystemNative_LSeek(fd, 1048576, RHU_PAL_SEEK_SET) == 1048576, "shim-fdmap-bounds", "(a seek to the maximum was refused)");
+        SCHECK(SystemNative_LSeek(fd, 0xFFFFFFFFll, RHU_PAL_SEEK_SET) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-bounds", "(a seek past the maximum was accepted)");
+        SCHECK(SystemNative_Write(fd, "x", 1) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a write past the maximum was accepted)");
+        SCHECK(SystemNative_FStat(fd, &st) == 0 && st.Size == 4, "shim-fdmap-bounds", "(the size moved on a refused write)");
+        SCHECK(SystemNative_Close(fd) == 0 && SystemNative_Unlink("/tmp/bounds.txt") == 0, "shim-fdmap-bounds", "(close, unlink)");
+        pass("shim-fdmap-bounds", " (offsets, counts and lengths checked in 64 bits against the stated maximum: EFBIG past it, EINVAL below zero, the bytes and the size untouched)");
     }
 
     out("SHIMTEST-FDMAP: ALL GOOD (explicit descriptor bands; the console never answers for a file)");
@@ -1489,7 +1703,7 @@ static int tls_ladder(void)
  * stand-ins carry the prototypes the generated header declares and read
  * the table by the slot names and export names it declares: a stand-in
  * that disagreed with the pin would prove the wrong contract. */
-#include "rhu_rt_entry_p7.h"
+#include "rhu_rt_entry_net11_rc1.h"
 
 _Static_assert(RHU_RT_CLASSLIB_SLOTS > RHU_RT_CLASSLIB_SLOT_ResolveDispatch, "the table holds the dispatch slot");
 _Static_assert(RHU_RT_CLASSLIB_EXPORTS == 8, "eight slots carry an export at this pin");

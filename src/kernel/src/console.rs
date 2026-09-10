@@ -1,7 +1,9 @@
 //! Kernel console: the board module owns the device; this module owns
-//! CRLF wire discipline, `core::fmt` plumbing, and line locking. Polled
-//! TX; every kprintln holds the kernel critical section for the whole
-//! formatted write, so concurrent contexts never tear a line.
+//! CRLF wire discipline, `core::fmt` plumbing, and line locking. Every
+//! kprintln holds the kernel critical section for the whole formatted
+//! write, so concurrent contexts never tear a line; a board driven the
+//! ring way takes the bytes without pacing the section by the wire,
+//! a polled board (the emulator rows) paces it.
 
 use core::fmt;
 
@@ -38,9 +40,32 @@ pub fn locked<R>(f: impl FnOnce(&mut Out) -> R) -> R {
 /// The write door's plumbing: the WHOLE buffer under one console
 /// lock, so a hosted writer never tears against a kprintln line (the
 /// same line-atomicity every kprintln already buys; callers size
-/// their lines accordingly). Wire grammar applies.
+/// their lines accordingly). Wire grammar applies. Back-pressure runs
+/// OUTSIDE the lock: the door waits, with interrupts open, until the
+/// board's console has room for the write's wire length (the bytes
+/// plus one per newline), takes the lock, re-checks the room under it
+/// and writes -- a writer that outruns the wire waits on the
+/// transmitter's drain, never inside the critical section, and never
+/// longer than a bounded write takes to drain (a polled board answers
+/// unbounded room and never waits here).
 pub fn door_write(bytes: &[u8]) {
-    locked(|_out| write_bytes(bytes));
+    let wire = bytes.len() + bytes.iter().filter(|&&b| b == b'\n').count();
+    loop {
+        while board::console_room() < wire {
+            core::hint::spin_loop();
+        }
+        let written = locked(|_out| {
+            if board::console_room() >= wire {
+                write_bytes(bytes);
+                true
+            } else {
+                false
+            }
+        });
+        if written {
+            return;
+        }
+    }
 }
 
 /// The read door's plumbing: drain pending receiver bytes -- up to

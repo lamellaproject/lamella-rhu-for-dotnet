@@ -3,7 +3,6 @@
 
 use core::hint::black_box;
 use core::ptr::{addr_of, addr_of_mut, read_volatile};
-use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{api, console, sched, semihost};
 
@@ -22,12 +21,6 @@ static mut ARENA: Arena = Arena([0; ARENA_BYTES]);
 /// Object-start bitmap for the conservative GC: one mark bit per
 /// 8-byte arena granule, so bytes = ARENA_BYTES / 8 / 8.
 static mut STARTBITS: [u8; ARENA_BYTES / 64] = [0; ARENA_BYTES / 64];
-
-/// Stack top of the thread hosting the payload, published by `run()`
-/// before the managed entry: the GC scans [current SP, stack_top) of
-/// the thread it runs on, and under a scheduler that is a pool-carved
-/// thread stack, never the boot stack.
-static PAYLOAD_STACK_TOP: AtomicU32 = AtomicU32::new(0);
 
 
 /// Write a NUL-terminated byte string to the console, unprefixed,
@@ -81,9 +74,13 @@ extern "C" fn statics_end() -> *mut u8 {
     addr_of!(__ebss) as *mut u8
 }
 
+/// The CURRENT thread's stack top, read live: the collector scans
+/// [current SP, stack top) of the thread it runs on, and under a
+/// scheduler that is that thread's own pool-carved stack -- never the
+/// boot stack, never another thread's top.
 #[unsafe(no_mangle)]
 extern "C" fn stack_top() -> *mut u8 {
-    PAYLOAD_STACK_TOP.load(Ordering::Relaxed) as *mut u8
+    sched::current_stack_top() as *mut u8
 }
 
 core::arch::global_asm!(
@@ -320,12 +317,10 @@ fn refuse_entry(reason: core::fmt::Arguments) -> ! {
 }
 
 
-/// Publish this thread's stack top, settle the contract handshake, and
-/// hand the thread to the payload entry; exit the machine with the code
-/// it returns. Runs on the kmain thread; never returns.
+/// Settle the contract handshake and hand the thread to the payload
+/// entry; exit the machine with the code it returns. Runs on the kmain
+/// thread; never returns.
 pub fn run() -> ! {
-    PAYLOAD_STACK_TOP.store(sched::current_stack_top(), Ordering::Relaxed);
-
     let provided = black_box(rhu_payload_entry as *const () as usize)
         != black_box(__rhu_payload_entry_weak as *const () as usize);
     let stated = unsafe { read_volatile(addr_of!(rhu_payload_abi)) };

@@ -40,7 +40,7 @@ const SHA_GCTEST_G: &str = "5900b85b44294d57e75e9160feed525a8f0465b481d6992e716d
 /// final line remains the expected-free source because the derived value
 /// equals it; a divergent derivation would have moved that expectation
 /// into a gate-owned constant.
-const COLLECTIONS_EXACT: &str = "61";
+const COLLECTIONS_EXACT: &str = "62";
 
 /// The deterministic profile's name in the results surface (additive,
 /// report-only, between "control" and "image"). Emitted only on case
@@ -55,10 +55,10 @@ const TIMING_DET: &str = "icount-shift0";
 /// kernel's default entry references, and the family's linker words.
 const RT_MERGED_O: &str = "goldens/rt/rthello-merged.o";
 const RT_DEMAND_TXT: &str = "goldens/rt/rthello-merged.undef.txt";
-const RT_MANAGED_BYTES: u64 = 385_282;
-const RT_UNBOX_BYTES: u64 = 734;
-const RT_HYDRATED_BYTES: u64 = 77_132;
-const RT_TDATA_BYTES: u64 = 160;
+const RT_MANAGED_BYTES: u64 = 389_414;
+const RT_UNBOX_BYTES: u64 = 766;
+const RT_HYDRATED_BYTES: u64 = 77_204;
+const RT_TDATA_BYTES: u64 = 152;
 const RT_INIT_ARRAY_BYTES: u64 = 24;
 const RT_MODULES_BYTES: u64 = 4;
 
@@ -2508,13 +2508,13 @@ pub fn selfcheck(repo: &Path) -> ! {
     let rt_dump = |m: (u64, u64), u: (u64, u64), h: (u64, u64), t: (u64, u64), i: (u64, u64), arena: (u64, u64)| -> Vec<u8> {
         let syms: [(&str, u64); 25] = [
             ("__stext", 0x440),
-            ("__etext", 0xa4080),
+            ("__etext", u.1 + 2),
             ("__rhu_managedcode_lo", m.0),
             ("__rhu_managedcode_hi", m.1),
             ("__rhu_unbox_lo", u.0),
             ("__rhu_unbox_hi", u.1),
-            ("__start___modules", 0xa4080),
-            ("__stop___modules", 0xa4084),
+            ("__start___modules", u.1 + 2),
+            ("__stop___modules", u.1 + 6),
             ("__rhu_frozen_lo", 0xc70c0),
             ("__rhu_frozen_hi", 0xc70c0),
             ("__exidx_start", 0xd5024),
@@ -2526,7 +2526,7 @@ pub fn selfcheck(repo: &Path) -> ! {
             ("__rhu_tdata_lo", t.0),
             ("__rhu_tdata_hi", t.1),
             ("__sbss", 0x2000_2408),
-            ("__ebss", 0x2001_c404),
+            ("__ebss", h.1),
             ("__rhu_hydrated_lo", h.0),
             ("__rhu_hydrated_hi", h.1),
             ("__rhu_arena_lo", arena.0),
@@ -2543,14 +2543,14 @@ pub fn selfcheck(repo: &Path) -> ! {
         vec![
             Phdr { p_type: PT_LOAD, p_offset: 0, p_vaddr: 0, p_paddr: 0, p_filesz: 0x440, p_memsz: 0x440, p_align: 0x10000 },
             Phdr { p_type: PT_LOAD, p_offset: 0, p_vaddr: 0x2000_0000, p_paddr: 0xd9460, p_filesz: 0x2408, p_memsz: 0x2408, p_align: 0x10000 },
-            Phdr { p_type: PT_TLS, p_offset: 0, p_vaddr: 0x2000_2368, p_paddr: 0xdb7c8, p_filesz: 0xa0, p_memsz: 0xa0, p_align: 8 },
+            Phdr { p_type: PT_TLS, p_offset: 0, p_vaddr: 0x2000_2368, p_paddr: 0xdb7c8, p_filesz: RT_TDATA_BYTES, p_memsz: RT_TDATA_BYTES, p_align: 8 },
             Phdr { p_type: PT_GNU_RELRO, p_offset: 0, p_vaddr: relro_vaddr, p_paddr: 0xdb638, p_filesz: 0x230, p_memsz: 0x230, p_align: 1 },
         ]
     };
     let g_m = (0x45c9cu64, 0x45c9c + RT_MANAGED_BYTES);
-    let g_u = (0xa3da0u64, 0xa3da0 + RT_UNBOX_BYTES);
+    let g_u = (g_m.1 + 2, g_m.1 + 2 + RT_UNBOX_BYTES);
     let g_h = (0x2000_96b8u64, 0x2000_96b8 + RT_HYDRATED_BYTES);
-    let g_t = (0x2000_2368u64, 0x2000_2408u64);
+    let g_t = (0x2000_2368u64, 0x2000_2368 + RT_TDATA_BYTES);
     let g_i = (0x2000_2350u64, 0x2000_2368u64);
     let g_a = (0x2002_c408u64, 0x203f_0000u64);
     let demand: Vec<String> = ["SystemNative_Abort", "malloc", "pthread_self"].iter().map(|s| s.to_string()).collect();
@@ -2570,7 +2570,7 @@ pub fn selfcheck(repo: &Path) -> ! {
     sc.probe(
         "rt-unbox-off",
         "unboxing-stub bracket one byte off the object's section",
-        check(&rt_dump(g_m, (0xa3da0, 0xa3da0 + RT_UNBOX_BYTES + 1), g_h, g_t, g_i, g_a), &ph(0x2000_21d8), &unresolved),
+        check(&rt_dump(g_m, (g_u.0, g_u.0 + RT_UNBOX_BYTES + 1), g_h, g_t, g_i, g_a), &ph(0x2000_21d8), &unresolved),
     );
     sc.probe(
         "rt-hydrated-size",
@@ -2580,7 +2580,7 @@ pub fn selfcheck(repo: &Path) -> ! {
     sc.probe(
         "rt-tdata-size",
         "TLS template bracket short of the object's thread-locals",
-        check(&rt_dump(g_m, g_u, g_h, (0x2000_2368, 0x2000_2404), g_i, g_a), &ph(0x2000_21d8), &unresolved),
+        check(&rt_dump(g_m, g_u, g_h, (0x2000_2368, 0x2000_2368 + RT_TDATA_BYTES - 4), g_i, g_a), &ph(0x2000_21d8), &unresolved),
     );
     sc.probe(
         "rt-init-array",

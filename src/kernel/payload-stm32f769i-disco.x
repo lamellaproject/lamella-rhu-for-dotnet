@@ -34,8 +34,8 @@ MEMORY
 }
 
 /* GC-substrate floor: the arena window this board GUARANTEES after
- * statics + .kstacks + the boot-stack reserve (link-enforced by the
- * window asserts at the bottom of this map). PAYLOAD-map value: with
+ * statics + .kstacks + the console mirror + the boot-stack reserve
+ * (link-enforced by the window asserts at the bottom of this map). PAYLOAD-map value: with
  * the DTCM inside DATA, the window under the FULL hosted image (the
  * runtime, the shim, the collector and the C library beside the
  * kernel) reads ~251K, so 192K -- the kernel map's own floor, the two
@@ -256,20 +256,32 @@ SECTIONS
     __ekstacks = .;
   } > DATA
 
+  /* The console mirror (__rhu_console_log): the transcript a debug
+   * probe reads out of RAM, and the transmit ring's storage. NOLOAD,
+   * after the thread stacks and outside the statics window like them;
+   * the board module writes its header at boot. KEEP: the probe reads
+   * it by symbol, nothing in the image references it by name. */
+  .rhu_console_log (NOLOAD) : ALIGN(8)
+  {
+    KEEP(*(.rhu_console_log));
+    . = ALIGN(8);
+    __rhu_console_log_end = .;
+  } > DATA
+
   /DISCARD/ : { *(.comment) *(.note*) }
 }
 
-/* The arena window: link-defined slack between the end of
- * .kstacks and the boot/handler-stack reserve at the top of DATA.
+/* The arena window: link-defined slack between the end of the console
+ * mirror and the boot/handler-stack reserve at the top of DATA.
  * Kernel-owned NOLOAD space outside every section; arena::init()
  * establishes the zero-birth invariant over it at boot. (Top level: the
  * linker rejects a bare ASSERT between output sections and reports the
  * error one command late.) */
 RHU_BOOT_STACK_RESERVE = 64K;
-__rhu_arena_lo = ALIGN(__ekstacks, 8);
+__rhu_arena_lo = ALIGN(__rhu_console_log_end, 8);
 __rhu_arena_hi = __stack_start - RHU_BOOT_STACK_RESERVE;
 ASSERT(__rhu_arena_hi >= __rhu_arena_lo,
-  "static RAM + .kstacks overflow into the boot-stack reserve (arena window negative)");
+  "static RAM + .kstacks + the console mirror overflow into the boot-stack reserve (arena window negative)");
 ASSERT(__rhu_arena_hi - __rhu_arena_lo >= RHU_ARENA_MIN,
   "arena window under this board's GC-substrate floor (RHU_ARENA_MIN)");
 
@@ -310,8 +322,8 @@ RHU_KERNEL_CODE_RESERVE = 128K;
 RHU_KERNEL_RAM_RESERVE = 16K;
 ASSERT(LENGTH(CODE) >= RHU_RT_CODE_BYTES + RHU_RT_COPY_BYTES + RHU_KERNEL_CODE_RESERVE,
   "CODE region under the hosted runtime's code class and copied data beside the kernel's code reserve");
-ASSERT(LENGTH(DATA) >= RHU_RT_COPY_BYTES + RHU_RT_ZERO_BYTES + SIZEOF(.kstacks) + RHU_BOOT_STACK_RESERVE + RHU_ARENA_MIN + RHU_KERNEL_RAM_RESERVE,
-  "DATA region under the hosted runtime's data beside the thread stacks, the boot-stack reserve, the arena floor and the kernel's RAM reserve");
+ASSERT(LENGTH(DATA) >= RHU_RT_COPY_BYTES + RHU_RT_ZERO_BYTES + SIZEOF(.kstacks) + SIZEOF(.rhu_console_log) + RHU_BOOT_STACK_RESERVE + RHU_ARENA_MIN + RHU_KERNEL_RAM_RESERVE,
+  "DATA region under the hosted runtime's data beside the thread stacks, the console mirror, the boot-stack reserve, the arena floor and the kernel's RAM reserve");
 
 /* The GOT rides the boot's single copy: at .data's load/run offset. */
 ASSERT(LOADADDR(.got) - ADDR(.got) == LOADADDR(.data) - ADDR(.data),

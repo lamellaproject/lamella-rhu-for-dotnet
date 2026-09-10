@@ -1,0 +1,5 @@
+shimtest: the host's initialization contract, in order
+PASS shim-host-order (initialize, then register, then the module list, then managed entry)
+PASS shim-host-classlib (twelve slots; eight exports by the bootstrapper's names, four null)
+PASS shim-host-module (the handle is the image's load address; empty ranges; no module; one argument)
+SHIMTEST-HOST: ALL GOOD (the initialization contract in order; the class-library table as the pin declares it)

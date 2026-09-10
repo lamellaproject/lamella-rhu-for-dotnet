@@ -114,6 +114,23 @@ extern "C" fn __rhu_exception(frame: *const ExcFrame, exc_return: u32) -> ! {
     );
     decode_cfsr(cfsr);
 
+    #[cfg(armv8m)]
+    if cfsr & (1 << 20) != 0 {
+        let floor: u32;
+        let which = if exc_return & 0x4 != 0 {
+            unsafe { asm!("mrs {}, PSPLIM", out(reg) floor, options(nomem, nostack)) };
+            "thread"
+        } else {
+            unsafe { asm!("mrs {}, MSPLIM", out(reg) floor, options(nomem, nostack)) };
+            "handler"
+        };
+        kprintln!(
+            "[fault] stack overflow: the {} stack's floor {:#010x} (the limit register) was crossed -- the frame dump below may be unstacked",
+            which,
+            floor
+        );
+    }
+
     let f = frame as usize;
     if FRAME_RANGES.iter().any(|&(lo, hi)| f >= lo && f < hi) {
         let fr = unsafe { &*frame };
@@ -151,11 +168,12 @@ fn decode_cfsr(cfsr: u32) {
     if cfsr == 0 {
         return;
     }
-    const BITS: [(u32, &str); 19] = [
+    const BITS: [(u32, &str); 20] = [
         (16, "UNDEFINSTR undefined instruction"),
         (17, "INVSTATE invalid EPSR state"),
         (18, "INVPC invalid EXC_RETURN"),
         (19, "NOCP coprocessor access denied"),
+        (20, "STKOF stack limit violation (the v8-M limit registers)"),
         (24, "UNALIGNED unaligned access trap"),
         (25, "DIVBYZERO divide by zero"),
         (8, "IBUSERR instruction-fetch bus error"),

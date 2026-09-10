@@ -24,7 +24,7 @@
 #include "mgc_board_rows.h"
 #include "rhu.h"
 #include "rhu_glibc_arm32.h"
-#include "rhu_pal_errno_p7.h"
+#include "rhu_pal_errno_net11_rc1.h"
 
 void *memcpy(void *dst, const void *src, size_t n);
 void *memset(void *dst, int c, size_t n);
@@ -1378,6 +1378,21 @@ void arc4random_buf(void *buf, size_t len)
         rhu_shim_log("arc4random_buf: the entropy source failed; refusing to return weak bytes");
         rhu_exit(134);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* the auxiliary vector: no entry exists on this platform              */
+/* ------------------------------------------------------------------ */
+
+/* The runtime's portability layer asks the auxiliary vector for the
+ * hardware capability words and the executable's path. This platform
+ * has no auxiliary vector, so every entry is absent, and the C library's
+ * contract for an absent entry is 0 with ENOENT. */
+unsigned long getauxval(unsigned long type)
+{
+    (void)type;
+    SET_ERRNO(RHU_GERR_ENOENT);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */

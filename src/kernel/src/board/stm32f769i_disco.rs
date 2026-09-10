@@ -13,6 +13,8 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
+use super::ring;
+
 pub const NAME: &str = "STM32F769I-DISCO";
 pub const CONSOLE: &str = "USART1 (ST-LINK VCP)";
 
@@ -61,6 +63,10 @@ pub const NIRQ: usize = 110;
 /// never by context-switch code.
 #[allow(dead_code)]
 pub const FPU_DP: bool = true;
+/// The cycle counter the lost-tick witness reads: the core's data
+/// watchpoint and trace unit counts processor cycles, enabled and
+/// verified to advance at the scheduler's init.
+pub const CYCLE_COUNTER: bool = true;
 
 /// RAM windows a hardware-pushed exception frame may plausibly live in:
 /// DTCM+SRAM1+SRAM2, the one contiguous 512 K window this image uses
@@ -165,6 +171,30 @@ const ISR_ORE: u32 = 1 << 3;
 const ICR_ORECF: u32 = 1 << 3;
 const BAUD: u32 = 115_200;
 
+/// The transmit-empty interrupt's enable (USART_CR1 TXEIE, bit 7): the
+/// level-shaped interrupt the ring's drain runs on -- asserted whenever
+/// the transmit data register is empty, so the ring module sets it only
+/// while a backlog exists and clears it when the ring empties.
+const CR1_TXEIE: u32 = 1 << 7;
+
+/// USART1's interrupt line (RM0410's vector table, position 37), its
+/// enable bit in the interrupt controller's second set-enable and
+/// clear-pending registers, and its priority byte in the priority array.
+pub const USART1_IRQ: usize = 37;
+const NVIC_ISER1: *mut u32 = 0xE000_E104 as *mut u32;
+const NVIC_ICPR1: *mut u32 = 0xE000_E284 as *mut u32;
+const NVIC_IPR: *mut u8 = 0xE000_E400 as *mut u8;
+/// The lowest band: masked inside a kernel critical section (the ceiling
+/// 0x40), below the tick (0x80), above the context switch (0xF0) -- the
+/// drain preempts thread code and nothing else, and the writer's section
+/// is its lock.
+const USART1_IRQ_PRIO: u8 = 0xE0;
+
+/// The interrupt lines this board claims with its own handlers, folded
+/// into the vector table by the boot module: USART1's line, the console
+/// ring's transmit drain.
+pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[(USART1_IRQ, __rhu_stm32f769_usart1_irq)];
+
 /// Enforce the HSI-16 posture. On a cold flash boot every write below
 /// restates reset state; with a probe or resident image on the bus,
 /// nothing upstream is assumed: HSI is turned on and waited for, SYSCLK
@@ -183,6 +213,7 @@ pub fn clock_init() {
         while read_volatile(RCC_CFGR) & CFGR_SWS != 0 {}
         write_volatile(FLASH_ACR, read_volatile(FLASH_ACR) & !ACR_LATENCY);
     }
+    ring::boot_mark();
 }
 
 /// Boring posture: no clock line in the banner (the banked transcript
@@ -240,6 +271,7 @@ pub fn clock_init() {
         write_volatile(RCC_CFGR, cfgr | CFGR_SW_PLL);
         while read_volatile(RCC_CFGR) & CFGR_SWS != CFGR_SWS_PLL {}
     }
+    ring::boot_mark();
 }
 
 /// Gated posture: report the live clock tree for the banner line, every
@@ -281,12 +313,11 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
 }
 
 /// Route PA9/PA10 to USART1 (AF7 -- the ST-LINK VCP wiring) and program
-/// 115200 8N1 from PCLK2. Idempotent by construction (every write lands
-/// the same values); the UE-low reprogram window can tear at most one
-/// in-flight character when the panic path re-runs it; output checks
-/// anchor on the panic banner that follows, so a single torn
-/// character is harmless.
-pub fn console_init() {
+/// 115200 8N1 from PCLK2. Runs once, at the first console init (a panic
+/// before the boot's own init reaches it through the same path), so the
+/// UE-low reprogram window that could tear an in-flight character is
+/// never re-entered.
+unsafe fn console_hw_init() {
     unsafe {
         write_volatile(RCC_AHB1ENR, read_volatile(RCC_AHB1ENR) | AHB1ENR_GPIOAEN);
         let _ = read_volatile(RCC_AHB1ENR);
@@ -304,12 +335,74 @@ pub fn console_init() {
     }
 }
 
-/// Blocking byte transmit (polled).
-pub fn console_putb(b: u8) {
+/// The console driver's init. The first call configures the hardware.
+/// The call the boot path makes (marked by `clock_init` through the ring
+/// module) arms the transmit interrupt -- its priority byte, its enable
+/// bit in the interrupt controller -- and takes the interrupt mode; any
+/// later call is the panic or fault path's re-init and switches the
+/// driver to the polled mode with the transmit-empty interrupt disabled,
+/// so the report that follows goes through the wire synchronously. The
+/// console mirror is not touched here (see `clock_init`), so a panic
+/// transcript appends to the boot's.
+pub fn console_init() {
     unsafe {
-        while read_volatile(USART1_ISR) & ISR_TXE == 0 {}
-        write_volatile(USART1_TDR, b as u32);
+        if ring::mode() == 0 {
+            console_hw_init();
+        }
+        if ring::take_boot_mark() {
+            write_volatile(NVIC_IPR.add(USART1_IRQ), USART1_IRQ_PRIO);
+            write_volatile(NVIC_ICPR1, 1 << (USART1_IRQ - 32));
+            write_volatile(NVIC_ISER1, 1 << (USART1_IRQ - 32));
+            ring::set_mode(ring::MODE_IRQ);
+        } else {
+            ring_tx_irq(false);
+            ring::set_mode(ring::MODE_POLLED);
+        }
     }
+}
+
+/// The ring's four hooks on this USART: the transmit data register takes
+/// a byte while its empty flag is set; a byte goes into the transmit data
+/// register (which clears the flag until the byte moves on to the shift
+/// register); nothing latches, so the acknowledge is empty; and the
+/// transmit-empty interrupt is level-shaped, so its enable is set only
+/// while the ring holds a backlog and cleared when the ring empties.
+pub unsafe fn ring_tx_room() -> bool {
+    unsafe { read_volatile(USART1_ISR) & ISR_TXE != 0 }
+}
+pub unsafe fn ring_tx_put(b: u8) {
+    unsafe { write_volatile(USART1_TDR, b as u32) }
+}
+pub unsafe fn ring_tx_ack() {}
+pub unsafe fn ring_tx_irq(enabled: bool) {
+    unsafe {
+        let cr1 = read_volatile(USART1_CR1);
+        let want = if enabled { cr1 | CR1_TXEIE } else { cr1 & !CR1_TXEIE };
+        if want != cr1 {
+            write_volatile(USART1_CR1, want);
+        }
+    }
+}
+
+/// USART1's interrupt: the ring's drain in the interrupt mode, raised
+/// while the transmit data register is empty and the enable is set.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __rhu_stm32f769_usart1_irq() {
+    unsafe { ring::irq() }
+}
+
+/// Byte transmit through the shared ring (the mirror, the primed
+/// transmitter, the interrupt drain; the polled drain on the panic and
+/// fault paths). The caller holds the kernel critical section (the
+/// console's line lock), which masks the interrupt.
+pub fn console_putb(b: u8) {
+    ring::putb(b)
+}
+
+/// The room the ring has for a writer, in bytes (the door's back-pressure
+/// reads it outside the critical section).
+pub fn console_room() -> usize {
+    ring::room()
 }
 
 /// Non-blocking byte receive: one pending byte, or None immediately.
@@ -326,3 +419,11 @@ pub fn console_getb() -> Option<u8> {
         None
     }
 }
+
+/// Whether address 0 is readable memory on this row -- the low-address
+/// question's per-row record, MEASURED on the part (a read that returns
+/// a word, or a bus fault): the api flavor's observation reads it before
+/// it touches the address.
+/// This row: the ITCM RAM at 0.
+#[allow(dead_code)]
+pub const ADDRESS_ZERO_READABLE: bool = true;

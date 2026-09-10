@@ -1,0 +1,8 @@
+shimtest: the image's thread-local template through the kernel's module 0
+PASS shim-tls-template (the map brackets 8 bytes; the block is present and 8-aligned)
+PASS shim-tls-initial (the initialized half arrives; the zero-fill half is zero)
+PASS shim-tls-write (both words take a store; the template itself is untouched)
+PASS shim-tls-fresh (each worker starts from a fresh copy of the template, not the hosting thread's)
+PASS shim-tls-isolation (two blocks at once, each thread reads back only its own pair)
+PASS shim-tls-block (the shim's own per-thread block does not alias the image's template)
+SHIMTEST-TLS: ALL GOOD (the image's thread-local template on module 0; a fresh copy per thread, isolated)

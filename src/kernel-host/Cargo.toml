@@ -1,0 +1,26 @@
+[package]
+name = "rhu-kernel-host"
+version = "0.1.0"
+edition = "2024"
+description = "The Lamella RHU kernel's pure modules, compiled from their own source files and exercised on the host toolchain."
+license = "MIT OR Apache-2.0"
+
+# A manifest of its own (see the kernel's): the empty workspace table
+# stops cargo's upward search.
+[workspace]
+
+[lib]
+name = "rhu_kernel_host"
+path = "src/lib.rs"
+
+# No dependencies: the tier is the kernel's own pure code and the
+# standard library's test harness.
+[dependencies]
+
+# The kernel's own feature names the included modules mention in their
+# configuration attributes, declared so the compiler knows them; the tier
+# never enables one.
+[features]
+api-smoke = []
+payload = []
+test-kheap-loud = []

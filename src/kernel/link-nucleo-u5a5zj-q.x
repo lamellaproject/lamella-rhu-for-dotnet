@@ -38,8 +38,8 @@ MEMORY
 }
 
 /* GC-substrate floor: the arena window this board GUARANTEES after
- * statics + .kstacks + the boot-stack reserve (link-enforced by the
- * window asserts at the bottom of this map). */
+ * statics + .kstacks + the console mirror + the boot-stack reserve
+ * (link-enforced by the window asserts at the bottom of this map). */
 RHU_ARENA_MIN = 1536K;
 
 ENTRY(Reset);
@@ -154,6 +154,18 @@ SECTIONS
     __ekstacks = .;
   } > DATA
 
+  /* The console mirror (__rhu_console_log): the transcript a debug
+   * probe reads out of RAM, and the transmit ring's storage. NOLOAD,
+   * after the thread stacks and outside the statics window like them;
+   * the board module writes its header at boot. KEEP: the probe reads
+   * it by symbol, nothing in the image references it by name. */
+  .rhu_console_log (NOLOAD) : ALIGN(8)
+  {
+    KEEP(*(.rhu_console_log));
+    . = ALIGN(8);
+    __rhu_console_log_end = .;
+  } > DATA
+
   /* panic=abort image: no unwind tables. */
   /DISCARD/ :
   {
@@ -162,17 +174,17 @@ SECTIONS
   }
 }
 
-/* The arena window: link-defined slack between the end of
- * .kstacks and the boot/handler-stack reserve at the top of DATA.
+/* The arena window: link-defined slack between the end of the console
+ * mirror and the boot/handler-stack reserve at the top of DATA.
  * Kernel-owned NOLOAD space outside every section; arena::init()
  * establishes the zero-birth invariant over it at boot. (Top level: the
  * linker rejects a bare ASSERT between output sections and reports the
  * error one command late.) */
 RHU_BOOT_STACK_RESERVE = 64K;
-__rhu_arena_lo = ALIGN(__ekstacks, 8);
+__rhu_arena_lo = ALIGN(__rhu_console_log_end, 8);
 __rhu_arena_hi = __stack_start - RHU_BOOT_STACK_RESERVE;
 ASSERT(__rhu_arena_hi >= __rhu_arena_lo,
-  "static RAM + .kstacks overflow into the boot-stack reserve (arena window negative)");
+  "static RAM + .kstacks + the console mirror overflow into the boot-stack reserve (arena window negative)");
 ASSERT(__rhu_arena_hi - __rhu_arena_lo >= RHU_ARENA_MIN,
   "arena window under this board's GC-substrate floor (RHU_ARENA_MIN)");
 
