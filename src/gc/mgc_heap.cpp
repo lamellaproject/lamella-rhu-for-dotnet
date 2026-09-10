@@ -884,6 +884,13 @@ extern "C" Object* mgc_freach_pop(void)
 /* ------------------------------------------------------------------ */
 
 static uint8_t** g_free_tail;   /* sweep appends in address order */
+static uint32_t  g_sweep_pads;  /* dead spaces of exactly 12 bytes the
+                                 * sweep left as PADS: walkable, never
+                                 * linked, unusable until the next
+                                 * sweep coalesces them */
+#ifdef MGC_BREAK_FREE_PAD
+static int g_break_free_pad_said;
+#endif
 
 extern "C" void mgc_heap_free_reset(void)
 {
@@ -891,16 +898,36 @@ extern "C" void mgc_heap_free_reset(void)
     g_free_tail  = &g_free_head;
     g_free_runs  = 0;
     g_free_bytes = 0;
+    g_sweep_pads = 0;
 }
 
 extern "C" void mgc_heap_free_add(uint8_t* q, uint32_t bytes)
 {
-    /* write the free object: walkable (free MT + numComponents) and a
-     * list node ([q+8] = next). The -4 header slot is dead garbage and
-     * is deliberately not touched -- free-object headers are never read;
-     * zeroing happens at handout, where the birth protocol requires it. */
+    /* write the free object: walkable (free MT + numComponents) and,
+     * when the run has room for it, a list node ([q+8] = next). The -4
+     * header slot is dead garbage and is deliberately not touched --
+     * free-object headers are never read; zeroing happens at handout,
+     * where the birth protocol requires it. */
     *(MethodTable**)q   = g_free_mt;
     *(uint32_t*)(q + 4) = bytes - 12u;
+    /* A run of exactly 12 bytes has no room for the link: [q+8] is the
+     * header word of the object that FOLLOWS the run -- the runtime's
+     * thin lock, hash code and finalization state, live when that
+     * object is. Writing the link there hands the successor a lock
+     * held by a thread that does not exist. Such a run is a PAD:
+     * walkable (free MT, zero components), never linked, counted for
+     * the walk, coalesced by the next sweep. */
+#ifdef MGC_BREAK_FREE_PAD
+    if (bytes < 16u && !g_break_free_pad_said) {
+        g_break_free_pad_said = 1;
+        HPLOG("BREAK_FREE_PAD: 12-byte runs LINKED through the successor's header word (negative control)");
+    }
+#else
+    if (bytes < 16u) {
+        g_sweep_pads++;
+        return;
+    }
+#endif
     *(uint8_t**)(q + 8) = nullptr;
     *g_free_tail = q;
     g_free_tail  = (uint8_t**)(q + 8);
@@ -910,7 +937,10 @@ extern "C" void mgc_heap_free_add(uint8_t* q, uint32_t bytes)
 
 extern "C" void mgc_heap_free_done(uint32_t live_objs)
 {
-    g_walk_expected = live_objs + g_free_runs;
+    g_walk_expected = live_objs + g_free_runs + g_sweep_pads;   /* pads walk too */
+    if (g_sweep_pads)
+        HPLOG("sweep pads: %lu (dead spaces of 12 bytes left unlinked: walkable, unusable until the next sweep coalesces them)",
+              (unsigned long)g_sweep_pads);
     /* grace closes when the heap again has a reserve's worth of slack */
     if (g_grace && g_free_bytes >= MGC_OOM_RESERVE) {
         g_grace = 0;
@@ -997,7 +1027,7 @@ static uint8_t* fit_alloc(size_t size, uint32_t align_flags)
         uint32_t rem;
         if (rb >= need && ((rem = rb - need) == 0 || rem >= 12u)) {
             uint8_t* next = *(uint8_t**)(q + 8);
-            if (rem) {
+            if (rem >= 16u) {
                 /* shrink in place: successor run keeps address order */
                 uint8_t* q2 = q + need;
                 *(MethodTable**)q2   = g_free_mt;
@@ -1007,11 +1037,25 @@ static uint8_t* fit_alloc(size_t size, uint32_t align_flags)
                 if (!next) g_free_tail = (uint8_t**)(q2 + 8);
                 g_splits++;
             } else {
+                /* an exact fit, or a 12-byte remainder: the run is consumed
+                 * whole. A 12-byte remainder cannot be a list node (its
+                 * link word would be the successor's header word), so it
+                 * becomes a trailing PAD -- walkable, unlinked -- and the
+                 * whole run leaves the free bytes. */
                 *pprev = next;
                 if (!next) g_free_tail = pprev;
                 g_free_runs--;
                 g_walk_expected--;      /* the run object is consumed */
-                g_exact_fits++;
+                if (rem) {
+                    uint8_t* q2 = q + need;
+                    *(MethodTable**)q2   = g_free_mt;
+                    *(uint32_t*)(q2 + 4) = 0;
+                    g_pads++;
+                    g_walk_expected++;
+                    need += rem;
+                } else {
+                    g_exact_fits++;
+                }
             }
             if (pad) {
                 /* walkable 12-byte filler; dead garbage until the next
@@ -1116,7 +1160,7 @@ static uint8_t* fit_alloc_window(size_t size, uint8_t** out_limit)
         if (rb >= (uint32_t)size + MGC_WINDOW_BYTES + 12u) {
             win = MGC_WINDOW_BYTES;
             rem = rb - ((uint32_t)size + win + 12u);
-            if (rem && rem < 12u) { win += rem; rem = 0; }
+            if (rem && rem < 16u) { win += rem; rem = 0; }   /* a 12-byte run cannot hold its link */
         } else if (rb >= (uint32_t)size + MGC_WINDOW_FLOOR + 12u) {
             win = rb - (uint32_t)size - 12u;   /* whole run */
             rem = 0;

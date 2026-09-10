@@ -146,23 +146,122 @@ pub fn version_first_line(program: &Path) -> Option<String> {
     }
 }
 
-/// QEMU, resolved env (`QEMU`) -> PATH -> the documented default install
-/// location. Fails loud naming the override variable.
-pub fn resolve_qemu() -> Result<(PathBuf, String), String> {
-    let qemu = match env::var_os("QEMU") {
-        Some(v) if !v.is_empty() => PathBuf::from(v),
-        _ => match path_lookup("qemu-system-arm") {
-            Some(p) => p,
-            None => PathBuf::from(r"C:\msys64\ucrt64\bin\qemu-system-arm.exe"),
-        },
-    };
+/// Where a resolved emulator came from: the `QEMU` variable, a PATH
+/// lookup, or the untracked per-machine pointer file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QemuSource {
+    Variable,
+    Path,
+    Pointer,
+}
+
+/// The emulator's pointer file, repo-relative: its first non-empty,
+/// non-comment line names the `qemu-system-arm` executable on this machine
+/// (the same untracked per-machine idiom as the compiler and archive
+/// pointers under that directory).
+pub const QEMU_POINTER: &str = "tools/toolchains/qemu.local";
+
+/// The emulator's resolution ladder as a pure decision: the `QEMU` variable
+/// when set and non-empty, else the PATH hit, else the pointer file's line,
+/// else a refusal naming all three. No path is built in: a machine's own
+/// layout reaches the runner only through the variable, PATH or the pointer.
+pub fn qemu_ladder(
+    variable: Option<&str>,
+    on_path: Option<PathBuf>,
+    pointer_line: Option<&str>,
+    path_dirs: usize,
+) -> Result<(PathBuf, QemuSource), String> {
+    if let Some(v) = variable {
+        if !v.trim().is_empty() {
+            return Ok((PathBuf::from(v.trim()), QemuSource::Variable));
+        }
+    }
+    if let Some(p) = on_path {
+        return Ok((p, QemuSource::Path));
+    }
+    if let Some(l) = pointer_line {
+        if !l.trim().is_empty() {
+            return Ok((PathBuf::from(l.trim()), QemuSource::Pointer));
+        }
+    }
+    Err(format!(
+        "QEMU not resolved: the QEMU variable is unset, qemu-system-arm is on none of PATH's {path_dirs} directories, and {QEMU_POINTER} is absent or empty -- set QEMU=<path to qemu-system-arm>, put it on PATH, or write that file (line 1 = the path)"
+    ))
+}
+
+/// QEMU, resolved `QEMU` -> PATH -> the untracked per-machine pointer file,
+/// then verified runnable by its version line. Fails loud naming every
+/// place it looked; a candidate that does not answer is refused naming
+/// where it came from.
+pub fn resolve_qemu(repo: &Path) -> Result<(PathBuf, String), String> {
+    let variable = env::var("QEMU").ok();
+    let path_dirs = env::var_os("PATH").map(|p| env::split_paths(&p).count()).unwrap_or(0);
+    let pointer_text = std::fs::read_to_string(repo.join(QEMU_POINTER)).ok();
+    let pointer_line = pointer_text
+        .as_deref()
+        .and_then(|t| t.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#')));
+    let (qemu, source) = qemu_ladder(
+        variable.as_deref(),
+        path_lookup("qemu-system-arm"),
+        pointer_line,
+        path_dirs,
+    )?;
     match version_first_line(&qemu) {
         Some(v) => Ok((qemu, v)),
-        None => Err(format!(
-            "QEMU not runnable at '{}' (set QEMU=/path/to/qemu-system-arm)",
-            qemu.display()
-        )),
+        None => {
+            let from = match source {
+                QemuSource::Variable => "the QEMU variable",
+                QemuSource::Path => "PATH",
+                QemuSource::Pointer => QEMU_POINTER,
+            };
+            Err(format!(
+                "QEMU at '{}' (from {from}) did not answer --version -- set QEMU=<path to qemu-system-arm>, or fix {QEMU_POINTER}",
+                qemu.display()
+            ))
+        }
     }
+}
+
+/// A command-valued override split into words: whitespace separates words,
+/// a double-quoted run is one word with its quotes removed (an executable
+/// under a path with a space travels that way), no other escape exists, and
+/// an unbalanced quote is refused. The rule for every `RHU_*` command
+/// variable and for the first line of a pointer file that holds a command.
+pub fn command_words(text: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut quoted = false;
+    for c in text.chars() {
+        if quoted {
+            if c == '"' {
+                quoted = false;
+            } else {
+                cur.push(c);
+            }
+        } else if c == '"' {
+            quoted = true;
+            in_word = true;
+        } else if c.is_whitespace() {
+            if in_word {
+                words.push(std::mem::take(&mut cur));
+                in_word = false;
+            }
+        } else {
+            cur.push(c);
+            in_word = true;
+        }
+    }
+    if quoted {
+        return Err(format!("unbalanced double quote in the command '{text}'"));
+    }
+    if in_word {
+        words.push(cur);
+    }
+    if words.is_empty() {
+        return Err("empty command".to_string());
+    }
+    Ok(words)
 }
 
 /// Facts of the pinned Rust toolchain: version line, sysroot, host triple,

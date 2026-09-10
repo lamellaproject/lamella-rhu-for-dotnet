@@ -13,7 +13,7 @@ mod tools;
 use std::process::exit;
 
 fn usage() -> ! {
-    println!("usage: rhu-gate <base | sched | payload | api | gc | shim | rt | chain | selfcheck> [selfcheck | rederive]");
+    println!("usage: rhu-gate <base | sched | payload | api | gc | shim | rt | chain | selfcheck> [selfcheck | rederive | attrs <pre> <donor> <out>]");
     exit(2);
 }
 
@@ -44,6 +44,7 @@ fn main() {
         (Some("rt"), None, 1) => gates::rt::run(&repo),
         (Some("rt"), Some("selfcheck"), 2) => gates::rt::selfcheck(&repo),
         (Some("rt"), Some("rederive"), 2) => gates::rt::rederive(&repo),
+        (Some("rt"), Some("attrs"), _) => gates::rt::attrs(&repo, &args[2..]),
         (Some("selfcheck"), None, 1) => selfcheck::run(&repo),
         (Some("chain"), None, 1) => chain::run(&repo),
         _ => usage(),

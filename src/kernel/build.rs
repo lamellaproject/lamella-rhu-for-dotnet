@@ -12,6 +12,10 @@ fn main() {
         "link-mps2-an505.x"
     } else if cfg!(feature = "board-nucleo-u5a5zj-q") {
         "link-nucleo-u5a5zj-q.x"
+    } else if cfg!(feature = "board-pico-2") {
+        "link-pico-2.x"
+    } else if cfg!(feature = "board-pico-plus-2") {
+        "link-pico-plus-2.x"
     } else {
         "link-mps2-an500.x"
     };

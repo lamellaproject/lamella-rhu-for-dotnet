@@ -11,8 +11,8 @@ use crate::text::{
     contains_fixed, cr_count, eq_lf_normalized, final_free, final_gcs, payload_stream,
     wake_order, word_sym_present,
 };
-use crate::tools::{rustc_facts, ExecProfile};
-use std::path::Path;
+use crate::tools::{command_words, qemu_ladder, rustc_facts, ExecProfile, QemuSource, QEMU_POINTER};
+use std::path::{Path, PathBuf};
 use std::process::exit;
 
 const GATE: &str = "rhu-gate-selfcheck";
@@ -230,6 +230,57 @@ pub fn run(repo: &Path) -> ! {
         "json-escape",
         "quote and backslash escaped; clean ASCII untouched",
         json_escape("a\"b\\c") == "a\\\"b\\\\c" && json_escape("clean text") == "clean text",
+    );
+
+    let on_path = Some(PathBuf::from("path-dir/qemu-system-arm"));
+    sc.accept_probe(
+        "qemu-variable-first",
+        "the QEMU variable wins over a PATH hit and a pointer line",
+        matches!(
+            qemu_ladder(Some("var/qemu"), on_path.clone(), Some("ptr/qemu"), 3),
+            Ok((ref p, QemuSource::Variable)) if p.as_path() == Path::new("var/qemu")
+        ),
+    );
+    sc.accept_probe(
+        "qemu-path-second",
+        "an empty variable falls through to the PATH hit ahead of the pointer",
+        matches!(
+            qemu_ladder(Some("  "), on_path.clone(), Some("ptr/qemu"), 3),
+            Ok((ref p, QemuSource::Path)) if p.as_path() == Path::new("path-dir/qemu-system-arm")
+        ),
+    );
+    sc.accept_probe(
+        "qemu-pointer-third",
+        "no variable and no PATH hit resolve through the pointer file's line, trimmed",
+        matches!(
+            qemu_ladder(None, None, Some("  ptr/qemu  "), 3),
+            Ok((ref p, QemuSource::Pointer)) if p.as_path() == Path::new("ptr/qemu")
+        ),
+    );
+    sc.probe(
+        "qemu-nothing-resolves",
+        "no variable, no PATH hit, no pointer line (the refusal must name the variable, the directory count and the pointer)",
+        match qemu_ladder(None, None, None, 7) {
+            Ok(_) => true,
+            Err(e) => !(e.contains("QEMU") && e.contains("7 directories") && e.contains(QEMU_POINTER)),
+        },
+    );
+    sc.accept_probe(
+        "command-quoted-word",
+        "a double-quoted word with spaces stays one word; the rest split on whitespace",
+        command_words("\"tool dir/clang.exe\" --target=arm-none-eabi  -x c")
+            == Ok(vec!["tool dir/clang.exe".to_string(), "--target=arm-none-eabi".to_string(), "-x".to_string(), "c".to_string()]),
+    );
+    sc.accept_probe(
+        "command-plain-words",
+        "an unquoted command splits exactly on whitespace",
+        command_words("wsl.exe -d Ubuntu -- kit/bin/clang")
+            == Ok(vec!["wsl.exe".to_string(), "-d".to_string(), "Ubuntu".to_string(), "--".to_string(), "kit/bin/clang".to_string()]),
+    );
+    sc.probe(
+        "command-unbalanced-quote",
+        "a command with an unbalanced double quote",
+        command_words("\"tool dir/clang.exe --version").is_ok(),
     );
 
     sc.finish("genuine inputs accepted");

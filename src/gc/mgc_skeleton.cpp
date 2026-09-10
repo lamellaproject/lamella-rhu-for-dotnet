@@ -68,6 +68,12 @@
 #include <stdio.h>
 #include <string.h>
 
+/* The kernel's hosting verbs (rhu.h) in every world: the futex pair is
+ * the host ABI's ONE blocking primitive (deadline absolute monotonic
+ * ns), behind the handle pool's lock and, under the windows surface,
+ * behind the GC-done event. */
+#include "rhu.h"
+
 extern "C" void abort(void);
 extern "C" int  sched_yield(void);
 
@@ -100,11 +106,10 @@ extern "C" uint32_t mgc_heap_live_bytes(void);
 #endif
 #ifdef MGC_TUNE_LIVE
 /* the windows surface: window retire (thread-detach path) + the
- * kernel futex that backs the GC-done event (the host ABI's ONE
- * blocking primitive; deadline is absolute monotonic ns). The futex
- * verbs are the RHU hosting API's (rhu.h). */
+ * GC-done event's word (the futex behind it is the same kernel pair the
+ * handle pool's lock parks on; rhu.h is included with the standard
+ * headers above). */
 extern "C" void    mgc_heap_window_fix(gc_alloc_context* acontext);
-#include "rhu.h"
 /* GC-done event: 1 = no GC in progress (initial), 0 = GC running.
  * Reset/Set are vcalled by the EE inside SuspendEE/RestartEE; waiters
  * sleep on the word. */
@@ -126,6 +131,19 @@ extern "C" uint32_t mgc_collect_total(void);
 
 /* One call-inventory line shape, greppable: "call <Iface>::<Method>" */
 #define SKCALL(fmt, ...) SKLOG("call " fmt, ##__VA_ARGS__)
+
+/* The handle entries can be called by the hundred thousand -- by a program
+ * that churns handles, and by the gate case that races the pool from two
+ * threads -- so their call log keeps the first 32 calls of each entry in
+ * full (every boot on record makes fewer) and then every 65536th with the
+ * running count. The counter is atomic: two threads log through it. */
+#define SKCALL_H(ctr, fmt, ...) \
+    do { static uint32_t ctr##_n; \
+         uint32_t v_ = __atomic_add_fetch(&ctr##_n, 1u, __ATOMIC_RELAXED); \
+         if (v_ <= 32) SKCALL(fmt, ##__VA_ARGS__); \
+         else if ((v_ & 65535u) == 0) \
+             SKCALL(fmt " (call #%lu)", ##__VA_ARGS__, (unsigned long)v_); \
+    } while (0)
 
 /* Once a live allocator is behind the interface, a handful of BCL
  * surface methods can be called at allocation-era frequency; their
@@ -189,6 +207,51 @@ static void*    g_slot_extra[MGC_HANDLE_SLOTS];
 static uint8_t  g_slot_type[MGC_HANDLE_SLOTS];
 static uint8_t  g_slot_live[MGC_HANDLE_SLOTS];
 static unsigned g_slot_next;
+
+/* The pool lock. The runtime creates and destroys handles from any thread
+ * with no lock of its own, and the pool's cursor and free list are a
+ * read-modify-write pair: two threads inside them at once alias a slot or
+ * drop a free-list entry. One short lock covers every pool operation. A
+ * contended taker parks on the kernel futex and never spins: under a
+ * strict fixed-priority pick a spinner starves the holder it waits for.
+ * Three states -- 0 free, 1 held, 2 held with a waiter possible -- so the
+ * uncontended path is one compare-and-swap each way and the release wakes
+ * only when a waiter may exist. A slot's own words stay outside the lock:
+ * they belong to the handle's owner once the pool handed the slot out, and
+ * the interlocked entries below serve them by their own atomics. */
+static uint32_t g_pool_lock;
+
+static void pool_lock(void)
+{
+#ifdef MGC_BREAK_HANDLE_LOCK
+    /* The negative control's knob: the pool runs unlocked, and says so
+     * once. */
+    static int said;
+    if (!said) {
+        said = 1;
+        SKLOG("BREAK_HANDLE_LOCK: the pool lock is compiled out (the negative control's knob)");
+    }
+#else
+    uint32_t c = 0;
+    if (__atomic_compare_exchange_n(&g_pool_lock, &c, 1u, false,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+        return;
+    if (c != 2u)
+        c = __atomic_exchange_n(&g_pool_lock, 2u, __ATOMIC_ACQUIRE);
+    while (c != 0u) {
+        (void)rhu_futex_wait((const uint32_t*)&g_pool_lock, 2u, RHU_DEADLINE_NONE);
+        c = __atomic_exchange_n(&g_pool_lock, 2u, __ATOMIC_ACQUIRE);
+    }
+#endif
+}
+
+static void pool_unlock(void)
+{
+#ifndef MGC_BREAK_HANDLE_LOCK
+    if (__atomic_exchange_n(&g_pool_lock, 0u, __ATOMIC_RELEASE) == 2u)
+        (void)rhu_futex_wake((const uint32_t*)&g_pool_lock, 1);
+#endif
+}
 #ifdef MGC_TUNE_LIVE
 static unsigned g_slot_free;        /* free list: index+1, 0 = empty
                                      * (threaded through g_slot_extra
@@ -199,7 +262,8 @@ static unsigned g_slot_live_now, g_slot_live_hw;  /* the knob-table sizing numbe
 static int      g_slot_selftest;    /* suppress per-create logs during
                                      * the init reuse self-test */
 
-static void slot_release(unsigned i)
+/* The pool lock held by the caller. */
+static void slot_release_locked(unsigned i)
 {
     g_slot_live[i] = 0;
     g_slot[i] = nullptr;
@@ -207,6 +271,13 @@ static void slot_release(unsigned i)
     g_slot_extra[i] = (void*)(uintptr_t)g_slot_free;
     g_slot_free = i + 1;
     g_slot_live_now--;
+}
+
+static void slot_release(unsigned i)
+{
+    pool_lock();
+    slot_release_locked(i);
+    pool_unlock();
 }
 #endif
 
@@ -223,6 +294,7 @@ static unsigned slot_of(OBJECTHANDLE h, const char* via)
 static OBJECTHANDLE mk_handle(Object* obj, int type, void* extra,
                               Object* secondary, const char* via)
 {
+    pool_lock();
 #ifdef MGC_TUNE_LIVE
     unsigned i;
     if (g_slot_free) {
@@ -237,6 +309,7 @@ static OBJECTHANDLE mk_handle(Object* obj, int type, void* extra,
     g_slot_created++;
     g_slot_live_now++;
     if (g_slot_live_now > g_slot_live_hw) g_slot_live_hw = g_slot_live_now;
+    unsigned created = g_slot_created;
 #else
     if (g_slot_next >= MGC_HANDLE_SLOTS)
         mgc_failfast("handle slot pool exhausted (raise MGC_HANDLE_SLOTS)");
@@ -247,17 +320,18 @@ static OBJECTHANDLE mk_handle(Object* obj, int type, void* extra,
     g_slot_extra[i]     = extra;
     g_slot_type[i]      = (uint8_t)type;
     g_slot_live[i]      = 1;
+    pool_unlock();
     /* full detail for the first 16 (init-era evidence), then every
-     * 256th -- allocation-era handle traffic would otherwise flood the
+     * 65536th -- allocation-era handle traffic would otherwise flood the
      * transcript; the census carries the totals */
 #ifdef MGC_TUNE_LIVE
     if (!g_slot_selftest
-        && (g_slot_created <= 24 || (g_slot_created & 255u) == 0))
+        && (created <= 24 || (created & 65535u) == 0))
         SKLOG("handle[%u] created via %s: type=%d obj=%p secondary=%p extra=%p (create #%u)",
               i, via, type, (void*)obj, (void*)secondary, extra,
-              g_slot_created);
+              created);
 #else
-    if (i < 16 || ((i + 1) & 255u) == 0)
+    if (i < 16 || ((i + 1) & 65535u) == 0)
         SKLOG("handle[%u] created via %s: type=%d obj=%p secondary=%p extra=%p",
               i, via, type, (void*)obj, (void*)secondary, extra);
 #endif
@@ -388,31 +462,31 @@ public:
 
     OBJECTHANDLE CreateHandleOfType(Object* object, HandleType type) override
     {
-        SKCALL("IGCHandleStore::CreateHandleOfType(obj=%p type=%d)",
-               (void*)object, (int)type);
+        SKCALL_H(hs_create, "IGCHandleStore::CreateHandleOfType(obj=%p type=%d)",
+                 (void*)object, (int)type);
         return mk_handle(object, (int)type, nullptr, nullptr, "store");
     }
 
     OBJECTHANDLE CreateHandleOfType(Object* object, HandleType type,
                                     int heapToAffinitizeTo) override
     {
-        SKCALL("IGCHandleStore::CreateHandleOfType(obj=%p type=%d heap=%d)",
-               (void*)object, (int)type, heapToAffinitizeTo);
+        SKCALL_H(hs_create_affinitized, "IGCHandleStore::CreateHandleOfType(obj=%p type=%d heap=%d)",
+                 (void*)object, (int)type, heapToAffinitizeTo);
         return mk_handle(object, (int)type, nullptr, nullptr, "store/affinitized");
     }
 
     OBJECTHANDLE CreateHandleWithExtraInfo(Object* object, HandleType type,
                                            void* pExtraInfo) override
     {
-        SKCALL("IGCHandleStore::CreateHandleWithExtraInfo(obj=%p type=%d extra=%p)",
-               (void*)object, (int)type, pExtraInfo);
+        SKCALL_H(hs_create_extra, "IGCHandleStore::CreateHandleWithExtraInfo(obj=%p type=%d extra=%p)",
+                 (void*)object, (int)type, pExtraInfo);
         return mk_handle(object, (int)type, pExtraInfo, nullptr, "store/extra");
     }
 
     OBJECTHANDLE CreateDependentHandle(Object* primary, Object* secondary) override
     {
-        SKCALL("IGCHandleStore::CreateDependentHandle(primary=%p secondary=%p)",
-               (void*)primary, (void*)secondary);
+        SKCALL_H(hs_create_dependent, "IGCHandleStore::CreateDependentHandle(primary=%p secondary=%p)",
+                 (void*)primary, (void*)secondary);
         return mk_handle(primary, (int)HNDTYPE_DEPENDENT, nullptr, secondary,
                          "store/dependent");
     }
@@ -459,15 +533,15 @@ public:
 
     OBJECTHANDLE CreateGlobalHandleOfType(Object* object, HandleType type) override
     {
-        SKCALL("IGCHandleManager::CreateGlobalHandleOfType(obj=%p type=%d)",
-               (void*)object, (int)type);
+        SKCALL_H(hm_create_global, "IGCHandleManager::CreateGlobalHandleOfType(obj=%p type=%d)",
+                 (void*)object, (int)type);
         return mk_handle(object, (int)type, nullptr, nullptr, "manager/global");
     }
 
     OBJECTHANDLE CreateDuplicateHandle(OBJECTHANDLE handle) override
     {
         unsigned i = slot_of(handle, "CreateDuplicateHandle");
-        SKCALL("IGCHandleManager::CreateDuplicateHandle(handle[%u])", i);
+        SKCALL_H(hm_create_duplicate, "IGCHandleManager::CreateDuplicateHandle(handle[%u])", i);
         return mk_handle(g_slot[i], (int)g_slot_type[i], g_slot_extra[i],
                          g_slot_secondary[i], "manager/duplicate");
     }
@@ -475,34 +549,40 @@ public:
     void DestroyHandleOfType(OBJECTHANDLE handle, HandleType type) override
     {
         unsigned i = slot_of(handle, "DestroyHandleOfType");
-        SKCALL("IGCHandleManager::DestroyHandleOfType(handle[%u] type=%d)",
-               i, (int)type);
+        SKCALL_H(hm_destroy, "IGCHandleManager::DestroyHandleOfType(handle[%u] type=%d)",
+                 i, (int)type);
+        pool_lock();
 #ifdef MGC_TUNE_LIVE
         if (!g_slot_live[i]) {
+            pool_unlock();
             SKLOG("DestroyHandleOfType: handle[%u] already dead (double destroy ignored)", i);
             return;
         }
-        slot_release(i);
+        slot_release_locked(i);
 #else
         g_slot_live[i] = 0;
         g_slot[i] = nullptr;
 #endif
+        pool_unlock();
     }
 
     void DestroyHandleOfUnknownType(OBJECTHANDLE handle) override
     {
         unsigned i = slot_of(handle, "DestroyHandleOfUnknownType");
-        SKCALL("IGCHandleManager::DestroyHandleOfUnknownType(handle[%u])", i);
+        SKCALL_H(hm_destroy_unknown, "IGCHandleManager::DestroyHandleOfUnknownType(handle[%u])", i);
+        pool_lock();
 #ifdef MGC_TUNE_LIVE
         if (!g_slot_live[i]) {
+            pool_unlock();
             SKLOG("DestroyHandleOfUnknownType: handle[%u] already dead (double destroy ignored)", i);
             return;
         }
-        slot_release(i);
+        slot_release_locked(i);
 #else
         g_slot_live[i] = 0;
         g_slot[i] = nullptr;
 #endif
+        pool_unlock();
     }
 
     void SetExtraInfoForHandle(OBJECTHANDLE handle, HandleType type,

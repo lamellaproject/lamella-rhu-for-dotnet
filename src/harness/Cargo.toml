@@ -5,6 +5,10 @@ edition = "2024"
 description = "Gate runner for the RHU verification tier: builds, runs, and asserts the QEMU gate chain, emitting schema-1 structured results."
 license = "MIT OR Apache-2.0"
 
+# The crate stands alone: a workspace manifest in a directory above a
+# checkout must not claim it (cargo stops its upward search here).
+[workspace]
+
 [[bin]]
 name = "rhu-gate"
 path = "src/main.rs"

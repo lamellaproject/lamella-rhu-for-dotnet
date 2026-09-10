@@ -6,8 +6,8 @@
 //! boot golden -- verified host-side, then linked into the hosted image
 //! and booted on the emulator. Nothing here compiles: the consumer story
 //! is Rust, the pinned toolchain's own object tools and linker, and the
-//! emulator; the merges live behind the frozen boundary on the internal
-//! rederive leg.
+//! emulator; the merges are produced once, on the maintainer's
+//! re-derivation leg ('rhu-gate rt rederive'), and committed.
 
 use crate::gate::Selfcheck;
 use crate::gates::gc::{parse_undefined, parse_vendored_manifest, resolve_ld, run_tool_bounded, ToolCmd};
@@ -15,7 +15,7 @@ use crate::gates::payload::{check_rt_placement, map_region, split_ld_log, RtBrac
 use crate::gates::shim::{markers_out_of_order, resolve_newlib_dir};
 use crate::image::{check_records, elf32_phdrs, header_abi};
 use crate::results::{chain_json_from_env, validate_results, Results};
-use crate::sha256::sha256_file;
+use crate::sha256::{sha256_file, sha256_hex};
 use crate::text::{contains_fixed, cr_count, eq_lf_normalized, payload_stream, word_sym_present, word_sym_value};
 use crate::tools::{cargo_build_kernel, cargo_build_kernel_at, echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts, ExecProfile, RustcFacts};
 use std::path::{Path, PathBuf};
@@ -31,21 +31,21 @@ const RUN_TIMEOUT_S: u64 = 300;
 /// goldens/rt/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates the objects, the lists, the manifest
 /// and this pin together in one reviewed commit.
-pub(crate) const SHA_FROZEN_MANIFEST: &str = "6e73b465cd06fbc5f1aec32f762201a79243c0fa559b5b8e868d484c7505df0b";
+pub(crate) const SHA_FROZEN_MANIFEST: &str = "c8ce278fde142abb7b2b3558567b2991ec34a660c15e98677cb0152520d14991";
 
 /// The archive set the frozen merge consumed. The manifest's `archives:`
 /// line and the frozen set file must both name it; a merge recorded under
 /// another set is refused before its bytes are trusted.
-const ARCHIVE_SET: &str = "p7-shipped-sgc-enabled";
+const ARCHIVE_SET: &str = "p7-rhu-cortex-m7-sgc-enabled";
 
 /// The frozen tier: the file names under goldens/rt/ and what each is.
-const FROZEN_FILES: [(&str, &str); 14] = [
+const FROZEN_FILES: [(&str, &str); 15] = [
     ("rthello.o", "the program object the merge consumed (the compiler's output of record)"),
     ("startup-cookie-copied.o", "the runtime archive's startup member with its stack-cookie section renamed into copied data"),
     ("rthello-merged.o", "the merged object: the program object, the surgery object and the runtime archives, the descriptor rooted, attributes neutralized"),
     ("attr-donor-v7em.bin", "the build-attributes blob the merges apply (a donor compiled at the image ABI)"),
     ("control-attr-a-profile.bin", "the archives' own merged attributes (application profile), the negative control's input"),
-    ("archives-p7-shipped-sgc-enabled.txt", "the archive set's identity: each archive by size and sha256, the set's demand and surface shas"),
+    ("archives-p7-rhu-cortex-m7-sgc-enabled.txt", "the archive set's identity: what built it, each archive by size and sha256, the set's demand and surface shas"),
     ("rthello-merged.undef.txt", "the merged object's undefined names, sorted: the demand surface pinned exactly"),
     ("rt-libc.o", "the C and math libraries' closure merged into one relocatable, attributes neutralized"),
     ("rt-libc.members.txt", "the closure's member list by archive and name, with the kit's two libraries by size and sha256"),
@@ -54,13 +54,14 @@ const FROZEN_FILES: [(&str, &str); 14] = [
     ("rtsuite-merged.o", "the suite's merged object: the same recipe from the suite's program object"),
     ("rtsuite-merged.undef.txt", "the suite's merged object's undefined names, sorted: its demand surface pinned exactly"),
     ("rtsuite.golden.txt", "the payload stream of the suite's boot: the rt.suite golden"),
+    ("control-d32-site.o", "one function naming double registers above d15 (the application profile's 32-double register file): the census control's input"),
 ];
 const PAYLOAD: &str = "rthello.o";
 const SURGERY: &str = "startup-cookie-copied.o";
 const MERGED: &str = "rthello-merged.o";
 const DONOR: &str = "attr-donor-v7em.bin";
 const CONTROL_ATTRS: &str = "control-attr-a-profile.bin";
-const SET_FILE: &str = "archives-p7-shipped-sgc-enabled.txt";
+const SET_FILE: &str = "archives-p7-rhu-cortex-m7-sgc-enabled.txt";
 const UNDEF_FILE: &str = "rthello-merged.undef.txt";
 const LIBC: &str = "rt-libc.o";
 const LIBC_MEMBERS: &str = "rt-libc.members.txt";
@@ -69,6 +70,38 @@ const SUITE_PAYLOAD: &str = "rtsuite.o";
 const SUITE_MERGED: &str = "rtsuite-merged.o";
 const SUITE_UNDEF_FILE: &str = "rtsuite-merged.undef.txt";
 const SUITE_GOLDEN: &str = "rtsuite.golden.txt";
+const CONTROL_D32: &str = "control-d32-site.o";
+/// The ARM-state code the Cortex-M7 class archive set still carries: libunwind's
+/// context save (`unw_getcontext`, its private alias beside it) and its
+/// resume jump, hand-written assembly that takes its instruction set from
+/// the A-profile target the archives are built for (the source selects
+/// Thumb only where the ARM instruction set is absent). Both are merged
+/// and linked into the images and reached by nothing the images run (the
+/// runtime unwinds through its own helpers; the suite's exception section
+/// passes on the Cortex-M7). The census pins them by name and by count, so a
+/// third ARM-state function is loud.
+const ARM_MODE_PINNED: [&str; 3] = ["_ZN9libunwind13Registers_arm20restoreCoreAndJumpToEv", "__unw_getcontext", "unw_getcontext"];
+/// The ARM-state mapping symbols the merged objects, the images and the
+/// archive set carry: the two functions above.
+const ARM_MODE_PINNED_COUNT: usize = 2;
+/// The hand-written assembly the Cortex-M7 class set still carries that names a
+/// double register above d15: libunwind's VFPv3 register save and restore
+/// (one `vstmia`/`vldmia` of d16-d31 each), the neighbours of the ARM-state
+/// pair in the same section, reached by nothing the images run. The
+/// compiler's flag cannot touch assembly; the census pins these two by
+/// name with one site each, so any COMPILED function naming d16-d31 is
+/// loud.
+const D32_PINNED: [&str; 2] = ["_ZN9libunwind13Registers_arm9saveVFPv3EPv", "_ZN9libunwind13Registers_arm12restoreVFPv3EPv"];
+/// The A-profile decode of record for the census: the mapping symbols
+/// keep literal pools out of the count, the register file is the full one
+/// so a name above d15 decodes as itself.
+const CENSUS_TRIPLE: &str = "--triple=thumbv7a-none-eabihf";
+/// The ARM-state decode for the regions the mapping symbols mark `$a`: the
+/// object reader's Thumb decode does not switch state inside a merged
+/// object's section, so those regions are decoded again in ARM state and
+/// the census reads each region with its own decode.
+const CENSUS_TRIPLE_ARM: &str = "--triple=armv7a-none-eabihf";
+const CENSUS_MATTR: &str = "--mattr=+vfp4,+d32,+neon,+fp-armv8";
 
 /// The surgery: the archive member, the archive it lives in, and the
 /// section rename that moves its read-only stack cookie into copied data
@@ -237,9 +270,10 @@ const FORBIDDEN_PATTERNS: [&str; 7] = ["FAIL ", "RTHELLO: FAIL", "KERNEL PANIC",
 const PENDING: [&str; 0] = [];
 
 /// The suite's boot: the platform's lines around the program's (the
-/// runtime's own thread spawned at its 16 KB ask, the one worker at the
-/// row's default), every section's verdict line, the summary last.
-const SUITE_MARKERS: [&str; 15] = [
+/// runtime's own thread spawned at its 16 KB ask, the threading section's
+/// worker and the activation section's worker at the row's default),
+/// every section's verdict line, the summary last.
+const SUITE_MARKERS: [&str; 19] = [
     "[payload] entry: payload-provided, built for hosting-API contract generation 31 (this kernel: 31)",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
     "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
@@ -253,7 +287,11 @@ const SUITE_MARKERS: [&str; 15] = [
     "PASS rt-time (tick count monotonic across a spin, processor count)",
     "PASS rt-dispatch (interface dispatch, delegate, generic comparison)",
     "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 4)",
-    "PASS rt-threads (one worker thread, 10000 interlocked increments)",
+    "PASS rt-threads (one worker thread, 10000 locked increments)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 5)",
+    "PASS rt-activation (a running worker suspended and resumed across three collections)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 6)",
+    "PASS rt-parked (a worker parked on a held monitor across two collections, released and joined)",
     "RTSUITE: ALL GOOD",
 ];
 const SUITE_ALL_GOOD: &str = "RTSUITE: ALL GOOD";
@@ -261,13 +299,16 @@ const SUITE_ALL_GOOD: &str = "RTSUITE: ALL GOOD";
 /// unhandled-exception report among them).
 const SUITE_FORBIDDEN: [&str; 8] = ["FAIL ", "RTSUITE: FAIL", "Unhandled exception", "KERNEL PANIC", "EXCEPTION:", "REFUSED", "abort()", "unsupported conversion"];
 /// The activation count the host prints at exit: the line must be present
-/// and parse, and the count is reported. No floor while the activation
-/// section is parked: the frozen suite predates the kernel's activation
-/// resume completing pending lazy floating-point state, and under the
-/// earlier kernel a suite that delivered activations faulted about once
-/// in fifteen boots.
+/// and parse, and the count must reach the floor. The activation section
+/// collects three times while a worker runs managed code, and each
+/// collection suspends that worker through the shim's costume, so a
+/// passing boot delivers at least three activations (the other threads
+/// the runtime suspends add to the count and vary run to run; the floor
+/// is the invariant). The kernel's activation resume completes the lazy
+/// floating-point state a handler leaves pending before it pops a target
+/// whose own frame is basic, which is what lets this section run.
 const ACTIVATIONS_LINE: &str = "[host] activations delivered: ";
-const ACTIVATIONS_FLOOR: u32 = 0;
+const ACTIVATIONS_FLOOR: u32 = 3;
 
 /// The F769 rider's world: the board's payload map and staticlib (built
 /// as the payload gate builds it), and the row's tier objects -- the
@@ -291,9 +332,10 @@ const F769_GC_OBJECTS: [&str; 3] = ["goldens/gc/skel-row.o", "goldens/gc/heap-ro
 /// The section classes the suite's frozen merged object carries at the
 /// merge (read off its linked image's brackets at the freeze; the maps'
 /// brackets read them exactly).
-const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 421_074, unbox: 958, hydrated: 92_200, tdata: 160, init_array: 24, modules: 4 };
-const INTERNAL_CASES: [&str; 1] = [
+const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 423_190, unbox: 958, hydrated: 93_080, tdata: 160, init_array: 24, modules: 4 };
+const INTERNAL_CASES: [&str; 2] = [
     "rt.rederive-selector-control -- link-tier; runs under 'rhu-gate rt rederive' when the archive set is resolved: the same merge with the standalone-GC-disabled selector must not tie the frozen object",
+    "rt.rederive-census -- link-tier; runs under 'rhu-gate rt rederive' when the archive set is resolved: every member of the five archives decoded, no compiled function naming a double register above d15 (the pinned assembly pair the only ones), the ARM-state code exactly the pinned pair",
 ];
 
 /// The file header, as the object reader prints it: a 32-bit ARM
@@ -342,6 +384,357 @@ fn attrs_fault(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The build-attributes update as the runner's own byte operation --
+/// the ELF32 relocatable's `.ARM.attributes` section contents replaced by
+/// the donor blob, appended at the object's end (4-byte aligned) with the
+/// section header re-pointed, every other byte of the object untouched.
+/// Deterministic by construction: the same input bytes give the same
+/// output bytes on every run and every desk.
+pub(crate) fn attrs_update(pre: &[u8], donor: &[u8]) -> Result<Vec<u8>, String> {
+    let (hdr, _, _) = elf_attrs_header(pre)?;
+    let mut out = pre.to_vec();
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+    let new_off = out.len() as u32;
+    out.extend_from_slice(donor);
+    out[hdr + 16..hdr + 20].copy_from_slice(&new_off.to_le_bytes());
+    out[hdr + 20..hdr + 24].copy_from_slice(&(donor.len() as u32).to_le_bytes());
+    Ok(out)
+}
+
+/// The `.ARM.attributes` section of a 32-bit little-endian ARM relocatable:
+/// (its header's file offset, its contents' offset, its size).
+fn elf_attrs_header(obj: &[u8]) -> Result<(usize, usize, usize), String> {
+    let rd16 = |o: usize| -> Result<u16, String> {
+        obj.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]])).ok_or_else(|| format!("object truncated at offset {o}"))
+    };
+    let rd32 = |o: usize| -> Result<u32, String> {
+        obj.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).ok_or_else(|| format!("object truncated at offset {o}"))
+    };
+    if obj.len() < 52 || &obj[0..4] != b"\x7fELF" {
+        return Err("not an ELF object".to_string());
+    }
+    if obj[4] != 1 {
+        return Err("not a 32-bit ELF object".to_string());
+    }
+    if obj[5] != 1 {
+        return Err("not a little-endian ELF object".to_string());
+    }
+    if rd16(16)? != 1 {
+        return Err("not a relocatable (ET_REL) object".to_string());
+    }
+    if rd16(18)? != 40 {
+        return Err("not an ARM object".to_string());
+    }
+    let shoff = rd32(32)? as usize;
+    let shentsize = rd16(46)? as usize;
+    let shnum = rd16(48)? as usize;
+    let shstrndx = rd16(50)? as usize;
+    if shentsize < 40 || shnum == 0 || shstrndx >= shnum {
+        return Err("section header table malformed".to_string());
+    }
+    let sh = |i: usize, field: usize| rd32(shoff + i * shentsize + field);
+    let str_off = sh(shstrndx, 16)? as usize;
+    let str_size = sh(shstrndx, 20)? as usize;
+    let strtab = obj.get(str_off..str_off + str_size).ok_or_else(|| "section name table outside the file".to_string())?;
+    let mut found: Option<usize> = None;
+    for i in 0..shnum {
+        let name_off = sh(i, 0)? as usize;
+        let name: &[u8] = strtab.get(name_off..).map(|s| s.split(|&c| c == 0).next().unwrap_or(&[])).unwrap_or(&[]);
+        if name == b".ARM.attributes" {
+            if sh(i, 4)? != 0x7000_0003 {
+                return Err("the .ARM.attributes section's type is not SHT_ARM_ATTRIBUTES".to_string());
+            }
+            if found.is_some() {
+                return Err("two .ARM.attributes sections".to_string());
+            }
+            found = Some(i);
+        }
+    }
+    let i = found.ok_or_else(|| "no .ARM.attributes section".to_string())?;
+    Ok((shoff + i * shentsize, sh(i, 16)? as usize, sh(i, 20)? as usize))
+}
+
+/// The `.ARM.attributes` contents of an object, for the selfcheck.
+fn attrs_section(obj: &[u8]) -> Option<Vec<u8>> {
+    let (_, off, size) = elf_attrs_header(obj).ok()?;
+    obj.get(off..off + size).map(|b| b.to_vec())
+}
+
+/// The file form: `post` written from `pre` with the donor applied; the
+/// pre-object's sha256 and the donor's length returned for the transcript.
+fn attrs_update_file(pre: &Path, donor: &Path, post: &Path) -> Result<(String, usize), String> {
+    let pre_bytes = std::fs::read(pre).map_err(|e| format!("{} unreadable: {e}", pre.display()))?;
+    let donor_bytes = std::fs::read(donor).map_err(|e| format!("{} unreadable: {e}", donor.display()))?;
+    if donor_bytes.is_empty() {
+        return Err(format!("{} is empty", donor.display()));
+    }
+    let out = attrs_update(&pre_bytes, &donor_bytes)?;
+    let _ = std::fs::remove_file(post);
+    std::fs::write(post, &out).map_err(|e| format!("{} unwritable: {e}", post.display()))?;
+    Ok((sha256_hex(&pre_bytes), donor_bytes.len()))
+}
+
+/// True when the operand text names a double register above d15: a `d`
+/// followed by 16..31, delimited by non-word characters.
+fn names_high_double(operands: &str) -> bool {
+    let b = operands.as_bytes();
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'd' && (i == 0 || !is_word(b[i - 1])) {
+            let mut j = i + 1;
+            let mut n: u32 = 0;
+            let mut digits = 0;
+            while j < b.len() && b[j].is_ascii_digit() && digits < 3 {
+                n = n * 10 + u32::from(b[j] - b'0');
+                j += 1;
+                digits += 1;
+            }
+            if digits > 0 && (j >= b.len() || !is_word(b[j])) && (16..=31).contains(&n) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The d32 census over a disassembly (the A-profile decode with the
+/// mapping symbols honoured): every function naming a double register
+/// above d15 in an instruction's OPERANDS, with its site count. A decode
+/// line is `<address>: <bytes><TAB><mnemonic><TAB><operands>`; an address
+/// or a byte column never counts.
+fn d32_census(dis: &str) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    let mut cur = String::from("<?>");
+    for line in dis.lines() {
+        let t = line.trim_end_matches('\r');
+        if t.ends_with(">:") && t.starts_with(|c: char| c.is_ascii_hexdigit()) {
+            if let Some(p) = t.find(" <") {
+                cur = t[p + 1..].to_string();
+                continue;
+            }
+        }
+        let mut fields = t.split('\t');
+        let _addr_bytes = fields.next();
+        let _mnemonic = fields.next();
+        let operands = fields.next().unwrap_or("");
+        if names_high_double(operands) {
+            match out.iter_mut().find(|(f, _)| f == &cur) {
+                Some(e) => e.1 += 1,
+                None => out.push((cur.clone(), 1)),
+            }
+        }
+    }
+    out
+}
+
+/// The section names of a GNU-style section table dump
+/// (`llvm-readobj --elf-output-style=GNU --sections`), by index.
+fn section_names(sections: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for line in sections.lines() {
+        let t = line.trim_start();
+        if !t.starts_with('[') {
+            continue;
+        }
+        let Some(close) = t.find(']') else {
+            continue;
+        };
+        let idx: usize = match t[1..close].trim().parse() {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        let rest = t[close + 1..].trim_start();
+        let name = rest.split_whitespace().next().unwrap_or("");
+        if !name.is_empty() && name != "NULL" {
+            out.push((idx, name.to_string()));
+        }
+    }
+    out
+}
+
+/// The ARM-state regions of an object, by section name: from each `$a`
+/// mapping symbol to the next mapping symbol of its section (or the
+/// section's end). The Thumb decode of those bytes is meaningless, so the
+/// census walks them with the ARM decode and everything else with the
+/// Thumb decode.
+fn arm_regions(syms: &str, sections: &str) -> Vec<(String, u64, u64)> {
+    let names = section_names(sections);
+    let mut mapping: Vec<(usize, u64, char)> = Vec::new();
+    for line in syms.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() >= 8 && (f[7] == "$a" || f[7] == "$t" || f[7] == "$d") {
+            if let (Ok(v), Ok(n)) = (u64::from_str_radix(f[1], 16), f[6].parse::<usize>()) {
+                mapping.push((n, v, f[7].as_bytes()[1] as char));
+            }
+        }
+    }
+    mapping.sort();
+    let mut out = Vec::new();
+    for (i, (n, v, k)) in mapping.iter().enumerate() {
+        if *k != 'a' {
+            continue;
+        }
+        let end = mapping[i + 1..].iter().find(|(n2, _, _)| n2 == n).map(|(_, v2, _)| *v2).unwrap_or(u64::MAX);
+        let name = names.iter().find(|(idx, _)| idx == n).map(|(_, s)| s.clone()).unwrap_or_default();
+        out.push((name, *v, end));
+    }
+    out
+}
+
+/// One decode line's address and its region membership: the line is
+/// `<address>: <bytes><TAB><mnemonic><TAB><operands>` under a
+/// section header line the reader prints (its name the last word).
+fn in_arm_region(section: &str, addr_bytes: &str, regions: &[(String, u64, u64)]) -> Option<bool> {
+    let addr = u64::from_str_radix(addr_bytes.trim_start().split(':').next().unwrap_or(""), 16).ok()?;
+    Some(regions.iter().any(|(s, lo, hi)| s == section && addr >= *lo && addr < *hi))
+}
+
+/// The d32 census over a disassembly restricted by the ARM-state regions:
+/// `inside` counts only the instructions inside them (the ARM decode),
+/// otherwise only the instructions outside them (the Thumb decode).
+fn d32_census_regions(dis: &str, regions: &[(String, u64, u64)], inside: bool) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    let mut cur = String::from("<?>");
+    let mut section = String::new();
+    for line in dis.lines() {
+        let t = line.trim_end_matches('\r');
+        if t.starts_with("Disassembly") && t.contains(" of section ") {
+            section = t.rsplit(' ').next().unwrap_or("").trim_end_matches(':').to_string();
+            continue;
+        }
+        if t.ends_with(">:") && t.starts_with(|c: char| c.is_ascii_hexdigit()) {
+            if let Some(p) = t.find(" <") {
+                cur = t[p + 1..].to_string();
+                continue;
+            }
+        }
+        let mut fields = t.split('\t');
+        let addr_bytes = fields.next().unwrap_or("");
+        let _mnemonic = fields.next();
+        let operands = fields.next().unwrap_or("");
+        let Some(in_arm) = in_arm_region(&section, addr_bytes, regions) else {
+            continue;
+        };
+        if in_arm != inside {
+            continue;
+        }
+        if names_high_double(operands) {
+            match out.iter_mut().find(|(f, _)| f == &cur) {
+                Some(e) => e.1 += 1,
+                None => out.push((cur.clone(), 1)),
+            }
+        }
+    }
+    out
+}
+
+/// The double-precision sites of a disassembly outside the ARM-state
+/// regions (the Thumb decode; the regions are hand-written assembly).
+fn f64_census_regions(dis: &str, regions: &[(String, u64, u64)]) -> usize {
+    let mut n = 0usize;
+    let mut section = String::new();
+    for line in dis.lines() {
+        let t = line.trim_end_matches('\r');
+        if t.starts_with("Disassembly") && t.contains(" of section ") {
+            section = t.rsplit(' ').next().unwrap_or("").trim_end_matches(':').to_string();
+            continue;
+        }
+        let mut fields = t.split('\t');
+        let addr_bytes = fields.next().unwrap_or("");
+        let mnemonic = fields.next().unwrap_or("");
+        if in_arm_region(&section, addr_bytes, regions) == Some(false) && mnemonic.contains(".f64") {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// The d32 census against its pin: every function counted must be one of
+/// the pinned assembly functions with exactly one site, and the pinned
+/// pair must be whole when `expect_pinned` (the merged objects and the
+/// archive set carry the pair; the closure carries none).
+fn d32_fault(census: &[(String, usize)], expect_pinned: bool) -> Option<String> {
+    for (f, n) in census {
+        let name = f.trim_start_matches('<').trim_end_matches(':').trim_end_matches('>');
+        if !D32_PINNED.contains(&name) {
+            return Some(format!("{f} names a double register above d15 ({n} site(s)) and is not the pinned assembly pair -- the Cortex-M7's FPU has sixteen"));
+        }
+        if *n != 1 {
+            return Some(format!("{f} names d16-d31 at {n} sites, the pin is one"));
+        }
+    }
+    let want = if expect_pinned { D32_PINNED.len() } else { 0 };
+    if census.len() != want {
+        return Some(format!("{} function(s) naming d16-d31, the pin is {want}", census.len()));
+    }
+    None
+}
+
+/// The double-precision sites of a disassembly: every instruction whose
+/// mnemonic carries the `.f64` type.
+fn f64_census(dis: &str) -> usize {
+    dis.lines().filter(|l| l.split('\t').nth(1).map_or(false, |m| m.contains(".f64"))).count()
+}
+
+/// The ARM-state mapping symbols of a GNU-style symbol table dump
+/// (`llvm-readobj --elf-output-style=GNU --symbols`): (value, section
+/// index) of every `$a`.
+fn arm_mode_symbols(syms: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in syms.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() >= 8 && f[7] == "$a" {
+            out.push((f[1].to_string(), f[6].to_string()));
+        }
+    }
+    out
+}
+
+/// The function symbols at a (value, section index) of the same dump.
+fn funcs_at(syms: &str, value: &str, ndx: &str) -> Vec<String> {
+    syms.lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() >= 8 && f[3] == "FUNC" && f[1] == value && f[6] == ndx {
+                Some(f[7].to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// The ARM-state census against the pin: exactly `want` mapping symbols,
+/// each at a pinned function's address.
+fn arm_mode_fault(arm: &[(String, String)], syms: &str, want: usize) -> Option<String> {
+    if arm.len() != want {
+        return Some(format!("ARM-state mapping symbols {}, the pin is {want} (Cortex-M executes Thumb only)", arm.len()));
+    }
+    for (v, n) in arm {
+        let fs = funcs_at(syms, v, n);
+        if !fs.iter().any(|f| ARM_MODE_PINNED.contains(&f.as_str())) {
+            return Some(format!("an ARM-state mapping symbol at {v} (section {n}) with no pinned function there: [{}]", fs.join(" ")));
+        }
+    }
+    None
+}
+
+/// The suite's capture with the host's activation count set to zero (the
+/// delivery-suppressed control's input).
+fn zero_delivery(raw: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(raw);
+    let Some(p) = text.find(ACTIVATIONS_LINE) else {
+        return raw.to_vec();
+    };
+    let start = p + ACTIVATIONS_LINE.len();
+    let end = start + text[start..].chars().take_while(|c| c.is_ascii_digit()).count();
+    format!("{}0{}", &text[..start], &text[end..]).into_bytes()
 }
 
 /// The sorted undefined-name list against the frozen list, exactly.
@@ -866,20 +1259,17 @@ impl Rt {
     fn control_attrs(&mut self, facts: &RustcFacts) {
         let case = "rt.merge-attrs-control";
         println!("== case {case} (negative control) ==");
-        let objcopy = match llvm_tool(facts, "llvm-objcopy") {
-            Ok(p) => p,
-            Err(e) => self.fail(case, &e),
-        };
         let readobj = match llvm_tool(facts, "llvm-readobj") {
             Ok(p) => p,
             Err(e) => self.fail(case, &e),
         };
         let copy = self.out.join("merged-attrs-control.o");
         let blob = self.frozen(CONTROL_ATTRS);
-        let update = format!(".ARM.attributes={}", blob.to_string_lossy());
-        let src = self.frozen(MERGED).to_string_lossy().into_owned();
+        let src = self.frozen(MERGED);
+        if let Err(e) = attrs_update_file(&src, &blob, &copy) {
+            self.fail(case, &format!("the control's attributes update failed: {e}"));
+        }
         let dst = copy.to_string_lossy().into_owned();
-        let _ = self.tool_text(&objcopy, case, &["--update-section", &update, &src, &dst], "attrs-control.objcopy.txt");
         let attrs = self.tool_text(&readobj, case, &["--arch-specific", &dst], "attrs-control.attrs.txt");
         let broke = "the archives' application-profile attributes applied to a copy of the merged object";
         match attrs_fault(&attrs) {
@@ -896,7 +1286,7 @@ impl Rt {
     fn control_set(&mut self) {
         let case = "rt.merge-set-control";
         println!("== case {case} (negative control) ==");
-        let doctored = self.manifest_text.replace(&format!("archives: {ARCHIVE_SET} "), "archives: p7-shipped-sgc-disabled ");
+        let doctored = self.manifest_text.replace(&format!("archives: {ARCHIVE_SET} "), "archives: p7-rhu-cortex-m7-sgc-disabled ");
         if doctored == self.manifest_text {
             self.fail(case, "the control could not doctor the manifest's archives line");
         }
@@ -1376,8 +1766,8 @@ impl Rt {
     /// The suite: the frozen suite merge linked by the rt.link line in the
     /// an500 image's place, then booted -- every section's verdict line in
     /// order, the summary last, the payload stream equal to its golden,
-    /// the host's activation count at exit read and reported (no floor
-    /// while the activation section is parked). Returns the raw
+    /// the host's activation count at exit read against its floor (one
+    /// delivery per collection of the activation section). Returns the raw
     /// capture for the break-class control.
     fn case_suite(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path, abi: u32) -> Vec<u8> {
         let case = "rt.suite";
@@ -1513,10 +1903,124 @@ impl Rt {
         let stats = format!("{{\"stream_lines\":{lines},\"markers\":{},\"activations\":{activations},\"activations_floor\":{ACTIVATIONS_FLOOR}}}", SUITE_MARKERS.len());
         self.pass_image(case, 0, &path_rel, &sha, Some(SUITE_GOLDEN), &stats);
         println!(
-            "== case {case}: PASS (exit 0; the payload stream equals its golden, {lines} lines with the verdict last; {} markers IN ORDER incl. eight section verdicts; the host reports {activations} activations delivered (report-only at floor {ACTIVATIONS_FLOOR}: the activation section is parked); then the kernel's return line) ==",
+            "== case {case}: PASS (exit 0; the payload stream equals its golden, {lines} lines with the verdict last; {} markers IN ORDER incl. ten section verdicts; the host reports {activations} activations delivered (at least {ACTIVATIONS_FLOOR}: one per collection of the activation section); then the kernel's return line) ==",
             SUITE_MARKERS.len()
         );
         raw
+    }
+
+    /// rt.census: the M-profile facts over the frozen merged objects, the
+    /// closure and the linked images (the module doc's paragraph).
+    fn case_census(&mut self, facts: &RustcFacts) {
+        let case = "rt.census";
+        println!("== case {case}: no compiled function naming a double register above d15 in the merged objects and the closure (the pinned assembly pair the only ones); the ARM-state code exactly the pinned pair; the double-precision sites counted ==");
+        let objdump = match llvm_tool(facts, "llvm-objdump") {
+            Ok(p) => p,
+            Err(e) => self.fail(case, &e),
+        };
+        let readobj = match llvm_tool(facts, "llvm-readobj") {
+            Ok(p) => p,
+            Err(e) => self.fail(case, &e),
+        };
+        let mut f64_total = 0usize;
+        let mut parts: Vec<String> = Vec::new();
+        for (name, arm_want) in [(MERGED, ARM_MODE_PINNED_COUNT), (SUITE_MERGED, ARM_MODE_PINNED_COUNT), (LIBC, 0usize)] {
+            let path = self.frozen(name).to_string_lossy().into_owned();
+            let syms = self.tool_text(&readobj, case, &["--elf-output-style=GNU", "--symbols", &path], &format!("census-{name}.syms.txt"));
+            let sections = self.tool_text(&readobj, case, &["--elf-output-style=GNU", "--sections", &path], &format!("census-{name}.sections.txt"));
+            let regions = arm_regions(&syms, &sections);
+            let dis_t = self.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE, CENSUS_MATTR, &path], &format!("census-{name}.dis.txt"));
+            let thumb = d32_census_regions(&dis_t, &regions, false);
+            if !thumb.is_empty() {
+                let sites: usize = thumb.iter().map(|(_, n)| n).sum();
+                self.fail(
+                    case,
+                    &format!("{name}: {} compiled function(s) name a double register above d15 ({sites} sites; the first: {} with {}) -- the Cortex-M7's FPU has sixteen", thumb.len(), thumb[0].0, thumb[0].1),
+                );
+            }
+            let asm = if regions.is_empty() {
+                Vec::new()
+            } else {
+                let dis_a = self.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE_ARM, CENSUS_MATTR, &path], &format!("census-{name}.dis-arm.txt"));
+                d32_census_regions(&dis_a, &regions, true)
+            };
+            if let Some(f) = d32_fault(&asm, name != LIBC) {
+                self.fail(case, &format!("{name}: {f}"));
+            }
+            let f64 = f64_census_regions(&dis_t, &regions);
+            f64_total += f64;
+            let arm = arm_mode_symbols(&syms);
+            if let Some(f) = arm_mode_fault(&arm, &syms, arm_want) {
+                self.fail(case, &format!("{name}: {f}"));
+            }
+            println!(
+                "  {name}: compiled functions naming d16-d31: 0; the ARM-state assembly naming them: {} (the pinned pair, one site each); double-precision sites: {f64}; ARM-state regions: {}; ARM-state mapping symbols: {} ({})",
+                asm.len(),
+                regions.len(),
+                arm.len(),
+                if arm.is_empty() { "none" } else { "the pinned libunwind pair" }
+            );
+            parts.push(format!("\"{name}\":{{\"d32_compiled\":0,\"d32_pinned_asm\":{},\"f64_sites\":{f64},\"arm_mode\":{}}}", asm.len(), arm.len()));
+        }
+        for img in ["rt-link.elf", "rt-suite.elf"] {
+            let p = self.out.join(img);
+            if !p.is_file() {
+                self.fail(case, &format!("{img} is not on disk (the link cases run first)"));
+            }
+            let ps = p.to_string_lossy().into_owned();
+            let syms = self.tool_text(&readobj, case, &["--elf-output-style=GNU", "--symbols", &ps], &format!("census-{img}.syms.txt"));
+            let arm = arm_mode_symbols(&syms);
+            if let Some(f) = arm_mode_fault(&arm, &syms, ARM_MODE_PINNED_COUNT) {
+                self.fail(case, &format!("{img}: {f}"));
+            }
+            println!("  {img}: ARM-state mapping symbols: {} (the pinned libunwind pair, linked in, reached by nothing the images run)", arm.len());
+            parts.push(format!("\"{img}\":{{\"arm_mode\":{}}}", arm.len()));
+        }
+        let stats = format!("{{{}}}", parts.join(","));
+        self.pass(case, "positive", "", &stats);
+        println!("== case {case}: PASS (no compiled function naming d16-d31 in the merged objects or the closure, the two pinned assembly functions the only ones; {f64_total} double-precision sites over the three; the ARM-state code exactly the pinned pair in the merged objects and both images) ==");
+    }
+
+    /// The census control: the frozen object carrying one function that
+    /// names registers above d15 must be refused by the census.
+    fn control_census(&mut self, facts: &RustcFacts) {
+        let case = "rt.census-control";
+        println!("== case {case} (negative control): the frozen object with one function naming d16-d31 offered to the census ==");
+        let objdump = match llvm_tool(facts, "llvm-objdump") {
+            Ok(p) => p,
+            Err(e) => self.fail(case, &e),
+        };
+        let path = self.frozen(CONTROL_D32).to_string_lossy().into_owned();
+        let dis = self.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE, CENSUS_MATTR, &path], "census-control.dis.txt");
+        let d32 = d32_census(&dis);
+        let broke = "a function compiled for the 32-double register file, naming registers above d15";
+        let fault = match d32_fault(&d32, false) {
+            Some(f) => f,
+            None => self.fail_control(case, broke, "the census read NO unpinned site naming d16-d31 in the control object"),
+        };
+        let sites: usize = d32.iter().map(|(_, n)| n).sum();
+        println!("  refused as designed: {} function(s), {sites} sites naming d16-d31 -- {fault}", d32.len());
+        self.pass(case, "negative", broke, "");
+        println!("  PASS (control)");
+    }
+
+    /// The delivery control: the suite's capture with its activation count
+    /// set to zero must refuse at the floor (a host that delivered no
+    /// activation could not have suspended a running worker).
+    fn control_suite_delivery(&mut self, raw: &[u8]) {
+        let case = "rt.suite-delivery-control";
+        println!("== case {case} (negative control): the suite's capture with its activation count set to zero ==");
+        let broke = "the suite's capture with the host's activation count set to zero (delivery suppressed on the wire)";
+        let doctored = zero_delivery(raw);
+        if doctored == raw {
+            self.fail(case, "the control could not doctor the capture (the activation line is absent)");
+        }
+        if activation_count(&doctored, ACTIVATIONS_FLOOR).is_ok() {
+            self.fail_control(case, broke, "a capture reporting zero activations was ACCEPTED at the floor");
+        }
+        println!("  refused as designed: zero activations delivered is below the floor of {ACTIVATIONS_FLOOR}");
+        self.pass(case, "negative", broke, "");
+        println!("  PASS (control)");
     }
 
     /// The suite golden control: the golden with its verdict's GOOD changed
@@ -1610,7 +2114,7 @@ pub fn run(repo: &Path) -> ! {
             exit(1);
         }
     };
-    let (qemu, qemu_v) = match resolve_qemu() {
+    let (qemu, qemu_v) = match resolve_qemu(repo) {
         Ok(q) => q,
         Err(e) => {
             println!("rhu-gate: {e}");
@@ -1641,6 +2145,9 @@ pub fn run(repo: &Path) -> ! {
     let suite_raw = rt.case_suite(&facts, &ld, &qemu, abi);
     rt.control_suite_golden();
     rt.control_suite_break(&suite_raw);
+    rt.control_suite_delivery(&suite_raw);
+    rt.case_census(&facts);
+    rt.control_census(&facts);
     for p in PENDING {
         println!("   pending (unarmed, not counted): {p}");
     }
@@ -1653,7 +2160,7 @@ pub fn run(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "{DISPLAY}: PASS (14/14 cases incl. 7 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        "{DISPLAY}: PASS (17/17 cases incl. 9 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
         PENDING.len(),
         INTERNAL_CASES.len(),
         qemu_v,
@@ -1772,7 +2279,6 @@ pub fn rederive(repo: &Path) -> ! {
         println!("RT REDERIVE: NOT RUN (the toolchain's C library is not resolved: set RHU_NEWLIB or write tools/toolchains/newlib.local)");
         exit(1);
     };
-    let donor_update = format!(".ARM.attributes={}", rt.frozen(DONOR).to_string_lossy());
 
     let case = "rt.rederive-surgery";
     println!("== case {case}: the startup member printed out of {SURGERY_ARCHIVE} at {dir} and its cookie section renamed ==");
@@ -1823,9 +2329,11 @@ pub fn rederive(repo: &Path) -> ! {
             Ok(false) => rt.fail(case, &format!("the merge ({tag}) failed (see {})", log_e.display())),
             Err(e) => rt.fail(case, &e),
         }
-        let pre_s = pre.to_string_lossy().into_owned();
-        let post_s = post.to_string_lossy().into_owned();
-        let _ = rt.tool_text(&objcopy, case, &["--update-section", &donor_update, &pre_s, &post_s], &format!("rederive-{tag}.objcopy.txt"));
+        let donor = rt.frozen(DONOR);
+        match attrs_update_file(&pre, &donor, &post) {
+            Ok((pre_sha, n)) => println!("  {tag}: the linker's product (the pre-object) sha256 {pre_sha}; the attributes update applied by the runner ({n}-byte donor)"),
+            Err(e) => rt.fail(case, &format!("the attributes update failed ({tag}): {e}")),
+        }
         post
     };
     let post = merge(&mut rt, PAYLOAD, "libstandalonegc-enabled.a", "enabled");
@@ -1891,9 +2399,11 @@ pub fn rederive(repo: &Path) -> ! {
         Ok(false) => rt.fail(case, &format!("the closure merge failed (see {})", log_e.display())),
         Err(e) => rt.fail(case, &e),
     }
-    let pre_s = pre.to_string_lossy().into_owned();
-    let post_s = post.to_string_lossy().into_owned();
-    let _ = rt.tool_text(&objcopy, case, &["--update-section", &donor_update, &pre_s, &post_s], "rederive-libc.objcopy.txt");
+    let donor = rt.frozen(DONOR);
+    match attrs_update_file(&pre, &donor, &post) {
+        Ok((pre_sha, n)) => println!("  the linker's product (the pre-object) sha256 {pre_sha}; the attributes update applied by the runner ({n}-byte donor)"),
+        Err(e) => rt.fail(case, &format!("the attributes update failed (libc): {e}")),
+    }
     let got = sha256_file(&post).unwrap_or_default();
     let want = rt.record_sha(LIBC);
     if got != want {
@@ -1901,6 +2411,75 @@ pub fn rederive(repo: &Path) -> ! {
     }
     println!("  {} members printed out of the archives and re-merged in the list's order; byte-identical to goldens/rt/{LIBC} ({}...)", members.members.len(), &want[..16]);
     rt.pass(case, "positive", "", &format!("{{\"libc_sha\":\"{want}\",\"members\":{}}}", members.members.len()));
+    println!("  PASS");
+
+    let case = "rt.rederive-census";
+    println!("== case {case}: every member of the five archives at {dir} decoded -- no compiled function naming a double register above d15 (the pinned assembly pair the only ones); the ARM-state code exactly the pinned pair ==");
+    let objdump = match llvm_tool(&facts, "llvm-objdump") {
+        Ok(p) => p,
+        Err(e) => rt.fail(case, &e),
+    };
+    let readobj = match llvm_tool(&facts, "llvm-readobj") {
+        Ok(p) => p,
+        Err(e) => rt.fail(case, &e),
+    };
+    let mut arm_all: Vec<String> = Vec::new();
+    let mut d32_all: Vec<String> = Vec::new();
+    let mut f64_total = 0usize;
+    for a in MERGE_ARCHIVES {
+        let archive_path = format!("{dir}/{a}");
+        let listing = rt.tool_text(&ar, case, &["t", &archive_path], &format!("census-{a}.members.txt"));
+        let members: Vec<String> = listing.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        let mut arm_here: Vec<String> = Vec::new();
+        let mut f64_here = 0usize;
+        for (i, m) in members.iter().enumerate() {
+            let p = rt.tool_bytes(&ar, case, &["p", &archive_path, m], &format!("census-{a}-{i:03}.o"));
+            let ps = p.to_string_lossy().into_owned();
+            let syms = rt.tool_text(&readobj, case, &["--elf-output-style=GNU", "--symbols", &ps], &format!("census-{a}-{i:03}.syms.txt"));
+            let sections = rt.tool_text(&readobj, case, &["--elf-output-style=GNU", "--sections", &ps], &format!("census-{a}-{i:03}.sections.txt"));
+            let regions = arm_regions(&syms, &sections);
+            let dis_t = rt.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE, CENSUS_MATTR, &ps], &format!("census-{a}-{i:03}.dis.txt"));
+            let thumb = d32_census_regions(&dis_t, &regions, false);
+            if !thumb.is_empty() {
+                let sites: usize = thumb.iter().map(|(_, n)| n).sum();
+                rt.fail(case, &format!("{a}({m}): {} compiled function(s) name a double register above d15 ({sites} sites; the first: {} with {}) -- the Cortex-M7 class set carries none", thumb.len(), thumb[0].0, thumb[0].1));
+            }
+            if !regions.is_empty() {
+                let dis_a = rt.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE_ARM, CENSUS_MATTR, &ps], &format!("census-{a}-{i:03}.dis-arm.txt"));
+                for (f, n) in d32_census_regions(&dis_a, &regions, true) {
+                    let name = f.trim_start_matches('<').trim_end_matches(':').trim_end_matches('>').to_string();
+                    if !D32_PINNED.contains(&name.as_str()) || n != 1 {
+                        rt.fail(case, &format!("{a}({m}): {f} names a double register above d15 in ARM state ({n} site(s)) and is not the pinned assembly pair -- the Cortex-M7 class set carries no other"));
+                    }
+                    d32_all.push(format!("{m}: {name}"));
+                }
+            }
+            f64_here += f64_census_regions(&dis_t, &regions);
+            for (v, n) in arm_mode_symbols(&syms) {
+                let fs = funcs_at(&syms, &v, &n);
+                if !fs.iter().any(|f| ARM_MODE_PINNED.contains(&f.as_str())) {
+                    rt.fail(case, &format!("{a}({m}): an ARM-state mapping symbol at {v} (section {n}) with no pinned function there: [{}]", fs.join(" ")));
+                }
+                arm_here.push(format!("{m}: {}", fs.join("/")));
+            }
+        }
+        println!(
+            "  {a}: {} members; compiled functions naming d16-d31: 0; double-precision sites: {f64_here}; ARM-state mapping symbols: {} [{}]",
+            members.len(),
+            arm_here.len(),
+            arm_here.join("; ")
+        );
+        f64_total += f64_here;
+        arm_all.extend(arm_here);
+    }
+    if arm_all.len() != ARM_MODE_PINNED_COUNT {
+        rt.fail(case, &format!("ARM-state mapping symbols over the set: {}, the pin is {ARM_MODE_PINNED_COUNT}", arm_all.len()));
+    }
+    if d32_all.len() != D32_PINNED.len() {
+        rt.fail(case, &format!("functions naming d16-d31 over the set: {} [{}], the pin is the assembly pair", d32_all.len(), d32_all.join("; ")));
+    }
+    println!("  the pinned assembly pair naming d16-d31: [{}]", d32_all.join("; "));
+    rt.pass(case, "positive", "", &format!("{{\"archives\":{},\"d32_compiled\":0,\"d32_pinned_asm\":{},\"f64_sites\":{f64_total},\"arm_mode\":{}}}", MERGE_ARCHIVES.len(), d32_all.len(), arm_all.len()));
     println!("  PASS");
 
     let ccase = "rt.rederive-selector-control";
@@ -1928,10 +2507,35 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "RT REDERIVE: PASS (4/4 frozen objects re-derived byte-identical: the surgery object, the two merged objects, the closure; the archive set and the kit's libraries tie the frozen identities; selector control refused)  [{}]",
+        "RT REDERIVE: PASS (4/4 frozen objects re-derived byte-identical: the surgery object, the two merged objects, the closure; the archive set and the kit's libraries tie the frozen identities; the set censused: no compiled function naming d16-d31, the ARM-state code the pinned pair; selector control refused)  [{}]",
         ld.version
     );
     exit(0);
+}
+
+/// `rhu-gate rt attrs <pre> <donor> <out>`: the runner's own attributes
+/// update for the freeze -- the same bytes the rederive leg produces.
+pub fn attrs(_repo: &Path, args: &[String]) -> ! {
+    if args.len() != 3 {
+        println!("usage: rhu-gate rt attrs <pre-object> <donor-blob> <out-object>");
+        exit(2);
+    }
+    let (pre, donor, out) = (Path::new(&args[0]), Path::new(&args[1]), Path::new(&args[2]));
+    match attrs_update_file(pre, donor, out) {
+        Ok((pre_sha, n)) => {
+            let out_sha = sha256_file(out).unwrap_or_default();
+            println!(
+                "rt attrs: {} written -- the .ARM.attributes section replaced by the {n}-byte donor {}; pre-object sha256 {pre_sha}; result sha256 {out_sha}",
+                out.display(),
+                donor.display()
+            );
+            exit(0);
+        }
+        Err(e) => {
+            println!("rt attrs: REFUSED -- {e}");
+            exit(1);
+        }
+    }
 }
 
 pub fn selfcheck(repo: &Path) -> ! {
@@ -1979,10 +2583,10 @@ pub fn selfcheck(repo: &Path) -> ! {
     let missing: Vec<String> = ["a", "c"].iter().map(|s| s.to_string()).collect();
     sc.probe("undef-missing", "an undefined set with one VANISHED name must be refused", undef_fault(&missing, &want).is_none());
 
-    let manifest = "# goldens/rt\n\narchives: p7-shipped-sgc-enabled abcd\n\n- `goldens/rt/x.o`\n  `0000000000000000000000000000000000000000000000000000000000000000`\n";
-    let set_file = "set-id: p7-shipped-sgc-enabled\narchive libRuntime.WorkstationGC.a 1 ff\narchives-sha256: abcd\n";
+    let manifest = "# goldens/rt\n\narchives: p7-rhu-cortex-m7-sgc-enabled abcd\n\n- `goldens/rt/x.o`\n  `0000000000000000000000000000000000000000000000000000000000000000`\n";
+    let set_file = "set-id: p7-rhu-cortex-m7-sgc-enabled\narchive libRuntime.WorkstationGC.a 1 ff\narchives-sha256: abcd\n";
     sc.accept_probe("set-genuine", "a manifest and set file naming the consumed set with equal shas accepted", set_fault(manifest, set_file, ARCHIVE_SET).is_none());
-    sc.probe("set-other-id", "a manifest naming another archive set must be refused", set_fault(&manifest.replace("p7-shipped-sgc-enabled", "p7-shipped-sgc-disabled"), set_file, ARCHIVE_SET).is_none());
+    sc.probe("set-other-id", "a manifest naming another archive set must be refused", set_fault(&manifest.replace("p7-rhu-cortex-m7-sgc-enabled", "p7-rhu-cortex-m7-sgc-disabled"), set_file, ARCHIVE_SET).is_none());
     sc.probe("set-sha-disagree", "a set file whose archives sha disagrees with the manifest must be refused", set_fault(manifest, &set_file.replace("archives-sha256: abcd", "archives-sha256: abce"), ARCHIVE_SET).is_none());
 
     let records: Vec<(String, String)> = FROZEN_FILES.iter().map(|(n, _)| (format!("goldens/rt/{n}"), "0".repeat(64))).collect();
@@ -2069,7 +2673,7 @@ pub fn selfcheck(repo: &Path) -> ! {
     let suite_swapped_capture: Vec<u8> = suite_swapped.join("\r\n").into_bytes();
     sc.probe("suite-order-swapped", "the threading section's verdict before the first section's", markers_out_of_order(&suite_swapped_capture, &SUITE_MARKERS).is_none());
     sc.accept_probe("activations-genuine", "an activation line at the floor accepted", activation_count(b"[host] activations delivered: 3\r\n", ACTIVATIONS_FLOOR).is_ok());
-    sc.probe("activations-below-floor", "an activation line below a floor of three must be refused (the mechanism; the shipped floor is 0 while the activation section is parked)", activation_count(b"[host] activations delivered: 0\r\n", 3).is_ok());
+    sc.probe("activations-below-floor", "an activation line below the floor of three must be refused", activation_count(b"[host] activations delivered: 0\r\n", 3).is_ok());
     sc.probe("activations-absent", "a capture without the activation line must be refused", activation_count(b"[host] exit: 0\r\n", ACTIVATIONS_FLOOR).is_ok());
     let suite_broken: Vec<u8> = String::from_utf8_lossy(&suite_ordered).replace("PASS rt-threads", "FAIL rt-threads").into_bytes();
     sc.probe("suite-break-forbidden", "a capture with one section's verdict turned FAIL must trip the forbidden sweep", !SUITE_FORBIDDEN.iter().any(|m| contains_fixed(&suite_broken, m)));
@@ -2077,6 +2681,42 @@ pub fn selfcheck(repo: &Path) -> ! {
 
     let manifest_short = manifest.replace("0000000000000000000000000000000000000000000000000000000000000000", "000000000000000000000000000000000000000000000000000000000000000");
     sc.probe("manifest-sha-malformed", "a manifest record whose sha is 63 hex digits must parse to fewer records (a drifted record set)", parse_vendored_manifest(&manifest_short).len() == parse_vendored_manifest(manifest).len());
+
+    let dis_hi = "00000000 <f>:\n       0: ec d1 7b 2b\tvldr\td17, [r1, #8]\n";
+    sc.accept_probe("census-sees-d17", "a decode naming d17 in its operands is counted", d32_census(dis_hi).len() == 1);
+    let dis_lo = "00000000 <f>:\n       0: ed 91 7b 02\tvldr\td7, [r1, #8]\n";
+    sc.accept_probe("census-passes-d7", "a decode naming d7 is not counted", d32_census(dis_lo).is_empty());
+    let dis_addr = "00000000 <f>:\n     d16: 2b 7b\tldr\tr3, [r7, #0x30]\n";
+    sc.accept_probe("census-ignores-address", "an instruction at address d16 is not a register name", d32_census(dis_addr).is_empty());
+    sc.probe("census-d17-as-clean", "a decode with a d16-d31 site offered as clean", d32_census(dis_hi).is_empty());
+    sc.probe("census-unpinned-function", "a compiled function naming d17 must be refused against the pin", d32_fault(&d32_census(dis_hi), false).is_none());
+    let dis_pinned = "00000000 <_ZN9libunwind13Registers_arm9saveVFPv3EPv>:\n       0: ec 80 0b 20\tvstmia\tr0, {d16, d17}\n00000004 <_ZN9libunwind13Registers_arm12restoreVFPv3EPv>:\n       4: ec 90 0b 20\tvldmia\tr0, {d16, d17}\n";
+    sc.accept_probe("census-pinned-pair", "the two pinned assembly functions with one site each pass the pin", d32_fault(&d32_census(dis_pinned), true).is_none());
+    let dis_pinned_twice = format!("{dis_pinned}       8: ec 90 0b 20\tvldmia\tr0, {{d18, d19}}\n");
+    sc.probe("census-pinned-second-site", "a pinned assembly function with a second site must be refused", d32_fault(&d32_census(&dis_pinned_twice), true).is_none());
+    let syms_map = "   Num:    Value  Size Type    Bind   Vis       Ndx Name\n     1: 00000010     0 NOTYPE  LOCAL  DEFAULT     1 $a\n     2: 00000020     0 NOTYPE  LOCAL  DEFAULT     1 $t\n     3: 00000000     0 NOTYPE  LOCAL  DEFAULT     1 $t\n";
+    let sections_map = "  [Nr] Name              Type            Address  Off    Size   ES Flg Lk Inf Al\n  [ 0]                   NULL            00000000 000000 000000 00      0   0  0\n  [ 1] .text             PROGBITS        00000000 000034 000100 00  AX  0   0  4\n";
+    let regions = arm_regions(syms_map, sections_map);
+    sc.accept_probe("census-arm-region-read", "one ARM-state region from an $a at 0x10 to the $t at 0x20 in .text", regions == vec![(".text".to_string(), 0x10, 0x20)]);
+    let dis_sec = format!("{} of section .text:\n\n00000000 <f>:\n       0: ec d1 7b 2b\tvldr\td17, [r1, #8]\n00000010 <g>:\n      10: ec d1 7b 2b\tvldr\td17, [r1, #8]\n", "Disassembly");
+    sc.accept_probe("census-regions-outside", "the Thumb walk counts the function outside the ARM-state region only", d32_census_regions(&dis_sec, &regions, false) == vec![("<f>:".to_string(), 1)]);
+    sc.accept_probe("census-regions-inside", "the ARM walk counts the function inside the ARM-state region only", d32_census_regions(&dis_sec, &regions, true) == vec![("<g>:".to_string(), 1)]);
+    let dis_f64 = "00000000 <f>:\n       0: ee 21 0b 01\tvmul.f64\td0, d1, d1\n       4: ee 20 0a 01\tvmul.f32\ts0, s0, s2\n";
+    sc.accept_probe("census-counts-f64", "a decode with one double-precision multiply counts one", f64_census(dis_f64) == 1);
+    let syms_arm = "   Num:    Value  Size Type    Bind   Vis       Ndx Name\n     1: 00000000     0 NOTYPE  LOCAL  DEFAULT     1 $a\n     2: 00000000     0 FUNC    LOCAL  DEFAULT     1 __unw_getcontext\n";
+    sc.accept_probe("arm-mode-seen", "a symbol table with one ARM-state mapping symbol at a pinned function reads one and passes the pin of one", arm_mode_fault(&arm_mode_symbols(syms_arm), syms_arm, 1).is_none());
+    let syms_thumb = syms_arm.replace("$a", "$t");
+    sc.accept_probe("arm-mode-none", "a symbol table with Thumb mapping symbols only reads zero", arm_mode_symbols(&syms_thumb).is_empty());
+    let syms_stray = syms_arm.replace("__unw_getcontext", "SomeOtherFunction");
+    sc.probe("arm-mode-unpinned", "an ARM-state mapping symbol at an unpinned function must be refused", arm_mode_fault(&arm_mode_symbols(&syms_stray), &syms_stray, 1).is_none());
+    let merged = std::fs::read(repo.join("goldens").join("rt").join(MERGED)).unwrap_or_default();
+    let donor = std::fs::read(repo.join("goldens").join("rt").join(DONOR)).unwrap_or_default();
+    let once = attrs_update(&merged, &donor);
+    let twice = attrs_update(&merged, &donor);
+    sc.accept_probe("attrs-update-deterministic", "the runner's attributes update gives the same bytes twice on the frozen merged object", once.is_ok() && once == twice);
+    sc.accept_probe("attrs-update-applied", "the updated object's .ARM.attributes section reads the donor's bytes", once.as_ref().ok().and_then(|o| attrs_section(o)) == Some(donor.clone()));
+    sc.probe("attrs-update-not-elf", "the attributes update must refuse a non-ELF input", attrs_update(b"not an object", &donor).is_ok());
+    sc.probe("delivery-zeroed", "the suite's capture with its activation count set to zero must be refused at the floor", activation_count(&zero_delivery(b"[host] activations delivered: 7\r\n"), ACTIVATIONS_FLOOR).is_ok());
 
     sc.finish("genuine inputs accepted");
 }

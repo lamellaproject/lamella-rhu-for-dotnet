@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 
@@ -247,6 +248,7 @@ internal static class Program
     }
 
     private static int s_shared;
+    private static readonly object s_lock = new object();
 
     private static void Section8Threads()
     {
@@ -257,20 +259,131 @@ internal static class Program
         {
             for (int i = 0; i < 5000; i++)
             {
-                Interlocked.Increment(ref s_shared);
+                lock (s_lock)
+                {
+                    s_shared++;
+                }
             }
         });
         t.Start();
         for (int i = 0; i < 5000; i++)
         {
-            Interlocked.Increment(ref s_shared);
+            lock (s_lock)
+            {
+                s_shared++;
+            }
         }
         bool joined = t.Join(30000);
         Check(joined, section, "worker joined");
         Check(s_shared == 10000, section, "shared counter " + s_shared);
         if (s_failures == before)
         {
-            Pass(section, "(one worker thread, 10000 interlocked increments)");
+            Pass(section, "(one worker thread, 10000 locked increments)");
+        }
+    }
+
+    private static volatile int s_stop;
+    private static int s_spins;
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Tick(int n)
+    {
+        Volatile.Write(ref s_spins, n);
+    }
+
+    private static int WaitForProgress(int above)
+    {
+        for (int i = 0; i < 200000; i++)
+        {
+            int v = Volatile.Read(ref s_spins);
+            if (v > above)
+            {
+                return v;
+            }
+            Thread.Yield();
+        }
+        return Volatile.Read(ref s_spins);
+    }
+
+    private static void Section9Activation()
+    {
+        const string section = "rt-activation";
+        int before = s_failures;
+        s_stop = 0;
+        s_spins = 0;
+        Thread t = new Thread(delegate ()
+        {
+            int n = 0;
+            while (s_stop == 0)
+            {
+                n++;
+                Tick(n);
+            }
+        });
+        t.Start();
+        int seen = WaitForProgress(0);
+        Check(seen > 0, section, "worker running before the first collection");
+        int startCount = GC.CollectionCount(0);
+        for (int round = 1; round <= 3; round++)
+        {
+            GC.Collect();
+            int after = WaitForProgress(seen);
+            Check(after > seen, section, "worker resumed after collection " + round);
+            seen = after;
+        }
+        int endCount = GC.CollectionCount(0);
+        Check(endCount >= startCount + 3, section, "collection count " + startCount + " to " + endCount);
+        s_stop = 1;
+        bool joined = t.Join(30000);
+        Check(joined, section, "worker joined");
+        if (s_failures == before)
+        {
+            Pass(section, "(a running worker suspended and resumed across three collections)");
+        }
+    }
+
+    private static readonly object s_gate = new object();
+    private static volatile int s_gateReached;
+    private static volatile int s_gatePassed;
+
+    private static void Section10Parked()
+    {
+        const string section = "rt-parked";
+        int before = s_failures;
+        s_gateReached = 0;
+        s_gatePassed = 0;
+        Monitor.Enter(s_gate);
+        Thread t = new Thread(delegate ()
+        {
+            s_gateReached = 1;
+            lock (s_gate)
+            {
+                s_gatePassed = 1;
+            }
+        });
+        t.Start();
+        for (int i = 0; i < 200000 && s_gateReached == 0; i++)
+        {
+            Thread.Yield();
+        }
+        Check(s_gateReached == 1, section, "worker reached the gate");
+        for (int i = 0; i < 2000; i++)
+        {
+            Thread.Yield();
+        }
+        int startCount = GC.CollectionCount(0);
+        GC.Collect();
+        GC.Collect();
+        int endCount = GC.CollectionCount(0);
+        Check(endCount >= startCount + 2, section, "collection count " + startCount + " to " + endCount);
+        Check(s_gatePassed == 0, section, "worker still parked after the collections");
+        Monitor.Exit(s_gate);
+        bool joined = t.Join(30000);
+        Check(joined, section, "worker joined");
+        Check(s_gatePassed == 1, section, "worker passed the gate after its release");
+        if (s_failures == before)
+        {
+            Pass(section, "(a worker parked on a held monitor across two collections, released and joined)");
         }
     }
 
@@ -285,6 +398,8 @@ internal static class Program
         Section6Time();
         Section7Dispatch();
         Section8Threads();
+        Section9Activation();
+        Section10Parked();
         if (s_failures != 0)
         {
             Console.WriteLine("RTSUITE: FAIL (" + s_failures + " checks)");

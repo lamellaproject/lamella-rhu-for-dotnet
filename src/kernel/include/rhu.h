@@ -190,6 +190,8 @@ int32_t rhu_thread_spawn(void (*entry)(void *), void *arg,
                          const char *name);
 void rhu_thread_exit(void);     /* runs dtors, frees TLS, never returns */
 int32_t rhu_thread_self(void);  /* the calling thread's tid */
+/* Give the CPU to every equal-or-more-urgent Ready peer: the switch is
+ * taken before this call returns (a synchronous scheduling point). */
 void rhu_thread_yield(void);
 
 /* A live thread's stack carve [*lo, *lo + *bytes), by tid, exactly as

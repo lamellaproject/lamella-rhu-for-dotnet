@@ -55,11 +55,28 @@ static __EXCEPTIONS: [Vector; 14] = [
 ];
 
 /// [16..) External IRQ lines -- the count is a board fact. Every line
-/// funnels: an unexpected interrupt is a loud fault report, not a spin.
+/// funnels: an unexpected interrupt is a loud fault report, not a spin --
+/// except the lines a board claims with its own handlers
+/// (`board::BOARD_IRQS`; an empty list on boards that claim none), folded
+/// into the table here at compile time.
 #[unsafe(link_section = ".vector_table.interrupts")]
 #[unsafe(no_mangle)]
-static __INTERRUPTS: [Vector; crate::board::NIRQ] =
-    [Vector { handler: ExceptionTrampoline }; crate::board::NIRQ];
+static __INTERRUPTS: [Vector; crate::board::NIRQ] = interrupts();
+
+/// The external-line table: the trampoline on every line, the board's own
+/// handlers on the lines it claims. A claimed line outside the table
+/// refuses to compile.
+const fn interrupts() -> [Vector; crate::board::NIRQ] {
+    let mut table = [Vector { handler: ExceptionTrampoline }; crate::board::NIRQ];
+    let mut i = 0;
+    while i < crate::board::BOARD_IRQS.len() {
+        let (line, handler) = crate::board::BOARD_IRQS[i];
+        assert!(line < crate::board::NIRQ, "a board interrupt handler names a line outside the vector table");
+        table[line] = Vector { handler };
+        i += 1;
+    }
+    table
+}
 
 global_asm!(
     r#"

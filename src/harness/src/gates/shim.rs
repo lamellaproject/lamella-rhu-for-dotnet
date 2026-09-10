@@ -1,10 +1,11 @@
 //! The shim gate on the runner: the hosting shim's gate family, running
 //! on FROZEN world objects and goldens (goldens/shim) -- the consumer
-//! story is Rust + QEMU only, and the C compile lives behind the frozen
-//! boundary on the internal rederive leg.
+//! story is Rust + QEMU only; the shim's C compile happens once, on the
+//! maintainer's re-derivation leg ('rhu-gate shim rederive'), and its
+//! objects are committed.
 
 use crate::gate::{write_fixture, Selfcheck};
-use crate::gates::gc::{parse_undefined, parse_vendored_manifest, resolve_gxx, resolve_ld, run_tool_bounded, ToolCmd};
+use crate::gates::gc::{parse_undefined, parse_vendored_manifest, resolve_clang, resolve_ld, run_tool_bounded, ToolCmd};
 use crate::results::{chain_json_from_env, validate_results, Results};
 use crate::sha256::sha256_file;
 use crate::text::{contains_fixed, cr_count, eq_lf_normalized, payload_stream, word_sym_present, word_sym_value};
@@ -19,19 +20,26 @@ const HOST: &str = "qemu-mps2-an500";
 const RUNNER: &str = "src/harness";
 const RUN_TIMEOUT_S: u64 = 120;
 
-/// The compile flag set of record for the shim's C: the pinned kit's g++
-/// driver running the C front end, the image ABI half (hard-float to
-/// match thumbv7em-none-eabihf), no C library assumed, every diagnostic
-/// an error, and the include closure (the shim, the board rows, rhu.h).
-const CC_FLAGS: [&str; 19] = [
+/// The compile flag set of record for the shim's C: clang, the compiler of
+/// record (the version the runtime archives at the pin
+/// were built with), running the C front end for the image ABI half --
+/// v7E-M, hard-float FPv5-D16, to match thumbv7em-none-eabihf -- with no
+/// implicit floating-point use (the activation costume carries no
+/// floating-point instruction, and the tier's census pins every object's
+/// count), no C library assumed, every diagnostic an error, and the
+/// include closure (the shim, the board rows, rhu.h); the kit's C-library
+/// headers are the sysroot the resolver appends.
+const CC_FLAGS: [&str; 21] = [
     "-x",
     "c",
     "-c",
     "-O2",
+    "--target=arm-none-eabi",
     "-mcpu=cortex-m7",
     "-mthumb",
     "-mfloat-abi=hard",
     "-mfpu=fpv5-d16",
+    "-mno-implicit-float",
     "-ffunction-sections",
     "-fdata-sections",
     "-ffreestanding",
@@ -48,7 +56,7 @@ const CC_FLAGS: [&str; 19] = [
 /// goldens/shim/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates objects + goldens + manifest + this pin
 /// together in one reviewed commit.
-const SHA_FROZEN_MANIFEST: &str = "0b0b63b986accee6478c0d120796af985330fd23fec88d3936b9014157ce066d";
+const SHA_FROZEN_MANIFEST: &str = "0a6b9c0ffd41f9159376c62e8a06bad2da01aad95364594246876220ae72f66c";
 
 /// The frozen-object plan of record: file name under goldens/shim/,
 /// source TU, extra defines beyond CC_FLAGS. The manifest's records must
@@ -90,10 +98,12 @@ const GOLDENS: [&str; 5] = [
 /// The core object's EXACT import closure: the kernel verbs it consumes
 /// (the activation pair since the costume, the module-find door since
 /// the address answer), the two arena-window link symbols, the in-image
-/// header the address answer reads, the compiler builtins and the 64-bit
+/// header the address answer reads, the compiler builtins (the zero-fill
+/// helper the compiler of record emits among them) and the 64-bit
 /// division helper (the loader-seam hooks are weak references, not
 /// imports, and stay outside the pin).
-const IMPORTS_CORE: [&str; 32] = [
+const IMPORTS_CORE: [&str; 33] = [
+    "__aeabi_memclr4",
     "__aeabi_uldivmod",
     "__rhu_arena_hi",
     "__rhu_arena_lo",
@@ -417,9 +427,10 @@ int rhu_newlib_header_probe;
 const NEWLIB_DOCTOR_FROM: &str = "#define RHU_NEWLIB_STREAM_LINEBUF 0x0001";
 const NEWLIB_DOCTOR_TO: &str = "#define RHU_NEWLIB_STREAM_LINEBUF 0x0200";
 
-/// The class-library order control: the generated runtime-entry header's
-/// unhandled-exception slot moved from 7 to 6 -- the index that slot has in
-/// a table laid out without the dispatch resolver, one slot shifted.
+/// The class-library order control: a doctored copy of the generated
+/// runtime-entry header whose unhandled-exception slot reads 6 where the
+/// header says 7 -- the index the slot would have in a table laid out
+/// without the dispatch resolver, one slot shifted -- must be refused.
 const RT_ENTRY_DOCTOR_FROM: &str = "#define RHU_RT_CLASSLIB_SLOT_OnUnhandledException 7";
 const RT_ENTRY_DOCTOR_TO: &str = "#define RHU_RT_CLASSLIB_SLOT_OnUnhandledException 6";
 
@@ -435,12 +446,77 @@ const FORBIDDEN_PATTERNS: [&str; 6] = ["FAIL ", "KERNEL PANIC", "EXCEPTION:", "R
 /// the gate grows next.
 const PENDING: [&str; 0] = [];
 
-const INTERNAL_CASES: [&str; 5] = [
-    "shim.foreign-errno-refused -- compile-tier; runs under 'rhu-gate shim rederive' at the pinned kit",
-    "shim.newlib-header-ties-kit -- compile-tier; runs under 'rhu-gate shim rederive' at the pinned kit: the generated C-library layout header against the kit's own headers",
-    "shim.classlib-order-ties-pin -- compile-tier; runs under 'rhu-gate shim rederive' at the pinned kit: the host against a copy of the generated runtime-entry header with one class-library slot shifted, refused at the assertion that names the slot",
+/// The floating-point instruction census of the frozen tier, pinned per
+/// object (the FPU-free costume hardening). The activation
+/// costume's object carries none: a floating-point instruction on the
+/// activation path is what armed the lazy floating-point state the kernel
+/// now completes, and the compiler of record under
+/// -mno-implicit-float emits none the source does not ask for. The tier's
+/// only floating-point sites are the PAL's CPU-utilization function, which
+/// returns a double by its own signature, and the core tenant's check of
+/// it. A moved count means the source, a flag or the compiler changed.
+const FP_CENSUS: [(&str, u32); 19] = [
+    ("shim-core.o", 0),
+    ("shim-core-break-sipid.o", 0),
+    ("shim-core-break-ctxpc.o", 0),
+    ("shim-core-break-tlsoff.o", 0),
+    ("shim-core-break-tlscache.o", 0),
+    ("shim-sysnative.o", 1),
+    ("shim-sysnative-break-fdbase.o", 1),
+    ("shim-libc-glue.o", 0),
+    ("shim-host.o", 0),
+    ("shim-host-break-dataverify.o", 0),
+    ("shim-stdio-sym.o", 0),
+    ("shimtest-core.o", 2),
+    ("shimtest-core-break-errno.o", 2),
+    ("shimtest-core-break-canary.o", 2),
+    ("shimtest-fdmap.o", 0),
+    ("shimtest-activation.o", 0),
+    ("shimtest-tls.o", 0),
+    ("shimtest-host.o", 0),
+    ("shim-core-f769.o", 0),
+];
+
+/// Count the floating-point instructions in a decoded listing: every line whose
+/// mnemonic (the first token after the first tab) begins with `v` followed
+/// by a letter -- the VFP mnemonics on this profile all do (vldr, vstr,
+/// vmov, vpush, vpop, vcmp, vmrs, vcvt, vmul, ...) and no other Thumb-2
+/// mnemonic does. The decoder must be the Cortex-M7's: without it the
+/// double-precision forms print as unknown and the count is blind.
+pub(crate) fn fp_instruction_count(text: &str) -> u32 {
+    let mut n = 0u32;
+    for line in text.lines() {
+        let Some((_, rest)) = line.split_once('\t') else {
+            continue;
+        };
+        let mnemonic = rest.trim_start().split(|c: char| c == '\t' || c == ' ').next().unwrap_or("");
+        let mut chars = mnemonic.chars();
+        if chars.next() == Some('v') && chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// The census against its pin: the first object whose count differs, named.
+pub(crate) fn fp_census_fault(got: &[(String, u32)], want: &[(&str, u32)]) -> Option<String> {
+    for (name, w) in want {
+        match got.iter().find(|(n, _)| n == name) {
+            Some((_, g)) if g == w => {}
+            Some((_, g)) => return Some(format!("{name}: {g} floating-point instruction(s), pinned {w}")),
+            None => return Some(format!("{name}: not censused")),
+        }
+    }
+    None
+}
+
+const INTERNAL_CASES: [&str; 6] = [
+    "shim.foreign-errno-refused -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record",
+    "shim.newlib-header-ties-kit -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the generated C-library layout header against the kit's own headers",
+    "shim.classlib-order-ties-pin -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the host against a copy of the generated runtime-entry header with one class-library slot shifted, refused at the assertion that names the slot",
     "shim.newlib-retarget -- link-tier; runs under 'rhu-gate shim rederive' when the kit's C library is resolved",
-    "shim.f769-shared-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' at the pinned kit: the sysnative and host objects under the F769 selector tie the frozen an500 objects, the F769 core differs from the an500 core",
+    "shim.f769-shared-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the sysnative and host objects under the F769 selector tie the frozen an500 objects, the F769 core differs from the an500 core",
+    "shim.fp-census-instrument -- compile-tier; runs under 'rhu-gate shim rederive': a compiled double multiply-add must be counted by the census the shim.fp-census case runs over the frozen tier",
 ];
 
 /// The module-root template brackets, read from a linked artifact: the
@@ -499,7 +575,7 @@ fn find_fixed_from(raw: &[u8], needle: &str, from: usize) -> Option<usize> {
 /// The directory holding the toolchain's own C library, resolved the way
 /// the image-tier compiler already is: RHU_NEWLIB, else the first line of
 /// an untracked machine-local pointer file, else absent. Absent is not a
-/// failure -- the retarget case is INTERNAL and the main gate never needs
+/// failure -- the retarget case runs on the maintainer's leg and the main gate never needs
 /// it -- so this returns an Option and the caller declares the case.
 ///
 /// The pointer file names a directory in the form the LINKER can open,
@@ -1212,7 +1288,7 @@ impl Shim {
         println!("== case shim.host-break-dataverify: PASS (exit 70; the data check refused, and the constructor step never ran) ==");
     }
 
-    /// Compile one source with the pinned kit into the gate's obj dir;
+    /// Compile one source with the compiler of record into the gate's obj dir;
     /// on failure the stderr log is echoed and the gate fails.
     fn compile(&mut self, gxx: &ToolCmd, case: &str, src_rel: &str, extra: &[&str], out_rel: &str) {
         let stem = Path::new(out_rel).file_stem().unwrap().to_string_lossy().into_owned();
@@ -1323,8 +1399,94 @@ impl Shim {
         println!("== case {CASE}: PASS (one heap and one console with the toolchain's C library linked) ==");
     }
 
+    /// The floating-point census over the frozen tier (host-side,
+    /// image:null): every object decoded with the Cortex-M7 decoder, its
+    /// count against the pin.
+    fn run_fp_census(&mut self, facts: &RustcFacts) {
+        const CASE: &str = "shim.fp-census";
+        println!("== case {CASE} (the frozen tier's floating-point instruction census, pinned per object) ==");
+        let objdump = match llvm_tool(facts, "llvm-objdump") {
+            Ok(p) => p,
+            Err(e) => self.fail(CASE, &e),
+        };
+        let mut got: Vec<(String, u32)> = Vec::new();
+        for (name, _) in FP_CENSUS {
+            let obj_abs = self.repo.join("goldens").join("shim").join(name);
+            let obj_arg = obj_abs.to_string_lossy().into_owned();
+            let dump_p = self.out.join(format!("{name}.objdump"));
+            let scratch = self.out.join("objdump.stderr");
+            let run = run_captured(&objdump, &["-d", "--mcpu=cortex-m7", &obj_arg], &dump_p, &scratch, Duration::from_secs(60));
+            if !matches!(run, Ok(ref o) if o.exit == 0) {
+                self.fail(CASE, &format!("llvm-objdump failed on goldens/shim/{name}"));
+            }
+            let text = std::fs::read_to_string(&dump_p).unwrap_or_default();
+            if !text.lines().any(|l| l.split_once('\t').is_some()) {
+                self.fail(CASE, &format!("llvm-objdump produced no instruction lines for goldens/shim/{name} (a broken instrument, never a zero)"));
+            }
+            got.push((name.to_string(), fp_instruction_count(&text)));
+        }
+        if let Some(f) = fp_census_fault(&got, &FP_CENSUS) {
+            self.fail(
+                CASE,
+                &format!("the tier's floating-point census moved: {f} -- a moved count is a registered change (a source, flag or compiler change), never a drift"),
+            );
+        }
+        let total: u32 = got.iter().map(|(_, n)| n).sum();
+        let sites: Vec<String> = got.iter().filter(|(_, n)| *n > 0).map(|(name, n)| format!("{name} {n}")).collect();
+        println!(
+            "   {} objects censused with the Cortex-M7 decoder: {} floating-point instruction(s) in all, every count at its pin; the costume's core object 0; the sites: {}",
+            got.len(),
+            total,
+            sites.join(", ")
+        );
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"objects\":{},\"fp_instructions\":{total}}}}}",
+            self.gate_id,
+            got.len()
+        ));
+        self.results.tally("pass", "positive");
+        println!("== case {CASE}: PASS (the activation costume's object carries no floating-point instruction; the tier's counts at their pins) ==");
+    }
+
+    /// The census instrument's control (compile-tier): a compiled double
+    /// multiply-add must be counted, or the census's zeros mean nothing.
+    fn run_fp_census_instrument_control(&mut self, gxx: &ToolCmd, facts: &RustcFacts) {
+        const CASE: &str = "shim.fp-census-instrument";
+        println!("== case {CASE} (compile-tier control) ==");
+        let probe_rel = "src/kernel/target/shim-gate/obj/fp-probe.c";
+        write_fixture(
+            &self.repo.join(probe_rel.replace('/', std::path::MAIN_SEPARATOR_STR)),
+            b"double rhu_fp_probe(double a, double b);\ndouble rhu_fp_probe(double a, double b) { return a * b + 1.5; }\n",
+        );
+        let out_rel = "src/kernel/target/shim-gate/obj/fp-probe.o";
+        self.compile(gxx, CASE, probe_rel, &[], out_rel);
+        let objdump = match llvm_tool(facts, "llvm-objdump") {
+            Ok(p) => p,
+            Err(e) => self.fail(CASE, &e),
+        };
+        let obj_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let obj_arg = obj_abs.to_string_lossy().into_owned();
+        let dump_p = self.out.join("fp-probe.objdump");
+        let scratch = self.out.join("objdump.stderr");
+        let run = run_captured(&objdump, &["-d", "--mcpu=cortex-m7", &obj_arg], &dump_p, &scratch, Duration::from_secs(60));
+        if !matches!(run, Ok(ref o) if o.exit == 0) {
+            self.fail(CASE, "llvm-objdump failed on the probe object");
+        }
+        let n = fp_instruction_count(&std::fs::read_to_string(&dump_p).unwrap_or_default());
+        if n == 0 {
+            self.fail(CASE, "the census counted no floating-point instruction in a compiled double multiply-add -- the instrument is blind");
+        }
+        println!("   a compiled double multiply-add is counted: {n} floating-point instruction(s)");
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"negative\",\"image\":null,\"broke\":\"a compiled double multiply-add the census must count\"}}",
+            self.gate_id
+        ));
+        self.results.tally("pass", "negative");
+        println!("== case {CASE}: PASS (the census instrument counts a compiled double multiply-add) ==");
+    }
+
     fn run_rederive(&mut self, gxx: &ToolCmd) {
-        println!("== rederive: {} frozen-plan objects from src/shim at the pinned kit ==", FROZEN_PLAN.len());
+        println!("== rederive: {} frozen-plan objects from src/shim with the compiler of record ==", FROZEN_PLAN.len());
         let obj_dir = self.out.join("obj");
         if std::fs::create_dir_all(&obj_dir).is_err() {
             self.fail("rederive", "cannot create the object directory");
@@ -1450,16 +1612,9 @@ impl Shim {
     fn run_newlib_header_control(&mut self, gxx: &ToolCmd) {
         const CASE: &str = "shim.newlib-header-ties-kit";
         println!("== case {CASE} (compile-tier control) ==");
-        let sr_out = self.out.join("newlib-sysroot.stdout");
-        let sr_err = self.out.join("newlib-sysroot.stderr");
-        match run_tool_bounded(&self.repo, gxx, &["-print-sysroot".to_string()], &sr_out, &sr_err) {
-            Ok(true) => {}
-            Ok(false) => self.fail(CASE, "the compiler did not report its sysroot"),
-            Err(e) => self.fail(CASE, &e),
-        }
-        let sysroot = std::fs::read_to_string(&sr_out).unwrap_or_default().trim().to_string();
+        let sysroot = gxx.sysroot.clone();
         if sysroot.is_empty() {
-            self.fail(CASE, "the compiler reported an empty sysroot");
+            self.fail(CASE, "the resolver carries no C-library sysroot");
         }
         let nano = format!("{sysroot}/include/newlib-nano");
         let obj_dir = self.out.join("obj");
@@ -1594,7 +1749,7 @@ pub fn run(repo: &Path) -> ! {
             exit(1);
         }
     };
-    let (qemu, qemu_v) = match resolve_qemu() {
+    let (qemu, qemu_v) = match resolve_qemu(repo) {
         Ok(q) => q,
         Err(e) => {
             println!("rhu-gate: {e}");
@@ -1636,6 +1791,7 @@ pub fn run(repo: &Path) -> ! {
     shim.run_activation(&facts, &ld, &qemu);
     shim.run_tls(&facts, &ld, &qemu);
     shim.run_host(&facts, &ld, &qemu);
+    shim.run_fp_census(&facts);
     for p in PENDING {
         println!("   pending (unarmed, not counted): {p}");
     }
@@ -1648,7 +1804,7 @@ pub fn run(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "{DISPLAY}: PASS (14/14 cases incl. 8 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        "{DISPLAY}: PASS (15/15 cases incl. 8 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
         PENDING.len(),
         INTERNAL_CASES.len(),
         qemu_v,
@@ -1658,12 +1814,13 @@ pub fn run(repo: &Path) -> ! {
     exit(0);
 }
 
-/// The internal re-derivation leg: the only place the C compiler lives.
+/// The maintainer's re-derivation leg: the only place the C compiler is needed.
 /// Recompiles the frozen plan, byte-asserts it against goldens/shim, then
-/// runs the compile-tier control. Needs the pinned 12.2 kit; consumers
-/// never need it -- the chain never calls this.
+/// runs the compile-tier controls. Needs the compiler of record (clang
+/// 22.1.8, resolved by RHU_CLANG or tools/toolchains/clang.local);
+/// consumers never need it -- the chain never calls this.
 pub fn rederive(repo: &Path) -> ! {
-    let gxx = match resolve_gxx(repo) {
+    let gxx = match resolve_clang(repo) {
         Ok(g) => g,
         Err(e) => {
             println!("rhu-gate: {e}");
@@ -1684,7 +1841,7 @@ pub fn rederive(repo: &Path) -> ! {
     };
     let mut shim = Shim { repo: repo.to_path_buf(), out, results, gate_id: "shim-rederive", display: "SHIM REDERIVE", records: Vec::new() };
     shim.results.emit(&format!(
-        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"shim-rederive\",\"run\":\"shim-rederive-{}\",\"host\":\"compile-tier\",\"runner\":\"{RUNNER}\",\"tools\":{{\"gxx\":\"{}\"}}}}",
+        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"shim-rederive\",\"run\":\"shim-rederive-{}\",\"host\":\"compile-tier\",\"runner\":\"{RUNNER}\",\"tools\":{{\"clang\":\"{}\"}}}}",
         std::process::id(),
         gxx.version
     ));
@@ -1701,6 +1858,13 @@ pub fn rederive(repo: &Path) -> ! {
         }
     }
     shim.run_rederive(&gxx);
+    match rustc_facts() {
+        Ok(facts) => shim.run_fp_census_instrument_control(&gxx, &facts),
+        Err(e) => {
+            println!("SHIM REDERIVE: FAIL -- {e}");
+            exit(1);
+        }
+    }
     shim.build_staticlib();
     let retarget = match (resolve_newlib_dir(repo), rustc_facts()) {
         (Some(dir), Ok(facts)) => match resolve_ld(&facts) {
@@ -1728,7 +1892,7 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical; foreign-errno control refused at compile; C-library layout header ties the kit; class-library order ties the pin; the F769 row's shared objects tie the an500 bytes; C-library retarget {})  [{}]",
+        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical; foreign-errno control refused at compile; C-library layout header ties the kit; class-library order ties the pin; the F769 row's shared objects tie the an500 bytes; the floating-point census instrument counts a compiled double multiply-add; C-library retarget {})  [{}]",
         FROZEN_PLAN.len(),
         FROZEN_PLAN.len(),
         retarget,
@@ -1889,6 +2053,22 @@ pub fn selfcheck(repo: &Path) -> ! {
     sc.accept_probe("verdict-last", "the genuine golden ends on the verdict line", String::from_utf8_lossy(&golden).lines().last() == Some(CORE_ALL_GOOD));
     sc.probe("verdict-missing", "a broken transcript without the verdict line", contains_fixed(failing, CORE_ALL_GOOD));
     sc.probe("exit-timeout", "a run recorded as exit 124 (a hang) offered as exit 0", 124 == 0);
+
+    sc.accept_probe(
+        "fp-census-counts-vfp",
+        "a disassembly line with a VFP mnemonic is counted once",
+        fp_instruction_count("      56: ed95 7b0a    \tvldr\td7, [r5, #40]\n      5a: 68a5         \tldr\tr5, [r4, #0x8]\n") == 1,
+    );
+    sc.accept_probe(
+        "fp-census-ignores-integer",
+        "a disassembly with no VFP mnemonic counts zero",
+        fp_instruction_count("      54: 6a23         \tldr\tr3, [r4, #0x20]\n      58: 4607         \tmov\tr7, r0\n") == 0,
+    );
+    sc.probe(
+        "fp-census-moved-count",
+        "a census reading one instruction where the pin says zero offered as at the pin",
+        fp_census_fault(&[("shim-core.o".to_string(), 1)], &[("shim-core.o", 0)]).is_none(),
+    );
 
     sc.finish("genuine inputs accepted");
 }

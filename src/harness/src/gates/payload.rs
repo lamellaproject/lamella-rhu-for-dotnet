@@ -10,8 +10,8 @@ use crate::text::{
     payload_stream, word_sym_present, word_sym_value,
 };
 use crate::tools::{
-    cargo_build_kernel_at, echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts,
-    status_bounded, ExecProfile, RustcFacts,
+    cargo_build_kernel_at, command_words, echo_file, llvm_tool, resolve_qemu, run_captured,
+    rustc_facts, status_bounded, ExecProfile, RustcFacts,
 };
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, Stdio};
@@ -108,11 +108,13 @@ struct RtBoard {
     features: &'static str,
 }
 
-const RT_BOARDS: [RtBoard; 4] = [
+const RT_BOARDS: [RtBoard; 6] = [
     RtBoard { board: "mps2-an500", target: "thumbv7em-none-eabihf", features: "qemu-exit,board-mps2-an500,payload" },
     RtBoard { board: "mps2-an505", target: "thumbv8m.main-none-eabihf", features: "qemu-exit,board-mps2-an505,payload" },
     RtBoard { board: "nucleo-u5a5zj-q", target: "thumbv8m.main-none-eabihf", features: "board-nucleo-u5a5zj-q,payload" },
     RtBoard { board: "stm32f769i-disco", target: "thumbv7em-none-eabihf", features: "board-stm32f769i-disco,payload" },
+    RtBoard { board: "pico-2", target: "thumbv8m.main-none-eabihf", features: "board-pico-2,payload" },
+    RtBoard { board: "pico-plus-2", target: "thumbv8m.main-none-eabihf", features: "board-pico-plus-2,payload" },
 ];
 
 /// What the rt-link checker reads off a linked artifact.
@@ -607,7 +609,7 @@ fn check_window_refusal(raw: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// The payload linker as a word-split command plus its reported version
+/// The payload linker as a command in words plus its reported version
 /// (first line of `<command> --version`, CR-trimmed).
 struct PayloadLd {
     words: Vec<String>,
@@ -809,11 +811,13 @@ fn check_minirt_brackets(dump: &[u8], managed_want: u64) -> Result<(), String> {
 
 fn resolve_payload_ld(repo: &Path, facts: &RustcFacts) -> Result<PayloadLd, String> {
     let words: Vec<String> = match std::env::var("RHU_PAYLOAD_LD") {
-        Ok(v) if !v.trim().is_empty() => v.split_whitespace().map(str::to_string).collect(),
+        Ok(v) if !v.trim().is_empty() => {
+            command_words(&v).map_err(|e| format!("{e} (RHU_PAYLOAD_LD)"))?
+        }
         _ => {
             let lld = llvm_tool(facts, "rust-lld").map_err(|e| {
                 format!(
-                    "no payload linker resolved: set RHU_PAYLOAD_LD (a command; word-split) -- the default rust-lld is unavailable: {e}"
+                    "no payload linker resolved: set RHU_PAYLOAD_LD (a command; a double-quoted word keeps its spaces) -- the default rust-lld is unavailable: {e}"
                 )
             })?;
             vec![
@@ -846,7 +850,8 @@ fn resolve_payload_ld(repo: &Path, facts: &RustcFacts) -> Result<PayloadLd, Stri
         .to_string();
     if !matches!(outcome, Ok(ref o) if o.exit == 0) || first.is_empty() {
         return Err(format!(
-            "payload linker not runnable via '{} --version' (set RHU_PAYLOAD_LD to a working linker command; a probe that hangs past 20 s is killed and counts as not runnable)",
+            "the payload linker '{}' did not answer --version (the command: {}; set RHU_PAYLOAD_LD to a working linker command; a probe that hangs past 20 s is killed and counts as not runnable)",
+            words[0],
             words.join(" ")
         ));
     }
@@ -886,7 +891,7 @@ struct PayloadRun {
     exit: i32,
 }
 
-fn setup(_repo: &Path) -> (RustcFacts, PathBuf, String) {
+fn setup(repo: &Path) -> (RustcFacts, PathBuf, String) {
     let facts = match rustc_facts() {
         Ok(f) => f,
         Err(e) => {
@@ -894,7 +899,7 @@ fn setup(_repo: &Path) -> (RustcFacts, PathBuf, String) {
             exit(1);
         }
     };
-    let (qemu, qemu_v) = match resolve_qemu() {
+    let (qemu, qemu_v) = match resolve_qemu(repo) {
         Ok(q) => q,
         Err(e) => {
             println!("rhu-gate: {e}");
@@ -1872,7 +1877,7 @@ impl MPayload {
         (dump, bytes, sha, unresolved, other)
     }
 
-    /// The rt-link family: the three other boards' staticlibs, the frozen
+    /// The rt-link family: the five other boards' staticlibs, the frozen
     /// merged runtime object under each payload map, then the orphan
     /// control on the an500 map.
     fn run_rt_links(&mut self) {

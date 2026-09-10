@@ -148,6 +148,52 @@
 #define MGC_ROW_WINDOW_FLOOR          256u
 #define MGC_ROW_WALL_RETRIES            4u
 #define MGC_ROW_FROZEN_SEGS             8u
+#elif defined(MGC_HOST_ROW_PICO2)
+/* Raspberry Pi Pico 2 (and Pico 2 W): DATA 520K @ 0x20000000 (the
+ * eight striped SRAM banks and the two small ones after them, one
+ * contiguous window), map floor 192K. The mini row: kheap 16K +
+ * region 96K + bitmap 3K + mark stack 8K + foh 64K = 187K inside the
+ * floor (slack 5K). Cover 1M is minimal: a 512K granule at 0x20000000
+ * ends at 0x20080000, 8K short of the window's end 0x20082000; the 1M
+ * granule holds it. */
+#define MGC_ROW_BOARD             "pico-2"
+#define MGC_ROW_PROFILE           "mini"
+#define MGC_ROW_BASIS             "floor"
+#define MGC_ROW_REGION_BYTES        98304u
+#define MGC_ROW_COVER_BYTES       1048576u
+#define MGC_ROW_KHEAP_BYTES         16384u
+#define MGC_ROW_STACK_DEFAULT       16384u
+#define MGC_ROW_STACK_CLAMP         24576u
+#define MGC_ROW_HANDLE_SLOTS           64u
+#define MGC_ROW_FOH_POOL_BYTES      65536u
+#define MGC_ROW_MARKSTACK_ENTRIES    2048u
+#define MGC_ROW_FINQ_CAP              256u
+#define MGC_ROW_OOM_RESERVE          8192u
+#define MGC_ROW_WINDOW_BYTES         4096u
+#define MGC_ROW_WINDOW_FLOOR          256u
+#define MGC_ROW_WALL_RETRIES            4u
+#define MGC_ROW_FROZEN_SEGS             8u
+#elif defined(MGC_HOST_ROW_PICOPLUS2)
+/* Pimoroni Pico Plus 2 (and Plus 2 W): the same chip, the same 520K SRAM
+ * window and map floor as the Pico 2, so the same mini row and the same
+ * 1M cover; the board's PSRAM is not part of the map. */
+#define MGC_ROW_BOARD             "pico-plus-2"
+#define MGC_ROW_PROFILE           "mini"
+#define MGC_ROW_BASIS             "floor"
+#define MGC_ROW_REGION_BYTES        98304u
+#define MGC_ROW_COVER_BYTES       1048576u
+#define MGC_ROW_KHEAP_BYTES         16384u
+#define MGC_ROW_STACK_DEFAULT       16384u
+#define MGC_ROW_STACK_CLAMP         24576u
+#define MGC_ROW_HANDLE_SLOTS           64u
+#define MGC_ROW_FOH_POOL_BYTES      65536u
+#define MGC_ROW_MARKSTACK_ENTRIES    2048u
+#define MGC_ROW_FINQ_CAP              256u
+#define MGC_ROW_OOM_RESERVE          8192u
+#define MGC_ROW_WINDOW_BYTES         4096u
+#define MGC_ROW_WINDOW_FLOOR          256u
+#define MGC_ROW_WALL_RETRIES            4u
+#define MGC_ROW_FROZEN_SEGS             8u
 #else
 #error "a row world names its board (define exactly one MGC_HOST_ROW_<BOARD>)"
 #endif

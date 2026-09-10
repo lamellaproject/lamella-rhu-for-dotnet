@@ -337,7 +337,10 @@ unsafe fn sched() -> &'static mut Sched { unsafe {
 }}
 
 fn pend_switch() {
-    unsafe { write_volatile(ICSR, ICSR_PENDSVSET) };
+    unsafe {
+        write_volatile(ICSR, ICSR_PENDSVSET);
+        core::arch::asm!("dsb sy", "isb sy", options(nostack, preserves_flags));
+    }
 }
 
 /// Recompute slot i's mask bits from its TCB -- the ONLY writer of the

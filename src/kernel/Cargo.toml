@@ -49,6 +49,22 @@ stm32f769i-disco-pll216 = []
 # register read-back; requires board-nucleo-u5a5zj-q (src/board/mod.rs
 # refuses otherwise). Without it the board runs the boring HSI16 default.
 nucleo-u5a5zj-q-pll160 = []
+# Raspberry Pi Pico 2 (RP2350A, Cortex-M33 silicon, execute-in-place from
+# the QSPI flash at 0x10000000): build with --no-default-features (no
+# semihosting exits off the bench) and --target thumbv8m.main-none-eabihf.
+board-pico-2 = []
+# Pimoroni Pico Plus 2 and Pico Plus 2 W (RP2350B; the same chip module
+# as the Pico 2): the same build shape.
+board-pico-plus-2 = []
+# Pico 2 clock posture 2: the system PLL at 150 MHz (the chip's rated
+# clock). A gated posture -- own image names, own goldens, banner line
+# from register read-back; requires board-pico-2 (src/board/mod.rs
+# refuses otherwise). Without it the board runs the boring 12 MHz
+# crystal default.
+pico-2-pll150 = []
+# Pico Plus 2 clock posture 2: the same PLL150 posture on that board;
+# requires board-pico-plus-2.
+pico-plus-2-pll150 = []
 # Semihosting exits on the shutdown/panic/fault paths. QEMU runs only:
 # without a debugger attached, BKPT #0xAB escalates to HardFault on real
 # silicon, so non-QEMU builds disable this and every exit becomes a park.

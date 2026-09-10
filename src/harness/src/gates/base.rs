@@ -32,7 +32,7 @@ fn setup(repo: &Path) -> (RustcFacts, PathBuf, String) {
             exit(1);
         }
     };
-    let (qemu, qemu_v) = match resolve_qemu() {
+    let (qemu, qemu_v) = match resolve_qemu(repo) {
         Ok(q) => q,
         Err(e) => {
             println!("rhu-gate: {e}");

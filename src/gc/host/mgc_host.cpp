@@ -121,6 +121,16 @@
 #endif
 #endif
 
+#ifdef MGC_HOST_DRIVE_FREEPAD
+#ifndef MGC_HOST_DRIVE_SWEEP
+#error "MGC_HOST_DRIVE_FREEPAD is a sweep-world drive (needs MGC_HOST_DRIVE_SWEEP)"
+#endif
+#endif
+#ifdef MGC_HOST_DRIVE_HANDLES
+#ifndef MGC_HOST_DRIVE_TUNE
+#error "MGC_HOST_DRIVE_HANDLES is a windows-world drive (needs MGC_HOST_DRIVE_TUNE)"
+#endif
+#endif
 #ifdef MGC_HOST_DRIVE_TUNE
 #ifndef MGC_HOST_DRIVE_SWEEP
 #error "MGC_HOST_DRIVE_TUNE extends the sweep-drive world (pass MGC_HOST_DRIVE_SWEEP too)"
@@ -1148,8 +1158,249 @@ static Object* drive_alloc_win(gc_alloc_context* acx, size_t size, unsigned no)
 }
 #endif /* MGC_HOST_DRIVE_TUNE */
 
+#ifdef MGC_HOST_DRIVE_FREEPAD
+/* ------------------------------------------------------------------ */
+/* the free-pad drive (gate case gc.free-pad): a dead space of exactly */
+/* 12 bytes before a live object whose header word is in use.          */
+/* ------------------------------------------------------------------ */
+
+/* The header-word state the runtime keeps in the word before an object:
+ * a hash code (the is-hash-code bit with 26 bits of hash), the pattern a
+ * program that hashed the object would have left there. */
+#define FREEPAD_HEADER_STATE 0x08ABCDEFu
+
+static int32_t drive_free_pad(IGCHeap* heap)
+{
+    printf("[gc-host] gc.free-pad drive: a dead 12-byte object before a live object whose header word is in use, then two sweeps\n");
+    gc_alloc_context* acx = &g_mutator.acx;
+
+    /* #1 the 12-byte object that dies; #2 the live object right after it,
+     * its header word carrying a hash code; #3 a second dead object (the
+     * next run the sweep installs); #4 a live object bounding that run. */
+    Object* o1 = drive_alloc(heap, acx, 12, 0, 1);
+    Object* o2 = drive_alloc(heap, acx, 16, 0, 2);
+    drive_check((unsigned char*)o2 == (unsigned char*)o1 + 12,
+                "the live object is not adjacent to the 12-byte object");
+    Object* o3 = drive_alloc(heap, acx, 24, 0, 3);
+    Object* o4 = drive_alloc(heap, acx, 16, 0, 4);
+    drive_check((unsigned char*)o3 == (unsigned char*)o2 + 16
+                && (unsigned char*)o4 == (unsigned char*)o3 + 24,
+                "the four objects are not adjacent in address order");
+    *(volatile uint32_t*)((unsigned char*)(void*)o2 - 4) = FREEPAD_HEADER_STATE;
+    printf("[gc-host] free-pad: layout #1 dead 12 B | #2 live 16 B (header word set to 0x%08lx) | #3 dead 24 B | #4 live 16 B\n",
+           (unsigned long)FREEPAD_HEADER_STATE);
+
+    g_root_static = o2;
+    g_root_null   = nullptr;
+    g_root_oob    = (Object*)(void*)&g_mutator;
+    g_root_pair   = o4;
+    g_root_fin    = nullptr;
+    g_root_big    = nullptr;
+
+    g_worker_tid = rhu_thread_spawn(&gc_worker, (void*)o4, 4096u,
+                                    GC_HOST_WORKER_PRIO,
+                                    "gcmut");
+    drive_check(g_worker_tid >= 1, "worker spawn refused");
+    printf("[gc-host] worker spawned: tid=%d prio=" GC_HOST_STR(GC_HOST_WORKER_PRIO)
+           " stack=4096 (runs only while kmain sleeps)\n",
+           (int)g_worker_tid);
+    {
+        unsigned tries = 0;
+        for (; tries < 100 && !g_worker_ready; tries++)
+            rhu_sleep_ns(2000000ull);
+    }
+    drive_check(g_worker_ready == 1, "worker never published its stack slot");
+    drive_check(*g_worker_slot == o4,
+                "the worker stack slot does not hold alloc #4");
+    printf("[gc-host] worker ready: stack slot published (alloc #4 parked on the worker stack)\n");
+
+    /* Sweep #1: #1 becomes the 12-byte dead space, #3 the first free run
+     * the sweep links. The live header word is read back afterwards. */
+    drive_check(heap->GarbageCollect(2, false, 0) == 0,
+                "GarbageCollect #1 rc != S_OK");
+    uint32_t hw = *(volatile uint32_t*)((unsigned char*)(void*)o2 - 4);
+    printf("[gc-host] free-pad: the live object's header word after sweep #1 reads 0x%08lx (%s)\n",
+           (unsigned long)hw,
+           hw == FREEPAD_HEADER_STATE ? "INTACT" : "CLOBBERED");
+    drive_check(hw == FREEPAD_HEADER_STATE,
+                "the sweep wrote a free-list link into the live successor's header word");
+
+    /* The first fit's remainder rule: a 12-byte ask is served from the
+     * 24-byte run at #3's address; the run is consumed whole and its
+     * 12-byte remainder is left as a pad, never as a list node. */
+    Object* o5 = drive_alloc_reuse(heap, acx, 12, 0, 5);
+    drive_check(o5 == o3,
+                "the 12-byte ask was not served at the dead 24-byte object's address");
+    printf("[gc-host] free-pad: a 12-byte ask reused the 24-byte run at alloc #3's address (the run consumed whole, its 12-byte remainder a pad)\n");
+
+    /* Sweep #2: the pads walk (the collector's walk model counts them)
+     * and the live header word still reads as set. */
+    drive_check(heap->GarbageCollect(2, false, 0) == 0,
+                "GarbageCollect #2 rc != S_OK");
+    hw = *(volatile uint32_t*)((unsigned char*)(void*)o2 - 4);
+    printf("[gc-host] free-pad: the live object's header word after sweep #2 reads 0x%08lx (%s)\n",
+           (unsigned long)hw,
+           hw == FREEPAD_HEADER_STATE ? "INTACT" : "CLOBBERED");
+    drive_check(hw == FREEPAD_HEADER_STATE,
+                "the second sweep disturbed the live successor's header word");
+    printf("[gc-host] GC FREE-PAD EXERCISE OK (a 12-byte dead space before a live object left its header word intact across two sweeps; the pads walked and counted; a 12-byte first-fit remainder left as a pad)\n");
+    return 0;
+}
+#endif /* MGC_HOST_DRIVE_FREEPAD */
+
+#ifdef MGC_HOST_DRIVE_HANDLES
+/* ------------------------------------------------------------------ */
+/* the handle-pool drive (gate case gc.handle-pool): two hosted threads */
+/* at one priority create and destroy handles at once through the       */
+/* handle manager's own entries, for a bounded count.                    */
+/* ------------------------------------------------------------------ */
+
+/* Iterations per worker; each iteration creates HD_BURST handles on the
+ * worker's own object, reads every one back at once, reads them back
+ * again and destroys them. The count is a plan fact, sized so a boot
+ * spans hundreds of scheduler ticks: on one core the tick is the only
+ * preemption, and a pool race needs one inside the pool's
+ * read-modify-write. Both workers sit at one level above the counter
+ * worker and below the host, so they share the core by rotation while
+ * the host parks and the counter waits its turn. */
+#ifndef MGC_HANDLES_ITER
+#define MGC_HANDLES_ITER 20000u
+#endif
+#define HD_BURST 8u
+#define HD_WORKER_PRIO GC_HOST_WAITER_PRIO
+
+struct HdWorker {
+    Object*      obj;          /* the worker's own object */
+    uint32_t     creates;
+    uint32_t     destroys;
+    uint32_t     aliases;      /* a handle that read another object */
+    OBJECTHANDLE first_alias;  /* the first such handle, null = none */
+    Object*      first_seen;   /* what it read */
+    uint64_t     ns;           /* the worker's own elapsed time */
+    int32_t      tid;
+};
+static HdWorker            g_hd[2];
+static volatile uint32_t   g_hd_done;
+
+static void hd_worker(void* arg)
+{
+    HdWorker* w = (HdWorker*)arg;
+    OBJECTHANDLE h[HD_BURST];
+    uint64_t t0 = rhu_now_ns();
+    for (uint32_t it = 0; it < MGC_HANDLES_ITER; it++) {
+        for (uint32_t j = 0; j < HD_BURST; j++) {
+            h[j] = g_handle_mgr->CreateGlobalHandleOfType(w->obj, HNDTYPE_STRONG);
+            w->creates++;
+            Object* seen = *(Object* volatile*)h[j];
+            if (seen != w->obj) {
+                w->aliases++;
+                if (!w->first_alias) { w->first_alias = h[j]; w->first_seen = seen; }
+            }
+        }
+        for (uint32_t j = 0; j < HD_BURST; j++) {
+            Object* seen = *(Object* volatile*)h[j];
+            if (seen != w->obj) {
+                w->aliases++;
+                if (!w->first_alias) { w->first_alias = h[j]; w->first_seen = seen; }
+            }
+            g_handle_mgr->DestroyHandleOfType(h[j], HNDTYPE_STRONG);
+            w->destroys++;
+        }
+    }
+    w->ns = rhu_now_ns() - t0;
+    __atomic_add_fetch(&g_hd_done, 1u, __ATOMIC_SEQ_CST);
+    (void)rhu_futex_wake((const uint32_t*)&g_hd_done, 1);
+    rhu_thread_exit();
+}
+
+static int32_t drive_handles(IGCHeap* heap)
+{
+    printf("[gc-host] gc.handle-pool drive: two hosted threads at one priority create and destroy handles at once through the handle manager's own entries (%u iterations of %u handles each)\n",
+           (unsigned)MGC_HANDLES_ITER, (unsigned)HD_BURST);
+    gc_alloc_context* acx = &g_mutator.acx;
+    /* The heap pointer the EE-side event wiring reads inside the
+     * stop-the-world (the GC-done event's reset and set), published the
+     * way every windows-world drive publishes it before its first
+     * collection. */
+    g_heap_ee = heap;
+    Object* o1 = drive_alloc(heap, acx, 16, 0, 1);
+    Object* o2 = drive_alloc(heap, acx, 16, 0, 2);
+    Object* o3 = drive_alloc(heap, acx, 16, 0, 3);
+    g_root_static = o1;
+    g_root_null   = nullptr;
+    g_root_oob    = (Object*)(void*)&g_mutator;
+    g_root_pair   = o2;
+    g_root_fin    = nullptr;
+    g_root_big    = nullptr;
+
+    /* The counter worker every collection drive spawns, so the census
+     * collection at the end keeps its standard shape (one thread the
+     * stop-the-world stops); it runs only while nothing above it is
+     * runnable. */
+    g_worker_tid = rhu_thread_spawn(&gc_worker, (void*)o3, 4096u,
+                                    GC_HOST_WORKER_PRIO,
+                                    "gcmut");
+    drive_check(g_worker_tid >= 1, "worker spawn refused");
+    printf("[gc-host] worker spawned: tid=%d prio=" GC_HOST_STR(GC_HOST_WORKER_PRIO)
+           " stack=4096 (runs only while kmain sleeps)\n",
+           (int)g_worker_tid);
+    {
+        unsigned tries = 0;
+        for (; tries < 100 && !g_worker_ready; tries++)
+            rhu_sleep_ns(2000000ull);
+    }
+    drive_check(g_worker_ready == 1, "worker never published its stack slot");
+
+    g_hd[0].obj = o1;
+    g_hd[1].obj = o2;
+    g_hd[0].tid = rhu_thread_spawn(&hd_worker, &g_hd[0], 4096u, HD_WORKER_PRIO, "hdwk0");
+    g_hd[1].tid = rhu_thread_spawn(&hd_worker, &g_hd[1], 4096u, HD_WORKER_PRIO, "hdwk1");
+    drive_check(g_hd[0].tid >= 1 && g_hd[1].tid >= 1, "handle worker spawn refused");
+    printf("[gc-host] handle workers spawned: tid=%d and tid=%d prio=" GC_HOST_STR(HD_WORKER_PRIO)
+           " stack=4096 (rotation at one level above the counter; the host parks until both finish)\n",
+           (int)g_hd[0].tid, (int)g_hd[1].tid);
+    for (;;) {
+        uint32_t v = g_hd_done;
+        if (v >= 2u)
+            break;
+        (void)rhu_futex_wait((const uint32_t*)&g_hd_done, v, RHU_DEADLINE_NONE);
+    }
+    for (unsigned k = 0; k < 2; k++) {
+        HdWorker* w = &g_hd[k];
+        printf("[gc-host] handle worker %u (tid %d): %u creates, %u destroys, %u aliases%s\n",
+               k, (int)w->tid, w->creates, w->destroys, w->aliases,
+               w->aliases ? "" : " (every handle read its own object, twice)");
+        if (w->aliases)
+            printf("[gc-host] handle worker %u: the first aliased handle %p read %p; its own object is %p\n",
+                   k, (void*)w->first_alias, (void*)w->first_seen, (void*)w->obj);
+        printf("[gc-host] handle worker %u ran %lu ms\n", k, (unsigned long)(w->ns / 1000000ull));
+    }
+    drive_check(g_hd[0].aliases == 0 && g_hd[1].aliases == 0,
+                "a handle read another thread's object (the pool aliased a slot)");
+    drive_check(g_hd[0].creates == MGC_HANDLES_ITER * HD_BURST
+                && g_hd[1].creates == MGC_HANDLES_ITER * HD_BURST
+                && g_hd[0].destroys == MGC_HANDLES_ITER * HD_BURST
+                && g_hd[1].destroys == MGC_HANDLES_ITER * HD_BURST,
+                "a worker's operation count is not the plan's");
+    /* The pool's books after the storm: the census collection walks the
+     * live slots, and a slot a lost free-list entry left marked live
+     * shows there. */
+    drive_check(heap->GarbageCollect(2, false, 0) == 0,
+                "GarbageCollect rc != S_OK");
+    printf("[gc-host] GC HANDLE POOL EXERCISE OK (two threads, %u pool operations at once, no slot aliased, the workers' books exact; the census above carries the pool's)\n",
+           (unsigned)(4u * MGC_HANDLES_ITER * HD_BURST));
+    return 0;
+}
+#endif /* MGC_HOST_DRIVE_HANDLES */
+
 static int32_t drive_allocator(IGCHeap* heap)
 {
+#ifdef MGC_HOST_DRIVE_FREEPAD
+    return drive_free_pad(heap);
+#endif
+#ifdef MGC_HOST_DRIVE_HANDLES
+    return drive_handles(heap);
+#endif
 #if defined(MGC_HOST_DRIVE_TUNE)
     printf("[gc-host] gc.D windows+event drive: the same payload under window posture, the GC-done futex, and the activation break-out\n");
 #elif defined(MGC_HOST_DRIVE_SWEEP)
@@ -1523,14 +1774,17 @@ static int32_t drive_allocator(IGCHeap* heap)
     drive_check(heap->GarbageCollect(2, false, 0) == 0,
                 "GarbageCollect #9 rc != S_OK");
     drive_check(heap->GetGcCount() == 9, "GetGcCount at the drive's end is not 9");
-    /* GetTotalBytesInUse under the free-list allocator answers LIVE
-     * bytes (bump extent minus the free list) -- GC.GetTotalMemory honesty:
-     * 132 B of surviving objects + the 4-byte region skew. */
-    drive_check(heap->GetTotalBytesInUse() == 136, "final in_use is not 136 (live bytes)");
+    /* GetTotalBytesInUse under the free-list allocator answers the bump
+     * extent minus the free list -- GC.GetTotalMemory honesty: 132 B of
+     * surviving objects + the 4-byte region skew + the two dead spaces
+     * of exactly 12 bytes this schedule leaves between live objects,
+     * which the sweep keeps as pads (walkable, never on the list: a
+     * 12-byte run has no room for its link). */
+    drive_check(heap->GetTotalBytesInUse() == 160, "final in_use is not 160 (live bytes + two 12-byte pads)");
     drive_check(heap->GetTotalAllocatedBytes() == 3800344, "final allocated is not 3800344");
     drive_check(acx->alloc_count == 21, "final alloc_count is not 21");
     drive_check(acx->alloc_bytes == 3800344, "final alloc_bytes is not 3800344");
-    printf("[gc-host] final books: alloc_count=21 alloc_bytes=3800344; live_in_use=136 allocated=3800344 OK\n");
+    printf("[gc-host] final books: alloc_count=21 alloc_bytes=3800344; in_use=160 (132 live + 4 skew + 2 pads x 12) allocated=3800344 OK\n");
 
     printf("[gc-host] GC DEATH-PIPELINE EXERCISE OK (four partition branches + three weak classes + resurrection; drain normals-then-critical with FINALIZER_RUN honored; zero-on-reuse; the mark-only wall retired; honest NULL + grace round trip)\n");
     return 0;
@@ -1585,13 +1839,14 @@ static int32_t drive_allocator(IGCHeap* heap)
     drive_check(heap->GarbageCollect(2, false, 0) == 0,
                 "GarbageCollect #3 rc != S_OK");
     drive_check(heap->GetGcCount() == 3, "GetGcCount at the drive's end is not 3");
-    drive_check(heap->GetTotalBytesInUse() == 136, "final in_use is not 136 (live bytes)");
+    /* the same two 12-byte dead spaces as the sweep world's: pads, in use */
+    drive_check(heap->GetTotalBytesInUse() == 160, "final in_use is not 160 (live bytes + two 12-byte pads)");
     drive_check(heap->GetTotalAllocatedBytes() == 376, "final allocated is not 376");
     drive_check(acx->alloc_count == 13, "final kmain alloc_count is not 13");
     drive_check(acx->alloc_bytes == 360, "final kmain alloc_bytes is not 360");
     drive_check(g_detach_mutator.acx.alloc_count == 1,
                 "the detach context's alloc_count is not 1");
-    printf("[gc-host] final books: kmain alloc_count=13 alloc_bytes=360, detach alloc_count=1; live_in_use=136 allocated=376 OK\n");
+    printf("[gc-host] final books: kmain alloc_count=13 alloc_bytes=360, detach alloc_count=1; in_use=160 (132 live + 4 skew + 2 pads x 12) allocated=376 OK\n");
 
     printf("[gc-host] GC WINDOWS+EVENT EXERCISE OK (windows both sources, three fix sites, refunds exact; the GC-done event slept and woke over the kernel futex; an activation broke a blocked wait -- the RHU_EINTR contract; handle slots reused)\n");
     return 0;
