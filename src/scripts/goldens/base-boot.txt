@@ -1,6 +1,9 @@
 rhu 0.2.0 -- Lamella RHU: runtime-hosting unikernel for .NET on Cortex-M
 [boot] QEMU mps2-an500 | CMSDK UART0 | flavor: boot
 [boot] VTOR=0x00000000 CPUID=0x411fc272 (Cortex-M7 r1p2)
+[boot] entropy: no hardware source on this row; the software stream is ACCEPTED for cryptographic draws by the build opt-in entropy-accept-software
+[boot] calendar: no calendar source on this row; the base is the epoch until set
+[boot] fpu: double precision in hardware
 [sched] online: 16 slots | SysTick 1000 Hz | BASEPRI ceiling 0x40 | zero-latency band below 0x40 never masked
 [selftest] .data copied from code-region LMA: OK
 [selftest] .bss zeroed, RAM readback: OK

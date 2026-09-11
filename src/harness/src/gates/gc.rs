@@ -4,7 +4,8 @@
 //! maintainer's re-derivation leg ('rhu-gate gc rederive'), and its
 //! objects are committed.
 
-use crate::gate::{write_fixture, Selfcheck};
+use crate::gate::{class_flag_sets_tie, write_fixture, Class, Selfcheck};
+use crate::objfile::{distinct_stamps, producer_stamp_of, section_span, section_span_prefixed, sha256_without_stamp};
 use crate::results::{chain_json_from_env, validate_results, Results};
 use crate::sha256::{sha256_file, sha256_hex};
 use crate::text::{contains_fixed, cr_count, word_sym_present};
@@ -66,6 +67,40 @@ const CXX_FLAGS: [&str; 20] = [
     "-Isrc/vendor/gcenv",
     "-Isrc/kernel/include",
 ];
+
+/// The same flag set for the Cortex-M33 (the mps2-an505 row's objects):
+/// one list apart from the core and FPU words, which the selfcheck asserts
+/// against `CXX_FLAGS` through the shared class record.
+const CXX_FLAGS_CORTEX_M33: [&str; 20] = [
+    "-x",
+    "c++",
+    "-c",
+    "-O2",
+    "--target=arm-none-eabi",
+    "-mcpu=cortex-m33",
+    "-mthumb",
+    "-mfloat-abi=hard",
+    "-mfpu=fpv5-sp-d16",
+    "-nostdinc++",
+    "-fno-exceptions",
+    "-fno-rtti",
+    "-fno-threadsafe-statics",
+    "-fno-use-cxa-atexit",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-Isrc/gc",
+    "-Isrc/vendor/gcinterface",
+    "-Isrc/vendor/gcenv",
+    "-Isrc/kernel/include",
+];
+
+/// The flag set of record for a class.
+fn cxx_flags(class: Class) -> &'static [&'static str] {
+    match class {
+        Class::CortexM7 => &CXX_FLAGS,
+        Class::CortexM33 => &CXX_FLAGS_CORTEX_M33,
+    }
+}
 
 /// The bare skeleton object's EXACT import closure with the compiler of record:
 /// the five flat EE methods the init path calls, the vtable's sized
@@ -919,49 +954,54 @@ const INTERNAL_CASES: [&str; 1] = [
 /// manifest and the objects together still cannot pass without editing
 /// this reviewed surface). A re-freeze updates objects + manifest + this
 /// pin together in one reviewed commit.
-const SHA_FROZEN_MANIFEST: &str = "e6a812222bf421a9c26251fd8f31d047629fd7831be789e534b0c3bc97ab8c23";
+const SHA_FROZEN_MANIFEST: &str = "587b5c922b2f4b106ff4866fc8b8d24e8ddf3834649bd450c37f69c81a86f644";
 
 /// The frozen-object plan of record: file name under goldens/gc/, source
-/// TU, extra defines beyond CXX_FLAGS. The manifest's records must tie
-/// this table by name both directions; 'rhu-gate gc rederive' recompiles
-/// every row and byte-asserts the output against the frozen bytes.
+/// TU, extra defines beyond the class's flag set, and the class (the
+/// Cortex-M7 for every row but the mps2-an505 row's, the Cortex-M33 for
+/// those). The manifest's records must tie this table by name both
+/// directions; 'rhu-gate gc rederive' recompiles every row under its
+/// class's flag set and byte-asserts the output against the frozen bytes.
 /// Worlds stage these files where they once compiled them -- the bytes
 /// are frozen inputs, produced by ONE recorded build, never rebuilt by
 /// a consumer.
-const FROZEN_PLAN: [(&str, &str, &[&str]); 33] = [
-    ("skel-bare.o", "src/gc/mgc_skeleton.cpp", &[]),
-    ("skel-bad.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_SKEL_BAD_VERSION"]),
-    ("host.o", "src/gc/host/mgc_host.cpp", &[]),
-    ("probe.o", "src/gc/mgc_ee_probe.cpp", &[]),
-    ("skel-heap.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE"]),
-    ("heap.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_HEAP_BYTES=2097152u"]),
-    ("host-drive.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC"]),
-    ("skel-collect.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE"]),
-    ("heap-collect.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_HEAP_BYTES=2097152u"]),
-    ("collect.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE"]),
-    ("collect-break.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_BREAK_ROOTS"]),
-    ("host-collect.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT"]),
-    ("skel-sweep.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE"]),
-    ("heap-sweep.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_HEAP_BYTES=2097152u"]),
-    ("collect-sweep.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE"]),
-    ("collect-sweep-break.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_BREAK_WEAK"]),
-    ("host-sweep.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP"]),
-    ("skel-tune.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64"]),
-    ("heap-tune.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u"]),
-    ("heap-tune-break.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_BREAK_WINDOW_FIX"]),
-    ("collect-tune.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE"]),
-    ("host-tune.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE"]),
-    ("skel-row.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64"]),
-    ("heap-row.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_ARENA_COVER_BYTES=4194304u"]),
-    ("heap-row-break-cover.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_ARENA_COVER_BYTES=2097152u"]),
-    ("collect-row.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE"]),
-    ("host-row.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_ROW_AN500"]),
-    ("heap-row-f769.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=98304u", "-DMGC_ARENA_COVER_BYTES=524288u", "-DMGC_FINQ_CAP=256u", "-DMGC_OOM_RESERVE=8192u", "-DMGC_WINDOW_BYTES=4096u", "-DMGC_WINDOW_FLOOR=256u", "-DMGC_WALL_RETRIES=4u"]),
-    ("collect-row-f769.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_MARK_STACK_ENTRIES=2048u", "-DMGC_OOM_RESERVE=8192u"]),
-    ("host-freepad.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_FREEPAD"]),
-    ("heap-sweep-break-freepad.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_BREAK_FREE_PAD"]),
-    ("host-handles.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_HANDLES", "-DMGC_HANDLES_ITER=100000u"]),
-    ("skel-tune-break-lock.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64", "-DMGC_BREAK_HANDLE_LOCK"]),
+const FROZEN_PLAN: [(&str, &str, &[&str], Class); 36] = [
+    ("skel-bare.o", "src/gc/mgc_skeleton.cpp", &[], Class::CortexM7),
+    ("skel-bad.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_SKEL_BAD_VERSION"], Class::CortexM7),
+    ("host.o", "src/gc/host/mgc_host.cpp", &[], Class::CortexM7),
+    ("probe.o", "src/gc/mgc_ee_probe.cpp", &[], Class::CortexM7),
+    ("skel-heap.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE"], Class::CortexM7),
+    ("heap.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_HEAP_BYTES=2097152u"], Class::CortexM7),
+    ("host-drive.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC"], Class::CortexM7),
+    ("skel-collect.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE"], Class::CortexM7),
+    ("heap-collect.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_HEAP_BYTES=2097152u"], Class::CortexM7),
+    ("collect.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE"], Class::CortexM7),
+    ("collect-break.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_BREAK_ROOTS"], Class::CortexM7),
+    ("host-collect.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT"], Class::CortexM7),
+    ("skel-sweep.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE"], Class::CortexM7),
+    ("heap-sweep.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_HEAP_BYTES=2097152u"], Class::CortexM7),
+    ("collect-sweep.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE"], Class::CortexM7),
+    ("collect-sweep-break.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_BREAK_WEAK"], Class::CortexM7),
+    ("host-sweep.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP"], Class::CortexM7),
+    ("skel-tune.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64"], Class::CortexM7),
+    ("heap-tune.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u"], Class::CortexM7),
+    ("heap-tune-break.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_BREAK_WINDOW_FIX"], Class::CortexM7),
+    ("collect-tune.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE"], Class::CortexM7),
+    ("host-tune.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE"], Class::CortexM7),
+    ("skel-row.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64"], Class::CortexM7),
+    ("heap-row.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_ARENA_COVER_BYTES=4194304u"], Class::CortexM7),
+    ("heap-row-break-cover.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_ARENA_COVER_BYTES=2097152u"], Class::CortexM7),
+    ("collect-row.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE"], Class::CortexM7),
+    ("host-row.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_ROW_AN500"], Class::CortexM7),
+    ("heap-row-f769.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=98304u", "-DMGC_ARENA_COVER_BYTES=524288u", "-DMGC_FINQ_CAP=256u", "-DMGC_OOM_RESERVE=8192u", "-DMGC_WINDOW_BYTES=4096u", "-DMGC_WINDOW_FLOOR=256u", "-DMGC_WALL_RETRIES=4u"], Class::CortexM7),
+    ("collect-row-f769.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_MARK_STACK_ENTRIES=2048u", "-DMGC_OOM_RESERVE=8192u"], Class::CortexM7),
+    ("host-freepad.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_FREEPAD"], Class::CortexM7),
+    ("heap-sweep-break-freepad.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_BREAK_FREE_PAD"], Class::CortexM7),
+    ("host-handles.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_HANDLES", "-DMGC_HANDLES_ITER=100000u"], Class::CortexM7),
+    ("skel-tune-break-lock.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64", "-DMGC_BREAK_HANDLE_LOCK"], Class::CortexM7),
+    ("skel-row-an505.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64"], Class::CortexM33),
+    ("heap-row-an505.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_ARENA_COVER_BYTES=4194304u"], Class::CortexM33),
+    ("collect-row-an505.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE"], Class::CortexM33),
 ];
 
 /// Parse VENDORED.md's per-file sha bullets: a line whose trimmed form is
@@ -1733,7 +1773,7 @@ impl Gc {
                 &format!("manifest parsed to {} records, the frozen plan holds {} -- a record set that drifted from the plan", records.len(), FROZEN_PLAN.len()),
             );
         }
-        for (name, _, _) in FROZEN_PLAN {
+        for (name, _, _, _) in FROZEN_PLAN {
             let want_path = format!("goldens/gc/{name}");
             if !records.iter().any(|(p, _)| p == &want_path) {
                 self.fail("frozen-inputs", &format!("plan object {name} has no manifest record"));
@@ -1743,7 +1783,7 @@ impl Gc {
             let Some(name) = path.strip_prefix("goldens/gc/") else {
                 self.fail("frozen-inputs", &format!("manifest record '{path}' is outside goldens/gc/"));
             };
-            if !FROZEN_PLAN.iter().any(|(n, _, _)| n == &name) {
+            if !FROZEN_PLAN.iter().any(|(n, _, _, _)| n == &name) {
                 self.fail("frozen-inputs", &format!("manifest record '{path}' has no frozen-plan entry"));
             }
             let got = match sha256_file(&self.repo.join(path.replace('/', std::path::MAIN_SEPARATOR_STR))) {
@@ -1767,7 +1807,7 @@ impl Gc {
         };
         on_disk.sort();
         for name in &on_disk {
-            if !FROZEN_PLAN.iter().any(|(n, _, _)| *n == name.as_str()) {
+            if !FROZEN_PLAN.iter().any(|(n, _, _, _)| *n == name.as_str()) {
                 self.fail("frozen-inputs", &format!("goldens/gc/{name} has NO manifest record (a file without a record)"));
             }
         }
@@ -1853,10 +1893,10 @@ impl Gc {
 
     /// Compile one source with the compiler of record into the gate's obj dir;
     /// on failure the stderr log is echoed and the gate fails.
-    fn compile(&mut self, gxx: &ToolCmd, case: &str, src_rel: &str, extra: &[&str], out_rel: &str) {
+    fn compile(&mut self, gxx: &ToolCmd, case: &str, src_rel: &str, extra: &[&str], out_rel: &str, class: Class) {
         let stdout_p = self.out.join(format!("{}.gxx.stdout", Path::new(out_rel).file_stem().unwrap().to_string_lossy()));
         let stderr_p = self.out.join(format!("{}.gxx.stderr", Path::new(out_rel).file_stem().unwrap().to_string_lossy()));
-        let mut args: Vec<String> = CXX_FLAGS.iter().map(|s| s.to_string()).collect();
+        let mut args: Vec<String> = cxx_flags(class).iter().map(|s| s.to_string()).collect();
         args.extend(extra.iter().map(|s| s.to_string()));
         args.push(src_rel.to_string());
         args.push("-o".to_string());
@@ -2011,7 +2051,7 @@ impl Gc {
         println!("== case gc.A (activation) ==");
 
         let log = self.out.join("build-staticlib.log");
-        let ok = match crate::tools::cargo_build_kernel(&self.repo, &["--lib", "--features", "payload"], &log) {
+        let ok = match crate::tools::cargo_build_kernel(&self.repo, &["--lib", "--features", "payload,entropy-accept-software"], &log) {
             Ok(ok) => ok,
             Err(e) => {
                 println!("rhu-gate: {e}");
@@ -2311,7 +2351,7 @@ impl Gc {
             "   probe surface: {EE_SURFACE} == header declarations == REF sites == object imports (name-level tie; the eighteen host-served methods present)"
         );
 
-        let merged_rel = "goldens/rt/rthello-merged.o";
+        let merged_rel = "goldens/rt-m7/rthello-merged.o";
         if self.repo.join(merged_rel.replace('/', std::path::MAIN_SEPARATOR_STR)).is_file() {
             let merged_defined = self.defined_extern_of(facts, "gc.B", merged_rel);
             if let Some(f) = seam_spelling_fault(&probe_undef, &merged_defined) {
@@ -2322,7 +2362,7 @@ impl Gc {
                 probe_undef.len()
             );
         } else {
-            println!("   the seam's spellings: NOT TIED (the rt tier's frozen merged object is absent: {merged_rel})");
+            println!("   the seam's spellings: NOT TIED (the rt-m7 tier's frozen merged object is absent: {merged_rel})");
         }
 
         let skel_heap = self.undefined_of(facts, "gc.B", "goldens/gc/skel-heap.o");
@@ -4065,6 +4105,9 @@ impl Gc {
             ("heap-row-break-cover.o", "goldens/gc/heap-row-break-cover.o", &IMPORTS_HEAP_SWEEP[..]),
             ("collect-row.o", "goldens/gc/collect-row.o", &IMPORTS_COLLECT_TUNE[..]),
             ("host-row.o", "goldens/gc/host-row.o", &IMPORTS_HOST_ROW[..]),
+            ("skel-row-an505.o", "goldens/gc/skel-row-an505.o", &IMPORTS_SKEL_TUNE[..]),
+            ("heap-row-an505.o", "goldens/gc/heap-row-an505.o", &IMPORTS_HEAP_SWEEP[..]),
+            ("collect-row-an505.o", "goldens/gc/collect-row-an505.o", &IMPORTS_COLLECT_TUNE[..]),
         ] {
             let got = self.undefined_of(facts, "gc.E", obj_rel);
             if !imports_match(&got, want) {
@@ -4088,6 +4131,12 @@ impl Gc {
             IMPORTS_COLLECT_TUNE.len(),
             IMPORTS_HEAP_SWEEP.len(),
             IMPORTS_HOST_ROW.len()
+        );
+        println!(
+            "   the mps2-an505 row's Cortex-M33 objects: skel-row-an505 {} / heap-row-an505 {} / collect-row-an505 {} pinned against the same closures",
+            IMPORTS_SKEL_TUNE.len(),
+            IMPORTS_HEAP_SWEEP.len(),
+            IMPORTS_COLLECT_TUNE.len()
         );
 
         let (sha_ok, rel_ok) = self.link_image(
@@ -4299,54 +4348,65 @@ impl Gc {
     /// source, flag or kit change re-runs it and updates goldens +
     /// MANIFEST + the in-code pin together in one reviewed commit.
     fn run_rederive(&mut self, gxx: &ToolCmd) {
-        println!("== rederive: {} frozen-plan objects from src/gc with the compiler of record ==", FROZEN_PLAN.len());
+        println!("== rederive: {} frozen-plan objects from src/gc with the compiler of record, compared apart from the producer stamp (each sha256 the object's with its comment section removed) ==", FROZEN_PLAN.len());
         let obj_dir = self.out.join("obj");
         if std::fs::create_dir_all(&obj_dir).is_err() {
             self.fail("rederive.objects", "cannot create the rederive obj directory");
         }
+        let facts = match rustc_facts() {
+            Ok(f) => f,
+            Err(e) => self.fail("rederive.objects", &e),
+        };
+        let stripped = obj_dir.join("stripped");
+        let mut stamps_frozen: Vec<String> = Vec::new();
+        let mut stamps_fresh: Vec<String> = Vec::new();
         let heap_bytes_flag = format!("-DMGC_HEAP_BYTES={GATE_HEAP_BYTES}u");
-        if !FROZEN_PLAN.iter().any(|(_, _, defs)| defs.contains(&heap_bytes_flag.as_str())) {
+        if !FROZEN_PLAN.iter().any(|(_, _, defs, _)| defs.contains(&heap_bytes_flag.as_str())) {
             self.fail(
                 "rederive.objects",
                 &format!("no frozen-plan row carries {heap_bytes_flag} -- the plan literals drifted from GATE_HEAP_BYTES"),
             );
         }
-        for (name, src_rel, defines) in FROZEN_PLAN {
+        for (name, src_rel, defines, class) in FROZEN_PLAN {
             let out_rel = format!("src/kernel/target/gc-gate/obj/{name}");
             let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
             let _ = std::fs::remove_file(&out_abs);
-            self.compile(gxx, "rederive.objects", src_rel, defines, &out_rel);
+            self.compile(gxx, "rederive.objects", src_rel, defines, &out_rel, class);
             if !out_abs.is_file() {
                 self.fail(
                     "rederive.objects",
                     &format!("{name}: compile reported success but produced no object (the compile-assert guard)"),
                 );
             }
-            let fresh = match sha256_file(&out_abs) {
+            let frozen_abs = self.repo.join("goldens").join("gc").join(name);
+            let fresh = match sha256_without_stamp(&facts, &out_abs, &stripped.join(format!("fresh-{name}"))) {
                 Ok(s) => s,
-                Err(e) => self.fail("rederive.objects", &format!("{name}: cannot hash fresh object: {e}")),
+                Err(e) => self.fail("rederive.objects", &format!("{name}: cannot hash the fresh object apart from its stamp: {e}")),
             };
-            let frozen_rel = format!("goldens/gc/{name}");
-            let frozen = match sha256_file(&self.repo.join(frozen_rel.replace('/', std::path::MAIN_SEPARATOR_STR))) {
+            let frozen = match sha256_without_stamp(&facts, &frozen_abs, &stripped.join(format!("frozen-{name}"))) {
                 Ok(s) => s,
-                Err(e) => self.fail("rederive.objects", &format!("{name}: cannot hash frozen object: {e}")),
+                Err(e) => self.fail("rederive.objects", &format!("{name}: cannot hash the frozen object apart from its stamp: {e}")),
             };
+            stamps_frozen.push(producer_stamp_of(&frozen_abs));
+            stamps_fresh.push(producer_stamp_of(&out_abs));
             if fresh != frozen {
                 self.fail(
                     "rederive.objects",
                     &format!(
-                        "{name}: fresh compile {fresh} != frozen {frozen} -- source, flags, or kit moved; a re-freeze is a registered, reviewed change (goldens/gc + MANIFEST.md + the in-code pin move together), never a silent refresh"
+                        "{name}: fresh compile {fresh} != frozen {frozen}, apart from the producer stamp -- source, flags, or kit moved; a re-freeze is a registered, reviewed change (goldens/gc + MANIFEST.md + the in-code pin move together), never a silent refresh"
                     ),
                 );
             }
             println!("   {name} OK ({})", &fresh[..16]);
         }
+        println!("   the frozen tier's producer stamp (report-only): {}", distinct_stamps(&stamps_frozen));
+        println!("   the rebuild's producer stamp (report-only): {}", distinct_stamps(&stamps_fresh));
         self.results.emit(&format!(
             "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc-rederive\",\"case\":\"rederive.objects\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"objects\":{}}}}}",
             FROZEN_PLAN.len()
         ));
         self.results.tally("pass", "positive");
-        println!("== rederive: {}/{} objects byte-identical to goldens/gc ==", FROZEN_PLAN.len(), FROZEN_PLAN.len());
+        println!("== rederive: {}/{} objects byte-identical to goldens/gc apart from the producer stamp ==", FROZEN_PLAN.len(), FROZEN_PLAN.len());
 
         println!("== case gc.f769-shared-control (compile-tier control) ==");
         let shared_rel = "src/kernel/target/gc-gate/obj/skel-row-f769-control.o";
@@ -4358,6 +4418,7 @@ impl Gc {
             "src/gc/mgc_skeleton.cpp",
             &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64"],
             shared_rel,
+            Class::CortexM7,
         );
         let shared_got = match sha256_file(&shared_abs) {
             Ok(s) => s,
@@ -4537,7 +4598,7 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "GC REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical; the F769 row's shared skeleton ties the an500 object; posture control refused at compile)  [{}]",
+        "GC REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; the F769 row's shared skeleton ties the an500 object; posture control refused at compile)  [{}]",
         FROZEN_PLAN.len(),
         FROZEN_PLAN.len(),
         gxx.version
@@ -5282,6 +5343,52 @@ pub fn selfcheck(repo: &Path) -> ! {
         "a call inventory missing the census collection's head",
         imports_match(&hp_short, &INVENTORY_HANDLES),
     );
+
+    let stamp_obj = repo.join("goldens").join("gc").join("collect-row.o");
+    let stamp_bytes = std::fs::read(&stamp_obj).unwrap_or_default();
+    let stripped = tmp.join("stripped");
+    let stamp_base = sha256_without_stamp(&facts, &stamp_obj, &stripped.join("genuine.o")).unwrap_or_default();
+    let code_at = section_span_prefixed(&stamp_bytes, ".text").map(|(o, _)| o);
+    let mut code_moved = stamp_bytes.clone();
+    if let Some(at) = code_at {
+        if let Some(b) = code_moved.get_mut(at) {
+            *b ^= 0x01;
+        }
+    }
+    write_fixture(&tmp.join("stamp-code-moved.o"), &code_moved);
+    let code_sha = sha256_without_stamp(&facts, &tmp.join("stamp-code-moved.o"), &stripped.join("code-moved.o")).unwrap_or_default();
+    sc.probe(
+        "stamp-compare-code-byte",
+        "a copy of a frozen object with one code byte moved, compared apart from the stamp",
+        code_at.is_none() || stamp_base.is_empty() || code_sha.is_empty() || code_sha == stamp_base,
+    );
+    let stamp_at = section_span(&stamp_bytes, ".comment");
+    let mut stamp_moved = stamp_bytes.clone();
+    if let Some((o, s)) = stamp_at {
+        if s > 2 {
+            if let Some(b) = stamp_moved.get_mut(o + 1) {
+                *b ^= 0x01;
+            }
+        }
+    }
+    write_fixture(&tmp.join("stamp-stamp-moved.o"), &stamp_moved);
+    let stamp_sha = sha256_without_stamp(&facts, &tmp.join("stamp-stamp-moved.o"), &stripped.join("stamp-moved.o")).unwrap_or_default();
+    sc.accept_probe(
+        "stamp-compare-stamp-only",
+        "a copy of a frozen object whose producer stamp alone is changed ties apart from the stamp while the files differ",
+        stamp_at.is_some() && !stamp_base.is_empty() && stamp_sha == stamp_base && sha256_hex(&stamp_moved) != sha256_hex(&stamp_bytes),
+    );
+
+    sc.accept_probe(
+        "class-flags-two-words",
+        "the Cortex-M33 flag set is the Cortex-M7 set apart from the class's two words",
+        class_flag_sets_tie(&CXX_FLAGS, &CXX_FLAGS_CORTEX_M33).is_ok(),
+    );
+    let mut doctored: Vec<&str> = CXX_FLAGS_CORTEX_M33.to_vec();
+    if let Some(slot) = doctored.iter().position(|f| *f == "-O2") {
+        doctored[slot] = "-O1";
+    }
+    sc.probe("class-flags-doctored", "the Cortex-M33 flag set with a third word moved offered as the class variant", class_flag_sets_tie(&CXX_FLAGS, &doctored).is_ok());
 
     sc.finish("genuine inputs accepted");
 }

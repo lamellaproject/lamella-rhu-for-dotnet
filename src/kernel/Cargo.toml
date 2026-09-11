@@ -39,12 +39,12 @@ board-stm32f769i-disco = []
 # Secure-flat TrustZone posture -- the M33 boots Secure and the kernel
 # stays there (no SAU programming, no NS transition). Build with
 # --target thumbv8m.main-none-eabihf.
-board-mps2-an505 = []
+board-mps2-an505 = ["fpemul"]
 # NUCLEO-U5A5ZJ-Q (STM32U5A5ZJ, Cortex-M33 silicon, flash-boot at
 # 0x08000000, TrustZone option bit off): build with
 # --no-default-features (no semihosting exits off the bench) and
 # --target thumbv8m.main-none-eabihf.
-board-nucleo-u5a5zj-q = []
+board-nucleo-u5a5zj-q = ["fpemul"]
 # F769 clock posture 2: PLL at 216 MHz (the production clock). A gated
 # posture -- own image names, own goldens, banner line from register
 # read-back; requires board-stm32f769i-disco (src/board/mod.rs refuses
@@ -58,10 +58,10 @@ nucleo-u5a5zj-q-pll160 = []
 # Raspberry Pi Pico 2 (RP2350A, Cortex-M33 silicon, execute-in-place from
 # the QSPI flash at 0x10000000): build with --no-default-features (no
 # semihosting exits off the bench) and --target thumbv8m.main-none-eabihf.
-board-pico-2 = []
+board-pico-2 = ["fpemul"]
 # Pimoroni Pico Plus 2 and Pico Plus 2 W (RP2350B; the same chip module
 # as the Pico 2): the same build shape.
-board-pico-plus-2 = []
+board-pico-plus-2 = ["fpemul"]
 # Pico 2 clock posture 2: the system PLL at 150 MHz (the chip's rated
 # clock). A gated posture -- own image names, own goldens, banner line
 # from register read-back; requires board-pico-2 (src/board/mod.rs
@@ -75,6 +75,12 @@ pico-plus-2-pll150 = []
 # without a debugger attached, BKPT #0xAB escalates to HardFault on real
 # silicon, so non-QEMU builds disable this and every exit becomes a park.
 qemu-exit = []
+# The entropy opt-in: the cryptographic door serves the software stream on
+# an image that names this feature (the emulator rows' gate images, where
+# no hardware noise source exists); the boot banner says so. Off by default,
+# implied by no board feature, never named on a silicon image by the build
+# machinery -- a developer who names it on one gets the same honest banner.
+entropy-accept-software = []
 # Gate flavors: deliberately exercise the panic / fault path after the
 # selftests pass.
 test-panic = []
@@ -84,7 +90,7 @@ test-kheap-loud = []
 # The stack-overflow designed death (v8-M rows only; a v7-M target refuses
 # the flavor at compile time): a thread descends past its stack floor and
 # the limit register must raise the UsageFault with the overflow line.
-test-stkof = []
+test-stackovfl = []
 # The tick-cost measurement flavor (QEMU an500 + the
 # Deterministic icount profile only): raw dns/dms/dsw numbers, never a
 # gate case, never golden'd, never a silicon flavor.
@@ -99,6 +105,17 @@ api-smoke = []
 # against, plus the managed entry sequence. The image only exists via
 # the external payload link (staticlib + frozen ILC object).
 payload = []
+# The double-precision emulation for the single-precision FPU class: the fault
+# funnel computes the double-precision forms in software and resumes the
+# program. The Cortex-M33 boards imply it.
+fpemul = []
+# The emulation's decoder with the add and subtract operations swapped: the
+# api gate's negative control, never a shipped image.
+test-fpemul-doctored = []
+# The cost of one double-precision form on a row with a cycle counter, printed by
+# the api flavor's fp-cost check: a measurement image for a board flight, never a
+# chain row.
+fp-cost = []
 
 [profile.release]
 opt-level = 2

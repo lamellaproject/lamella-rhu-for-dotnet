@@ -611,9 +611,29 @@ static int core_ladder(void)
         }
         uint64_t want = (uint64_t)abs.sec * 1000000000ull + (uint64_t)abs.nsec;
         CHECK(__clock_nanosleep_time64(1, 1, &abs, NULL) == 0 && now_ns() >= want, "shim-time", "(the absolute sleep returned early)");
-        int64_t secs = __time64(NULL);
-        CHECK(secs >= 0 && (uint64_t)secs <= now_ns() / 1000000000ull, "shim-time", "(seconds since boot inconsistent)");
         pass("shim-time", " (monotonic clock; a relative sleep honors its floor; an absolute sleep honors its deadline)");
+    }
+
+    /* the calendar: every wall-clock answer is the kernel's calendar */
+    {
+        uint64_t c0;
+        uint64_t c1;
+        int32_t s0;
+        int32_t s1;
+        CHECK(rhu_calendar_get(&c0, &s0) == 0, "shim-calendar", "(the kernel's calendar door refused)");
+        int64_t pal = SystemNative_GetSystemTimeAsTicks();
+        struct ts64 rt;
+        CHECK(__clock_gettime64(0, &rt) == 0, "shim-calendar", "(the real-time clock refused)");
+        int64_t secs = __time64(NULL);
+        CHECK(rhu_calendar_get(&c1, &s1) == 0 && c1 >= c0, "shim-calendar", "(the calendar went backwards)");
+        int64_t lo = (int64_t)c0 - RHU_SHIM_UNIX_EPOCH_TICKS;
+        int64_t hi = (int64_t)c1 - RHU_SHIM_UNIX_EPOCH_TICKS;
+        CHECK(pal >= lo && pal <= hi, "shim-calendar", "(the system time is not the kernel's calendar)");
+        int64_t rtt = rt.sec * 10000000ll + rt.nsec / 100;
+        CHECK(rt.nsec >= 0 && rt.nsec < 1000000000 && rtt >= lo && rtt <= hi, "shim-calendar", "(the real-time clock is not the kernel's calendar)");
+        CHECK(secs * 10000000ll <= hi && (secs + 1) * 10000000ll > lo, "shim-calendar", "(time() is not the calendar's whole second)");
+        CHECK(s0 >= RHU_CALENDAR_UNSET && s0 <= RHU_CALENDAR_APP && s1 == s0, "shim-calendar", "(the source is not one the kernel names)");
+        pass("shim-calendar", " (the system time, the real-time clock and time() read the kernel's calendar; the source named on the wire)");
     }
 
     /* the allocation family */
@@ -641,14 +661,27 @@ static int core_ladder(void)
         pass("shim-alloc", " (realloc keeps bytes; calloc zero and overflow-checked; aligned forms aligned)");
     }
 
-    /* entropy */
+    /* entropy: the two doors */
     {
         uint8_t buf[16];
+        uint8_t again[16];
+        uint8_t big[600] = {0};
         CHECK(getentropy(buf, sizeof buf) == 0, "shim-entropy", "(getentropy refused)");
         CHECK(getrandom(buf, sizeof buf, 0) == (long)sizeof buf, "shim-entropy", "(getrandom short)");
-        CHECK(SystemNative_GetCryptographicallySecureRandomBytes(buf, (int32_t)sizeof buf) == 0, "shim-entropy", "(the PAL draw refused)");
+        CHECK(SystemNative_GetCryptographicallySecureRandomBytes(buf, (int32_t)sizeof buf) == 0, "shim-entropy", "(the cryptographic draw refused)");
+        CHECK(SystemNative_GetCryptographicallySecureRandomBytes(again, (int32_t)sizeof again) == 0 && memcmp(buf, again, sizeof buf) != 0, "shim-entropy", "(two cryptographic draws equal)");
+        CHECK(SystemNative_GetCryptographicallySecureRandomBytes(big, (int32_t)sizeof big) == 0, "shim-entropy", "(a draw past the door's bound refused)");
+        {
+            int nonzero = 0;
+            for (size_t i = 0; i < sizeof big; i++)
+                nonzero += big[i] != 0;
+            CHECK(nonzero > 0, "shim-entropy", "(a draw past the door's bound left the buffer zero)");
+        }
+        CHECK(SystemNative_GetCryptographicallySecureRandomBytes(buf, 0) == 0, "shim-entropy", "(a zero-length draw failed)");
+        CHECK(SystemNative_GetCryptographicallySecureRandomBytes(NULL, (int32_t)sizeof buf) == -1, "shim-entropy", "(a refused draw reported as served)");
+        CHECK(SystemNative_GetCryptographicallySecureRandomBytes(buf, -1) == -1, "shim-entropy", "(a negative length served)");
         SystemNative_GetNonCryptographicallySecureRandomBytes(buf, (int32_t)sizeof buf);
-        pass("shim-entropy", " (every draw all-or-nothing; the source declared on the wire)");
+        pass("shim-entropy", " (cryptographic draws through the secure door in bounded pieces, all or nothing, a refusal honored; the source declared on the wire)");
     }
 
     /* the low-level monitor */
@@ -716,7 +749,7 @@ static int core_ladder(void)
         int64_t a = SystemNative_GetTimestamp();
         msleep(2);
         CHECK(SystemNative_GetTimestamp() > a, "shim-misc", "(the timestamp did not advance)");
-        CHECK(SystemNative_GetSystemTimeAsTicks() > 0 && SystemNative_GetLowResolutionTimestamp() >= 0, "shim-misc", "(the clocks)");
+        CHECK(SystemNative_GetLowResolutionTimestamp() >= 0, "shim-misc", "(the low-resolution clock)");
         rhu_pal_processcpuinformation cpu;
         CHECK(SystemNative_GetCpuUtilization(&cpu) == 0.0 && cpu.lastRecordedCurrentTime != 0, "shim-misc", "(cpu utilization)");
         CHECK(SystemNative_GetUInt64OSThreadId() == (uint64_t)pthread_self() && SystemNative_SchedGetCpu() == 0, "shim-misc", "(thread id)");
@@ -929,12 +962,23 @@ static int fdmap_ladder(void)
         pass("shim-fdmap-truncate", " (shrink keeps the head; grow zero-fills)");
     }
 
-    /* file times */
+    /* file times: a new object's are the calendar's; a set pair sticks */
     {
+        uint64_t c0;
+        uint64_t c1;
+        int32_t s;
+        CHECK(rhu_calendar_get(&c0, &s) == 0, "shim-fdmap-times", "(the calendar door refused)");
+        intptr_t fd = SystemNative_Open("/tmp/w.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        CHECK(fd >= 0 && SystemNative_FStat(fd, &st) == 0 && SystemNative_Close(fd) == 0 && SystemNative_Unlink("/tmp/w.txt") == 0, "shim-fdmap-times", "(a new file)");
+        CHECK(rhu_calendar_get(&c1, &s) == 0, "shim-fdmap-times", "(the calendar door refused)");
+        int64_t lo = (int64_t)c0 - RHU_SHIM_UNIX_EPOCH_TICKS;
+        int64_t hi = (int64_t)c1 - RHU_SHIM_UNIX_EPOCH_TICKS;
+        int64_t mt = st.MTime * 10000000ll + st.MTimeNsec / 100;
+        CHECK(st.MTimeNsec >= 0 && st.MTimeNsec < 1000000000 && mt >= lo && mt <= hi && st.ATime == st.MTime && st.ATimeNsec == st.MTimeNsec, "shim-fdmap-times", "(a new file's times are not the calendar's)");
         rhu_pal_timespec times[2] = {{1000, 5}, {2000, 7}};
         CHECK(SystemNative_UTimensat("/tmp/v.txt", times) == 0, "shim-fdmap-times", "(utimensat)");
         CHECK(SystemNative_Stat("/tmp/v.txt", &st) == 0 && st.ATime == 1000 && st.ATimeNsec == 5 && st.MTime == 2000 && st.MTimeNsec == 7, "shim-fdmap-times", "(the times did not stick)");
-        pass("shim-fdmap-times", " (access and modification times set and read back)");
+        pass("shim-fdmap-times", " (a new file's times are the calendar's; access and modification times set and read back)");
     }
 
     /* the file surface's refusals, each with its errno */

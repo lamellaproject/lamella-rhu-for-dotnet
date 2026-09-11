@@ -318,7 +318,7 @@ ASSERT(ADDR(.rp2350_boot_block) == ORIGIN(CODE) + 0x440,
 ASSERT(SIZEOF(.rp2350_boot_block) == 20,
   "boot block is not the five words the boot ROM recognises");
 
-/* The hosted runtime's demand as the frozen tier states it (goldens/rt:
+/* The hosted runtime's demand as the frozen tier states it (goldens/rt-m7:
  * the merged program object's section classes by llvm-size -- the code
  * class, the copied data, the zero-filled data). The regions must hold
  * that demand beside the kernel's own reserves on every board: a region

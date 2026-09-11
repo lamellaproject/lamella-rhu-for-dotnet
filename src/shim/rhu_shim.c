@@ -403,9 +403,22 @@ static void ts64_from_ns(struct shim_ts64 *ts, uint64_t ns)
     ts->pad = 0;
 }
 
+/* The Linux clock ids of the glibc personality: the two real-time clocks
+ * read the kernel's calendar, every other id the monotonic clock. */
+#define SHIM_CLOCK_REALTIME 0
+#define SHIM_CLOCK_REALTIME_COARSE 5
+
 int __clock_gettime64(int id, struct shim_ts64 *ts)
 {
-    (void)id;
+    if (id == SHIM_CLOCK_REALTIME || id == SHIM_CLOCK_REALTIME_COARSE) {
+        int64_t sec;
+        int32_t nsec;
+        rhu_shim_unix_split(rhu_shim_calendar_unix_ticks(), &sec, &nsec);
+        ts->sec = sec;
+        ts->nsec = nsec;
+        ts->pad = 0;
+        return 0;
+    }
     ts64_from_ns(ts, rhu_now_ns());
     return 0;
 }
@@ -432,10 +445,47 @@ int __nanosleep64(const struct shim_ts64 *rq, struct shim_ts64 *rm)
 
 int64_t __time64(int64_t *out)
 {
-    int64_t t = (int64_t)(rhu_now_ns() / NS_PER_S);
+    int64_t t;
+    int32_t nsec;
+    rhu_shim_unix_split(rhu_shim_calendar_unix_ticks(), &t, &nsec);
     if (out != NULL)
         *out = t;
     return t;
+}
+
+/* The calendar's source, in the kernel's words, for the one line the
+ * first wall-clock read prints. */
+static const char *calendar_source_text(int32_t source)
+{
+    switch (source) {
+    case RHU_CALENDAR_UNSET:
+        return "unset (the epoch plus the elapsed clock)";
+    case RHU_CALENDAR_RTC:
+        return "the board's real-time clock, read at boot";
+    case RHU_CALENDAR_PUSH:
+        return "the debug channel's push";
+    case RHU_CALENDAR_NETWORK:
+        return "network time, set explicitly";
+    case RHU_CALENDAR_APP:
+        return "the application, set explicitly";
+    default:
+        return "a source the kernel does not name";
+    }
+}
+
+int64_t rhu_shim_calendar_unix_ticks(void)
+{
+    static uint32_t announced;
+    uint64_t ticks = 0;
+    int32_t source = 0;
+    int32_t r = rhu_calendar_get(&ticks, &source);
+    if (r != 0) {
+        rhu_shim_log("calendar: the kernel refused the calendar read (%d)", r);
+        rhu_shim_exit(120);
+    }
+    if (announced++ == 0)
+        rhu_shim_log("calendar: the kernel's calendar serves the wall clock; source: %s", calendar_source_text(source));
+    return (int64_t)ticks - RHU_SHIM_UNIX_EPOCH_TICKS;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1348,12 +1398,40 @@ int __libc_current_sigrtmax(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* entropy: never a short draw reported as a full one                   */
+/* entropy: the cryptographic sources on the kernel's secure door       */
 /* ------------------------------------------------------------------ */
 
+/* The kernel's secure door asked in pieces of at most its bound, all or
+ * nothing: the door's first refusal ends the draw, clears the bytes
+ * already served so the buffer never carries a partial draw, and is
+ * returned. */
+static int32_t secure_fill(void *buf, size_t len)
+{
+    uint8_t *p = (uint8_t *)buf;
+    size_t off = 0;
+    while (off < len) {
+        size_t piece = len - off;
+        if (piece > RHU_ENTROPY_SECURE_MAX)
+            piece = RHU_ENTROPY_SECURE_MAX;
+        int32_t r = rhu_entropy_secure(p == NULL ? NULL : p + off, (uint32_t)piece);
+        if (r != 0) {
+            if (p != NULL && off > 0)
+                memset(p, 0, off);
+            return r;
+        }
+        off += piece;
+    }
+    return 0;
+}
+
+/* The C library's cryptographic sources -- the runtime's portability
+ * layer draws its cryptographic bytes through getrandom, then getentropy
+ * -- take the secure door; a refusal is EIO for the two with an error
+ * channel. getentropy serves at most 256 bytes per call by its own
+ * contract. */
 int getentropy(void *buf, size_t len)
 {
-    if (rhu_entropy(buf, (uint32_t)len) != 0) {
+    if (len > 256u || secure_fill(buf, len) != 0) {
         SET_ERRNO(RHU_GERR_EIO);
         return -1;
     }
@@ -1363,7 +1441,7 @@ int getentropy(void *buf, size_t len)
 long getrandom(void *buf, size_t len, unsigned flags)
 {
     (void)flags;
-    if (rhu_entropy(buf, (uint32_t)len) != 0) {
+    if (secure_fill(buf, len) != 0) {
         SET_ERRNO(RHU_GERR_EIO);
         return -1;
     }
@@ -1374,8 +1452,8 @@ long getrandom(void *buf, size_t len, unsigned flags)
  * failed draw ends the process rather than returning weak bytes. */
 void arc4random_buf(void *buf, size_t len)
 {
-    if (rhu_entropy(buf, (uint32_t)len) != 0) {
-        rhu_shim_log("arc4random_buf: the entropy source failed; refusing to return weak bytes");
+    if (secure_fill(buf, len) != 0) {
+        rhu_shim_log("arc4random_buf: the secure door refused; refusing to return weak bytes");
         rhu_exit(134);
     }
 }

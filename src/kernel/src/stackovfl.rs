@@ -39,10 +39,10 @@ extern "C" fn eater(_: usize) {
 }
 
 pub fn run() -> ! {
-    kprintln!("[stkof] a 4 KB victim parked below a 1 KB eater; the eater descends twelve 256-byte frames past its floor -- expect a UsageFault with the stack-overflow line");
+    kprintln!("[stackovfl] a 4 KB victim parked below a 1 KB eater; the eater descends twelve 256-byte frames past its floor -- expect a UsageFault with the stack-overflow line");
     sched::spawn("victim", victim, 0, 2, 4096);
     sched::spawn("eater", eater, 0, 2, 1024);
     api::rhu_sleep_ns(20_000_000);
-    kprintln!("[stkof] UNREACHABLE: the descent survived the floor");
+    kprintln!("[stackovfl] UNREACHABLE: the descent survived the floor");
     semihost::exit(3)
 }

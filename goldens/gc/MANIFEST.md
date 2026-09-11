@@ -24,13 +24,20 @@ Compiler of record: clang version 22.1.8 (the LLVM project's 22.1.8
 release; the version the runtime archives at the pin were built with, so
 one LLVM lineage spells the 32-bit types and mangles the interface names
 the same way on both sides of the seam), targeting arm-none-eabi for the
-Cortex-M7 with hard-float FPv5-D16, no C++ standard library headers (the
+Cortex-M7 with hard-float FPv5-D16 -- and, for the mps2-an505 row's three
+objects, the Cortex-M33 with the single-precision FPv5 under the same flag
+set but the core and FPU words -- no C++ standard library headers (the
 collector is freestanding C++ over the kit's C headers).
 
 Frozen at the compile of record for the .NET 11 RC1 pin
 (v11.0.0-rc.1.26425.128): the ten runtime-to-GC interface headers vendored
 under src/vendor at that tag (the EE interface's major version 5, the flat
-surface the gate ties three ways at 53 names); 33 objects.
+surface the gate ties three ways at 53 names); the mps2-an505 row's three
+collector objects are the an500 row's sources and defines compiled for the
+Cortex-M33 with the single-precision FPv5 (the class flag set beside the
+Cortex-M7's in gc.rs; the collector reads no board row, so the class is
+the one variable), each carrying no double-precision instruction;
+36 objects.
 
 Records (repo-relative path, sha256; defines documented per record):
 
@@ -133,3 +140,12 @@ Records (repo-relative path, sha256; defines documented per record):
 - `goldens/gc/skel-tune-break-lock.o`
   `f860fc70362a890a5e013077e99393407a1f6958b5d1ad91861b4804da47e67e`
   (src/gc/mgc_skeleton.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HANDLE_SLOTS=64 -DMGC_BREAK_HANDLE_LOCK)
+- `goldens/gc/skel-row-an505.o`
+  `fb174cf14361e2ef5f8eb8914b654c9ef4d150ad3e9fa806d3d94c1c1bdf3aa2`
+  (src/gc/mgc_skeleton.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HANDLE_SLOTS=64; the Cortex-M33 class flag set)
+- `goldens/gc/heap-row-an505.o`
+  `d25728e835907f4ad8eaeaaded81f847b51f1531f9b96829583dbf61e7ee445c`
+  (src/gc/mgc_heap.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HEAP_BYTES=2097152u -DMGC_ARENA_COVER_BYTES=4194304u; the Cortex-M33 class flag set)
+- `goldens/gc/collect-row-an505.o`
+  `05e6fbf7f2a2e91b0233bbcc9572334a8fe695e894e4db6495a185d3b4dd1101`
+  (src/gc/mgc_collect.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE; the Cortex-M33 class flag set)

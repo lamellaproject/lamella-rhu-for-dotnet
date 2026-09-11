@@ -2,7 +2,7 @@
 //! payloads on QEMU mps2-an500.
 
 use crate::gate::{write_fixture, GateCtx, Selfcheck};
-use crate::image::{check_records, elf32_phdrs, header_abi, synth_elf32, Phdr, PT_LOAD, PT_TLS};
+use crate::image::{check_records, elf32_phdrs, header_abi, header_abi_compat, synth_elf32, Phdr, PT_LOAD, PT_TLS};
 use crate::results::{chain_json_from_env, golden_json, validate_results, Results};
 use crate::sha256::sha256_file;
 use crate::text::{
@@ -48,13 +48,13 @@ const COLLECTIONS_EXACT: &str = "62";
 const TIMING_DET: &str = "icount-shift0";
 
 /// The rt-link family's frozen input: the merged runtime object of the rt
-/// tier and its demand list (goldens/rt, tied through that tier's
+/// tier and its demand list (goldens/rt-m7, tied through that tier's
 /// manifest pin), the object's section classes as the tier states them
 /// (llvm-size -A over the object; the maps' brackets read them exactly),
 /// the roots the host's initialization contract names beyond the two the
 /// kernel's default entry references, and the family's linker words.
-const RT_MERGED_O: &str = "goldens/rt/rthello-merged.o";
-const RT_DEMAND_TXT: &str = "goldens/rt/rthello-merged.undef.txt";
+const RT_MERGED_O: &str = "goldens/rt-m7/rthello-merged.o";
+const RT_DEMAND_TXT: &str = "goldens/rt-m7/rthello-merged.undef.txt";
 const RT_MANAGED_BYTES: u64 = 389_414;
 const RT_UNBOX_BYTES: u64 = 766;
 const RT_HYDRATED_BYTES: u64 = 77_204;
@@ -541,10 +541,18 @@ fn provided_entry_line(abi: u32) -> String {
     )
 }
 
-/// The kernel's refusal of a stated generation that is not its own.
-fn mismatch_sentence(stated: u32, kernel: u32) -> String {
+/// The kernel's handshake line for a payload-provided entry built for a
+/// generation inside the window but not the kernel's own.
+fn window_entry_line(stated: u32, abi: u32, compat: u32) -> String {
     format!(
-        "[payload] entry REFUSED: the payload was built for hosting-API contract generation {stated}, this kernel serves {kernel}"
+        "[payload] entry: payload-provided, built for hosting-API contract generation {stated} (this kernel serves {abi}; the window reaches back to {compat})"
+    )
+}
+
+/// The kernel's refusal of a stated generation outside the window.
+fn outside_sentence(stated: u32, compat: u32, abi: u32) -> String {
+    format!(
+        "[payload] entry REFUSED: the payload was built for hosting-API contract generation {stated}, outside this kernel's window {compat}..{abi}"
     )
 }
 
@@ -557,6 +565,23 @@ fn check_entry_strong(raw: &[u8], abi: u32) -> Result<(), String> {
     if !contains_fixed(raw, &provided_entry_line(abi)) {
         return Err("the payload-provided handshake line is missing".to_string());
     }
+    check_entry_marks(raw)
+}
+
+/// The window acceptance's transcript: the strong entry built for the
+/// window's floor -- the window form of the handshake line, then the
+/// strong-entry family's marks.
+fn check_entry_window(raw: &[u8], stated: u32, abi: u32, compat: u32) -> Result<(), String> {
+    if !contains_fixed(raw, &window_entry_line(stated, abi, compat)) {
+        return Err("the window form of the handshake line is missing".to_string());
+    }
+    check_entry_marks(raw)
+}
+
+/// The strong-entry family's marks after its handshake line: the entry's
+/// marker, the returned code, the default's constructors line ABSENT, no
+/// payload output.
+fn check_entry_marks(raw: &[u8]) -> Result<(), String> {
     if !contains_fixed(raw, ENTRY_MARK) {
         return Err("the strong entry's marker is missing".to_string());
     }
@@ -877,6 +902,9 @@ struct MPayload {
     gold_dir: PathBuf,
     /// RHU_ABI as include/rhu.h states it, read at gate start.
     abi: u32,
+    /// RHU_ABI_COMPAT as include/rhu.h states it: the window's floor, the
+    /// oldest generation a payload may state and still run.
+    compat: u32,
     /// The frozen merged runtime object's demand list (sorted), read at
     /// the frozen-inputs case; every unresolved name of an rt-link must be
     /// in it.
@@ -1020,9 +1048,9 @@ impl MPayload {
                 self.fail_case("frozen-inputs", "null", "null", "", "", None, msg);
             }
         }
-        let mpath = self.ctx.repo.join("goldens").join("rt").join("MANIFEST.md");
+        let mpath = self.ctx.repo.join("goldens").join("rt-m7").join("MANIFEST.md");
         let msha = sha256_file(&mpath).unwrap_or_default();
-        if msha != crate::gates::rt::SHA_FROZEN_MANIFEST {
+        if msha != crate::gates::rt::SHA_FROZEN_MANIFEST_M7 {
             self.fail_case(
                 "frozen-inputs",
                 "null",
@@ -1030,7 +1058,7 @@ impl MPayload {
                 "",
                 "",
                 None,
-                "goldens/rt/MANIFEST.md sha256 does not match the rt tier's pin (the frozen record moved; this gate links its merged object)",
+                "goldens/rt-m7/MANIFEST.md sha256 does not match the rt-m7 tier's pin (the frozen record moved; this gate links its merged object)",
             );
         }
         let mtext = std::fs::read_to_string(&mpath).unwrap_or_default();
@@ -1044,7 +1072,7 @@ impl MPayload {
                     "",
                     "",
                     None,
-                    &format!("{want} has no record in goldens/rt/MANIFEST.md"),
+                    &format!("{want} has no record in goldens/rt-m7/MANIFEST.md"),
                 );
             };
             let got = sha256_file(&self.ctx.repo.join(want.replace('/', std::path::MAIN_SEPARATOR_STR)))
@@ -1057,7 +1085,7 @@ impl MPayload {
                     "",
                     "",
                     None,
-                    &format!("{want} sha256 mismatch against goldens/rt/MANIFEST.md (frozen artifact moved)"),
+                    &format!("{want} sha256 mismatch against goldens/rt-m7/MANIFEST.md (frozen artifact moved)"),
                 );
             }
         }
@@ -1082,7 +1110,7 @@ impl MPayload {
         );
         self.emit_case("frozen-inputs", "pass", "null", "null", "", "", "null", None, Some(&stats));
         println!(
-            "== frozen inputs: PASS (4/4 hashes match the MANIFEST; the rt tier's merged object and demand list tie goldens/rt/MANIFEST.md, {} names) ==",
+            "== frozen inputs: PASS (4/4 hashes match the MANIFEST; the rt-m7 tier's merged object and demand list tie goldens/rt-m7/MANIFEST.md, {} names) ==",
             self.rt_demand.len()
         );
     }
@@ -1092,7 +1120,7 @@ impl MPayload {
         let log = self.ctx.out.join("build-staticlib.log");
         let ok = match crate::tools::cargo_build_kernel(
             &self.ctx.repo,
-            &["--lib", "--features", "payload"],
+            &["--lib", "--features", "payload,entropy-accept-software"],
             &log,
         ) {
             Ok(ok) => ok,
@@ -1112,7 +1140,7 @@ impl MPayload {
     }
 
     /// One bounded linker invocation under `map_rel`: the object
-    /// `obj_rel` (a frozen payload object, or the rt tier's merged runtime
+    /// `obj_rel` (a frozen payload object, or the rt-m7 tier's merged runtime
     /// object), any extra objects after it, then the staticlib `lib_rel`;
     /// `ld_extra` are the family's own linker words (none for the minirt
     /// links). Returns (linked, linker log, artifact path); the caller
@@ -1634,12 +1662,16 @@ impl MPayload {
         println!("== control {CASE}: PASS (the kernel refused the misplaced arrays before any entry was read: exit 1) ==");
     }
 
-    /// Negative controls (run): the strong input built for the NEXT
-    /// contract generation, and the strong input stating none -- the
-    /// kernel refuses each with its sentence and exit 4 before the entry
-    /// runs. Both inputs come from the strong input by one exact edit.
+    /// The abi controls (run): the strong input built for the NEXT
+    /// contract generation and for the generation BELOW the window's
+    /// floor, and the strong input stating none -- the kernel refuses
+    /// each with its sentence and exit 4 before the entry runs; then the
+    /// strong input built for the window's FLOOR, accepted -- the entry
+    /// runs to its exit and the handshake line takes its window form.
+    /// Every input comes from the strong input by one exact edit.
     fn run_abi_controls(&mut self) {
         let abi = self.abi;
+        let compat = self.compat;
         let strong = format!("{}\n", strong_entry_asm(abi).join("\n"));
         let word = format!("rhu_payload_abi: .word {abi}");
         let block = strong_abi_block(abi);
@@ -1647,13 +1679,20 @@ impl MPayload {
             self.ctx.gate_fail("abi controls: cannot arm -- the strong input's generation statement is not unique");
         }
         let mismatch = strong.replacen(&word, &format!("rhu_payload_abi: .word {}", abi + 1), 1);
+        let below = strong.replacen(&word, &format!("rhu_payload_abi: .word {}", compat - 1), 1);
         let unstated = strong.replacen(&block, "", 1);
-        let cases: [(&str, String, String, &str); 2] = [
+        let cases: [(&str, String, String, &str); 3] = [
             (
                 "abi-mismatch-control",
                 mismatch,
-                mismatch_sentence(abi + 1, abi),
+                outside_sentence(abi + 1, compat, abi),
                 "a payload entry built for the next hosting-API contract generation",
+            ),
+            (
+                "abi-below-window-control",
+                below,
+                outside_sentence(compat - 1, compat, abi),
+                "a payload entry built for the generation below the window's floor",
             ),
             (
                 "abi-unstated-control",
@@ -1678,6 +1717,23 @@ impl MPayload {
             self.emit_control_run(case, "pass", run.exit, 4, &sha, &path_rel, broke);
             println!("== control {case}: PASS (refused with its sentence, exit 4, the entry never ran) ==");
         }
+        let case = "abi-window-control";
+        let broke = "a payload entry built for the window's floor (accepted: the entry runs)";
+        let floor = strong.replacen(&word, &format!("rhu_payload_abi: .word {compat}"), 1);
+        let lines: Vec<String> = floor.lines().map(String::from).collect();
+        let obj_rel = self.assemble_module_asm("ctor", case, &lines);
+        let (sha, path_rel) = self.link_image(case, "rtsmoke", &[obj_rel.as_str()]);
+        let run = self.run_payload_qemu(case, &sha, &path_rel, ExecProfile::Parity);
+        if let Err(e) = check_entry_window(&run.raw, compat, abi, compat) {
+            self.emit_control_run(case, "fail", run.exit, ENTRY_RETURN, &sha, &path_rel, broke);
+            self.ctx.gate_fail(&format!("{case}: {e}"));
+        }
+        if run.exit != ENTRY_RETURN {
+            self.emit_control_run(case, "fail", run.exit, ENTRY_RETURN, &sha, &path_rel, broke);
+            self.ctx.gate_fail(&format!("{case}: exit {}, wanted {ENTRY_RETURN} (the strong entry's return)", run.exit));
+        }
+        self.emit_control_run(case, "pass", run.exit, ENTRY_RETURN, &sha, &path_rel, broke);
+        println!("== control {case}: PASS (the window's floor {compat} accepted: the entry ran and returned {ENTRY_RETURN}; the handshake line in its window form) ==");
     }
 
     /// Run a linked payload under QEMU on the given execution profile
@@ -2037,6 +2093,17 @@ pub fn run(repo: &Path) -> ! {
             exit(1);
         }
     };
+    let compat = match header_abi_compat(&header) {
+        Some(n) if n >= 1 && n <= abi => n,
+        Some(n) => {
+            println!("rhu-gate: src/kernel/include/rhu.h states RHU_ABI_COMPAT {n} against RHU_ABI {abi} (the floor is 1 or more and never above the generation)");
+            exit(1);
+        }
+        None => {
+            println!("rhu-gate: src/kernel/include/rhu.h states no RHU_ABI_COMPAT (the window's floor the entry handshake pins)");
+            exit(1);
+        }
+    };
     let mut g = MPayload {
         ctx: GateCtx {
             repo: repo.to_path_buf(),
@@ -2052,6 +2119,7 @@ pub fn run(repo: &Path) -> ! {
         ld,
         gold_dir,
         abi,
+        compat,
         rt_demand: Vec::new(),
     };
     g.ctx.results.emit(&format!(
@@ -2079,7 +2147,7 @@ pub fn run(repo: &Path) -> ! {
         println!("{DISPLAY}: FAIL -- results file failed schema validation");
         exit(1);
     }
-    println!("{DISPLAY}: PASS (18/18 cases incl. 6 negative controls)  [{qemu_v} | {rustc_v} | {ld_v}]");
+    println!("{DISPLAY}: PASS (20/20 cases incl. 7 negative controls)  [{qemu_v} | {rustc_v} | {ld_v}]");
     exit(0);
 }
 
@@ -2336,6 +2404,12 @@ pub fn selfcheck(repo: &Path) -> ! {
         header_abi(&header).is_some(),
     );
     let abi = header_abi(&header).unwrap_or(0);
+    let compat = header_abi_compat(&header).unwrap_or(0);
+    sc.accept_probe(
+        "abi-compat-header-genuine",
+        "include/rhu.h states an RHU_ABI_COMPAT the gate can read, 1 or more and not above RHU_ABI",
+        header_abi_compat(&header).map(|c| c >= 1 && c <= abi).unwrap_or(false),
+    );
     sc.probe(
         "abi-header-missing",
         "a header text without the RHU_ABI define (the gate must refuse to run without it)",
@@ -2467,7 +2541,22 @@ pub fn selfcheck(repo: &Path) -> ! {
         check_entry_strong(wrong_code.as_bytes(), abi).is_ok(),
     );
 
-    let sentence = mismatch_sentence(abi + 1, abi);
+    let window_ok = format!(
+        "[boot] x | y | flavor: payload\r\n{}\r\n{ENTRY_MARK}\r\n[payload] managed Main returned {ENTRY_RETURN}\r\n",
+        window_entry_line(compat, abi, compat)
+    );
+    sc.accept_probe(
+        "entry-window-genuine",
+        "genuine window-acceptance transcript (the window form of the handshake line) accepted",
+        check_entry_window(window_ok.as_bytes(), compat, abi, compat).is_ok(),
+    );
+    sc.probe(
+        "entry-window-line-plain",
+        "window-acceptance transcript carrying the plain provided line instead of the window form",
+        check_entry_window(strong_ok.as_bytes(), compat, abi, compat).is_ok(),
+    );
+
+    let sentence = outside_sentence(abi + 1, compat, abi);
     let refused_ok = format!("[boot] x | flavor: payload\r\n{sentence}\r\n");
     write_fixture(&tmp.join("abi-refused.raw"), refused_ok.as_bytes());
     sc.accept_probe(

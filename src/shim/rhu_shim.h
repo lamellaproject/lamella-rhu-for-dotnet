@@ -66,4 +66,33 @@ int rhu_shim_create_thread(size_t stack_bytes, void *(*fn)(void *), void *arg);
  * calling thread. Never returns. */
 void rhu_shim_exit(int code) __attribute__((noreturn));
 
+/* The wall clock is the kernel's calendar. RHU_SHIM_UNIX_EPOCH_TICKS is the
+ * calendar tick of 1970-01-01T00:00:00Z: 719,162 days of 864,000,000,000
+ * ticks of 100 ns each since the epoch of 0001-01-01T00:00:00Z, the
+ * hosted runtime's own epoch offset. rhu_shim_calendar_unix_ticks reads the
+ * kernel's calendar for every wall-clock answer the shim gives (the PAL's
+ * system time, the C library's real-time clock and time(), the file
+ * store's times) as ticks since 1970-01-01T00:00:00Z, signed: negative
+ * before that instant, which is how an unset calendar reads (the epoch
+ * plus the elapsed clock). The first read states the calendar's source on
+ * the console. */
+#define RHU_SHIM_UNIX_EPOCH_TICKS 621355968000000000ll
+static_assert(RHU_SHIM_UNIX_EPOCH_TICKS == 719162ll * 864000000000ll, "the epoch offset is the day count times the ticks per day");
+int64_t rhu_shim_calendar_unix_ticks(void);
+
+/* A signed tick count since 1970-01-01T00:00:00Z split into whole seconds
+ * and the nanoseconds within that second, 0 to 999,999,999: the floor is
+ * taken, so a negative count never yields a negative nanosecond field. */
+static inline void rhu_shim_unix_split(int64_t ticks, int64_t *sec, int32_t *nsec)
+{
+    int64_t s = ticks / 10000000ll;
+    int64_t rem = ticks - s * 10000000ll;
+    if (rem < 0) {
+        s -= 1;
+        rem += 10000000ll;
+    }
+    *sec = s;
+    *nsec = (int32_t)(rem * 100);
+}
+
 #endif /* RHU_SHIM_H */

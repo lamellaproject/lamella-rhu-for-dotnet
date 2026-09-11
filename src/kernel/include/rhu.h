@@ -19,15 +19,28 @@ extern "C" {
  * nanoseconds on the rhu_now_ns clock, never relative. */
 #define RHU_DEADLINE_NONE UINT64_MAX
 
-/* The hosting-API contract generation this header describes. A change
- * a compiled consumer could feel -- a signature, a struct layout, an
- * error value, a function added or removed -- bumps it by one. Its
- * value today is the header's function count; the two part ways at the
- * first signature-only change. A payload that provides its own entry
- * states the generation it was built against (rhu_payload_abi, at the
- * end of this header), and the kernel refuses a mismatch before that
- * entry runs. */
-#define RHU_ABI 31
+/* The hosting-API contract generation this header describes, and the
+ * window of generations a kernel built from it serves.
+ *
+ * RHU_ABI is the generation. An ADDITIVE change -- a function added at
+ * the end of this header, nothing a compiled consumer could feel moved
+ * -- raises RHU_ABI by one and leaves RHU_ABI_COMPAT where it stands. A
+ * BREAKING change -- a signature, a struct layout, an error value, a
+ * function removed or reordered -- raises both to the same new number.
+ * (Through generation 31 the value was the header's function count; it
+ * is a generation number from 32 on.)
+ *
+ * A payload that provides its own entry states the RHU_ABI of the header
+ * it compiled against and nothing else (rhu_payload_abi, at the end of
+ * this header); it never states the window. The kernel runs a stated
+ * generation from RHU_ABI_COMPAT through RHU_ABI and refuses any other
+ * before the entry runs, with one sentence on the console that names
+ * the stated generation and the window:
+ *     [payload] entry REFUSED: the payload was built for hosting-API
+ *     contract generation N, outside this kernel's window C..A
+ * where C is RHU_ABI_COMPAT and A is RHU_ABI. */
+#define RHU_ABI 32
+#define RHU_ABI_COMPAT 31
 
 /* Error surface (RHU-owned values, errno-mirroring by convention). */
 #define RHU_EAGAIN (-11)    /* *addr != expected at entry; no sleep    */
@@ -38,6 +51,41 @@ extern "C" {
  * resolution by hardware-counter interpolation; never steps backward,
  * including across the tick-wrap window. */
 uint64_t rhu_now_ns(void);
+
+/* --- The calendar: the date and time as a BASE plus the monotonic
+ * clock above. The unit is the calendar tick -- 100 nanoseconds since
+ * 0001-01-01T00:00:00Z (the hosted runtime's own DateTime tick; the
+ * value 0 is that epoch, RHU_CALENDAR_MAX the last instant of the year
+ * 9999). The calendar at any moment is the base plus the elapsed
+ * monotonic clock, so setting the base never moves rhu_now_ns. The base
+ * is the epoch until a source sets it. The sources: a board's real-time
+ * clock read once at boot where the part has one and it was ever set
+ * (RHU_CALENDAR_RTC); the developer's tooling writing the push mailbox
+ * over the debug probe (RHU_CALENDAR_PUSH); network time by an EXPLICIT
+ * call (RHU_CALENDAR_NETWORK, never automatic); the application
+ * (RHU_CALENDAR_APP). The first source establishes the base; any later
+ * explicit set replaces it; the query says which is current. Where a
+ * part has a real-time clock, an explicit set is written back to it so
+ * the next boot starts true across a reset, and across a power cycle on
+ * a board whose clock has backup power; the boot banner states each
+ * row's posture. */
+#define RHU_CALENDAR_MAX 3155378975999999999ull
+#define RHU_CALENDAR_UNSET 0
+#define RHU_CALENDAR_RTC 1
+#define RHU_CALENDAR_PUSH 2
+#define RHU_CALENDAR_NETWORK 3
+#define RHU_CALENDAR_APP 4
+
+/* The calendar now and the source that set the base: 0; RHU_EINVAL for
+ * a null or misaligned pointer, writing nothing. */
+int32_t rhu_calendar_get(uint64_t *ticks, int32_t *source);
+
+/* The explicit set: the calendar reads ticks from now on, the source
+ * recorded (RHU_CALENDAR_NETWORK or RHU_CALENDAR_APP only -- the kernel
+ * records its own two sources itself), the real-time clock written back
+ * where the part has one. Returns 0; RHU_EINVAL for another source or
+ * ticks past RHU_CALENDAR_MAX. Never blocks. */
+int32_t rhu_calendar_set(uint64_t ticks, int32_t source);
 
 /* Sleep at least ns nanoseconds (relative request). NEVER returns
  * early, however long the request (a target beyond the scheduler's
@@ -360,8 +408,8 @@ int32_t rhu_console_write(const void *buf, uint32_t n);
 
 /* Drain up to n pending console input bytes into buf and return the
  * count -- 0 means no input, and the call NEVER waits for any (a
- * blocking read is a recipe: poll, then futex-wait on a readiness
- * word once a real notification path exists). Bytes are raw wire
+ * blocking read is a recipe: poll; no readiness word is exported
+ * for a futex wait). Bytes are raw wire
  * bytes: no echo, no line editing, no CR/LF translation. Refusals
  * mirror rhu_console_write. */
 int32_t rhu_console_read(void *buf, uint32_t n);
@@ -374,16 +422,34 @@ int32_t rhu_console_read(void *buf, uint32_t n);
  * ceremony). */
 void rhu_exit(int32_t code);
 
-/* Fill buf[0..n) with entropy and return 0, or refuse RHU_EINVAL
- * (NULL buf with n > 0) writing nothing -- the draw is all-or-
- * nothing, a short fill never exists. n == 0 returns 0 trivially.
- * Never blocks. QUALITY IS DECLARED, never implied: on every current
- * board the source is a seeded software PRNG, and
- * rhu_entropy_is_hardware answers 0 honestly; a board with a real
- * hardware TRNG will serve it here and answer 1. Callers that need
- * cryptographic strength must check the query and own the refusal
- * story. */
+/* Random bytes, two doors. rhu_entropy fills buf[0..n) from the
+ * kernel's software stream -- well mixed, entirely predictable from its
+ * seed, seeded at its first draw from the hardware source where one
+ * serves -- for everything that does not need secrecy; returns 0, or
+ * refuses RHU_EINVAL (NULL buf with n > 0) writing nothing; n == 0
+ * returns 0 trivially; never blocks; the draw is all-or-nothing.
+ * rhu_entropy_secure fills buf[0..n) with bytes for cryptography, from a
+ * hardware noise source ONLY, with the source's own health flags read at
+ * this draw: 0 when served; RHU_ENODEV when no hardware source serves on
+ * this row or clock posture (or the source was retired); RHU_EIO when
+ * the source failed its health check at this draw -- it is then retired
+ * for the boot's life, rhu_entropy_is_hardware answers 0 and every later
+ * secure draw refuses RHU_ENODEV; RHU_EAGAIN when the source is healthy
+ * but the bytes were not ready within the door's bound (retry), or a
+ * draw was already in flight; RHU_EINVAL for NULL with n > 0 or n past
+ * RHU_ENTROPY_SECURE_MAX (a larger buffer is filled in bounded pieces by
+ * the caller). A refusal writes nothing. The build opt-in named
+ * entropy-accept-software, off by default and implied by no board, lets
+ * an image -- the emulator rows' gate images -- serve the software
+ * stream through this door; the boot banner says so on every image
+ * that carries it. QUALITY IS DECLARED, never implied:
+ * rhu_entropy_is_hardware answers 1 while a hardware source serves and
+ * its last check passed, 0 otherwise -- 0 under the opt-in too. */
+#define RHU_ENODEV (-19)    /* no hardware entropy source serves          */
+#define RHU_EIO (-5)        /* the source failed its check; retired       */
+#define RHU_ENTROPY_SECURE_MAX 256
 int32_t rhu_entropy(void *buf, uint32_t n);
+int32_t rhu_entropy_secure(void *buf, uint32_t n);
 int32_t rhu_entropy_is_hardware(void);
 
 /* --- The payload entry seam: the one member of this surface the
@@ -417,12 +483,13 @@ int32_t rhu_payload_entry(void);
  * of the header it compiled against:
  *     const uint32_t rhu_payload_abi = RHU_ABI;
  * The kernel reads it before calling the entry. A stated generation
- * that is not the kernel's, or a provided entry with no stated
- * generation, is refused with one sentence on the console and exit
- * code 4 (a park on silicon): the entry never runs, and a mismatched
- * peer reports instead of hanging. A payload that keeps the default
- * entry may leave this undefined (the kernel's weak sentinel reads 0,
- * "no generation stated"). */
+ * inside the kernel's window (RHU_ABI_COMPAT through RHU_ABI) runs; one
+ * outside it, or a provided entry with no stated generation, is refused
+ * with one sentence on the console and exit code 4 (a park on silicon):
+ * the entry never runs, and a mismatched peer reports instead of
+ * hanging. A payload that keeps the default entry may leave this
+ * undefined (the kernel's weak sentinel reads 0, "no generation
+ * stated"). */
 extern const uint32_t rhu_payload_abi;
 
 #ifdef __cplusplus

@@ -36,7 +36,10 @@ ExceptionTrampoline:
     mrseq r0, msp
     mrsne r0, psp
     mov   r1, lr
-    b     __rhu_exception
+    push  {{r4, lr}}      /* the exception return value kept; the call returns it in r0 */
+    bl    __rhu_exception
+    pop   {{r4, lr}}
+    bx    r0
     .size ExceptionTrampoline, . - ExceptionTrampoline
 "#
 );
@@ -83,8 +86,33 @@ fn panic(info: &PanicInfo) -> ! {
     semihost::exit(1)
 }
 
+/// The exception entry: the double-precision emulation's gate first (a
+/// UsageFault on an undefined instruction that decodes as a double-precision
+/// form is computed and the program resumes past it -- the value returned is
+/// the EXC_RETURN the trampoline branches through), then the terminal report.
 #[unsafe(no_mangle)]
-extern "C" fn __rhu_exception(frame: *const ExcFrame, exc_return: u32) -> ! {
+extern "C" fn __rhu_exception(frame: *mut ExcFrame, exc_return: u32) -> u32 {
+    #[cfg(feature = "fpemul")]
+    {
+        let raw_ipsr: u32;
+        unsafe { asm!("mrs {}, IPSR", out(reg) raw_ipsr, options(nomem, nostack)) };
+        if raw_ipsr & 0x1FF == 6 && unsafe { SCB_CFSR.read_volatile() } & (1 << 16) != 0 {
+            match crate::fpemul::trap(frame, exc_return) {
+                crate::fpemul::Trap::Emulated(out) => return out,
+                crate::fpemul::Trap::NotOurs => {}
+                crate::fpemul::Trap::Refused(reason) => {
+                    console::init();
+                    let pc = unsafe { (*frame).pc };
+                    kprintln!("[fault] double-precision form {} at {:#010x}: not emulated -- {}", crate::fpemul::name_at(pc), pc, reason);
+                }
+            }
+        }
+    }
+    terminal(frame, exc_return)
+}
+
+/// The terminal report: never returns (the emulator rows exit, silicon parks).
+fn terminal(frame: *const ExcFrame, exc_return: u32) -> ! {
     if TERMINAL_DEPTH.fetch_add(1, Ordering::SeqCst) > 0 {
         semihost::park();
     }

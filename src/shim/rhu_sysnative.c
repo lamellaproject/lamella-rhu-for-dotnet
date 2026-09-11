@@ -177,6 +177,23 @@ const char *SystemNative_StrErrorR(int32_t platformErrno, char *buffer, int32_t 
  * name: unlink and rename-over take the name away at once and leave the
  * bytes to the descriptors that hold them; a slot is reused only after
  * the last close. */
+/* A file's time as the PAL reports it: whole seconds since
+ * 1970-01-01T00:00:00Z and the nanoseconds within that second. A time the
+ * store sets itself is the kernel's calendar at that moment; a time set
+ * through the PAL is kept exactly as given. */
+typedef struct rfs_time {
+    int64_t sec;
+    int32_t nsec;
+} rfs_time;
+
+/* The calendar now, as a file time. */
+static rfs_time rfs_now(void)
+{
+    rfs_time t;
+    rhu_shim_unix_split(rhu_shim_calendar_unix_ticks(), &t.sec, &t.nsec);
+    return t;
+}
+
 typedef struct rfs_file {
     uint8_t used;
     uint8_t linked;
@@ -188,8 +205,8 @@ typedef struct rfs_file {
     uint32_t size;
     uint32_t cap;
     uint32_t mode;
-    int64_t atime_ns;
-    int64_t mtime_ns;
+    rfs_time atime;
+    rfs_time mtime;
 } rfs_file;
 
 typedef struct rfs_dir {
@@ -403,7 +420,7 @@ static int32_t file_pread(rfs_fd *h, void *buf, int32_t count, int64_t at)
     if ((uint32_t)count < n)
         n = (uint32_t)count;
     memcpy(buf, f->data + (uint32_t)at, n);
-    f->atime_ns = (int64_t)rhu_now_ns();
+    f->atime = rfs_now();
     return (int32_t)n;
 }
 
@@ -434,7 +451,7 @@ static int32_t file_pwrite(rfs_fd *h, const void *buf, int32_t count, int64_t at
     memcpy(f->data + (uint32_t)at, buf, (uint32_t)count);
     if (end > f->size)
         f->size = end;
-    f->mtime_ns = (int64_t)rhu_now_ns();
+    f->mtime = rfs_now();
     return count;
 }
 
@@ -515,11 +532,11 @@ static intptr_t open_locked(const char *path, int32_t flags, int32_t mode)
         g_files[ni].linked = 1;
         strcpy(g_files[ni].path, path);
         g_files[ni].mode = (uint32_t)mode & RFS_MODE_MASK;
-        g_files[ni].atime_ns = (int64_t)rhu_now_ns();
-        g_files[ni].mtime_ns = g_files[ni].atime_ns;
+        g_files[ni].atime = rfs_now();
+        g_files[ni].mtime = g_files[ni].atime;
     } else if ((flags & RHU_PAL_O_TRUNC) != 0 && access != RHU_PAL_O_RDONLY) {
         g_files[ni].size = 0;
-        g_files[ni].mtime_ns = (int64_t)rhu_now_ns();
+        g_files[ni].mtime = rfs_now();
     }
 #ifdef RHU_SHIM_BREAK_STORE_OPEN_ORDER
     if (di < 0) {
@@ -717,12 +734,12 @@ int64_t SystemNative_LSeek(intptr_t fd, int64_t offset, int32_t whence)
     return r;
 }
 
-static void status_times(rhu_pal_filestatus *st, int64_t atime_ns, int64_t mtime_ns)
+static void status_times(rhu_pal_filestatus *st, const rfs_time *atime, const rfs_time *mtime)
 {
-    st->ATime = atime_ns / (int64_t)NS_PER_S;
-    st->ATimeNsec = atime_ns % (int64_t)NS_PER_S;
-    st->MTime = mtime_ns / (int64_t)NS_PER_S;
-    st->MTimeNsec = mtime_ns % (int64_t)NS_PER_S;
+    st->ATime = atime->sec;
+    st->ATimeNsec = atime->nsec;
+    st->MTime = mtime->sec;
+    st->MTimeNsec = mtime->nsec;
     st->CTime = st->MTime;
     st->CTimeNsec = st->MTimeNsec;
 }
@@ -736,7 +753,7 @@ static void status_of_file(rhu_pal_filestatus *st, int index)
     st->Ino = (int64_t)index + 1;
     st->Dev = 1;
     st->HardLinkCount = f->linked != 0 ? 1 : 0;
-    status_times(st, f->atime_ns, f->mtime_ns);
+    status_times(st, &f->atime, &f->mtime);
 }
 
 static void status_of_dir(rhu_pal_filestatus *st)
@@ -1077,7 +1094,7 @@ static int32_t ftruncate_locked(intptr_t fd, int64_t length)
         memset(f->data + f->size, 0, len - f->size);
     }
     f->size = len;
-    f->mtime_ns = (int64_t)rhu_now_ns();
+    f->mtime = rfs_now();
     return 0;
 }
 
@@ -1257,10 +1274,9 @@ int32_t SystemNative_FChMod(intptr_t fd, int32_t mode)
  * either time moves. Directories carry no times. */
 static int32_t set_times(int fi, const rhu_pal_timespec *times)
 {
-    int64_t now = (int64_t)rhu_now_ns();
     if (times == NULL) {
-        g_files[fi].atime_ns = now;
-        g_files[fi].mtime_ns = now;
+        g_files[fi].atime = rfs_now();
+        g_files[fi].mtime = g_files[fi].atime;
         return 0;
     }
 #ifndef RHU_SHIM_BREAK_STORE_TIMES
@@ -1271,8 +1287,10 @@ static int32_t set_times(int fi, const rhu_pal_timespec *times)
         }
     }
 #endif
-    g_files[fi].atime_ns = times[0].tv_sec * (int64_t)NS_PER_S + times[0].tv_nsec;
-    g_files[fi].mtime_ns = times[1].tv_sec * (int64_t)NS_PER_S + times[1].tv_nsec;
+    g_files[fi].atime.sec = times[0].tv_sec;
+    g_files[fi].atime.nsec = (int32_t)times[0].tv_nsec;
+    g_files[fi].mtime.sec = times[1].tv_sec;
+    g_files[fi].mtime.nsec = (int32_t)times[1].tv_nsec;
     return 0;
 }
 
@@ -1640,11 +1658,19 @@ int64_t SystemNative_GetLowResolutionTimestamp(void)
     return (int64_t)(rhu_now_ns() / 1000000ull);
 }
 
-/* 100 ns ticks since boot: this platform has no calendar source, so the
- * system time reads as elapsed time. */
+/* The system time in 100 ns ticks since 1970-01-01T00:00:00Z, read from
+ * the kernel's calendar (the runtime adds its own epoch offset to make a
+ * calendar value): negative while the calendar is unset, which the
+ * runtime reads as the epoch plus the elapsed clock. */
 int64_t SystemNative_GetSystemTimeAsTicks(void)
 {
+#ifdef RHU_SHIM_BREAK_CALENDAR_CLOCK
+    /* A test knob: the boot clock in place of the calendar, the answer of a
+     * shim that has no calendar. Never set in a hosted image. */
     return (int64_t)(rhu_now_ns() / 100ull);
+#else
+    return rhu_shim_calendar_unix_ticks();
+#endif
 }
 
 double SystemNative_GetCpuUtilization(rhu_pal_processcpuinformation *previousCpuInfo)
@@ -1656,24 +1682,70 @@ double SystemNative_GetCpuUtilization(rhu_pal_processcpuinformation *previousCpu
 }
 
 /* ------------------------------------------------------------------ */
-/* random bytes: the source is declared, never implied                  */
+/* random bytes: the kernel's two doors; the door's answer reported     */
 /* ------------------------------------------------------------------ */
 
+/* The non-cryptographic draw: the kernel's software stream. */
 void SystemNative_GetNonCryptographicallySecureRandomBytes(uint8_t *buffer, int32_t bufferLength)
 {
     rhu_entropy(buffer, (uint32_t)bufferLength);
 }
 
+/* The secure door's refusal, in words, for the line the first refusal
+ * prints. */
+static const char *entropy_refusal_text(int32_t code)
+{
+    switch (code) {
+    case RHU_EINVAL:
+        return "an invalid argument";
+    case RHU_ENODEV:
+        return "no hardware source serves";
+    case RHU_EIO:
+        return "the source failed its health check and is retired";
+    case RHU_EAGAIN:
+        return "the bytes were not ready in time";
+    default:
+        return "a code the door does not name";
+    }
+}
+
+/* The cryptographic draw: the kernel's secure door, asked in pieces of at
+ * most its bound, all or nothing. A refusal by the door fails the whole
+ * draw -- the bytes already served are cleared, so the buffer never
+ * carries a partial draw -- and the runtime surfaces the failure to its
+ * caller; the first refusal is announced with the door's reason. A
+ * negative length is refused before the door is asked; a zero length is
+ * served trivially. */
 int32_t SystemNative_GetCryptographicallySecureRandomBytes(uint8_t *buffer, int32_t bufferLength)
 {
-    static uint32_t announced;
-    if (announced++ == 0) {
-        if (rhu_entropy_is_hardware() != 0)
-            rhu_shim_log("entropy: hardware source");
-        else
-            rhu_shim_log("entropy: software PRNG, not cryptographic (no hardware source on this board)");
+    static uint32_t served_announced;
+    static uint32_t refusal_announced;
+    if (bufferLength < 0)
+        return -1;
+    uint32_t n = (uint32_t)bufferLength;
+    uint32_t off = 0;
+    while (off < n) {
+        uint32_t piece = n - off;
+        if (piece > RHU_ENTROPY_SECURE_MAX)
+            piece = RHU_ENTROPY_SECURE_MAX;
+        int32_t r = rhu_entropy_secure(buffer == NULL ? NULL : buffer + off, piece);
+#ifdef RHU_SHIM_BREAK_ENTROPY_REFUSAL
+        /* A test knob: the door's answer ignored, every draw reported as
+         * served. Never set in a hosted image. */
+        r = 0;
+#endif
+        if (r != 0) {
+            if (buffer != NULL && off > 0)
+                memset(buffer, 0, off);
+            if (refusal_announced++ == 0)
+                rhu_shim_log("entropy: the secure door refused a cryptographic draw (%s); the draw fails and nothing is served (further refusals counted silently)", entropy_refusal_text(r));
+            return -1;
+        }
+        off += piece;
     }
-    return rhu_entropy(buffer, (uint32_t)bufferLength) == 0 ? 0 : -1;
+    if (n != 0 && served_announced++ == 0)
+        rhu_shim_log("entropy: cryptographic draws through the kernel's secure door; hardware source: %s", rhu_entropy_is_hardware() != 0 ? "yes" : "no");
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */

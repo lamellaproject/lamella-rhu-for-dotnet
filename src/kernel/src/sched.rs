@@ -822,6 +822,10 @@ pub const ERR_INVAL: i32 = -22;
 pub const ERR_SRCH: i32 = -3;
 /// Futex wait broken by activation delivery (rhu.h RHU_EINTR).
 pub const ERR_INTR: i32 = -4;
+/// No hardware entropy source serves (rhu.h RHU_ENODEV; the cryptographic door).
+pub const ERR_NODEV: i32 = -19;
+/// The hardware entropy source failed its health check (rhu.h RHU_EIO).
+pub const ERR_IO: i32 = -5;
 
 /// 64-bit monotonic nanoseconds since scheduler init. The four
 /// recorded hazards, each handled in order:
@@ -1653,6 +1657,7 @@ pub unsafe extern "C" fn systick_vector() { unsafe {
             w.entries = w.entries.wrapping_add(1);
         }
     }
+    crate::calendar::tick_poll();
     let now = TICKS.fetch_add(1, Ordering::Release).wrapping_add(1);
     if now == 0 {
         TICKS_HI.fetch_add(1, Ordering::Release);

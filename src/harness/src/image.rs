@@ -201,6 +201,18 @@ pub fn header_abi(text: &str) -> Option<u32> {
     })
 }
 
+/// `RHU_ABI_COMPAT` as `include/rhu.h` states it: the oldest generation
+/// the kernel's entry handshake still runs (the window's floor).
+pub fn header_abi_compat(text: &str) -> Option<u32> {
+    text.lines().find_map(|l| {
+        let rest = l.trim_end_matches('\r').strip_prefix("#define RHU_ABI_COMPAT")?.trim();
+        if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        rest.parse().ok()
+    })
+}
+
 /// A minimal ELF32 little-endian image for the selfchecks' probes: the
 /// given program headers (type, offset, vaddr, paddr, filesz, memsz,
 /// align) and `data` placed at file offset `data_at`.

@@ -1,4 +1,4 @@
-//! The host board: the row facts the pure modules read (the emulator
+//! The host board: the row facts the arithmetic modules read (the emulator
 //! rows' kernel-heap carve) and the arena's window over a host buffer of
 //! one megabyte, 8-aligned like a map's window.
 

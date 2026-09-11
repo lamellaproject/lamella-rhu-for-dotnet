@@ -4,10 +4,12 @@
 //! maintainer's re-derivation leg ('rhu-gate shim rederive'), and its
 //! objects are committed.
 
-use crate::gate::{write_fixture, Selfcheck};
+use crate::gate::{class_flag_sets_tie, write_fixture, Class, Selfcheck};
 use crate::gates::gc::{parse_undefined, parse_vendored_manifest, resolve_clang, resolve_ld, run_tool_bounded, ToolCmd};
+use crate::image::header_abi;
+use crate::objfile::{distinct_stamps, producer_stamp_of, section_span, section_span_prefixed, sha256_without_stamp, symbol_word};
 use crate::results::{chain_json_from_env, validate_results, Results};
-use crate::sha256::sha256_file;
+use crate::sha256::{sha256_file, sha256_hex};
 use crate::text::{contains_fixed, cr_count, eq_lf_normalized, payload_stream, word_sym_present, word_sym_value};
 use crate::tools::{echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts, ExecProfile, RustcFacts};
 use std::path::{Path, PathBuf};
@@ -53,44 +55,88 @@ const CC_FLAGS: [&str; 21] = [
     "-Isrc/kernel/include",
 ];
 
+/// The same flag set for the Cortex-M33 (the mps2-an505 row's objects):
+/// one list apart from the core and FPU words, which the selfcheck asserts
+/// against `CC_FLAGS` through the shared class record.
+const CC_FLAGS_CORTEX_M33: [&str; 21] = [
+    "-x",
+    "c",
+    "-c",
+    "-O2",
+    "--target=arm-none-eabi",
+    "-mcpu=cortex-m33",
+    "-mthumb",
+    "-mfloat-abi=hard",
+    "-mfpu=fpv5-sp-d16",
+    "-mno-implicit-float",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-ffreestanding",
+    "-fno-common",
+    "-std=gnu11",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-Isrc/shim",
+    "-Isrc/gc/host",
+    "-Isrc/kernel/include",
+];
+
+/// The flag set of record for a class.
+fn cc_flags(class: Class) -> &'static [&'static str] {
+    match class {
+        Class::CortexM7 => &CC_FLAGS,
+        Class::CortexM33 => &CC_FLAGS_CORTEX_M33,
+    }
+}
+
 /// goldens/shim/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates objects + goldens + manifest + this pin
 /// together in one reviewed commit.
-const SHA_FROZEN_MANIFEST: &str = "00d76982a1b8606c0815b105183be4aaef49bd41e60beb305624933267b15e7f";
+const SHA_FROZEN_MANIFEST: &str = "fec5029357ef8bfb4d8514b59982022af64ea0cd5a2ab53b7122a27e5b560f53";
 
 /// The frozen-object plan of record: file name under goldens/shim/,
-/// source TU, extra defines beyond CC_FLAGS. The manifest's records must
-/// tie this table by name both directions; 'rhu-gate shim rederive'
-/// recompiles every row and byte-asserts the output against the frozen
-/// bytes.
-const FROZEN_PLAN: [(&str, &str, &[&str]); 27] = [
-    ("shim-core.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500"]),
-    ("shim-core-break-sipid.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SIPID"]),
-    ("shim-core-break-ctxpc.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_CTXPC"]),
-    ("shim-core-break-tlsoff.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_TLSOFF"]),
-    ("shim-core-break-tlscache.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_TLSCACHE"]),
-    ("shim-sysnative.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500"]),
-    ("shim-sysnative-break-fdbase.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_FD_BASE"]),
-    ("shim-sysnative-break-store-bounds.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_BOUNDS"]),
-    ("shim-sysnative-break-store-lifetime.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_LIFETIME"]),
-    ("shim-sysnative-break-store-open-order.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_OPEN_ORDER"]),
-    ("shim-sysnative-break-store-access.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_ACCESS"]),
-    ("shim-sysnative-break-store-flock.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_FLOCK"]),
-    ("shim-sysnative-break-store-slash.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_SLASH"]),
-    ("shim-sysnative-break-store-times.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_TIMES"]),
-    ("shim-sysnative-break-store-lock.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_LOCK"]),
-    ("shim-libc-glue.o", "src/shim/rhu_libc_glue.c", &[]),
-    ("shim-host.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN500"]),
-    ("shim-host-break-dataverify.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_DATAVERIFY"]),
-    ("shim-stdio-sym.o", "src/shim/rhu_stdio_sym.c", &[]),
-    ("shimtest-core.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_CORE"]),
-    ("shimtest-core-break-errno.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_CORE", "-DRHU_SHIMTEST_BREAK_ERRNO"]),
-    ("shimtest-core-break-canary.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_CORE", "-DRHU_SHIMTEST_BREAK_CANARY"]),
-    ("shimtest-fdmap.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_FDMAP"]),
-    ("shimtest-activation.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_ACTIVATION"]),
-    ("shimtest-tls.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_TLS"]),
-    ("shimtest-host.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_HOST"]),
-    ("shim-core-f769.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_F769"]),
+/// source TU, extra defines beyond the class's flag set, and the class
+/// (the Cortex-M7 for the an500 and F769 rows' objects, the Cortex-M33 for
+/// the mps2-an505 row's). The manifest's records must tie this table by
+/// name both directions; 'rhu-gate shim rederive' recompiles every row
+/// under its class's flag set and byte-asserts the output against the
+/// frozen bytes.
+const FROZEN_PLAN: [(&str, &str, &[&str], Class); 34] = [
+    ("shim-core.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
+    ("shim-core-break-sipid.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SIPID"], Class::CortexM7),
+    ("shim-core-break-ctxpc.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_CTXPC"], Class::CortexM7),
+    ("shim-core-break-tlsoff.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_TLSOFF"], Class::CortexM7),
+    ("shim-core-break-tlscache.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_TLSCACHE"], Class::CortexM7),
+    ("shim-sysnative.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
+    ("shim-sysnative-break-fdbase.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_FD_BASE"], Class::CortexM7),
+    ("shim-sysnative-break-store-bounds.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_BOUNDS"], Class::CortexM7),
+    ("shim-sysnative-break-store-lifetime.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_LIFETIME"], Class::CortexM7),
+    ("shim-sysnative-break-store-open-order.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_OPEN_ORDER"], Class::CortexM7),
+    ("shim-sysnative-break-store-access.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_ACCESS"], Class::CortexM7),
+    ("shim-sysnative-break-store-flock.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_FLOCK"], Class::CortexM7),
+    ("shim-sysnative-break-store-slash.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_SLASH"], Class::CortexM7),
+    ("shim-sysnative-break-store-times.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_TIMES"], Class::CortexM7),
+    ("shim-sysnative-break-store-lock.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_LOCK"], Class::CortexM7),
+    ("shim-sysnative-break-entropy-refusal.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_ENTROPY_REFUSAL"], Class::CortexM7),
+    ("shim-sysnative-break-calendar-clock.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_CALENDAR_CLOCK"], Class::CortexM7),
+    ("shim-libc-glue.o", "src/shim/rhu_libc_glue.c", &[], Class::CortexM7),
+    ("shim-host.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
+    ("shim-host-break-dataverify.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_DATAVERIFY"], Class::CortexM7),
+    ("shim-stdio-sym.o", "src/shim/rhu_stdio_sym.c", &[], Class::CortexM7),
+    ("shimtest-core.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_CORE"], Class::CortexM7),
+    ("shimtest-core-break-errno.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_CORE", "-DRHU_SHIMTEST_BREAK_ERRNO"], Class::CortexM7),
+    ("shimtest-core-break-canary.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_CORE", "-DRHU_SHIMTEST_BREAK_CANARY"], Class::CortexM7),
+    ("shimtest-fdmap.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_FDMAP"], Class::CortexM7),
+    ("shimtest-activation.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_ACTIVATION"], Class::CortexM7),
+    ("shimtest-tls.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_TLS"], Class::CortexM7),
+    ("shimtest-host.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_HOST"], Class::CortexM7),
+    ("shim-core-f769.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_F769"], Class::CortexM7),
+    ("shim-core-an505.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
+    ("shim-sysnative-an505.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
+    ("shim-libc-glue-an505.o", "src/shim/rhu_libc_glue.c", &[], Class::CortexM33),
+    ("shim-host-an505.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
+    ("shim-stdio-sym-an505.o", "src/shim/rhu_stdio_sym.c", &[], Class::CortexM33),
 ];
 
 /// The frozen goldens: the payload stream of each positive image, class
@@ -110,7 +156,8 @@ const GOLDENS: [&str; 5] = [
 /// helper the compiler of record emits among them) and the 64-bit
 /// division helper (the loader-seam hooks are weak references, not
 /// imports, and stay outside the pin).
-const IMPORTS_CORE: [&str; 33] = [
+const IMPORTS_CORE: [&str; 36] = [
+    "__aeabi_ldivmod",
     "__aeabi_memclr4",
     "__aeabi_uldivmod",
     "__rhu_arena_hi",
@@ -124,8 +171,10 @@ const IMPORTS_CORE: [&str; 33] = [
     "rhu_arena_alloc_at",
     "rhu_arena_headroom",
     "rhu_arena_rezero",
+    "rhu_calendar_get",
     "rhu_console_write",
     "rhu_entropy",
+    "rhu_entropy_secure",
     "rhu_exit",
     "rhu_futex_wait",
     "rhu_futex_wake",
@@ -150,7 +199,7 @@ const IMPORTS_CORE: [&str; 33] = [
 /// allocator, the core's errno, environment table, diagnostics, thread and
 /// mmap paths, the mutex recipe, the string functions, the division
 /// helpers.
-const IMPORTS_SYSNATIVE: [&str; 35] = [
+const IMPORTS_SYSNATIVE: [&str; 37] = [
     "__aeabi_ldivmod",
     "__aeabi_uldivmod",
     "__errno_location",
@@ -171,10 +220,12 @@ const IMPORTS_SYSNATIVE: [&str; 35] = [
     "rhu_console_write",
     "rhu_entropy",
     "rhu_entropy_is_hardware",
+    "rhu_entropy_secure",
     "rhu_exit",
     "rhu_futex_wait",
     "rhu_futex_wake",
     "rhu_now_ns",
+    "rhu_shim_calendar_unix_ticks",
     "rhu_shim_create_thread",
     "rhu_shim_exit",
     "rhu_shim_log",
@@ -296,13 +347,15 @@ const MAP_SYMBOLS: [&str; 19] = [
 const FORBIDDEN_IMPORT_FAMILIES: [&str; 6] = ["_Unwind", "__cxa", "_ZSt", "__aeabi_f", "__aeabi_d", "__emutls"];
 
 /// The diagnostic lines the core run must carry (fixed strings).
-const PINNED_CORE_LINES: [&str; 9] = [
+const PINNED_CORE_LINES: [&str; 11] = [
     "[shim] init: per-thread block registered as module 1 (48 bytes)",
     "[shim] pthread_create: stack 96 KB clamped to 24 KB (the row's clamp)",
     "[shim] mmap: MAP_FIXED re-zero in place (decommit; further requests counted silently)",
     "[shim] frozen-object reserve 4096 KB -> pool 64 KB (commit guard armed)",
     "[shim] frozen-object commit refused beyond the pool (managed allocation failure, never a wild write)",
-    "[shim] entropy: software PRNG, not cryptographic (no hardware source on this board)",
+    "[shim] entropy: cryptographic draws through the kernel's secure door; hardware source: no",
+    "[shim] entropy: the secure door refused a cryptographic draw (an invalid argument); the draw fails and nothing is served (further refusals counted silently)",
+    "[shim] calendar: the kernel's calendar serves the wall clock; source: unset (the epoch plus the elapsed clock)",
     "[shim] fork: not available (ENOSYS)",
     "[shim] syscall 999: not available (ENOSYS)",
     "[shim] open(/nonexistent): no such path (ENOENT)",
@@ -462,8 +515,11 @@ const PENDING: [&str; 0] = [];
 /// -mno-implicit-float emits none the source does not ask for. The tier's
 /// only floating-point sites are the PAL's CPU-utilization function, which
 /// returns a double by its own signature, and the core tenant's check of
-/// it. A moved count means the source, a flag or the compiler changed.
-const FP_CENSUS: [(&str, u32); 27] = [
+/// it. The mps2-an505 row's Cortex-M33 objects carry the same sites and
+/// no instruction outside the Cortex-M7 decoder's reach, so one decoder
+/// censuses the whole tier. A moved count means the source, a flag or the
+/// compiler changed.
+const FP_CENSUS: [(&str, u32); 34] = [
     ("shim-core.o", 0),
     ("shim-core-break-sipid.o", 0),
     ("shim-core-break-ctxpc.o", 0),
@@ -479,6 +535,8 @@ const FP_CENSUS: [(&str, u32); 27] = [
     ("shim-sysnative-break-store-slash.o", 1),
     ("shim-sysnative-break-store-times.o", 1),
     ("shim-sysnative-break-store-lock.o", 1),
+    ("shim-sysnative-break-entropy-refusal.o", 1),
+    ("shim-sysnative-break-calendar-clock.o", 1),
     ("shim-libc-glue.o", 0),
     ("shim-host.o", 0),
     ("shim-host-break-dataverify.o", 0),
@@ -491,6 +549,11 @@ const FP_CENSUS: [(&str, u32); 27] = [
     ("shimtest-tls.o", 0),
     ("shimtest-host.o", 0),
     ("shim-core-f769.o", 0),
+    ("shim-core-an505.o", 0),
+    ("shim-sysnative-an505.o", 1),
+    ("shim-libc-glue-an505.o", 0),
+    ("shim-host-an505.o", 0),
+    ("shim-stdio-sym-an505.o", 0),
 ];
 
 /// Count the floating-point instructions in a decoded listing: every line whose
@@ -526,13 +589,35 @@ pub(crate) fn fp_census_fault(got: &[(String, u32)], want: &[(&str, u32)]) -> Op
     None
 }
 
-const INTERNAL_CASES: [&str; 6] = [
+/// The hosting-API contract generation a frozen object STATES: the word
+/// of its `rhu_payload_abi` symbol read off the object's own bytes, with
+/// the word's file offset; None for an object that carries no such symbol.
+pub(crate) fn stated_generation(obj: &[u8]) -> Option<(u32, usize)> {
+    symbol_word(obj, "rhu_payload_abi")
+}
+
+/// The rederive leg's diagnosis before a byte comparison: the line naming
+/// a frozen object's stated hosting-API contract generation against the
+/// header's when they differ; None when the object states none, or the
+/// header's own.
+pub(crate) fn generation_fault(name: &str, frozen: &[u8], header_abi: u32) -> Option<String> {
+    let (stated, _) = stated_generation(frozen)?;
+    if stated == header_abi {
+        return None;
+    }
+    Some(format!(
+        "{name}: the frozen object states hosting-API contract generation {stated}; include/rhu.h is at {header_abi}: the tier was frozen against another generation and needs a re-freeze"
+    ))
+}
+
+const INTERNAL_CASES: [&str; 7] = [
     "shim.foreign-errno-refused -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record",
     "shim.newlib-header-ties-kit -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the generated C-library layout header against the kit's own headers",
     "shim.classlib-order-ties-pin -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the host against a copy of the generated runtime-entry header with one class-library slot shifted, refused at the assertion that names the slot",
     "shim.newlib-retarget -- link-tier; runs under 'rhu-gate shim rederive' when the kit's C library is resolved",
     "shim.f769-shared-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the sysnative and host objects under the F769 selector tie the frozen an500 objects, the F769 core differs from the an500 core",
     "shim.fp-census-instrument -- compile-tier; runs under 'rhu-gate shim rederive': a compiled double multiply-add must be counted by the census the shim.fp-census case runs over the frozen tier",
+    "shim.an505-row-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the core, sysnative and host sources under the an505 selector with the Cortex-M7 flag set tie the frozen an500 objects apart from the producer stamp, so the class flag set is the one variable behind the row's Cortex-M33 objects",
 ];
 
 /// The module-root template brackets, read from a linked artifact: the
@@ -589,7 +674,7 @@ fn find_fixed_from(raw: &[u8], needle: &str, from: usize) -> Option<usize> {
 }
 
 /// The directory holding the toolchain's own C library, resolved the way
-/// the image-tier compiler already is: RHU_NEWLIB, else the first line of
+/// the image-tier compiler already is: RHU_NEWLIB_M7, else the first line of
 /// an untracked machine-local pointer file, else absent. Absent is not a
 /// failure -- the retarget case runs on the maintainer's leg and the main gate never needs
 /// it -- so this returns an Option and the caller declares the case.
@@ -599,12 +684,12 @@ fn find_fixed_from(raw: &[u8], needle: &str, from: usize) -> Option<usize> {
 /// the form the compiler prints; that is why it is a recorded
 /// machine-local fact and not a derivation.
 pub(crate) fn resolve_newlib_dir(repo: &Path) -> Option<String> {
-    if let Ok(v) = std::env::var("RHU_NEWLIB") {
+    if let Ok(v) = std::env::var("RHU_NEWLIB_M7") {
         if !v.trim().is_empty() {
             return Some(v.trim().to_string());
         }
     }
-    let local = repo.join("tools").join("toolchains").join("newlib.local");
+    let local = repo.join("tools").join("toolchains").join("newlib-m7.local");
     let line = std::fs::read_to_string(&local)
         .ok()
         .and_then(|t| t.lines().next().map(str::to_string))
@@ -731,7 +816,7 @@ fn frozen_consistency(records: &[(String, String)], on_disk: &[String]) -> Resul
             expected
         ));
     }
-    for (name, _, _) in FROZEN_PLAN {
+    for (name, _, _, _) in FROZEN_PLAN {
         if !records.iter().any(|(p, _)| p == &format!("goldens/shim/{name}")) {
             return Err(format!("plan object {name} has no manifest record"));
         }
@@ -745,12 +830,12 @@ fn frozen_consistency(records: &[(String, String)], on_disk: &[String]) -> Resul
         let Some(name) = path.strip_prefix("goldens/shim/") else {
             return Err(format!("manifest record '{path}' is outside goldens/shim/"));
         };
-        if !FROZEN_PLAN.iter().any(|(n, _, _)| n == &name) && !GOLDENS.contains(&name) {
+        if !FROZEN_PLAN.iter().any(|(n, _, _, _)| n == &name) && !GOLDENS.contains(&name) {
             return Err(format!("manifest record '{path}' has no frozen-plan or golden entry"));
         }
     }
     for name in on_disk {
-        if !FROZEN_PLAN.iter().any(|(n, _, _)| *n == name.as_str()) {
+        if !FROZEN_PLAN.iter().any(|(n, _, _, _)| *n == name.as_str()) {
             return Err(format!("goldens/shim/{name} has NO manifest record (a file without a record)"));
         }
     }
@@ -1096,7 +1181,7 @@ impl Shim {
 
     fn build_staticlib(&mut self) {
         let log = self.out.join("build-staticlib.log");
-        let ok = match crate::tools::cargo_build_kernel(&self.repo, &["--lib", "--features", "payload"], &log) {
+        let ok = match crate::tools::cargo_build_kernel(&self.repo, &["--lib", "--features", "payload,entropy-accept-software"], &log) {
             Ok(ok) => ok,
             Err(e) => {
                 println!("rhu-gate: {e}");
@@ -1128,6 +1213,18 @@ impl Shim {
             IMPORTS_GLUE.len(),
             tenant.len()
         );
+        let core_an505 = self.pin_closure(facts, "shim.core", "shim-core-an505.o", &IMPORTS_CORE);
+        let sysn_an505 = self.pin_closure(facts, "shim.core", "shim-sysnative-an505.o", &IMPORTS_SYSNATIVE);
+        let glue_an505 = self.pin_closure(facts, "shim.core", "shim-libc-glue-an505.o", &IMPORTS_GLUE);
+        println!(
+            "   the mps2-an505 row's Cortex-M33 objects: core {}/{}, PAL {}/{}, glue {}/{} pinned against the same closures",
+            core_an505.len(),
+            IMPORTS_CORE.len(),
+            sysn_an505.len(),
+            IMPORTS_SYSNATIVE.len(),
+            glue_an505.len(),
+            IMPORTS_GLUE.len()
+        );
         let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o"];
         self.sweep_strong(facts, "shim.core", &[world[0], world[1], world[2], "goldens/shim/shimtest-core.o"]);
         println!("   one strong definition per symbol across the four linked objects; every import resolves (the objects, the kernel staticlib, and the link's own symbols: the map's arena window, data and template brackets, and the linker's constructor-array brackets)");
@@ -1154,6 +1251,22 @@ impl Shim {
         self.assert_control("shim.core-break-canary", &raw_c, code_c, 134, broke, &sha_c, &rel_c, GOLDENS[0], CANARY_LINE, CORE_ALL_GOOD);
         self.emit_pass("shim.core-break-canary", 134, "negative", broke, &sha_c, &rel_c, None);
         println!("== case shim.core-break-canary: PASS (exit 134; the allocator died loud on the corrupted header) ==");
+
+        println!("== case shim.core-break-entropy-refusal (negative control) ==");
+        let broke = "the cryptographic entry reporting a refused draw as served (RHU_SHIM_BREAK_ENTROPY_REFUSAL)";
+        let (sha_e, rel_e) = self.link_image(ld, "shim.core-break-entropy-refusal", &[world[0], "goldens/shim/shim-sysnative-break-entropy-refusal.o", world[2], "goldens/shim/shimtest-core.o"], "shim-core-break-entropy-refusal");
+        let (raw_e, code_e) = self.run_qemu(qemu, "shim.core-break-entropy-refusal", &rel_e);
+        self.assert_control("shim.core-break-entropy-refusal", &raw_e, code_e, 1, broke, &sha_e, &rel_e, GOLDENS[0], "FAIL shim-entropy (a refused draw reported as served)", CORE_ALL_GOOD);
+        self.emit_pass("shim.core-break-entropy-refusal", 1, "negative", broke, &sha_e, &rel_e, None);
+        println!("== case shim.core-break-entropy-refusal: PASS (exit 1; the tenant refused a draw the door had refused and the entry called served) ==");
+
+        println!("== case shim.core-break-calendar-clock (negative control) ==");
+        let broke = "the system time answered from the boot clock instead of the kernel's calendar (RHU_SHIM_BREAK_CALENDAR_CLOCK)";
+        let (sha_k, rel_k) = self.link_image(ld, "shim.core-break-calendar-clock", &[world[0], "goldens/shim/shim-sysnative-break-calendar-clock.o", world[2], "goldens/shim/shimtest-core.o"], "shim-core-break-calendar-clock");
+        let (raw_k, code_k) = self.run_qemu(qemu, "shim.core-break-calendar-clock", &rel_k);
+        self.assert_control("shim.core-break-calendar-clock", &raw_k, code_k, 1, broke, &sha_k, &rel_k, GOLDENS[0], "FAIL shim-calendar (the system time is not the kernel's calendar)", CORE_ALL_GOOD);
+        self.emit_pass("shim.core-break-calendar-clock", 1, "negative", broke, &sha_k, &rel_k, None);
+        println!("== case shim.core-break-calendar-clock: PASS (exit 1; the tenant refused a system time that was not the calendar) ==");
     }
 
     fn run_fdmap(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
@@ -1280,6 +1393,15 @@ impl Shim {
             IMPORTS_STDIO.len(),
             tenant.len()
         );
+        let host_an505 = self.pin_closure(facts, "shim.host", "shim-host-an505.o", &IMPORTS_HOST);
+        let bridge_an505 = self.pin_closure(facts, "shim.host", "shim-stdio-sym-an505.o", &IMPORTS_STDIO);
+        println!(
+            "   the mps2-an505 row's Cortex-M33 objects: host {}/{}, stream bridge {}/{} pinned against the same closures",
+            host_an505.len(),
+            IMPORTS_HOST.len(),
+            bridge_an505.len(),
+            IMPORTS_STDIO.len()
+        );
         let world = [
             "goldens/shim/shim-core.o",
             "goldens/shim/shim-sysnative.o",
@@ -1326,11 +1448,11 @@ impl Shim {
 
     /// Compile one source with the compiler of record into the gate's obj dir;
     /// on failure the stderr log is echoed and the gate fails.
-    fn compile(&mut self, gxx: &ToolCmd, case: &str, src_rel: &str, extra: &[&str], out_rel: &str) {
+    fn compile(&mut self, gxx: &ToolCmd, case: &str, src_rel: &str, extra: &[&str], out_rel: &str, class: Class) {
         let stem = Path::new(out_rel).file_stem().unwrap().to_string_lossy().into_owned();
         let stdout_p = self.out.join(format!("{stem}.cc.stdout"));
         let stderr_p = self.out.join(format!("{stem}.cc.stderr"));
-        let mut args: Vec<String> = CC_FLAGS.iter().map(|s| s.to_string()).collect();
+        let mut args: Vec<String> = cc_flags(class).iter().map(|s| s.to_string()).collect();
         args.extend(extra.iter().map(|s| s.to_string()));
         args.push(src_rel.to_string());
         args.push("-o".to_string());
@@ -1412,7 +1534,7 @@ impl Shim {
             PROBE_SOURCE,
         );
         let probe_obj = "src/kernel/target/shim-gate/obj/newlib-consumer.o";
-        self.compile(gxx, CASE, probe_rel, &[], probe_obj);
+        self.compile(gxx, CASE, probe_rel, &[], probe_obj, Class::CortexM7);
         let mut forced: Vec<&str> = world.to_vec();
         forced.push(probe_obj);
         let (forced_sha, rel_f) = self.link_image_extra(ld, CASE, &forced, "shim-newlib-forced", &lib_args, &["-u", "rhu_newlib_consumer"]);
@@ -1495,7 +1617,7 @@ impl Shim {
             b"double rhu_fp_probe(double a, double b);\ndouble rhu_fp_probe(double a, double b) { return a * b + 1.5; }\n",
         );
         let out_rel = "src/kernel/target/shim-gate/obj/fp-probe.o";
-        self.compile(gxx, CASE, probe_rel, &[], out_rel);
+        self.compile(gxx, CASE, probe_rel, &[], out_rel, Class::CortexM7);
         let objdump = match llvm_tool(facts, "llvm-objdump") {
             Ok(p) => p,
             Err(e) => self.fail(CASE, &e),
@@ -1522,36 +1644,59 @@ impl Shim {
     }
 
     fn run_rederive(&mut self, gxx: &ToolCmd) {
-        println!("== rederive: {} frozen-plan objects from src/shim with the compiler of record ==", FROZEN_PLAN.len());
+        println!("== rederive: {} frozen-plan objects from src/shim with the compiler of record, compared apart from the producer stamp (each sha256 the object's with its comment section removed) ==", FROZEN_PLAN.len());
         let obj_dir = self.out.join("obj");
         if std::fs::create_dir_all(&obj_dir).is_err() {
             self.fail("rederive", "cannot create the object directory");
         }
-        for (name, src, extra) in FROZEN_PLAN {
+        let header_text = std::fs::read_to_string(self.repo.join("src").join("kernel").join("include").join("rhu.h")).unwrap_or_default();
+        let Some(abi) = header_abi(&header_text) else {
+            self.fail("rederive", "src/kernel/include/rhu.h states no RHU_ABI (the hosting-API contract generation a frozen host object states)")
+        };
+        let facts = match rustc_facts() {
+            Ok(f) => f,
+            Err(e) => self.fail("rederive", &e),
+        };
+        let stripped = obj_dir.join("stripped");
+        let mut stamps_frozen: Vec<String> = Vec::new();
+        let mut stamps_fresh: Vec<String> = Vec::new();
+        for (name, src, extra, class) in FROZEN_PLAN {
             let out_rel = format!("src/kernel/target/shim-gate/obj/{name}");
             let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
             let _ = std::fs::remove_file(&out_abs);
-            self.compile(gxx, "rederive", src, extra, &out_rel);
-            let got = match sha256_file(&out_abs) {
+            self.compile(gxx, "rederive", src, extra, &out_rel, class);
+            let frozen_abs = self.repo.join("goldens").join("shim").join(name);
+            let got = match sha256_without_stamp(&facts, &out_abs, &stripped.join(format!("fresh-{name}"))) {
                 Ok(s) => s,
-                Err(e) => self.fail("rederive", &format!("{name}: the compile produced no object ({e})")),
+                Err(e) => self.fail("rederive", &format!("{name}: the compile produced no object, or its copy failed ({e})")),
             };
-            let want = match sha256_file(&self.repo.join("goldens").join("shim").join(name)) {
+            let want = match sha256_without_stamp(&facts, &frozen_abs, &stripped.join(format!("frozen-{name}"))) {
                 Ok(s) => s,
+                Err(e) => self.fail("rederive", &format!("goldens/shim/{name} unreadable, or its copy failed: {e}")),
+            };
+            stamps_frozen.push(producer_stamp_of(&frozen_abs));
+            stamps_fresh.push(producer_stamp_of(&out_abs));
+            let frozen = match std::fs::read(&frozen_abs) {
+                Ok(b) => b,
                 Err(e) => self.fail("rederive", &format!("goldens/shim/{name} unreadable: {e}")),
             };
+            if let Some(line) = generation_fault(name, &frozen, abi) {
+                println!("   {line}");
+            }
             if got != want {
-                self.fail("rederive", &format!("{name}: recompiled sha256 {got} != frozen {want} -- the source, the flags or the kit moved: a re-freeze is a registered change"));
+                self.fail("rederive", &format!("{name}: recompiled sha256 {got} != frozen {want}, apart from the producer stamp -- the source, the flags or the kit moved: a re-freeze is a registered change"));
             }
             println!("   {name} OK ({})", &got[..16]);
         }
+        println!("   the frozen tier's producer stamp (report-only): {}", distinct_stamps(&stamps_frozen));
+        println!("   the rebuild's producer stamp (report-only): {}", distinct_stamps(&stamps_fresh));
         self.results.emit(&format!(
             "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"rederive\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"objects\":{}}}}}",
             self.gate_id,
             FROZEN_PLAN.len()
         ));
         self.results.tally("pass", "positive");
-        println!("== rederive: {}/{} objects byte-identical to goldens/shim ==", FROZEN_PLAN.len(), FROZEN_PLAN.len());
+        println!("== rederive: {}/{} objects byte-identical to goldens/shim apart from the producer stamp ==", FROZEN_PLAN.len(), FROZEN_PLAN.len());
 
         println!("== case shim.foreign-errno-refused (negative control) ==");
         let probe_rel = "src/kernel/target/shim-gate/obj/foreign-errno-probe.c";
@@ -1588,6 +1733,7 @@ impl Shim {
         self.run_newlib_header_control(gxx);
         self.run_classlib_order_control(gxx);
         self.run_f769_shared_control(gxx);
+        self.run_an505_row_control(gxx);
     }
 
     /// The compile-tier control for the F769 rider's shared objects: the
@@ -1605,7 +1751,7 @@ impl Shim {
             let out_rel = format!("src/kernel/target/shim-gate/obj/{tag}-f769-control.o");
             let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
             let _ = std::fs::remove_file(&out_abs);
-            self.compile(gxx, CASE, src, &["-DMGC_HOST_ROW_F769"], &out_rel);
+            self.compile(gxx, CASE, src, &["-DMGC_HOST_ROW_F769"], &out_rel, Class::CortexM7);
             let got = match sha256_file(&out_abs) {
                 Ok(s) => s,
                 Err(e) => self.fail(CASE, &format!("{src} under the F769 selector produced no object ({e})")),
@@ -1636,6 +1782,49 @@ impl Shim {
         println!("== case {CASE}: PASS (two objects shared with the an500 line tie under the F769 selector; the core object differs and is frozen for the row) ==");
     }
 
+    /// The compile-tier control for the mps2-an505 row: its three
+    /// row-consuming sources compiled under the an505 selector WITH THE
+    /// CORTEX-M7 FLAG SET must tie the frozen an500 objects apart from the
+    /// producer stamp (the row's fields equal the an500's and the shim
+    /// consumes no field that differs), so the class flag set is the one
+    /// variable between the an500 objects and the row's Cortex-M33 objects.
+    /// A row edit that lets the an505 row diverge from the an500 is named
+    /// here.
+    fn run_an505_row_control(&mut self, gxx: &ToolCmd) {
+        const CASE: &str = "shim.an505-row-ties-an500";
+        println!("== case {CASE} (compile-tier control) ==");
+        let facts = match rustc_facts() {
+            Ok(f) => f,
+            Err(e) => self.fail(CASE, &e),
+        };
+        let stripped = self.out.join("obj").join("stripped");
+        for (src, frozen, tag) in [("src/shim/rhu_shim.c", "shim-core.o", "core"), ("src/shim/rhu_sysnative.c", "shim-sysnative.o", "sysnative"), ("src/shim/rhu_host.c", "shim-host.o", "host")] {
+            let out_rel = format!("src/kernel/target/shim-gate/obj/{tag}-an505-row-control.o");
+            let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let _ = std::fs::remove_file(&out_abs);
+            self.compile(gxx, CASE, src, &["-DMGC_HOST_ROW_AN505"], &out_rel, Class::CortexM7);
+            let got = match sha256_without_stamp(&facts, &out_abs, &stripped.join(format!("an505-row-{tag}.o"))) {
+                Ok(s) => s,
+                Err(e) => self.fail(CASE, &format!("{src} under the an505 selector produced no object, or its copy failed ({e})")),
+            };
+            let frozen_abs = self.repo.join("goldens").join("shim").join(frozen);
+            let want = match sha256_without_stamp(&facts, &frozen_abs, &stripped.join(format!("an505-row-frozen-{tag}.o"))) {
+                Ok(s) => s,
+                Err(e) => self.fail(CASE, &format!("goldens/shim/{frozen} unreadable, or its copy failed: {e}")),
+            };
+            if got != want {
+                self.fail(CASE, &format!("{src} under the an505 selector with the Cortex-M7 flag set compiled to {got}, not the frozen an500 {frozen} {want} (apart from the producer stamp): the an505 row no longer ties the an500 row, so the class flag set is no longer the one variable behind the row's Cortex-M33 objects"));
+            }
+            println!("   {frozen}: the compile under the an505 selector with the Cortex-M7 flag set ties the frozen an500 object apart from the producer stamp ({})", &got[..16]);
+        }
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"shared\":3}}}}",
+            self.gate_id
+        ));
+        self.results.tally("pass", "positive");
+        println!("== case {CASE}: PASS (the three row-consuming sources under the an505 selector with the Cortex-M7 flag set tie the frozen an500 objects apart from the producer stamp: the class flag set is the one variable behind the row's Cortex-M33 objects) ==");
+    }
+
     /// The compile-tier control for the generated C-library layout header
     /// (`src/shim/rhu_newlib_arm32.h`): the probe above, compiled with the
     /// kit's own headers under the nano configuration, must COMPILE against
@@ -1659,7 +1848,7 @@ impl Shim {
         let probe_rel = "src/kernel/target/shim-gate/obj/newlib-header-probe.c";
         write_fixture(&self.repo.join(probe_rel.replace('/', std::path::MAIN_SEPARATOR_STR)), NEWLIB_PROBE_SOURCE);
         let out_rel = "src/kernel/target/shim-gate/obj/newlib-header-probe.o";
-        self.compile(gxx, CASE, probe_rel, &["-isystem", &nano], out_rel);
+        self.compile(gxx, CASE, probe_rel, &["-isystem", &nano], out_rel, Class::CortexM7);
         println!("   (a) the generated header compiles against the kit's own headers under the nano configuration");
 
         let genuine = std::fs::read_to_string(self.repo.join("src").join("shim").join("rhu_newlib_arm32.h")).unwrap_or_default();
@@ -1726,7 +1915,7 @@ impl Shim {
         let copy_rel = "src/kernel/target/shim-gate/obj/classlib-order/rhu_host.c";
         write_fixture(&self.repo.join(copy_rel.replace('/', std::path::MAIN_SEPARATOR_STR)), &host);
         let out_rel = "src/kernel/target/shim-gate/obj/classlib-order/rhu_host.o";
-        self.compile(gxx, CASE, copy_rel, &["-DMGC_HOST_ROW_AN500"], out_rel);
+        self.compile(gxx, CASE, copy_rel, &["-DMGC_HOST_ROW_AN500"], out_rel, Class::CortexM7);
         let got = match sha256_file(&self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR))) {
             Ok(s) => s,
             Err(e) => self.fail(CASE, &format!("the copy's compile produced no object ({e})")),
@@ -1840,7 +2029,7 @@ pub fn run(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "{DISPLAY}: PASS (22/22 cases incl. 15 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        "{DISPLAY}: PASS (24/24 cases incl. 17 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
         PENDING.len(),
         INTERNAL_CASES.len(),
         qemu_v,
@@ -1851,8 +2040,10 @@ pub fn run(repo: &Path) -> ! {
 }
 
 /// The maintainer's re-derivation leg: the only place the C compiler is needed.
-/// Recompiles the frozen plan, byte-asserts it against goldens/shim, then
-/// runs the compile-tier controls. Needs the compiler of record (clang
+/// Recompiles the frozen plan, byte-asserts it against goldens/shim apart
+/// from the producer stamp each object carries (a frozen object stating
+/// another hosting-API contract generation than include/rhu.h is named
+/// before its byte comparison), then runs the compile-tier controls. Needs the compiler of record (clang
 /// 22.1.8, resolved by RHU_CLANG or tools/toolchains/clang.local);
 /// consumers never need it -- the chain never calls this.
 pub fn rederive(repo: &Path) -> ! {
@@ -1914,7 +2105,7 @@ pub fn rederive(repo: &Path) -> ! {
             }
         },
         (None, _) => {
-            println!("   declared (not run): shim.newlib-retarget -- the toolchain's C library is not resolved (set RHU_NEWLIB or write tools/toolchains/newlib.local)");
+            println!("   declared (not run): shim.newlib-retarget -- the toolchain's C library is not resolved (set RHU_NEWLIB_M7 or write tools/toolchains/newlib-m7.local)");
             "declared"
         }
         (_, Err(e)) => {
@@ -1928,7 +2119,7 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical; foreign-errno control refused at compile; C-library layout header ties the kit; class-library order ties the pin; the F769 row's shared objects tie the an500 bytes; the floating-point census instrument counts a compiled double multiply-add; C-library retarget {})  [{}]",
+        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; foreign-errno control refused at compile; C-library layout header ties the kit; class-library order ties the pin; the F769 row's shared objects tie the an500 bytes; the an505 row's objects tie the an500 bytes under the Cortex-M7 flag set apart from the producer stamp; the floating-point census instrument counts a compiled double multiply-add; C-library retarget {})  [{}]",
         FROZEN_PLAN.len(),
         FROZEN_PLAN.len(),
         retarget,
@@ -1944,13 +2135,14 @@ pub fn rederive(repo: &Path) -> ! {
 /// REJECT its doctored input, with the accept side pinned on genuine
 /// inputs.
 pub fn selfcheck(repo: &Path) -> ! {
-    let rustc_v = match rustc_facts() {
-        Ok(f) => f.version,
+    let facts = match rustc_facts() {
+        Ok(f) => f,
         Err(e) => {
             println!("rhu-gate: {e}");
             exit(1);
         }
     };
+    let rustc_v = facts.version.clone();
     let out = repo.join("src").join("kernel").join("target").join("shim-gate");
     if std::fs::create_dir_all(&out).is_err() {
         println!("rhu-gate: cannot create {}", out.display());
@@ -2011,7 +2203,7 @@ pub fn selfcheck(repo: &Path) -> ! {
 
     let text = std::fs::read_to_string(&mpath).unwrap_or_default();
     let records = parse_vendored_manifest(&text);
-    let on_disk: Vec<String> = FROZEN_PLAN.iter().map(|(n, _, _)| n.to_string()).collect();
+    let on_disk: Vec<String> = FROZEN_PLAN.iter().map(|(n, _, _, _)| n.to_string()).collect();
     sc.accept_probe("records-genuine", "the manifest's records tie the plan and goldens both directions", frozen_consistency(&records, &on_disk).is_ok());
     let mut outside = records.clone();
     if let Some(r) = outside.first_mut() {
@@ -2104,6 +2296,83 @@ pub fn selfcheck(repo: &Path) -> ! {
         "fp-census-moved-count",
         "a census reading one instruction where the pin says zero offered as at the pin",
         fp_census_fault(&[("shim-core.o".to_string(), 1)], &[("shim-core.o", 0)]).is_none(),
+    );
+
+    let header_text = std::fs::read_to_string(repo.join("src").join("kernel").join("include").join("rhu.h")).unwrap_or_default();
+    let abi = header_abi(&header_text).unwrap_or(0);
+    let host_path = repo.join("goldens").join("shim").join("shim-host.o");
+    let host_obj = std::fs::read(&host_path).unwrap_or_default();
+    let stated = stated_generation(&host_obj);
+    sc.accept_probe(
+        "generation-genuine",
+        "the frozen host object states the contract generation include/rhu.h states",
+        abi != 0 && stated.map(|(g, _)| g) == Some(abi) && generation_fault("shim-host.o", &host_obj, abi).is_none(),
+    );
+    let mut moved = host_obj.clone();
+    if let Some((_, at)) = stated {
+        moved[at..at + 4].copy_from_slice(&abi.wrapping_sub(1).to_le_bytes());
+    }
+    let fault = generation_fault("shim-host.o", &moved, abi).unwrap_or_default();
+    sc.probe("generation-moved", "a copy of the frozen host object stating the previous generation", fault.is_empty());
+    sc.accept_probe(
+        "generation-names-both",
+        "the diagnosis names the stated generation and the header's",
+        fault.contains(&format!("states hosting-API contract generation {}", abi.wrapping_sub(1))) && fault.contains(&format!("include/rhu.h is at {abi}")),
+    );
+    sc.accept_probe(
+        "generation-absent",
+        "an object stating no generation (the core object) is not diagnosed",
+        stated_generation(&genuine).is_none() && generation_fault("shim-core.o", &genuine, abi).is_none(),
+    );
+
+    let host_an505 = std::fs::read(repo.join("goldens").join("shim").join("shim-host-an505.o")).unwrap_or_default();
+    sc.accept_probe(
+        "generation-genuine-an505",
+        "the frozen an505 host object states the contract generation include/rhu.h states",
+        abi != 0 && stated_generation(&host_an505).map(|(g, _)| g) == Some(abi) && generation_fault("shim-host-an505.o", &host_an505, abi).is_none(),
+    );
+    sc.accept_probe(
+        "class-flags-two-words",
+        "the Cortex-M33 flag set is the Cortex-M7 set apart from the class's two words",
+        class_flag_sets_tie(&CC_FLAGS, &CC_FLAGS_CORTEX_M33).is_ok(),
+    );
+    let mut doctored: Vec<&str> = CC_FLAGS_CORTEX_M33.to_vec();
+    if let Some(slot) = doctored.iter().position(|f| *f == "-O2") {
+        doctored[slot] = "-O1";
+    }
+    sc.probe("class-flags-doctored", "the Cortex-M33 flag set with a third word moved offered as the class variant", class_flag_sets_tie(&CC_FLAGS, &doctored).is_ok());
+
+    let stripped = out.join("stripped");
+    let stamp_base = sha256_without_stamp(&facts, &host_path, &stripped.join("selfcheck-genuine.o")).unwrap_or_default();
+    let code_at = section_span_prefixed(&host_obj, ".text").map(|(o, _)| o);
+    let mut code_moved = host_obj.clone();
+    if let Some(at) = code_at {
+        if let Some(b) = code_moved.get_mut(at) {
+            *b ^= 0x01;
+        }
+    }
+    write_fixture(&out.join("doctored-host-code.o"), &code_moved);
+    let code_sha = sha256_without_stamp(&facts, &out.join("doctored-host-code.o"), &stripped.join("selfcheck-code-moved.o")).unwrap_or_default();
+    sc.probe(
+        "stamp-compare-code-byte",
+        "a copy of the frozen host object with one code byte moved, compared apart from the stamp",
+        code_at.is_none() || stamp_base.is_empty() || code_sha.is_empty() || code_sha == stamp_base,
+    );
+    let stamp_at = section_span(&host_obj, ".comment");
+    let mut stamp_moved = host_obj.clone();
+    if let Some((o, s)) = stamp_at {
+        if s > 2 {
+            if let Some(b) = stamp_moved.get_mut(o + 1) {
+                *b ^= 0x01;
+            }
+        }
+    }
+    write_fixture(&out.join("doctored-host-stamp.o"), &stamp_moved);
+    let stamp_sha = sha256_without_stamp(&facts, &out.join("doctored-host-stamp.o"), &stripped.join("selfcheck-stamp-moved.o")).unwrap_or_default();
+    sc.accept_probe(
+        "stamp-compare-stamp-only",
+        "a copy of the frozen host object whose producer stamp alone is changed ties apart from the stamp while the files differ",
+        stamp_at.is_some() && !stamp_base.is_empty() && stamp_sha == stamp_base && sha256_hex(&stamp_moved) != sha256_hex(&host_obj),
     );
 
     sc.finish("genuine inputs accepted");

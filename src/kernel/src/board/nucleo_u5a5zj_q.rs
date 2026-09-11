@@ -476,3 +476,280 @@ pub fn console_getb() -> Option<u8> {
 /// This row: a precise bus fault, BFAR 0, measured on the board: no memory answers at 0 with the boot address the option bytes hold.
 #[allow(dead_code)]
 pub const ADDRESS_ZERO_READABLE: bool = false;
+
+
+/// The RNG block (RM0456 chapter 48): a true random number generator
+/// with an analog noise source, a NIST-style conditioning stage and
+/// startup and continuous health tests in hardware. Its kernel clock is
+/// HSI48 (RCC_CCIPR2.RNGSEL = 00), on at both clock postures of this
+/// board; with the clock checker enabled (CED = 0) the block flags a
+/// clock error whenever that clock runs below the AHB clock over 32,
+/// which neither posture approaches. The configuration written is the
+/// manual's table's configuration C, in full: its certified
+/// configuration A is stated there only by reference to the vendor's
+/// application note, and the constant pair below is the one place it would move.
+const RNG: usize = 0x420C_0800;
+const RNG_CR: *mut u32 = RNG as *mut u32;
+const RNG_SR: *mut u32 = (RNG + 0x04) as *mut u32;
+const RNG_DR: *mut u32 = (RNG + 0x08) as *mut u32;
+const RNG_HTCR: *mut u32 = (RNG + 0x10) as *mut u32;
+/// RNG_CR: CONDRST bit 30 (the conditioning soft reset), RNG_CONFIG1
+/// bits 25:20, CLKDIV bits 19:16 (0: the 48 MHz clock undivided),
+/// RNG_CONFIG2 bits 15:13, NISTC bit 12, RNG_CONFIG3 bits 11:8, ARDIS
+/// bit 7 (0: the block auto-resets its conditioning after a seed error),
+/// CED bit 5 (0: clock error detection ON), IE bit 3, RNGEN bit 2.
+const RNG_CR_CONDRST: u32 = 1 << 30;
+const RNG_CR_CONFIG_C: u32 = (0x0F << 20) | (0xD << 8);
+const RNG_CR_RNGEN: u32 = 1 << 2;
+/// RNG_HTCR's health-test thresholds for configuration C; taken into
+/// account only while CONDRST is set.
+const RNG_HTCR_CONFIG_C: u32 = 0x0000_AAC7;
+/// RNG_SR: SEIS bit 6 and CEIS bit 5 (the error interrupt flags, cleared
+/// by writing 0), SECS bit 2 and CECS bit 1 (the current status), DRDY
+/// bit 0.
+const RNG_SR_SEIS: u32 = 1 << 6;
+const RNG_SR_CEIS: u32 = 1 << 5;
+const RNG_SR_SECS: u32 = 1 << 2;
+const RNG_SR_CECS: u32 = 1 << 1;
+const RNG_SR_DRDY: u32 = 1 << 0;
+const RNG_SR_ERRORS: u32 = RNG_SR_SEIS | RNG_SR_CEIS | RNG_SR_SECS | RNG_SR_CECS;
+
+const CR_HSI48ON: u32 = 1 << 12;
+const CR_HSI48RDY: u32 = 1 << 13;
+const RCC_CCIPR2: *mut u32 = (RCC + 0xE4) as *mut u32;
+/// CCIPR2.RNGSEL [13:12]: 00 HSI48.
+const CCIPR2_RNGSEL: u32 = 0b11 << 12;
+const AHB2ENR1_RNGEN: u32 = 1 << 18;
+
+/// A bounded wait's iteration count for about two milliseconds: the
+/// loop body is at least four cycles, so the count is the cycles of two
+/// milliseconds over four -- at the boot the tick clock is not yet
+/// running, so every wait here is an iteration bound, never a clock.
+const SPIN_2MS: u32 = SYSCLK_HZ / 500 / 4;
+
+/// The entropy posture of this row: the RNG block served on both clock
+/// postures, its self-tests read at every draw.
+pub const ENTROPY: super::EntropyPosture = super::EntropyPosture::Source {
+    id: 2,
+    name: "STM32U5 RNG",
+    line: "hardware source STM32U5 RNG enabled on HSI48; its self-tests gate every draw",
+};
+
+/// The block started: HSI48 on and ready, the kernel clock selected, the
+/// bus clock enabled, the configuration written under the conditioning
+/// reset, the block enabled, the reset's clearance and the first ready
+/// word waited for under the bound, the status read. False when the
+/// startup tests failed or the clock checker refused (the witness then
+/// reads the source absent and every secure draw refuses).
+pub fn entropy_init() -> bool {
+    unsafe {
+        write_volatile(RCC_CR, read_volatile(RCC_CR) | CR_HSI48ON);
+        let mut n = 0u32;
+        while read_volatile(RCC_CR) & CR_HSI48RDY == 0 {
+            n += 1;
+            if n > SPIN_2MS {
+                return false;
+            }
+        }
+        write_volatile(RCC_CCIPR2, read_volatile(RCC_CCIPR2) & !CCIPR2_RNGSEL);
+        write_volatile(RCC_AHB2ENR1, read_volatile(RCC_AHB2ENR1) | AHB2ENR1_RNGEN);
+        let _ = read_volatile(RCC_AHB2ENR1);
+        write_volatile(RNG_CR, RNG_CR_CONDRST | RNG_CR_CONFIG_C);
+        write_volatile(RNG_HTCR, RNG_HTCR_CONFIG_C);
+        write_volatile(RNG_CR, RNG_CR_CONFIG_C | RNG_CR_RNGEN);
+        n = 0;
+        while read_volatile(RNG_CR) & RNG_CR_CONDRST != 0 {
+            n += 1;
+            if n > SPIN_2MS {
+                return false;
+            }
+        }
+        n = 0;
+        loop {
+            let sr = read_volatile(RNG_SR);
+            if sr & RNG_SR_ERRORS != 0 {
+                return false;
+            }
+            if sr & RNG_SR_DRDY != 0 {
+                return true;
+            }
+            n += 1;
+            if n > SPIN_2MS {
+                return false;
+            }
+        }
+    }
+}
+
+/// One draw: per 32-bit word, under the kernel critical section, the
+/// status first -- an error flag is the health check failing at this
+/// draw (counted; the policy retires the source), a ready word is read
+/// (a zero word is the raced seed error the manual names, treated the
+/// same) -- and the wait for a word is bounded. The bytes land in the
+/// caller's buffer word by word; the policy layer copies out only when
+/// the whole draw succeeded.
+pub fn entropy_draw(buf: &mut [u8], counters: &mut super::DrawCounters) -> Result<(), super::EntropyErr> {
+    for chunk in buf.chunks_mut(4) {
+        let word = crate::critical::with_cs(|| unsafe {
+            let mut n = 0u32;
+            loop {
+                let sr = read_volatile(RNG_SR);
+                if sr & RNG_SR_ERRORS != 0 {
+                    return Err(super::EntropyErr::Health);
+                }
+                if sr & RNG_SR_DRDY != 0 {
+                    let w = read_volatile(RNG_DR);
+                    if w == 0 {
+                        return Err(super::EntropyErr::Health);
+                    }
+                    return Ok(w);
+                }
+                n += 1;
+                if n > SPIN_2MS {
+                    return Err(super::EntropyErr::Timeout);
+                }
+            }
+        });
+        match word {
+            Ok(w) => chunk.copy_from_slice(&w.to_le_bytes()[..chunk.len()]),
+            Err(e) => {
+                if matches!(&e, super::EntropyErr::Health) {
+                    counters.errors += 1;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The real-time clock (RM0456 chapter 63) in the backup domain, clocked
+/// by the board's 32.768 kHz crystal through the low-speed external
+/// oscillator (the Nucleo-144 board's default configuration). The
+/// domain's write protection is released through PWR (its bus clock first),
+/// the clock's registers are reached through their APB clock, and the
+/// clock's own key sequence opens its registers for a write. The
+/// prescalers keep their domain-reset values, which are exactly the
+/// 32.768 kHz configuration (a 1 Hz calendar).
+const PWR_DBPR: *mut u32 = 0x4602_0828 as *mut u32;
+const DBPR_DBP: u32 = 1 << 0;
+const RCC_AHB3ENR_RTC: *mut u32 = (RCC + 0x94) as *mut u32;
+const AHB3ENR_PWREN_RTC: u32 = 1 << 2;
+const RCC_APB3ENR: *mut u32 = (RCC + 0xA8) as *mut u32;
+const APB3ENR_RTCAPBEN: u32 = 1 << 21;
+const RCC_BDCR: *mut u32 = (RCC + 0xF0) as *mut u32;
+const BDCR_LSEON: u32 = 1 << 0;
+const BDCR_LSERDY: u32 = 1 << 1;
+const BDCR_RTCSEL: u32 = 0b11 << 8;
+const BDCR_RTCSEL_LSE: u32 = 0b01 << 8;
+const BDCR_RTCEN: u32 = 1 << 15;
+const RTC: usize = 0x4600_7800;
+const RTC_TR: *mut u32 = RTC as *mut u32;
+const RTC_DR: *mut u32 = (RTC + 0x04) as *mut u32;
+const RTC_ICSR: *mut u32 = (RTC + 0x0C) as *mut u32;
+const RTC_WPR: *mut u32 = (RTC + 0x24) as *mut u32;
+/// RTC_ICSR: INIT bit 7 (the initialization mode), INITF bit 6 (the mode
+/// entered), RSF bit 5 (the shadow registers synchronized; cleared by
+/// writing 0), INITS bit 4 (the calendar was ever initialized: the year
+/// field is not the domain-reset zero).
+const ICSR_INIT: u32 = 1 << 7;
+const ICSR_INITF: u32 = 1 << 6;
+const ICSR_RSF: u32 = 1 << 5;
+const ICSR_INITS: u32 = 1 << 4;
+const WPR_KEY1: u32 = 0xCA;
+const WPR_KEY2: u32 = 0x53;
+
+/// Whether this row carries a real-time clock the kernel reads at boot and
+/// writes at an explicit set.
+#[allow(dead_code)]
+pub const RTC_PRESENT: bool = true;
+/// The calendar banner's text for this row, constant per image.
+pub const RTC_LINE: &str = "RTC block present, 32.768 kHz crystal mounted, no backup cell: the base carries across a reset, not a power cycle";
+
+/// The backup domain reachable: PWR's bus clock, the clock's APB clock,
+/// the write protection released.
+unsafe fn rtc_reach() {
+    unsafe {
+        write_volatile(RCC_AHB3ENR_RTC, read_volatile(RCC_AHB3ENR_RTC) | AHB3ENR_PWREN_RTC);
+        let _ = read_volatile(RCC_AHB3ENR_RTC);
+        write_volatile(RCC_APB3ENR, read_volatile(RCC_APB3ENR) | APB3ENR_RTCAPBEN);
+        let _ = read_volatile(RCC_APB3ENR);
+        write_volatile(PWR_DBPR, read_volatile(PWR_DBPR) | DBPR_DBP);
+        let _ = read_volatile(PWR_DBPR);
+    }
+}
+
+/// The boot read: a running clock that was ever set is read once (the
+/// shadow registers resynchronized first, the time word before the date
+/// word so the pair is consistent); a running clock never set reports
+/// so; a cold domain gets its oscillator started and reports cold (the
+/// boot never waits for a crystal).
+pub fn rtc_read_at_boot() -> super::RtcBoot {
+    unsafe {
+        rtc_reach();
+        let bdcr = read_volatile(RCC_BDCR);
+        let running = bdcr & BDCR_RTCEN != 0 && bdcr & BDCR_RTCSEL == BDCR_RTCSEL_LSE && bdcr & BDCR_LSERDY != 0;
+        if !running {
+            if bdcr & BDCR_LSEON == 0 {
+                write_volatile(RCC_BDCR, bdcr | BDCR_LSEON);
+            }
+            return super::RtcBoot::Cold;
+        }
+        if read_volatile(RTC_ICSR) & ICSR_INITS == 0 {
+            return super::RtcBoot::Uninitialized;
+        }
+        write_volatile(RTC_ICSR, read_volatile(RTC_ICSR) & !ICSR_RSF);
+        let mut n = 0u32;
+        while read_volatile(RTC_ICSR) & ICSR_RSF == 0 {
+            n += 1;
+            if n > SPIN_2MS {
+                return super::RtcBoot::Uninitialized;
+            }
+        }
+        let tr = read_volatile(RTC_TR);
+        let dr = read_volatile(RTC_DR);
+        super::RtcBoot::Read(crate::calendar_math::st_unpack(tr, dr))
+    }
+}
+
+/// The write-back of an explicit set: skipped while the crystal is not
+/// yet stable and for an instant outside the clock's century; otherwise
+/// the clock is selected and enabled on a cold domain, its registers
+/// unlocked, the initialization mode entered and waited for, the time
+/// and date words written, the mode left (the counting restarts within
+/// four clock cycles) and the registers locked again.
+pub fn rtc_write(ticks: u64) -> super::RtcWrite {
+    unsafe {
+        rtc_reach();
+        let bdcr = read_volatile(RCC_BDCR);
+        if bdcr & BDCR_LSERDY == 0 {
+            return super::RtcWrite::SkippedLseNotReady;
+        }
+        let Some((tr, dr)) = crate::calendar_math::st_pack(ticks) else {
+            return super::RtcWrite::SkippedRange;
+        };
+        if bdcr & BDCR_RTCEN == 0 {
+            write_volatile(RCC_BDCR, (bdcr & !BDCR_RTCSEL) | BDCR_RTCSEL_LSE | BDCR_RTCEN);
+        }
+        if read_volatile(RCC_BDCR) & BDCR_RTCSEL != BDCR_RTCSEL_LSE {
+            return super::RtcWrite::SkippedSourceHeld;
+        }
+        write_volatile(RTC_WPR, WPR_KEY1);
+        write_volatile(RTC_WPR, WPR_KEY2);
+        write_volatile(RTC_ICSR, read_volatile(RTC_ICSR) | ICSR_INIT);
+        let mut n = 0u32;
+        while read_volatile(RTC_ICSR) & ICSR_INITF == 0 {
+            n += 1;
+            if n > SPIN_2MS {
+                write_volatile(RTC_ICSR, read_volatile(RTC_ICSR) & !ICSR_INIT);
+                write_volatile(RTC_WPR, 0xFF);
+                return super::RtcWrite::SkippedLseNotReady;
+            }
+        }
+        write_volatile(RTC_TR, tr);
+        write_volatile(RTC_DR, dr);
+        write_volatile(RTC_ICSR, read_volatile(RTC_ICSR) & !ICSR_INIT);
+        write_volatile(RTC_WPR, 0xFF);
+        super::RtcWrite::Written
+    }
+}

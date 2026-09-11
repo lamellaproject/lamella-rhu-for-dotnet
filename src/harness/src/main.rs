@@ -4,6 +4,7 @@ mod chain;
 mod gate;
 mod gates;
 mod image;
+mod objfile;
 mod results;
 mod selfcheck;
 mod sha256;
@@ -13,7 +14,7 @@ mod tools;
 use std::process::exit;
 
 fn usage() -> ! {
-    println!("usage: rhu-gate <base | sched | payload | api | gc | shim | rt | host | chain | selfcheck> [selfcheck | rederive | attrs <pre> <donor> <out>]");
+    println!("usage: rhu-gate <base | sched | payload | api | gc | shim | rt-m7 | rt-m33 | host | chain | selfcheck> [selfcheck | rederive | attrs <pre> <donor> <out>]");
     exit(2);
 }
 
@@ -41,9 +42,12 @@ fn main() {
         (Some("shim"), None, 1) => gates::shim::run(&repo),
         (Some("shim"), Some("selfcheck"), 2) => gates::shim::selfcheck(&repo),
         (Some("shim"), Some("rederive"), 2) => gates::shim::rederive(&repo),
-        (Some("rt"), None, 1) => gates::rt::run(&repo),
-        (Some("rt"), Some("selfcheck"), 2) => gates::rt::selfcheck(&repo),
-        (Some("rt"), Some("rederive"), 2) => gates::rt::rederive(&repo),
+        (Some("rt-m7"), None, 1) => gates::rt::run(&repo, &gates::rt::WORLD_M7),
+        (Some("rt-m7"), Some("selfcheck"), 2) => gates::rt::selfcheck(&repo, &gates::rt::WORLD_M7),
+        (Some("rt-m7"), Some("rederive"), 2) => gates::rt::rederive(&repo, &gates::rt::WORLD_M7),
+        (Some("rt-m33"), None, 1) => gates::rt::run(&repo, &gates::rt::WORLD_M33),
+        (Some("rt-m33"), Some("selfcheck"), 2) => gates::rt::selfcheck(&repo, &gates::rt::WORLD_M33),
+        (Some("rt-m33"), Some("rederive"), 2) => gates::rt::rederive(&repo, &gates::rt::WORLD_M33),
         (Some("host"), None, 1) => gates::host::run(&repo),
         (Some("host"), Some("selfcheck"), 2) => gates::host::selfcheck(&repo),
         (Some("rt"), Some("attrs"), _) => gates::rt::attrs(&repo, &args[2..]),

@@ -1,5 +1,5 @@
 //! The rt gate on the runner: the hosted-runtime world's frozen tier
-//! (goldens/rt) -- the class-library program's compiler output merged
+//! (goldens/rt-m7) -- the class-library program's compiler output merged
 //! with the runtime archives at the pin into ONE relocatable object, the
 //! C and math libraries' closure merged into another, the archive member
 //! whose stack-cookie section the merge takes renamed, and the program's
@@ -7,12 +7,18 @@
 //! and booted on the emulator. Nothing here compiles: the consumer story
 //! is Rust, the pinned toolchain's own object tools and linker, and the
 //! emulator; the merges are produced once, on the maintainer's
-//! re-derivation leg ('rhu-gate rt rederive'), and committed.
+//! re-derivation leg ('rhu-gate rt-m7 rederive'), and committed. The module
+//! runs one world per processor class: the Cortex-M7 world is the gate
+//! 'rt-m7' on goldens/rt-m7 and the mps2-an500 machine, the Cortex-M33 world
+//! the gate 'rt-m33' on goldens/rt-m33 and the mps2-an505 machine,
+//! consuming the same two program objects from goldens/rt-m7 by sha; every
+//! class-bound fact is a field of the world record.
 
-use crate::gate::Selfcheck;
+use crate::gate::{write_fixture, Selfcheck};
+use crate::objfile::{producer_stamp_of, section_span, section_span_prefixed, sha256_without_stamp};
 use crate::gates::gc::{parse_undefined, parse_vendored_manifest, resolve_ld, run_tool_bounded, ToolCmd};
 use crate::gates::payload::{check_rt_placement, map_region, split_ld_log, RtBrackets, RT_HELLO_BRACKETS};
-use crate::gates::shim::{markers_out_of_order, resolve_newlib_dir};
+use crate::gates::shim::markers_out_of_order;
 use crate::image::{check_records, elf32_phdrs, header_abi};
 use crate::results::{chain_json_from_env, validate_results, Results};
 use crate::sha256::{sha256_file, sha256_hex};
@@ -22,23 +28,215 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::time::Duration;
 
-const GATE: &str = "rt";
-const DISPLAY: &str = "RT GATE";
+const GATE: &str = "rt-m7";
+const DISPLAY: &str = "RT-M7 GATE";
 const HOST: &str = "qemu-mps2-an500";
 const RUNNER: &str = "src/harness";
 const RUN_TIMEOUT_S: u64 = 300;
 
-/// goldens/rt/MANIFEST.md's own sha256: the in-code anchor beside the
+/// The world a hosted-runtime gate runs: every fact the processor class
+/// binds -- the gate's identity and file names, the frozen
+/// tier and the tier the two program objects live in, the manifest pin,
+/// the archive set, the donor and the CPU architecture the merges must
+/// carry, the board map, the emulator machine, the kernel staticlib and
+/// its build, the shim and collector objects the images link, the pointers
+/// that resolve the archive set and the C library, whether the world
+/// carries the F769 rider, and the verdict's case count. The Cortex-M7
+/// world is the gate as it stood, its fields the constants of record.
+pub(crate) struct RtWorld {
+    pub(crate) gate: &'static str,
+    pub(crate) display: &'static str,
+    pub(crate) host: &'static str,
+    pub(crate) results: &'static str,
+    pub(crate) rederive_gate: &'static str,
+    pub(crate) rederive_display: &'static str,
+    pub(crate) rederive_results: &'static str,
+    pub(crate) selfcheck_gate: &'static str,
+    pub(crate) selfcheck_display: &'static str,
+    pub(crate) selfcheck_results: &'static str,
+    /// The gate's output directory under src/kernel/target.
+    pub(crate) out_dir: &'static str,
+    /// The frozen tier's path, repo-relative.
+    pub(crate) tier: &'static str,
+    /// Where the two program objects live: the rt-m7 tier for every world
+    /// (a world other than the Cortex-M7's consumes them by sha, never a
+    /// copy, so a republish of the programs refuses that world's gate
+    /// until its own re-freeze).
+    pub(crate) program_tier: &'static str,
+    pub(crate) pin: &'static str,
+    pub(crate) archive_set: &'static str,
+    pub(crate) set_file: &'static str,
+    pub(crate) donor: &'static str,
+    /// The CPU_arch build attribute the merged objects must carry.
+    pub(crate) cpu_arch: &'static str,
+    /// The THUMB_ISA_use build attribute the class's objects carry: the
+    /// v7 encoding names the ISA level ("Thumb-2"); a v8-M object states
+    /// the permission ("Permitted") and leaves the level to CPU_arch.
+    pub(crate) thumb_isa: &'static str,
+    pub(crate) map: &'static str,
+    pub(crate) machine: &'static str,
+    pub(crate) lib: &'static str,
+    /// The staticlib's build: None builds the kernel's default target under
+    /// the kernel's own target directory; Some((target dir, target,
+    /// features)) builds under a directory of the gate's own.
+    pub(crate) lib_build: Option<(&'static str, &'static str, &'static str)>,
+    pub(crate) shim_objects: [&'static str; 5],
+    pub(crate) gc_objects: [&'static str; 3],
+    pub(crate) archives_env: &'static str,
+    pub(crate) archives_local: &'static str,
+    pub(crate) newlib_env: &'static str,
+    pub(crate) newlib_local: &'static str,
+    /// Whether the world links the F769 rider case.
+    pub(crate) rider: bool,
+    /// The verdict's case count, as the line prints it.
+    pub(crate) cases: &'static str,
+}
+
+/// The Cortex-M7 world: the gate as it stood, every field a constant of
+/// record.
+pub(crate) const WORLD_M7: RtWorld = RtWorld {
+    gate: GATE,
+    display: DISPLAY,
+    host: HOST,
+    results: "rt-m7.results.jsonl",
+    rederive_gate: "rt-m7-rederive",
+    rederive_display: "RT-M7 REDERIVE",
+    rederive_results: "rt-m7-rederive.results.jsonl",
+    selfcheck_gate: "rt-m7-selfcheck",
+    selfcheck_display: "RT-M7 SELFCHECK",
+    selfcheck_results: "rt-m7-selfcheck.results.jsonl",
+    out_dir: "rt-m7-gate",
+    tier: "goldens/rt-m7",
+    program_tier: "goldens/rt-m7",
+    pin: SHA_FROZEN_MANIFEST_M7,
+    archive_set: ARCHIVE_SET,
+    set_file: SET_FILE,
+    donor: DONOR,
+    cpu_arch: "ARM v7E-M",
+    thumb_isa: "Thumb-2",
+    map: AN500_MAP,
+    machine: "mps2-an500",
+    lib: AN500_LIB,
+    lib_build: None,
+    shim_objects: SHIM_OBJECTS,
+    gc_objects: GC_OBJECTS,
+    archives_env: "RHU_RT_ARCHIVES_M7",
+    archives_local: "rtarchives-m7.local",
+    newlib_env: "RHU_NEWLIB_M7",
+    newlib_local: "newlib-m7.local",
+    rider: true,
+    cases: "17/17 cases incl. 9 negative controls",
+};
+
+/// The Cortex-M33 world: the gate `rt-m33` on the class's own frozen tier
+/// and the mps2-an505 machine. It consumes the two program objects from
+/// the Cortex-M7 tier by sha (the same compiler output, never copied),
+/// merges them with the class's single-precision archive set through the
+/// v8-M donor, links under the an505 map with the an505 row's shim and
+/// collector objects and the class's staticlib, and closes over the
+/// kit's v8-M C and math libraries. No board rider: the class's boards
+/// are the payload gate's rows and the kernel's flights.
+pub(crate) const WORLD_M33: RtWorld = RtWorld {
+    gate: "rt-m33",
+    display: "RT-M33 GATE",
+    host: "qemu-mps2-an505",
+    results: "rt-m33.results.jsonl",
+    rederive_gate: "rt-m33-rederive",
+    rederive_display: "RT-M33 REDERIVE",
+    rederive_results: "rt-m33-rederive.results.jsonl",
+    selfcheck_gate: "rt-m33-selfcheck",
+    selfcheck_display: "RT-M33 SELFCHECK",
+    selfcheck_results: "rt-m33-selfcheck.results.jsonl",
+    out_dir: "rt-m33-gate",
+    tier: "goldens/rt-m33",
+    program_tier: "goldens/rt-m7",
+    pin: SHA_FROZEN_MANIFEST_M33,
+    archive_set: "net11-rc1-rhu-cortex-m33-sgc-enabled",
+    set_file: "archives-net11-rc1-rhu-cortex-m33-sgc-enabled.txt",
+    donor: "attr-donor-v8m.bin",
+    cpu_arch: "ARM v8-M Mainline",
+    thumb_isa: "Permitted",
+    map: "src/kernel/payload-mps2-an505.x",
+    machine: "mps2-an505",
+    lib: "src/kernel/target/rt-m33-gate/kernel/thumbv8m.main-none-eabihf/release/librhu_kernel.a",
+    lib_build: Some(("src/kernel/target/rt-m33-gate/kernel", "thumbv8m.main-none-eabihf", "qemu-exit,board-mps2-an505,payload,entropy-accept-software")),
+    shim_objects: [
+        "goldens/shim/shim-core-an505.o",
+        "goldens/shim/shim-sysnative-an505.o",
+        "goldens/shim/shim-libc-glue-an505.o",
+        "goldens/shim/shim-stdio-sym-an505.o",
+        "goldens/shim/shim-host-an505.o",
+    ],
+    gc_objects: ["goldens/gc/skel-row-an505.o", "goldens/gc/heap-row-an505.o", "goldens/gc/collect-row-an505.o"],
+    archives_env: "RHU_RT_ARCHIVES_M33",
+    archives_local: "rtarchives-m33.local",
+    newlib_env: "RHU_NEWLIB_M33",
+    newlib_local: "newlib-m33.local",
+    rider: false,
+    cases: "16/16 cases incl. 9 negative controls",
+};
+
+/// The tier a frozen file lives in: the program objects' tier for the two
+/// program objects, the world's own tier for everything else.
+fn tier_of(w: &RtWorld, name: &str) -> &'static str {
+    if name == PAYLOAD || name == SUITE_PAYLOAD {
+        w.program_tier
+    } else {
+        w.tier
+    }
+}
+
+/// The frozen tier's file list for a world: the names of record with the
+/// world's own donor and set file.
+fn frozen_files(w: &RtWorld) -> [(&'static str, &'static str); 15] {
+    let mut files = FROZEN_FILES;
+    for f in files.iter_mut() {
+        if f.0 == DONOR {
+            f.0 = w.donor;
+        } else if f.0 == SET_FILE {
+            f.0 = w.set_file;
+        }
+    }
+    files
+}
+
+/// The kit's C-library directory for a world: its environment variable,
+/// else the first line of its untracked machine-local pointer file under
+/// tools/toolchains/, else None (the shim resolver's shape).
+fn resolve_kit_dir(repo: &Path, w: &RtWorld) -> Option<String> {
+    if let Ok(v) = std::env::var(w.newlib_env) {
+        if !v.trim().is_empty() {
+            return Some(v.trim().to_string());
+        }
+    }
+    let local = repo.join("tools").join("toolchains").join(w.newlib_local);
+    let line = std::fs::read_to_string(&local)
+        .ok()
+        .and_then(|t| t.lines().next().map(str::to_string))
+        .unwrap_or_default();
+    if line.trim().is_empty() {
+        None
+    } else {
+        Some(line.trim().to_string())
+    }
+}
+
+/// goldens/rt-m7/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates the objects, the lists, the manifest
 /// and this pin together in one reviewed commit.
-pub(crate) const SHA_FROZEN_MANIFEST: &str = "327f6438e7e5a94ad089e318bc8895c54eae30da8a942e7641caee8d3ab4d56c";
+pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "fbb618ffd30a36a71c797f83ec149dbc950a62bf4b2d65be98cd8f1aea9aa673";
+
+/// goldens/rt-m33/MANIFEST.md's own sha256: the Cortex-M33 world's pin,
+/// beside its manifest the way the Cortex-M7 world's is; a re-freeze of
+/// that tier moves this line and nothing of the other world's.
+pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "fa651e390e2451d35bac1f07ba3d946a7f0ea8b2fdc9b99293821b2243ab9e87";
 
 /// The archive set the frozen merge consumed. The manifest's `archives:`
 /// line and the frozen set file must both name it; a merge recorded under
 /// another set is refused before its bytes are trusted.
 const ARCHIVE_SET: &str = "rc1-rhu-cortex-m7-sgc-enabled";
 
-/// The frozen tier: the file names under goldens/rt/ and what each is.
+/// The frozen tier: the file names under goldens/rt-m7/ and what each is.
 const FROZEN_FILES: [(&str, &str); 15] = [
     ("rthello.o", "the program object the merge consumed (the compiler's output of record)"),
     ("startup-cookie-copied.o", "the runtime archive's startup member with its stack-cookie section renamed into copied data"),
@@ -141,14 +339,11 @@ const DESCRIPTOR: &str = "DotNetRuntimeContractDescriptor";
 
 /// The build attributes the merged object must carry, tag by tag, as the
 /// pinned toolchain's object reader prints them: the microcontroller
-/// profile at the image's architecture, Thumb-2, hard-float VFP argument
-/// passing.
-const REQUIRED_ATTRS: [(&str, &str); 4] = [
-    ("CPU_arch_profile", "Microcontroller"),
-    ("CPU_arch", "ARM v7E-M"),
-    ("THUMB_ISA_use", "Thumb-2"),
-    ("ABI_VFP_args", "AAPCS VFP"),
-];
+/// profile at the world's architecture, the world's Thumb ISA
+/// description, hard-float VFP argument passing.
+fn required_attrs(w: &RtWorld) -> [(&'static str, &'static str); 4] {
+    [("CPU_arch_profile", "Microcontroller"), ("CPU_arch", w.cpu_arch), ("THUMB_ISA_use", w.thumb_isa), ("ABI_VFP_args", "AAPCS VFP")]
+}
 
 /// Defined names the host relies on, by their EXPORTED spelling: the
 /// runtime's two entry points and its module-list initializer, the
@@ -237,7 +432,7 @@ const FLAVOUR_MARK: &str = "Object reference not set to an instance";
 /// entry, the program's start, one collection, the verdict, the host's
 /// exit line, the kernel's return.
 const BOOT_MARKERS: [&str; 24] = [
-    "[payload] entry: payload-provided, built for hosting-API contract generation 31 (this kernel: 31)",
+    "[payload] entry: payload-provided, built for hosting-API contract generation 32 (this kernel: 32)",
     "[shim] init: per-thread block registered as module 1 (48 bytes)",
     "[host] stdio: standard error bound to the C library's stream",
     "[host] stdio: standard output line buffered",
@@ -274,7 +469,7 @@ const PENDING: [&str; 0] = [];
 /// worker and the activation section's worker at the row's default),
 /// every section's verdict line, the summary last.
 const SUITE_MARKERS: [&str; 19] = [
-    "[payload] entry: payload-provided, built for hosting-API contract generation 31 (this kernel: 31)",
+    "[payload] entry: payload-provided, built for hosting-API contract generation 32 (this kernel: 32)",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
     "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
     "[host] entering managed entry",
@@ -333,10 +528,13 @@ const F769_GC_OBJECTS: [&str; 3] = ["goldens/gc/skel-row.o", "goldens/gc/heap-ro
 /// merge (read off its linked image's brackets at the freeze; the maps'
 /// brackets read them exactly).
 const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 427_378, unbox: 998, hydrated: 93_152, tdata: 152, init_array: 24, modules: 4 };
-const INTERNAL_CASES: [&str; 2] = [
-    "rt.rederive-selector-control -- link-tier; runs under 'rhu-gate rt rederive' when the archive set is resolved: the same merge with the standalone-GC-disabled selector must not tie the frozen object",
-    "rt.rederive-census -- link-tier; runs under 'rhu-gate rt rederive' when the archive set is resolved: every member of the five archives decoded, no compiled function naming a double register above d15 (the pinned assembly pair the only ones), the ARM-state code exactly the pinned pair",
-];
+/// The internal cases a world's rederive leg runs, named for its gate.
+fn internal_cases(w: &RtWorld) -> [String; 2] {
+    [
+        format!("rt.rederive-selector-control -- link-tier; runs under 'rhu-gate {} rederive' when the archive set is resolved: the same merge with the standalone-GC-disabled selector must not tie the frozen object", w.gate),
+        format!("rt.rederive-census -- link-tier; runs under 'rhu-gate {} rederive' when the archive set is resolved: every member of the five archives decoded, no compiled function naming a double register above d15 (the pinned assembly pair the only ones), the ARM-state code exactly the pinned pair", w.gate),
+    ]
+}
 
 /// The file header, as the object reader prints it: a 32-bit ARM
 /// relocatable. Anything else is not a mergeable payload object.
@@ -372,9 +570,9 @@ fn parse_attrs(text: &str) -> Vec<(String, String)> {
 
 /// Every required tag present with the required description; the first
 /// miss names the tag and what was read (or its absence).
-fn attrs_fault(text: &str) -> Option<String> {
+fn attrs_fault(text: &str, w: &RtWorld) -> Option<String> {
     let attrs = parse_attrs(text);
-    for (tag, want) in REQUIRED_ATTRS {
+    for (tag, want) in required_attrs(w) {
         match attrs.iter().find(|(t, _)| t == tag) {
             None => return Some(format!("build attribute {tag} absent (wanted '{want}')")),
             Some((_, got)) if got != want => {
@@ -778,30 +976,37 @@ fn set_fault(manifest: &str, set_file: &str, want_id: &str) -> Option<String> {
 
 /// The manifest's records against the frozen file list, both directions,
 /// and the on-disk files against the records.
-fn frozen_consistency(records: &[(String, String)], on_disk: &[String]) -> Result<(), String> {
-    if records.len() != FROZEN_FILES.len() {
+fn frozen_consistency(w: &RtWorld, records: &[(String, String)], on_disk: &[String]) -> Result<(), String> {
+    let files = frozen_files(w);
+    if records.len() != files.len() {
         return Err(format!(
             "manifest parsed to {} records, the frozen tier holds {} -- a record set that drifted",
             records.len(),
-            FROZEN_FILES.len()
+            files.len()
         ));
     }
-    for (name, _) in FROZEN_FILES {
-        if !records.iter().any(|(p, _)| p == &format!("goldens/rt/{name}")) {
+    for (name, _) in files {
+        if !records.iter().any(|(p, _)| p == &format!("{}/{name}", tier_of(w, name))) {
             return Err(format!("frozen file {name} has no manifest record"));
         }
     }
+    let own = format!("{}/", w.tier);
+    let programs = format!("{}/", w.program_tier);
     for (path, _) in records {
-        let Some(name) = path.strip_prefix("goldens/rt/") else {
-            return Err(format!("manifest record '{path}' is outside goldens/rt/"));
+        let name = match path.strip_prefix(&own) {
+            Some(n) => n,
+            None => match path.strip_prefix(&programs) {
+                Some(n) if n == PAYLOAD || n == SUITE_PAYLOAD => n,
+                _ => return Err(format!("manifest record '{path}' is outside {own}")),
+            },
         };
-        if !FROZEN_FILES.iter().any(|(n, _)| n == &name) {
+        if !files.iter().any(|(n, _)| n == &name) {
             return Err(format!("manifest record '{path}' has no frozen-tier entry"));
         }
     }
     for name in on_disk {
-        if !FROZEN_FILES.iter().any(|(n, _)| *n == name.as_str()) {
-            return Err(format!("goldens/rt/{name} has NO manifest record (a file without a record)"));
+        if !files.iter().any(|(n, _)| *n == name.as_str()) {
+            return Err(format!("{}/{name} has NO manifest record (a file without a record)", w.tier));
         }
     }
     Ok(())
@@ -829,7 +1034,7 @@ fn activation_count(raw: &[u8], floor: u32) -> Result<u32, String> {
 fn record_fault(path: &str, recorded: &str, actual: &str) -> Option<String> {
     if recorded != actual {
         return Some(format!(
-            "{path}: sha256 {actual} != recorded {recorded} (frozen artifact moved -- WRONG, never rebuilt; derivation is 'rhu-gate rt rederive')"
+            "{path}: sha256 {actual} != recorded {recorded} (frozen artifact moved -- WRONG, never rebuilt; derivation is the world's rederive leg)"
         ));
     }
     None
@@ -1010,6 +1215,7 @@ fn parse_weak_undefined(dump: &str) -> Vec<String> {
 }
 
 struct Rt {
+    w: &'static RtWorld,
     repo: PathBuf,
     out: PathBuf,
     results: Results,
@@ -1063,7 +1269,8 @@ impl Rt {
     fn pass_image(&mut self, case: &str, exit_code: i32, rel: &str, sha: &str, golden: Option<&str>, stats: &str) {
         let golden_frag = match golden {
             Some(g) => format!(
-                ",\"golden\":{{\"path\":\"goldens/rt/{g}\",\"sha256\":\"{}\",\"compare\":\"bytes\"}}",
+                ",\"golden\":{{\"path\":\"{}/{g}\",\"sha256\":\"{}\",\"compare\":\"bytes\"}}",
+                self.tier_of(g),
                 self.record_sha(g)
             ),
             None => String::new(),
@@ -1076,37 +1283,42 @@ impl Rt {
         self.results.tally("pass", "positive");
     }
 
+    fn tier_of(&self, name: &str) -> &'static str {
+        tier_of(self.w, name)
+    }
+
     fn frozen(&self, name: &str) -> PathBuf {
-        self.repo.join("goldens").join("rt").join(name)
+        self.repo.join(self.tier_of(name).replace('/', std::path::MAIN_SEPARATOR_STR)).join(name)
     }
 
     fn record_sha(&mut self, name: &str) -> String {
-        match self.records.iter().find(|(p, _)| p == &format!("goldens/rt/{name}")) {
+        let path = format!("{}/{name}", self.tier_of(name));
+        match self.records.iter().find(|(p, _)| p == &path) {
             Some((_, s)) => s.clone(),
             None => self.fail("frozen-inputs", &format!("no record for {name}")),
         }
     }
 
     fn verify_frozen(&mut self) {
-        println!("== frozen inputs: sha256 vs goldens/rt/MANIFEST.md ==");
-        let dir = self.repo.join("goldens").join("rt");
+        println!("== frozen inputs: sha256 vs {}/MANIFEST.md ==", self.w.tier);
+        let dir = self.repo.join(self.w.tier.replace('/', std::path::MAIN_SEPARATOR_STR));
         let mpath = dir.join("MANIFEST.md");
         let msha = match sha256_file(&mpath) {
             Ok(s) => s,
             Err(e) => self.fail(
                 "frozen-inputs",
-                &format!("goldens/rt/MANIFEST.md unreadable: {e} (the frozen tier's record; a drop copy without goldens/rt runs the chain with this tier DECLARED, never this gate)"),
+                &format!("{}/MANIFEST.md unreadable: {e} (the frozen tier's record; a drop copy without {} runs the chain with this tier DECLARED, never this gate)", self.w.tier, self.w.tier),
             ),
         };
-        if msha != SHA_FROZEN_MANIFEST {
+        if msha != self.w.pin {
             self.fail(
                 "frozen-inputs",
-                &format!("goldens/rt/MANIFEST.md sha256 {msha} != pinned {SHA_FROZEN_MANIFEST} -- the frozen record moved without a registered re-freeze"),
+                &format!("{}/MANIFEST.md sha256 {msha} != pinned {} -- the frozen record moved without a registered re-freeze", self.w.tier, self.w.pin),
             );
         }
         let text = match std::fs::read_to_string(&mpath) {
             Ok(t) => t,
-            Err(e) => self.fail("frozen-inputs", &format!("goldens/rt/MANIFEST.md unreadable: {e}")),
+            Err(e) => self.fail("frozen-inputs", &format!("{}/MANIFEST.md unreadable: {e}", self.w.tier)),
         };
         let records = parse_vendored_manifest(&text);
         let mut on_disk: Vec<String> = match std::fs::read_dir(&dir) {
@@ -1115,10 +1327,10 @@ impl Rt {
                 .filter_map(|e| e.file_name().to_str().map(str::to_string))
                 .filter(|n| n != "MANIFEST.md")
                 .collect(),
-            Err(e) => self.fail("frozen-inputs", &format!("cannot list goldens/rt: {e}")),
+            Err(e) => self.fail("frozen-inputs", &format!("cannot list {}: {e}", self.w.tier)),
         };
         on_disk.sort();
-        if let Err(e) = frozen_consistency(&records, &on_disk) {
+        if let Err(e) = frozen_consistency(self.w, &records, &on_disk) {
             self.fail("frozen-inputs", &e);
         }
         for (path, want) in &records {
@@ -1132,12 +1344,12 @@ impl Rt {
         }
         self.records = records;
         self.manifest_text = text;
-        let stats = format!("{{\"manifest_sha\":\"{SHA_FROZEN_MANIFEST}\",\"files\":{}}}", FROZEN_FILES.len());
+        let stats = format!("{{\"manifest_sha\":\"{}\",\"files\":{}}}", self.w.pin, frozen_files(self.w).len());
         self.pass("frozen-inputs", "positive", "", &stats);
         println!(
             "== frozen inputs: PASS ({}/{} files tie the manifest both directions; the manifest ties the in-code pin) ==",
-            FROZEN_FILES.len(),
-            FROZEN_FILES.len()
+            frozen_files(self.w).len(),
+            frozen_files(self.w).len()
         );
     }
 
@@ -1167,6 +1379,7 @@ impl Rt {
     }
 
     fn case_merge(&mut self, facts: &RustcFacts) {
+        let archive_set = self.w.archive_set;
         let case = "rt.merge";
         println!("== case {case} ==");
         let readobj = match llvm_tool(facts, "llvm-readobj") {
@@ -1189,19 +1402,19 @@ impl Rt {
         }
         println!("  file header: 32-bit ARM relocatable");
         let attrs = self.tool_text(&readobj, case, &["--arch-specific", &obj_arg], "merged.attrs.txt");
-        if let Some(f) = attrs_fault(&attrs) {
+        if let Some(f) = attrs_fault(&attrs, self.w) {
             self.fail(case, &f);
         }
         println!(
             "  build attributes: {}",
-            REQUIRED_ATTRS.iter().map(|(t, v)| format!("{t}={v}")).collect::<Vec<_>>().join(", ")
+            required_attrs(self.w).iter().map(|(t, v)| format!("{t}={v}")).collect::<Vec<_>>().join(", ")
         );
-        let set_text = match std::fs::read_to_string(self.frozen(SET_FILE)) {
+        let set_text = match std::fs::read_to_string(self.frozen(self.w.set_file)) {
             Ok(t) => t,
-            Err(e) => self.fail(case, &format!("{SET_FILE} unreadable: {e}")),
+            Err(e) => self.fail(case, &format!("{} unreadable: {e}", self.w.set_file)),
         };
         let manifest = self.manifest_text.clone();
-        if let Some(f) = set_fault(&manifest, &set_text, ARCHIVE_SET) {
+        if let Some(f) = set_fault(&manifest, &set_text, self.w.archive_set) {
             self.fail(case, &f);
         }
         let set_sha = manifest
@@ -1211,7 +1424,7 @@ impl Rt {
             .and_then(|l| l.split_whitespace().nth(2))
             .unwrap_or("")
             .to_string();
-        println!("  archive set: {ARCHIVE_SET} ({}...) named by the manifest and the frozen set file alike", &set_sha[..set_sha.len().min(16)]);
+        println!("  archive set: {} ({}...) named by the manifest and the frozen set file alike", self.w.archive_set, &set_sha[..set_sha.len().min(16)]);
         let undef_dump = self.tool_text(&nm, case, &["-u", &obj_arg], "merged.nm-u.txt");
         let got_undef = parse_undefined(&undef_dump);
         let want_undef = match std::fs::read_to_string(self.frozen(UNDEF_FILE)) {
@@ -1246,7 +1459,7 @@ impl Rt {
         println!("  the stack cookie: a data definition in {COOKIE_SECTION} (the surgery held through the merge)");
         let merged_sha = self.record_sha(MERGED);
         let stats = format!(
-            "{{\"merged_sha\":\"{merged_sha}\",\"undefined\":{},\"defined\":{},\"archive_set\":\"{ARCHIVE_SET}\"}}",
+            "{{\"merged_sha\":\"{merged_sha}\",\"undefined\":{},\"defined\":{},\"archive_set\":\"{archive_set}\"}}",
             got_undef.len(),
             defined.len()
         );
@@ -1272,7 +1485,7 @@ impl Rt {
         let dst = copy.to_string_lossy().into_owned();
         let attrs = self.tool_text(&readobj, case, &["--arch-specific", &dst], "attrs-control.attrs.txt");
         let broke = "the archives' application-profile attributes applied to a copy of the merged object";
-        match attrs_fault(&attrs) {
+        match attrs_fault(&attrs, self.w) {
             Some(f) => {
                 println!("  refused as designed: {f}");
                 self.pass(case, "negative", broke, "");
@@ -1286,13 +1499,15 @@ impl Rt {
     fn control_set(&mut self) {
         let case = "rt.merge-set-control";
         println!("== case {case} (negative control) ==");
-        let doctored = self.manifest_text.replace(&format!("archives: {ARCHIVE_SET} "), "archives: rc1-rhu-cortex-m7-sgc-disabled ");
+        let archive_set = self.w.archive_set;
+        let other_set = format!("{}-disabled", archive_set.trim_end_matches("-enabled"));
+        let doctored = self.manifest_text.replace(&format!("archives: {archive_set} "), &format!("archives: {other_set} "));
         if doctored == self.manifest_text {
             self.fail(case, "the control could not doctor the manifest's archives line");
         }
-        let set_text = std::fs::read_to_string(self.frozen(SET_FILE)).unwrap_or_default();
+        let set_text = std::fs::read_to_string(self.frozen(self.w.set_file)).unwrap_or_default();
         let broke = "the manifest's archives line naming another set";
-        match set_fault(&doctored, &set_text, ARCHIVE_SET) {
+        match set_fault(&doctored, &set_text, self.w.archive_set) {
             Some(f) => {
                 println!("  refused as designed: {f}");
                 self.pass(case, "negative", broke, "");
@@ -1323,7 +1538,7 @@ impl Rt {
             self.fail(case, &f);
         }
         let attrs = self.tool_text(&readobj, case, &["--arch-specific", &obj_arg], "libc.attrs.txt");
-        if let Some(f) = attrs_fault(&attrs) {
+        if let Some(f) = attrs_fault(&attrs, self.w) {
             self.fail(case, &f);
         }
         println!("  file header: 32-bit ARM relocatable; build attributes at the image profile");
@@ -1382,13 +1597,27 @@ impl Rt {
         }
     }
 
-    /// The hosted image linked under the an500 payload map: the link line
+    /// The world's kernel staticlib: the kernel's default target under its
+    /// own target directory, or the world's board target under a directory
+    /// of the gate's own.
+    fn build_lib(&self, log: &Path) -> Result<bool, String> {
+        match self.w.lib_build {
+            None => cargo_build_kernel(&self.repo, &["--lib", "--features", "payload,entropy-accept-software"], log),
+            Some((dir, target, feats)) => {
+                let target_dir = self.repo.join(dir.replace('/', std::path::MAIN_SEPARATOR_STR));
+                let _ = std::fs::create_dir_all(&target_dir);
+                cargo_build_kernel_at(&self.repo, &target_dir, &["--lib", "--target", target, "--no-default-features", "--features", feats], log)
+            }
+        }
+    }
+
+    /// The hosted image linked under the world's payload map: the link line
     /// of record, the artifact read.
     fn case_link(&mut self, facts: &RustcFacts, ld: &ToolCmd, abi: u32) -> (String, String) {
         let case = "rt.link";
         println!("== case {case} ==");
         let log = self.out.join("staticlib-build.log");
-        let ok = match cargo_build_kernel(&self.repo, &["--lib", "--features", "payload"], &log) {
+        let ok = match self.build_lib(&log) {
             Ok(ok) => ok,
             Err(e) => {
                 println!("rhu-gate: {e}");
@@ -1399,15 +1628,15 @@ impl Rt {
             echo_file(&log, "");
             self.fail(case, "kernel staticlib build error");
         }
-        let path_rel = "src/kernel/target/rt-gate/rt-link.elf".to_string();
-        let map_rel = "src/kernel/target/rt-gate/rt-link.map".to_string();
-        let mut args: Vec<String> = vec!["-T".to_string(), AN500_MAP.to_string(), "--gc-sections".to_string(), format!("-Map={map_rel}")];
+        let path_rel = format!("src/kernel/target/{}/rt-link.elf", self.w.out_dir);
+        let map_rel = format!("src/kernel/target/{}/rt-link.map", self.w.out_dir);
+        let mut args: Vec<String> = vec!["-T".to_string(), self.w.map.to_string(), "--gc-sections".to_string(), format!("-Map={map_rel}")];
         args.extend(RT_LINK_WORDS.iter().map(|s| s.to_string()));
-        args.push(format!("goldens/rt/{MERGED}"));
-        args.extend(SHIM_OBJECTS.iter().map(|s| s.to_string()));
-        args.extend(GC_OBJECTS.iter().map(|s| s.to_string()));
-        args.push(format!("goldens/rt/{LIBC}"));
-        args.push(AN500_LIB.to_string());
+        args.push(format!("{}/{MERGED}", self.w.tier));
+        args.extend(self.w.shim_objects.iter().map(|s| s.to_string()));
+        args.extend(self.w.gc_objects.iter().map(|s| s.to_string()));
+        args.push(format!("{}/{LIBC}", self.w.tier));
+        args.push(self.w.lib.to_string());
         args.push("-o".to_string());
         args.push(path_rel.clone());
         let ld_out = self.out.join("rt-link.ld.stdout");
@@ -1464,9 +1693,9 @@ impl Rt {
         let Some(phdrs) = elf32_phdrs(&elf_bytes) else {
             self.fail(case, "program headers not parseable");
         };
-        let map_text = std::fs::read_to_string(self.repo.join(AN500_MAP)).unwrap_or_default();
+        let map_text = std::fs::read_to_string(self.repo.join(self.w.map)).unwrap_or_default();
         let Some(code) = map_region(&map_text, "CODE") else {
-            self.fail(case, &format!("{AN500_MAP} states no CODE region"));
+            self.fail(case, &format!("{} states no CODE region", self.w.map));
         };
         let demand = match std::fs::read_to_string(self.frozen(UNDEF_FILE)) {
             Ok(t) => parse_list(&t),
@@ -1527,7 +1756,7 @@ impl Rt {
         let want = self.record_sha(MERGED);
         let flipped = format!("{}{}", &want[..63], if want.ends_with('0') { "1" } else { "0" });
         let broke = "the merged object's manifest record with one flipped digit";
-        match record_fault(&format!("goldens/rt/{MERGED}"), &flipped, &want) {
+        match record_fault(&format!("{}/{MERGED}", self.w.tier), &flipped, &want) {
             Some(f) => {
                 println!("  refused as designed: {}", f.split(" (frozen artifact").next().unwrap_or(&f));
                 self.pass(case, "negative", broke, "");
@@ -1545,7 +1774,7 @@ impl Rt {
         let raw_path = self.out.join("rt-boot.raw");
         let stderr_path = self.out.join("rt-boot.stderr");
         let elf_arg = elf.to_string_lossy().into_owned();
-        let mut args: Vec<&str> = vec!["-M", "mps2-an500", "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+        let mut args: Vec<&str> = vec!["-M", self.w.machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
         args.extend_from_slice(ExecProfile::Parity.qemu_args());
         args.push("-kernel");
         args.push(&elf_arg);
@@ -1568,7 +1797,7 @@ impl Rt {
         };
         let stream = payload_stream(&raw);
         if !eq_lf_normalized(&stream, &golden) {
-            self.fail(case, &format!("payload stream differs from goldens/rt/{GOLDEN} (byte class)"));
+            self.fail(case, &format!("payload stream differs from {}/{GOLDEN} (byte class)", self.w.tier));
         }
         if let Some(fault) = markers_out_of_order(&raw, &BOOT_MARKERS) {
             self.fail(case, &format!("the contract's order: {fault}"));
@@ -1645,14 +1874,14 @@ impl Rt {
             echo_file(&log, "");
             self.fail(case, "the board's kernel staticlib build error");
         }
-        let path_rel = format!("src/kernel/target/rt-gate/rt-link-{F769_BOARD}.elf");
-        let map_rel = format!("src/kernel/target/rt-gate/rt-link-{F769_BOARD}.map");
+        let path_rel = format!("src/kernel/target/{}/rt-link-{F769_BOARD}.elf", self.w.out_dir);
+        let map_rel = format!("src/kernel/target/{}/rt-link-{F769_BOARD}.map", self.w.out_dir);
         let mut args: Vec<String> = vec!["-T".to_string(), F769_MAP.to_string(), "--gc-sections".to_string(), format!("-Map={map_rel}")];
         args.extend(RT_LINK_WORDS.iter().map(|s| s.to_string()));
-        args.push(format!("goldens/rt/{MERGED}"));
+        args.push(format!("{}/{MERGED}", self.w.tier));
         args.extend(F769_SHIM_OBJECTS.iter().map(|s| s.to_string()));
         args.extend(F769_GC_OBJECTS.iter().map(|s| s.to_string()));
-        args.push(format!("goldens/rt/{LIBC}"));
+        args.push(format!("{}/{LIBC}", self.w.tier));
         args.push(F769_LIB.to_string());
         args.push("-o".to_string());
         args.push(path_rel.clone());
@@ -1772,15 +2001,15 @@ impl Rt {
     fn case_suite(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path, abi: u32) -> Vec<u8> {
         let case = "rt.suite";
         println!("== case {case} ==");
-        let path_rel = "src/kernel/target/rt-gate/rt-suite.elf".to_string();
-        let map_rel = "src/kernel/target/rt-gate/rt-suite.map".to_string();
-        let mut args: Vec<String> = vec!["-T".to_string(), AN500_MAP.to_string(), "--gc-sections".to_string(), format!("-Map={map_rel}")];
+        let path_rel = format!("src/kernel/target/{}/rt-suite.elf", self.w.out_dir);
+        let map_rel = format!("src/kernel/target/{}/rt-suite.map", self.w.out_dir);
+        let mut args: Vec<String> = vec!["-T".to_string(), self.w.map.to_string(), "--gc-sections".to_string(), format!("-Map={map_rel}")];
         args.extend(RT_LINK_WORDS.iter().map(|s| s.to_string()));
-        args.push(format!("goldens/rt/{SUITE_MERGED}"));
-        args.extend(SHIM_OBJECTS.iter().map(|s| s.to_string()));
-        args.extend(GC_OBJECTS.iter().map(|s| s.to_string()));
-        args.push(format!("goldens/rt/{LIBC}"));
-        args.push(AN500_LIB.to_string());
+        args.push(format!("{}/{SUITE_MERGED}", self.w.tier));
+        args.extend(self.w.shim_objects.iter().map(|s| s.to_string()));
+        args.extend(self.w.gc_objects.iter().map(|s| s.to_string()));
+        args.push(format!("{}/{LIBC}", self.w.tier));
+        args.push(self.w.lib.to_string());
         args.push("-o".to_string());
         args.push(path_rel.clone());
         let ld_out = self.out.join("rt-suite.ld.stdout");
@@ -1828,9 +2057,9 @@ impl Rt {
             Ok(r) => r,
             Err(e) => self.fail(case, &format!("image records: {e}")),
         };
-        let map_text = std::fs::read_to_string(self.repo.join(AN500_MAP)).unwrap_or_default();
+        let map_text = std::fs::read_to_string(self.repo.join(self.w.map)).unwrap_or_default();
         let Some(code) = map_region(&map_text, "CODE") else {
-            self.fail(case, &format!("{AN500_MAP} states no CODE region"));
+            self.fail(case, &format!("{} states no CODE region", self.w.map));
         };
         let Some(phdrs) = elf32_phdrs(&elf_bytes) else {
             self.fail(case, "program headers not parseable");
@@ -1852,7 +2081,7 @@ impl Rt {
         }
         let raw_path = self.out.join("rt-suite.raw");
         let stderr_path = self.out.join("rt-suite.stderr");
-        let mut qargs: Vec<&str> = vec!["-M", "mps2-an500", "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+        let mut qargs: Vec<&str> = vec!["-M", self.w.machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
         qargs.extend_from_slice(ExecProfile::Parity.qemu_args());
         qargs.push("-kernel");
         qargs.push(&elf_arg);
@@ -1875,7 +2104,7 @@ impl Rt {
         };
         let stream = payload_stream(&raw);
         if !eq_lf_normalized(&stream, &golden) {
-            self.fail(case, &format!("payload stream differs from goldens/rt/{SUITE_GOLDEN} (byte class)"));
+            self.fail(case, &format!("payload stream differs from {}/{SUITE_GOLDEN} (byte class)", self.w.tier));
         }
         if let Some(fault) = markers_out_of_order(&raw, &SUITE_MARKERS) {
             self.fail(case, &format!("the suite's order: {fault}"));
@@ -2070,8 +2299,8 @@ impl Rt {
     }
 }
 
-fn open(repo: &Path, gate_id: &'static str, display: &'static str, file: &str) -> Rt {
-    let out = repo.join("src").join("kernel").join("target").join("rt-gate");
+fn open(repo: &Path, w: &'static RtWorld, gate_id: &'static str, display: &'static str, file: &str) -> Rt {
+    let out = repo.join("src").join("kernel").join("target").join(w.out_dir);
     if std::fs::create_dir_all(&out).is_err() {
         println!("rhu-gate: cannot create {}", out.display());
         exit(1);
@@ -2083,7 +2312,7 @@ fn open(repo: &Path, gate_id: &'static str, display: &'static str, file: &str) -
             exit(1);
         }
     };
-    Rt { repo: repo.to_path_buf(), out, results, gate_id, display, records: Vec::new(), manifest_text: String::new() }
+    Rt { w, repo: repo.to_path_buf(), out, results, gate_id, display, records: Vec::new(), manifest_text: String::new() }
 }
 
 /// RHU_ABI as include/rhu.h states it: the generation the records must
@@ -2099,7 +2328,7 @@ fn read_abi(repo: &Path) -> u32 {
     }
 }
 
-pub fn run(repo: &Path) -> ! {
+pub fn run(repo: &Path, w: &'static RtWorld) -> ! {
     let facts = match rustc_facts() {
         Ok(f) => f,
         Err(e) => {
@@ -2122,10 +2351,13 @@ pub fn run(repo: &Path) -> ! {
         }
     };
     let abi = read_abi(repo);
-    let mut rt = open(repo, GATE, DISPLAY, "rt.results.jsonl");
+    let mut rt = open(repo, w, w.gate, w.display, w.results);
     rt.results.emit(&format!(
-        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"rt\",\"run\":\"rt-{}\",\"host\":\"{HOST}\",\"runner\":\"{RUNNER}\",\"chain\":{},\"tools\":{{\"qemu\":\"{}\",\"rustc\":\"{}\",\"ld\":\"{}\"}}}}",
+        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"{}\",\"run\":\"{}-{}\",\"host\":\"{}\",\"runner\":\"{RUNNER}\",\"chain\":{},\"tools\":{{\"qemu\":\"{}\",\"rustc\":\"{}\",\"ld\":\"{}\"}}}}",
+        w.gate,
+        w.gate,
         std::process::id(),
+        w.host,
         chain_json_from_env(),
         qemu_v,
         facts.version,
@@ -2139,7 +2371,9 @@ pub fn run(repo: &Path) -> ! {
     rt.control_libc_forbidden();
     let (path_rel, sha) = rt.case_link(&facts, &ld, abi);
     rt.control_link_frozen();
-    rt.case_link_board(&facts, &ld, abi);
+    if w.rider {
+        rt.case_link_board(&facts, &ld, abi);
+    }
     rt.case_boot(&qemu, &path_rel, &sha);
     rt.control_boot_golden();
     let suite_raw = rt.case_suite(&facts, &ld, &qemu, abi);
@@ -2151,18 +2385,20 @@ pub fn run(repo: &Path) -> ! {
     for p in PENDING {
         println!("   pending (unarmed, not counted): {p}");
     }
-    for c in INTERNAL_CASES {
+    for c in internal_cases(w) {
         println!("   internal (rederive leg, not counted): {c}");
     }
-    rt.results.emit_summary(GATE, "pass", 0);
+    rt.results.emit_summary(w.gate, "pass", 0);
     if !validate_results(repo, rt.results.path()) {
-        println!("{DISPLAY}: FAIL -- results file failed schema validation");
+        println!("{}: FAIL -- results file failed schema validation", w.display);
         exit(1);
     }
     println!(
-        "{DISPLAY}: PASS (17/17 cases incl. 9 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        "{}: PASS ({}; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        w.display,
+        w.cases,
         PENDING.len(),
-        INTERNAL_CASES.len(),
+        internal_cases(w).len(),
         qemu_v,
         facts.version,
         ld.version
@@ -2170,16 +2406,17 @@ pub fn run(repo: &Path) -> ! {
     exit(0);
 }
 
-/// The archive set's directory: RHU_RT_ARCHIVES, else the first line of
-/// the untracked machine-local tools/toolchains/rtarchives.local (the
-/// directory in the form the linker opens), else None.
-fn resolve_archives(repo: &Path) -> Option<String> {
-    if let Ok(v) = std::env::var("RHU_RT_ARCHIVES") {
+/// The archive set's directory for a world: its environment variable,
+/// else the first line of its untracked machine-local pointer file under
+/// tools/toolchains/ (the directory in the form the linker opens), else
+/// None.
+fn resolve_archives(repo: &Path, w: &RtWorld) -> Option<String> {
+    if let Ok(v) = std::env::var(w.archives_env) {
         if !v.trim().is_empty() {
             return Some(v.trim().to_string());
         }
     }
-    let local = repo.join("tools").join("toolchains").join("rtarchives.local");
+    let local = repo.join("tools").join("toolchains").join(w.archives_local);
     std::fs::read_to_string(&local)
         .ok()
         .and_then(|t| t.lines().next().map(|l| l.trim().to_string()))
@@ -2227,7 +2464,29 @@ fn kit_fault(dir: &str, members: &LibcMembers) -> Result<(), String> {
     Ok(())
 }
 
-pub fn rederive(repo: &Path) -> ! {
+/// The comparison the leg makes for a re-derived object against its
+/// frozen twin, and the method's name for the transcript: apart from the
+/// producer stamp where the toolchain's object copier can remove the
+/// comment section (a compiler's object), and WHOLE where the copier
+/// refuses because a relocation targets that section -- a merged object's
+/// debug ranges carry one -- so the stamp stays inside the identity there.
+/// Any other refusal of the copier is the caller's failure.
+fn stamp_compare(facts: &RustcFacts, out: &Path, fresh: &Path, frozen: &Path, tag: &str) -> Result<(String, String, &'static str), String> {
+    let dir = out.join("stripped");
+    let fresh_stripped = sha256_without_stamp(facts, fresh, &dir.join(format!("fresh-{tag}.o")));
+    let frozen_stripped = sha256_without_stamp(facts, frozen, &dir.join(format!("frozen-{tag}.o")));
+    match (fresh_stripped, frozen_stripped) {
+        (Ok(got), Ok(want)) => Ok((got, want, "apart from the producer stamp")),
+        (Err(e), _) | (_, Err(e)) if e.contains("cannot be removed") => {
+            let got = sha256_file(fresh).map_err(|e| format!("{}: {e}", fresh.display()))?;
+            let want = sha256_file(frozen).map_err(|e| format!("{}: {e}", frozen.display()))?;
+            Ok((got, want, "whole: the object copier cannot remove this object's comment section, a relocation in its debug ranges targeting it"))
+        }
+        (Err(e), _) | (_, Err(e)) => Err(e),
+    }
+}
+
+pub fn rederive(repo: &Path, w: &'static RtWorld) -> ! {
     let facts = match rustc_facts() {
         Ok(f) => f,
         Err(e) => {
@@ -2263,26 +2522,28 @@ pub fn rederive(repo: &Path) -> ! {
             exit(1);
         }
     };
-    let mut rt = open(repo, "rt-rederive", "RT REDERIVE", "rt-rederive.results.jsonl");
+    let mut rt = open(repo, w, w.rederive_gate, w.rederive_display, w.rederive_results);
     rt.results.emit(&format!(
-        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"rt-rederive\",\"run\":\"rt-rederive-{}\",\"host\":\"host-native\",\"runner\":\"{RUNNER}\",\"tools\":{{\"rustc\":\"{}\",\"ld\":\"{}\"}}}}",
+        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"{}\",\"run\":\"{}-{}\",\"host\":\"host-native\",\"runner\":\"{RUNNER}\",\"tools\":{{\"rustc\":\"{}\",\"ld\":\"{}\"}}}}",
+        w.rederive_gate,
+        w.rederive_gate,
         std::process::id(),
         facts.version,
         ld.version
     ));
     rt.verify_frozen();
-    let Some(dir) = resolve_archives(repo) else {
-        println!("RT REDERIVE: NOT RUN (no archive set resolved: set RHU_RT_ARCHIVES to the runtime pack's native directory at the pin, or put that directory in tools/toolchains/rtarchives.local)");
+    let Some(dir) = resolve_archives(repo, w) else {
+        println!("{}: NOT RUN (no archive set resolved: set {} to the runtime pack's native directory at the pin, or put that directory in tools/toolchains/{})", w.rederive_display, w.archives_env, w.archives_local);
         exit(1);
     };
-    let Some(kit) = resolve_newlib_dir(repo) else {
-        println!("RT REDERIVE: NOT RUN (the toolchain's C library is not resolved: set RHU_NEWLIB or write tools/toolchains/newlib.local)");
+    let Some(kit) = resolve_kit_dir(repo, w) else {
+        println!("{}: NOT RUN (the toolchain's C library is not resolved: set {} or write tools/toolchains/{})", w.rederive_display, w.newlib_env, w.newlib_local);
         exit(1);
     };
 
     let case = "rt.rederive-surgery";
     println!("== case {case}: the startup member printed out of {SURGERY_ARCHIVE} at {dir} and its cookie section renamed ==");
-    let set_text = std::fs::read_to_string(rt.frozen(SET_FILE)).unwrap_or_default();
+    let set_text = std::fs::read_to_string(rt.frozen(rt.w.set_file)).unwrap_or_default();
     if let Err(e) = archives_fault(&dir, &set_text) {
         rt.fail(case, &e);
     }
@@ -2293,13 +2554,19 @@ pub fn rederive(repo: &Path) -> ! {
     let member_s = member.to_string_lossy().into_owned();
     let renamed_s = renamed.to_string_lossy().into_owned();
     let _ = rt.tool_text(&objcopy, case, &["--rename-section", SURGERY_RENAME, &member_s, &renamed_s], "rederive-surgery.objcopy.txt");
-    let got = sha256_file(&renamed).unwrap_or_default();
-    let want = rt.record_sha(SURGERY);
+    let record = rt.record_sha(SURGERY);
+    let frozen_path = rt.frozen(SURGERY);
+    let (got, want, how) = match stamp_compare(&facts, &rt.out, &renamed, &frozen_path, "surgery") {
+        Ok(p) => p,
+        Err(e) => rt.fail(case, &e),
+    };
+    let how_surgery = how;
     if got != want {
-        rt.fail(case, &format!("re-derived surgery object sha256 {got} != frozen {want} -- the archive member or the rename moved; a moved object is a registered re-freeze"));
+        rt.fail(case, &format!("re-derived surgery object sha256 {got} != frozen {want} ({how}) -- the archive member or the rename moved; a moved object is a registered re-freeze"));
     }
-    println!("  re-derived surgery object byte-identical to goldens/rt/{SURGERY} ({}...)", &want[..16]);
-    rt.pass(case, "positive", "", &format!("{{\"surgery_sha\":\"{want}\"}}"));
+    println!("  re-derived surgery object byte-identical to {}/{SURGERY} ({how}; {}...; the record's sha256 {}...)", rt.w.tier, &want[..16], &record[..16]);
+    println!("  the frozen surgery object's producer stamp (report-only): '{}'; the re-derived one's: '{}'", producer_stamp_of(&frozen_path), producer_stamp_of(&renamed));
+    rt.pass(case, "positive", "", &format!("{{\"surgery_sha\":\"{record}\"}}"));
     println!("  PASS");
 
     let case = "rt.rederive-merge";
@@ -2329,7 +2596,7 @@ pub fn rederive(repo: &Path) -> ! {
             Ok(false) => rt.fail(case, &format!("the merge ({tag}) failed (see {})", log_e.display())),
             Err(e) => rt.fail(case, &e),
         }
-        let donor = rt.frozen(DONOR);
+        let donor = rt.frozen(rt.w.donor);
         match attrs_update_file(&pre, &donor, &post) {
             Ok((pre_sha, n)) => println!("  {tag}: the linker's product (the pre-object) sha256 {pre_sha}; the attributes update applied by the runner ({n}-byte donor)"),
             Err(e) => rt.fail(case, &format!("the attributes update failed ({tag}): {e}")),
@@ -2337,34 +2604,40 @@ pub fn rederive(repo: &Path) -> ! {
         post
     };
     let post = merge(&mut rt, PAYLOAD, "libstandalonegc-enabled.a", "enabled");
-    let got = match sha256_file(&post) {
-        Ok(s) => s,
-        Err(e) => rt.fail(case, &format!("re-derived object unreadable: {e}")),
+    let record = rt.record_sha(MERGED);
+    let frozen_path = rt.frozen(MERGED);
+    let (got, want, how) = match stamp_compare(&facts, &rt.out, &post, &frozen_path, "merged") {
+        Ok(p) => p,
+        Err(e) => rt.fail(case, &e),
     };
-    let want = rt.record_sha(MERGED);
+    let how_merged = how;
     if got != want {
         rt.fail(
             case,
-            &format!("re-derived merged object sha256 {got} != frozen {want} -- the merge moved (a linker, an archive, the surgery object or the program object changed); a moved object is a registered re-freeze, never a silent rebuild"),
+            &format!("re-derived merged object sha256 {got} != frozen {want} ({how}) -- the merge moved (a linker, an archive, the surgery object or the program object changed); a moved object is a registered re-freeze, never a silent rebuild"),
         );
     }
-    println!("  re-derived object byte-identical to goldens/rt/{MERGED} ({}...)", &want[..16]);
-    rt.pass(case, "positive", "", &format!("{{\"merged_sha\":\"{want}\",\"archives\":{}}}", MERGE_ARCHIVES.len()));
+    println!("  re-derived object byte-identical to {}/{MERGED} ({how}; {}...; the record's sha256 {}...)", rt.w.tier, &want[..16], &record[..16]);
+    println!("  the frozen merged object's producer stamp (report-only): '{}'; the re-derived one's: '{}'", producer_stamp_of(&frozen_path), producer_stamp_of(&post));
+    rt.pass(case, "positive", "", &format!("{{\"merged_sha\":\"{record}\",\"archives\":{}}}", MERGE_ARCHIVES.len()));
     println!("  PASS");
 
     let case = "rt.rederive-merge-suite";
     println!("== case {case}: the suite's merge re-derived from the frozen suite object, the frozen surgery object and the archive set ==");
     let post_suite = merge(&mut rt, SUITE_PAYLOAD, "libstandalonegc-enabled.a", "enabled-suite");
-    let got = match sha256_file(&post_suite) {
-        Ok(s) => s,
-        Err(e) => rt.fail(case, &format!("re-derived suite object unreadable: {e}")),
+    let record = rt.record_sha(SUITE_MERGED);
+    let frozen_path = rt.frozen(SUITE_MERGED);
+    let (got, want, how) = match stamp_compare(&facts, &rt.out, &post_suite, &frozen_path, "merged-suite") {
+        Ok(p) => p,
+        Err(e) => rt.fail(case, &e),
     };
-    let want = rt.record_sha(SUITE_MERGED);
+    let how_suite = how;
     if got != want {
-        rt.fail(case, &format!("re-derived suite merge sha256 {got} != frozen {want} -- the merge moved (a linker, an archive, the surgery object or the suite's program object changed); a moved object is a registered re-freeze, never a silent rebuild"));
+        rt.fail(case, &format!("re-derived suite merge sha256 {got} != frozen {want} ({how}) -- the merge moved (a linker, an archive, the surgery object or the suite's program object changed); a moved object is a registered re-freeze, never a silent rebuild"));
     }
-    println!("  re-derived object byte-identical to goldens/rt/{SUITE_MERGED} ({}...)", &want[..16]);
-    rt.pass(case, "positive", "", &format!("{{\"merged_sha\":\"{want}\",\"archives\":{}}}", MERGE_ARCHIVES.len()));
+    println!("  re-derived object byte-identical to {}/{SUITE_MERGED} ({how}; {}...; the record's sha256 {}...)", rt.w.tier, &want[..16], &record[..16]);
+    println!("  the frozen suite merge's producer stamp (report-only): '{}'; the re-derived one's: '{}'", producer_stamp_of(&frozen_path), producer_stamp_of(&post_suite));
+    rt.pass(case, "positive", "", &format!("{{\"merged_sha\":\"{record}\",\"archives\":{}}}", MERGE_ARCHIVES.len()));
     println!("  PASS");
 
     let case = "rt.rederive-libc";
@@ -2399,7 +2672,7 @@ pub fn rederive(repo: &Path) -> ! {
         Ok(false) => rt.fail(case, &format!("the closure merge failed (see {})", log_e.display())),
         Err(e) => rt.fail(case, &e),
     }
-    let donor = rt.frozen(DONOR);
+    let donor = rt.frozen(rt.w.donor);
     match attrs_update_file(&pre, &donor, &post) {
         Ok((pre_sha, n)) => println!("  the linker's product (the pre-object) sha256 {pre_sha}; the attributes update applied by the runner ({n}-byte donor)"),
         Err(e) => rt.fail(case, &format!("the attributes update failed (libc): {e}")),
@@ -2409,7 +2682,9 @@ pub fn rederive(repo: &Path) -> ! {
     if got != want {
         rt.fail(case, &format!("re-derived closure sha256 {got} != frozen {want} -- the kit's members, their order or the linker moved; a moved object is a registered re-freeze"));
     }
-    println!("  {} members printed out of the archives and re-merged in the list's order; byte-identical to goldens/rt/{LIBC} ({}...)", members.members.len(), &want[..16]);
+    println!("  {} members printed out of the archives and re-merged in the list's order; byte-identical to {}/{LIBC} ({}...)", members.members.len(), rt.w.tier, &want[..16]);
+    let closure_stamp = producer_stamp_of(&post);
+    println!("  the closure's producer stamp: {closure_stamp} (compared whole)");
     rt.pass(case, "positive", "", &format!("{{\"libc_sha\":\"{want}\",\"members\":{}}}", members.members.len()));
     println!("  PASS");
 
@@ -2501,13 +2776,14 @@ pub fn rederive(repo: &Path) -> ! {
     } else {
         rt.fail_control(ccase, broke, "the other selector reproduced the frozen object or carries the witness");
     }
-    rt.results.emit_summary("rt-rederive", "pass", 0);
+    rt.results.emit_summary(w.rederive_gate, "pass", 0);
     if !validate_results(repo, rt.results.path()) {
-        println!("RT REDERIVE: FAIL -- results file failed schema validation");
+        println!("{}: FAIL -- results file failed schema validation", w.rederive_display);
         exit(1);
     }
     println!(
-        "RT REDERIVE: PASS (4/4 frozen objects re-derived byte-identical: the surgery object, the two merged objects, the closure; the archive set and the kit's libraries tie the frozen identities; the set censused: no compiled function naming d16-d31, the ARM-state code the pinned pair; selector control refused)  [{}]",
+        "{}: PASS (4/4 frozen objects re-derived byte-identical -- the surgery object {how_surgery}; the merged object {how_merged}; the suite merge {how_suite}; the closure whole, its producer stamp {closure_stamp}; the archive set and the kit's libraries tie the frozen identities; the set censused: no compiled function naming d16-d31, the ARM-state code the pinned pair; selector control refused)  [{}]",
+        w.rederive_display,
         ld.version
     );
     exit(0);
@@ -2543,17 +2819,17 @@ pub fn attrs(_repo: &Path, args: &[String]) -> ! {
 /// bytes; an empty default in their place would let a doctored input
 /// compare equal to a genuine one and report the checker broken when it is
 /// the tier that is absent.
-fn selfcheck_frozen(repo: &Path, name: &str) -> Vec<u8> {
-    match std::fs::read(repo.join("goldens").join("rt").join(name)) {
+fn selfcheck_frozen(repo: &Path, w: &RtWorld, name: &str) -> Vec<u8> {
+    match std::fs::read(repo.join(tier_of(w, name).replace('/', std::path::MAIN_SEPARATOR_STR)).join(name)) {
         Ok(b) => b,
         Err(e) => {
-            println!("rhu-gate rt selfcheck: goldens/rt/{name} unreadable: {e}");
+            println!("rhu-gate {} selfcheck: {}/{name} unreadable: {e}", w.gate, tier_of(w, name));
             exit(1);
         }
     }
 }
 
-pub fn selfcheck(repo: &Path) -> ! {
+pub fn selfcheck(repo: &Path, w: &'static RtWorld) -> ! {
     let facts = match rustc_facts() {
         Ok(f) => f,
         Err(e) => {
@@ -2561,13 +2837,13 @@ pub fn selfcheck(repo: &Path) -> ! {
             exit(1);
         }
     };
-    if !repo.join("goldens").join("rt").join("MANIFEST.md").is_file() {
-        println!("rhu-gate rt selfcheck: frozen inputs missing (goldens/rt)");
+    if !repo.join(w.tier.replace('/', std::path::MAIN_SEPARATOR_STR)).join("MANIFEST.md").is_file() {
+        println!("rhu-gate {} selfcheck: frozen inputs missing ({})", w.gate, w.tier);
         exit(1);
     }
-    let out = repo.join("src").join("kernel").join("target").join("rt-gate");
+    let out = repo.join("src").join("kernel").join("target").join(w.out_dir);
     let _ = std::fs::create_dir_all(&out);
-    let results = match Results::create(&out.join("rt-selfcheck.results.jsonl")) {
+    let results = match Results::create(&out.join(w.selfcheck_results)) {
         Ok(r) => r,
         Err(e) => {
             println!("rhu-gate: cannot create results file: {e}");
@@ -2575,25 +2851,31 @@ pub fn selfcheck(repo: &Path) -> ! {
         }
     };
     results.emit(&format!(
-        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"rt-selfcheck\",\"run\":\"rt-selfcheck-{}\",\"host\":\"{HOST}\",\"runner\":\"{RUNNER}\",\"tools\":{{\"rustc\":\"{}\"}}}}",
+        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"{}\",\"run\":\"{}-{}\",\"host\":\"{}\",\"runner\":\"{RUNNER}\",\"tools\":{{\"rustc\":\"{}\"}}}}",
+        w.selfcheck_gate,
+        w.selfcheck_gate,
         std::process::id(),
+        w.host,
         facts.version
     ));
-    let mut sc = Selfcheck { repo: repo.to_path_buf(), gate: "rt-selfcheck".to_string(), display: "RT SELFCHECK".to_string(), results, n: 0, npass: 0, nneg: 0 };
+    let mut sc = Selfcheck { repo: repo.to_path_buf(), gate: w.selfcheck_gate.to_string(), display: w.selfcheck_display.to_string(), results, n: 0, npass: 0, nneg: 0 };
 
     let header_ok = "File: x\nFormat: elf32-littlearm\nElfHeader {\n  Class: 32-bit (0x1)\n  Type: Relocatable (0x1)\n  Machine: EM_ARM (0x28)\n}\n";
     sc.accept_probe("header-genuine", "a 32-bit ARM relocatable header accepted", header_fault(header_ok).is_none());
     sc.probe("header-executable", "an executable's header (Type: Executable) must be refused", header_fault(&header_ok.replace("Type: Relocatable (0x1)", "Type: Executable (0x2)")).is_none());
     sc.probe("header-x86", "a non-ARM header (Machine: EM_386) must be refused", header_fault(&header_ok.replace("Machine: EM_ARM (0x28)", "Machine: EM_386 (0x3)")).is_none());
 
-    let attrs_m = "BuildAttributes {\n  Attribute {\n    Tag: 5\n    TagName: CPU_name\n    Value: 7E-M\n  }\n  Attribute {\n    Tag: 6\n    Value: 13\n    TagName: CPU_arch\n    Description: ARM v7E-M\n  }\n  Attribute {\n    Tag: 7\n    Value: 77\n    TagName: CPU_arch_profile\n    Description: Microcontroller\n  }\n  Attribute {\n    Tag: 9\n    Value: 2\n    TagName: THUMB_ISA_use\n    Description: Thumb-2\n  }\n  Attribute {\n    Tag: 28\n    Value: 1\n    TagName: ABI_VFP_args\n    Description: AAPCS VFP\n  }\n}\n";
-    sc.accept_probe("attrs-genuine", "the microcontroller-profile hard-float attributes accepted", attrs_fault(attrs_m).is_none());
-    let attrs_a = attrs_m.replace("Description: ARM v7E-M", "Description: ARM v7").replace("Description: Microcontroller", "Description: Application");
-    sc.probe("attrs-application-profile", "the archives' own application-profile attributes must be refused", attrs_fault(&attrs_a).is_none());
+    let attrs_m_fixture = "BuildAttributes {\n  Attribute {\n    Tag: 5\n    TagName: CPU_name\n    Value: 7E-M\n  }\n  Attribute {\n    Tag: 6\n    Value: 13\n    TagName: CPU_arch\n    Description: ARM v7E-M\n  }\n  Attribute {\n    Tag: 7\n    Value: 77\n    TagName: CPU_arch_profile\n    Description: Microcontroller\n  }\n  Attribute {\n    Tag: 9\n    Value: 2\n    TagName: THUMB_ISA_use\n    Description: Thumb-2\n  }\n  Attribute {\n    Tag: 28\n    Value: 1\n    TagName: ABI_VFP_args\n    Description: AAPCS VFP\n  }\n}\n";
+    let attrs_m = attrs_m_fixture
+        .replace("Description: ARM v7E-M", &format!("Description: {}", w.cpu_arch))
+        .replace("Description: Thumb-2", &format!("Description: {}", w.thumb_isa));
+    sc.accept_probe("attrs-genuine", "the microcontroller-profile hard-float attributes accepted", attrs_fault(&attrs_m, w).is_none());
+    let attrs_a = attrs_m.replace(&format!("Description: {}", w.cpu_arch), "Description: ARM v7").replace("Description: Microcontroller", "Description: Application");
+    sc.probe("attrs-application-profile", "the archives' own application-profile attributes must be refused", attrs_fault(&attrs_a, w).is_none());
     let attrs_lld_pre = "BuildAttributes {\n  Attribute {\n    Tag: 6\n    Value: 2\n    TagName: CPU_arch\n    Description: ARM v4T\n  }\n  Attribute {\n    Tag: 28\n    Value: 1\n    TagName: ABI_VFP_args\n    Description: AAPCS VFP\n  }\n}\n";
-    sc.probe("attrs-profile-absent", "a merged object whose profile tag is absent (the linker's own minimal section) must be refused", attrs_fault(attrs_lld_pre).is_none());
+    sc.probe("attrs-profile-absent", "a merged object whose profile tag is absent (the linker's own minimal section) must be refused", attrs_fault(attrs_lld_pre, w).is_none());
     let attrs_soft = attrs_m.replace("Description: AAPCS VFP", "Description: AAPCS");
-    sc.probe("attrs-soft-float", "microcontroller attributes with soft-float argument passing must be refused", attrs_fault(&attrs_soft).is_none());
+    sc.probe("attrs-soft-float", "microcontroller attributes with soft-float argument passing must be refused", attrs_fault(&attrs_soft, w).is_none());
 
     let want: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
     sc.accept_probe("undef-genuine", "an undefined set equal to the frozen list accepted", undef_fault(&want, &want).is_none());
@@ -2602,24 +2884,27 @@ pub fn selfcheck(repo: &Path) -> ! {
     let missing: Vec<String> = ["a", "c"].iter().map(|s| s.to_string()).collect();
     sc.probe("undef-missing", "an undefined set with one VANISHED name must be refused", undef_fault(&missing, &want).is_none());
 
-    let manifest = "# goldens/rt\n\narchives: rc1-rhu-cortex-m7-sgc-enabled abcd\n\n- `goldens/rt/x.o`\n  `0000000000000000000000000000000000000000000000000000000000000000`\n";
-    let set_file = "set-id: rc1-rhu-cortex-m7-sgc-enabled\narchive libRuntime.WorkstationGC.a 1 ff\narchives-sha256: abcd\n";
-    sc.accept_probe("set-genuine", "a manifest and set file naming the consumed set with equal shas accepted", set_fault(manifest, set_file, ARCHIVE_SET).is_none());
-    sc.probe("set-other-id", "a manifest naming another archive set must be refused", set_fault(&manifest.replace("rc1-rhu-cortex-m7-sgc-enabled", "rc1-rhu-cortex-m7-sgc-disabled"), set_file, ARCHIVE_SET).is_none());
-    sc.probe("set-sha-disagree", "a set file whose archives sha disagrees with the manifest must be refused", set_fault(manifest, &set_file.replace("archives-sha256: abcd", "archives-sha256: abce"), ARCHIVE_SET).is_none());
+    let manifest_fixture = "# goldens/rt-m7\n\narchives: rc1-rhu-cortex-m7-sgc-enabled abcd\n\n- `goldens/rt-m7/x.o`\n  `0000000000000000000000000000000000000000000000000000000000000000`\n";
+    let set_file_fixture = "set-id: rc1-rhu-cortex-m7-sgc-enabled\narchive libRuntime.WorkstationGC.a 1 ff\narchives-sha256: abcd\n";
+    let manifest = manifest_fixture.replace("rc1-rhu-cortex-m7-sgc-enabled", w.archive_set);
+    let set_file = set_file_fixture.replace("rc1-rhu-cortex-m7-sgc-enabled", w.archive_set);
+    let other_set = format!("{}-disabled", w.archive_set.trim_end_matches("-enabled"));
+    sc.accept_probe("set-genuine", "a manifest and set file naming the consumed set with equal shas accepted", set_fault(&manifest, &set_file, w.archive_set).is_none());
+    sc.probe("set-other-id", "a manifest naming another archive set must be refused", set_fault(&manifest.replace(w.archive_set, &other_set), &set_file, w.archive_set).is_none());
+    sc.probe("set-sha-disagree", "a set file whose archives sha disagrees with the manifest must be refused", set_fault(&manifest, &set_file.replace("archives-sha256: abcd", "archives-sha256: abce"), w.archive_set).is_none());
 
-    let records: Vec<(String, String)> = FROZEN_FILES.iter().map(|(n, _)| (format!("goldens/rt/{n}"), "0".repeat(64))).collect();
-    let on_disk: Vec<String> = FROZEN_FILES.iter().map(|(n, _)| n.to_string()).collect();
+    let records: Vec<(String, String)> = frozen_files(w).iter().map(|(n, _)| (format!("{}/{n}", tier_of(w, n)), "0".repeat(64))).collect();
+    let on_disk: Vec<String> = frozen_files(w).iter().map(|(n, _)| n.to_string()).collect();
     let mut extra_disk = on_disk.clone();
     extra_disk.push("stray.o".to_string());
-    sc.probe("frozen-file-without-record", "an on-disk file without a manifest record must be refused", frozen_consistency(&records, &extra_disk).is_ok());
+    sc.probe("frozen-file-without-record", "an on-disk file without a manifest record must be refused", frozen_consistency(w, &records, &extra_disk).is_ok());
     let mut outside = records.clone();
     outside[0].0 = "goldens/shim/rthello.o".to_string();
-    sc.probe("frozen-record-outside", "a manifest record outside goldens/rt/ must be refused", frozen_consistency(&outside, &on_disk).is_ok());
+    sc.probe("frozen-record-outside", "a manifest record outside the world's tier must be refused", frozen_consistency(w, &outside, &on_disk).is_ok());
     let sha_a = "a".repeat(64);
-    sc.accept_probe("record-genuine", "a record equal to the file's sha accepted", record_fault("goldens/rt/x.o", &sha_a, &sha_a).is_none());
+    sc.accept_probe("record-genuine", "a record equal to the file's sha accepted", record_fault("goldens/rt-m7/x.o", &sha_a, &sha_a).is_none());
     let sha_b = format!("{}b", "a".repeat(63));
-    sc.probe("record-flipped", "a record with one flipped digit must be refused", record_fault("goldens/rt/x.o", &sha_b, &sha_a).is_none());
+    sc.probe("record-flipped", "a record with one flipped digit must be refused", record_fault("goldens/rt-m7/x.o", &sha_b, &sha_a).is_none());
 
     let defined: Vec<String> = SPOT_DEFINED.iter().map(|s| s.to_string()).collect();
     sc.accept_probe("spot-genuine", "a defined surface carrying every spot name accepted", spot_fault(&defined).is_none());
@@ -2669,7 +2954,7 @@ pub fn selfcheck(repo: &Path) -> ! {
     rich_image.extend_from_slice(&utf16le(FLAVOUR_MARK));
     sc.probe("flavour-present", "an image carrying the resource sentence as UTF-16 must be refused", flavour_fault(&rich_image).is_none());
 
-    let golden = selfcheck_frozen(repo, GOLDEN);
+    let golden = selfcheck_frozen(repo, w, GOLDEN);
     let mut wrapped: Vec<u8> = b"rhu 0.2.0 -- kernel banner\r\n[boot] kernel line\r\n[mgc] a collector line\r\n".to_vec();
     wrapped.extend_from_slice(&golden);
     wrapped.extend_from_slice(b"[payload] managed Main returned 0\r\n");
@@ -2699,7 +2984,7 @@ pub fn selfcheck(repo: &Path) -> ! {
     sc.probe("suite-break-order", "a capture with one section's verdict turned FAIL must lose that marker", markers_out_of_order(&suite_broken, &SUITE_MARKERS).is_none());
 
     let manifest_short = manifest.replace("0000000000000000000000000000000000000000000000000000000000000000", "000000000000000000000000000000000000000000000000000000000000000");
-    sc.probe("manifest-sha-malformed", "a manifest record whose sha is 63 hex digits must parse to fewer records (a drifted record set)", parse_vendored_manifest(&manifest_short).len() == parse_vendored_manifest(manifest).len());
+    sc.probe("manifest-sha-malformed", "a manifest record whose sha is 63 hex digits must parse to fewer records (a drifted record set)", parse_vendored_manifest(&manifest_short).len() == parse_vendored_manifest(&manifest).len());
 
     let dis_hi = "00000000 <f>:\n       0: ec d1 7b 2b\tvldr\td17, [r1, #8]\n";
     sc.accept_probe("census-sees-d17", "a decode naming d17 in its operands is counted", d32_census(dis_hi).len() == 1);
@@ -2728,14 +3013,49 @@ pub fn selfcheck(repo: &Path) -> ! {
     sc.accept_probe("arm-mode-none", "a symbol table with Thumb mapping symbols only reads zero", arm_mode_symbols(&syms_thumb).is_empty());
     let syms_stray = syms_arm.replace("__unw_getcontext", "SomeOtherFunction");
     sc.probe("arm-mode-unpinned", "an ARM-state mapping symbol at an unpinned function must be refused", arm_mode_fault(&arm_mode_symbols(&syms_stray), &syms_stray, 1).is_none());
-    let merged = selfcheck_frozen(repo, MERGED);
-    let donor = selfcheck_frozen(repo, DONOR);
+    let merged = selfcheck_frozen(repo, w, MERGED);
+    let donor = selfcheck_frozen(repo, w, w.donor);
     let once = attrs_update(&merged, &donor);
     let twice = attrs_update(&merged, &donor);
     sc.accept_probe("attrs-update-deterministic", "the runner's attributes update gives the same bytes twice on the frozen merged object", once.is_ok() && once == twice);
     sc.accept_probe("attrs-update-applied", "the updated object's .ARM.attributes section reads the donor's bytes", once.as_ref().ok().and_then(|o| attrs_section(o)) == Some(donor.clone()));
     sc.probe("attrs-update-not-elf", "the attributes update must refuse a non-ELF input", attrs_update(b"not an object", &donor).is_ok());
     sc.probe("delivery-zeroed", "the suite's capture with its activation count set to zero must be refused at the floor", activation_count(&zero_delivery(b"[host] activations delivered: 7\r\n"), ACTIVATIONS_FLOOR).is_ok());
+
+    let surgery_path = repo.join(w.tier.replace('/', std::path::MAIN_SEPARATOR_STR)).join(SURGERY);
+    let surgery_bytes = selfcheck_frozen(repo, w, SURGERY);
+    let stripped = out.join("selfcheck-stripped");
+    let stamp_base = sha256_without_stamp(&facts, &surgery_path, &stripped.join("genuine.o")).unwrap_or_default();
+    let code_at = section_span_prefixed(&surgery_bytes, ".text").map(|(o, _)| o);
+    let mut code_moved = surgery_bytes.clone();
+    if let Some(at) = code_at {
+        if let Some(b) = code_moved.get_mut(at) {
+            *b ^= 0x01;
+        }
+    }
+    write_fixture(&out.join("selfcheck-stamp-code-moved.o"), &code_moved);
+    let code_sha = sha256_without_stamp(&facts, &out.join("selfcheck-stamp-code-moved.o"), &stripped.join("code-moved.o")).unwrap_or_default();
+    sc.probe(
+        "stamp-compare-code-byte",
+        "a copy of the frozen surgery object with one code byte moved, compared apart from the stamp",
+        code_at.is_none() || stamp_base.is_empty() || code_sha.is_empty() || code_sha == stamp_base,
+    );
+    let stamp_at = section_span(&surgery_bytes, ".comment");
+    let mut stamp_moved = surgery_bytes.clone();
+    if let Some((o, s)) = stamp_at {
+        if s > 2 {
+            if let Some(b) = stamp_moved.get_mut(o + 1) {
+                *b ^= 0x01;
+            }
+        }
+    }
+    write_fixture(&out.join("selfcheck-stamp-stamp-moved.o"), &stamp_moved);
+    let stamp_sha = sha256_without_stamp(&facts, &out.join("selfcheck-stamp-stamp-moved.o"), &stripped.join("stamp-moved.o")).unwrap_or_default();
+    sc.accept_probe(
+        "stamp-compare-stamp-only",
+        "a copy of the frozen surgery object whose producer stamp alone is changed ties apart from the stamp while the files differ",
+        stamp_at.is_some() && !stamp_base.is_empty() && stamp_sha == stamp_base && sha256_hex(&stamp_moved) != sha256_hex(&surgery_bytes),
+    );
 
     sc.finish("genuine inputs accepted");
 }

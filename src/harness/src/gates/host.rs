@@ -1,4 +1,4 @@
-//! The host gate: the kernel's pure modules compiled from their own
+//! The host gate: the kernel's arithmetic modules and the handshake's judge compiled from their own
 //! source files by the host crate (src/kernel-host) and exercised on the
 //! host toolchain -- the boundary cases a bounded emulator run cannot
 //! reach (a request that wraps the heap's arithmetic, a wake target past
@@ -24,8 +24,20 @@ const TIMEOUT_S: u64 = 900;
 /// The cases pinned, in the order cargo's single-threaded runner reports
 /// them (alphabetical by name). A case added to the host crate joins this
 /// list in the same change, or the gate refuses the run.
-pub const CASES: [&str; 8] = [
+pub const CASES: [&str; 20] = [
+    "tests::abi_window_judges_the_window",
     "tests::arena_overflow_refused_headroom_intact",
+    "tests::calendar_bcd_packs_both_ways",
+    "tests::calendar_century_bound_refuses_1999_and_2100",
+    "tests::calendar_civil_from_days_at_the_maximum",
+    "tests::calendar_days_from_civil_round_trips_the_constants",
+    "tests::calendar_set_saturates_at_the_epoch",
+    "tests::fpemul_arithmetic_matches_the_host_in_round_to_nearest",
+    "tests::fpemul_compare_max_min_match_the_host",
+    "tests::fpemul_conversions_match_the_host",
+    "tests::fpemul_decoder_matches_the_assembler",
+    "tests::fpemul_flags_and_directed_rounding_by_hand",
+    "tests::fpemul_fma_is_fused_and_matches_the_host",
     "tests::kheap_largest_fits_and_one_more_byte_does_not",
     "tests::kheap_rounding_wraps_refused",
     "tests::kheap_wrapping_request_refused_null_heap_intact",

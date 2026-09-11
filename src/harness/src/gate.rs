@@ -50,7 +50,9 @@ impl GateCtx {
     ) -> CaseRun {
         println!("== case {name} ==");
         let log = self.out.join(format!("build-{name}.log"));
-        let ok = match cargo_build_kernel(&self.repo, features, &log) {
+        let mut feats: Vec<&str> = features.to_vec();
+        feats.extend_from_slice(&["--features", "entropy-accept-software"]);
+        let ok = match cargo_build_kernel(&self.repo, &feats, &log) {
             Ok(ok) => ok,
             Err(e) => {
                 println!("rhu-gate: {e}");
@@ -218,4 +220,55 @@ pub fn write_fixture(path: &Path, bytes: &[u8]) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(path, bytes);
+}
+
+/// The processor class a frozen object is compiled for: the two words of
+/// the compiler's flag set that select the core and its floating-point
+/// unit. Every other flag is shared between the classes, which each gate's
+/// selfcheck asserts over its two flag sets (`class_flag_sets_tie`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    /// The Cortex-M7 with the double-precision FPv5: the an500 and F769
+    /// rows' objects, the flag set of record.
+    CortexM7,
+    /// The Cortex-M33 with the single-precision FPv5: the mps2-an505 row's
+    /// objects, the same flag set apart from the core and FPU words.
+    CortexM33,
+}
+
+impl Class {
+    /// The two flag words that select this class.
+    pub fn cpu_words(self) -> [&'static str; 2] {
+        match self {
+            Class::CortexM7 => ["-mcpu=cortex-m7", "-mfpu=fpv5-d16"],
+            Class::CortexM33 => ["-mcpu=cortex-m33", "-mfpu=fpv5-sp-d16"],
+        }
+    }
+}
+
+/// Two flag sets are one list apart from the class's two words: the same
+/// length, the Cortex-M7 words in the first where the Cortex-M33 words sit
+/// in the second, every other position equal, and both class words
+/// present. The complaint names the first position that breaks the rule.
+pub fn class_flag_sets_tie(cortex_m7: &[&str], cortex_m33: &[&str]) -> Result<(), String> {
+    if cortex_m7.len() != cortex_m33.len() {
+        return Err(format!("the flag sets differ in length ({} and {})", cortex_m7.len(), cortex_m33.len()));
+    }
+    let w7 = Class::CortexM7.cpu_words();
+    let w33 = Class::CortexM33.cpu_words();
+    let mut class_positions = 0usize;
+    for (i, (a, b)) in cortex_m7.iter().zip(cortex_m33.iter()).enumerate() {
+        if let Some(k) = w7.iter().position(|w| w == a) {
+            if *b != w33[k] {
+                return Err(format!("position {i}: {a} pairs with {b}, not with {}", w33[k]));
+            }
+            class_positions += 1;
+        } else if a != b {
+            return Err(format!("position {i}: {a} and {b} differ outside the class's two words"));
+        }
+    }
+    if class_positions != 2 {
+        return Err(format!("the Cortex-M7 flag set carries {class_positions} of its two class words"));
+    }
+    Ok(())
 }

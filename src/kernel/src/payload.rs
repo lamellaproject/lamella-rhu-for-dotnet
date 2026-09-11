@@ -4,6 +4,7 @@
 use core::hint::black_box;
 use core::ptr::{addr_of, addr_of_mut, read_volatile};
 
+use crate::abi_window::{self, Verdict};
 use crate::{api, console, sched, semihost};
 
 /// GC arena, 96 KB. The hosted GC treats [arena_base, arena_base +
@@ -324,27 +325,40 @@ pub fn run() -> ! {
     let provided = black_box(rhu_payload_entry as *const () as usize)
         != black_box(__rhu_payload_entry_weak as *const () as usize);
     let stated = unsafe { read_volatile(addr_of!(rhu_payload_abi)) };
-    match (provided, stated) {
-        (false, 0) => kprintln!(
+    match abi_window::judge(provided, stated, api::ABI, api::ABI_COMPAT) {
+        Verdict::DefaultUnstated => kprintln!(
             "[payload] entry: kernel default (hosting-API contract generation {})",
             api::ABI
         ),
-        (false, n) if n == api::ABI => kprintln!(
+        Verdict::DefaultStated(n) if n == api::ABI => kprintln!(
             "[payload] entry: kernel default; the payload states hosting-API contract generation {} (this kernel: {})",
             n,
             api::ABI
         ),
-        (true, n) if n == api::ABI => kprintln!(
+        Verdict::DefaultStated(n) => kprintln!(
+            "[payload] entry: kernel default; the payload states hosting-API contract generation {} (this kernel serves {}; the window reaches back to {})",
+            n,
+            api::ABI,
+            api::ABI_COMPAT
+        ),
+        Verdict::ProvidedInside(n) if n == api::ABI => kprintln!(
             "[payload] entry: payload-provided, built for hosting-API contract generation {} (this kernel: {})",
             n,
             api::ABI
         ),
-        (true, 0) => refuse_entry(format_args!(
+        Verdict::ProvidedInside(n) => kprintln!(
+            "[payload] entry: payload-provided, built for hosting-API contract generation {} (this kernel serves {}; the window reaches back to {})",
+            n,
+            api::ABI,
+            api::ABI_COMPAT
+        ),
+        Verdict::RefusedUnstated => refuse_entry(format_args!(
             "the payload provides rhu_payload_entry but states no hosting-API contract generation (rhu_payload_abi)"
         )),
-        (_, n) => refuse_entry(format_args!(
-            "the payload was built for hosting-API contract generation {}, this kernel serves {}",
+        Verdict::RefusedOutside(n) => refuse_entry(format_args!(
+            "the payload was built for hosting-API contract generation {}, outside this kernel's window {}..{}",
             n,
+            api::ABI_COMPAT,
             api::ABI
         )),
     }

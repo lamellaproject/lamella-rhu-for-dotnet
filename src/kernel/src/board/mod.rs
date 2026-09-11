@@ -91,6 +91,110 @@ compile_error!("pico-2-pll150 is a posture of board-pico-2 -- select that board"
 #[cfg(all(feature = "pico-plus-2-pll150", not(feature = "board-pico-plus-2")))]
 compile_error!("pico-plus-2-pll150 is a posture of board-pico-plus-2 -- select that board");
 
+/// The entropy posture of a row: no hardware noise source (the emulator
+/// rows, and a silicon row without a noise driver); a source this
+/// clock posture cannot feed; or a source served on this posture. The
+/// banner line is the posture's own text, constant per image; the
+/// hardware query and the witness carry the runtime verdicts.
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub enum EntropyPosture {
+    None,
+    AbsentByPosture {
+        name: &'static str,
+        line: &'static str,
+    },
+    Source {
+        id: u32,
+        name: &'static str,
+        line: &'static str,
+    },
+}
+
+impl EntropyPosture {
+    /// The source's id in the witness (0 when none serves).
+    pub const fn id(self) -> u32 {
+        match self {
+            EntropyPosture::Source { id, .. } => id,
+            _ => 0,
+        }
+    }
+
+    /// The source's name for the api flavor's line.
+    #[allow(dead_code)]
+    pub const fn name(self) -> &'static str {
+        match self {
+            EntropyPosture::Source { name, .. } => name,
+            EntropyPosture::AbsentByPosture { name, .. } => name,
+            EntropyPosture::None => "none",
+        }
+    }
+}
+
+/// What a hardware draw can refuse: no source serves; the block's own
+/// health check failed at this draw; the bytes were not ready within the
+/// door's bound.
+#[allow(dead_code)]
+pub enum EntropyErr {
+    NoSource,
+    Health,
+    Timeout,
+}
+
+/// What a driver counted during one draw: health flags seen and cleared
+/// (discarded runs), and block resets performed.
+pub struct DrawCounters {
+    pub errors: u32,
+    pub resets: u32,
+}
+
+/// What the real-time clock said at boot: no clock on this row; the
+/// backup domain cold (the oscillator just started, the clock not yet
+/// clocked); running but never set; or set, with the instant read.
+#[allow(dead_code)]
+pub enum RtcBoot {
+    NoRtc,
+    Cold,
+    Uninitialized,
+    Read(u64),
+}
+
+/// What an explicit set's write-back did.
+#[allow(dead_code)]
+pub enum RtcWrite {
+    NoRtc,
+    Written,
+    SkippedLseNotReady,
+    SkippedRange,
+    /// The clock's source is held by an earlier selection of another source (the
+    /// selection is written once per backup-domain reset): the write would be
+    /// ignored, so it is reported instead of made.
+    SkippedSourceHeld,
+}
+
+/// The absent shapes of the two seams: no source, no clock. The emulator
+/// rows use them for good; a silicon row without its drivers uses them too.
+#[allow(dead_code)]
+pub mod absent {
+    use super::{DrawCounters, EntropyErr, RtcBoot, RtcWrite};
+
+    pub fn entropy_init() -> bool {
+        false
+    }
+
+    pub fn entropy_draw(_buf: &mut [u8], _counters: &mut DrawCounters) -> Result<(), EntropyErr> {
+        Err(EntropyErr::NoSource)
+    }
+
+    pub fn rtc_read_at_boot() -> RtcBoot {
+        RtcBoot::NoRtc
+    }
+
+    pub fn rtc_write(_ticks: u64) -> RtcWrite {
+        RtcWrite::NoRtc
+    }
+}
+
 /// The arena's window: the link-defined NOLOAD slack between the last
 /// kernel section and the boot-stack reserve, bracketed by the two map
 /// symbols on every board. Behind the facade so a host build of the pure

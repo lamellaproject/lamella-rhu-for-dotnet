@@ -309,7 +309,7 @@ ASSERT(SIZEOF(.vector_table) == 0x400,
 ASSERT(SIZEOF(.rhu_header) == 64,
   "image header is not the 64 bytes of layout version 1");
 
-/* The hosted runtime's demand as the frozen tier states it (goldens/rt:
+/* The hosted runtime's demand as the frozen tier states it (goldens/rt-m7:
  * the merged program object's section classes by llvm-size -- the code
  * class, the copied data, the zero-filled data). The regions must hold
  * that demand beside the kernel's own reserves on every board: a region

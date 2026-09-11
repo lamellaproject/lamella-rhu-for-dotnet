@@ -8,7 +8,7 @@ use std::process::{exit, Command};
 
 /// The chain verdict line: gate count, gate names, and the declared
 /// absence of every frozen-input tier whose inputs are not present
-/// (payload, gc, shim and rt), in leg order. Byte-identical to the chain of
+/// (payload, gc, shim, rt-m7 and rt-m33), in leg order. Byte-identical to the chain of
 /// record's line -- the drop pipeline parses it into the manifest --
 /// and byte-identical to the pre-generalization rendering for the
 /// zero- and payload-declared shapes (the core selfcheck pins all
@@ -65,11 +65,17 @@ pub fn run(repo: &Path) -> ! {
         declared.push(("shim", "goldens/shim"));
         say("==== chain: shim tier frozen inputs absent (goldens/shim) -- tier DECLARED, not run ====");
     }
-    if repo.join("goldens").join("rt").is_dir() {
-        legs.push("rt");
+    if repo.join("goldens").join("rt-m7").is_dir() {
+        legs.push("rt-m7");
     } else {
-        declared.push(("rt", "goldens/rt"));
-        say("==== chain: rt tier frozen inputs absent (goldens/rt) -- tier DECLARED, not run ====");
+        declared.push(("rt-m7", "goldens/rt-m7"));
+        say("==== chain: rt-m7 tier frozen inputs absent (goldens/rt-m7) -- tier DECLARED, not run ====");
+    }
+    if repo.join("goldens").join("rt-m33").is_dir() {
+        legs.push("rt-m33");
+    } else {
+        declared.push(("rt-m33", "goldens/rt-m33"));
+        say("==== chain: rt-m33 tier frozen inputs absent (goldens/rt-m33) -- tier DECLARED, not run ====");
     }
 
     let chain_id = format!("chain-{}", std::process::id());

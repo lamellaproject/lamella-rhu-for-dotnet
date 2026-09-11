@@ -112,3 +112,13 @@ pub fn console_getb() -> Option<u8> {
 /// This row: the image's own vector table lives at 0.
 #[allow(dead_code)]
 pub const ADDRESS_ZERO_READABLE: bool = true;
+
+/// The entropy posture of this row: no hardware noise source on the emulator rows.
+pub const ENTROPY: super::EntropyPosture = super::EntropyPosture::None;
+/// Whether this row carries a real-time clock the kernel reads at boot and
+/// writes at an explicit set.
+#[allow(dead_code)]
+pub const RTC_PRESENT: bool = false;
+/// The calendar banner's text for this row, constant per image.
+pub const RTC_LINE: &str = "no calendar source on this row; the base is the epoch until set";
+pub use super::absent::{entropy_draw, entropy_init, rtc_read_at_boot, rtc_write};

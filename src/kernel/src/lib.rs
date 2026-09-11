@@ -13,16 +13,30 @@ mod api;
 mod arena;
 mod board;
 mod boot;
+mod calendar;
+mod calendar_math;
 mod critical;
 mod entropy;
 mod funnel;
+#[cfg(feature = "fpemul")]
+mod fpemul;
 mod header;
 mod kheap;
+#[cfg(feature = "payload")]
+mod abi_window;
 #[cfg(feature = "payload")]
 mod payload;
 mod registry;
 mod sched;
 mod semihost;
+
+/// The floating-point posture of this row, one line at boot: the Cortex-M7 class
+/// computes double precision in hardware; the M33 class (the single-precision
+/// FPU) has the double-precision forms computed by the kernel's emulation.
+#[cfg(feature = "fpemul")]
+const FPU_LINE: &str = "single precision in hardware; the double-precision forms are emulated by the kernel";
+#[cfg(not(feature = "fpemul"))]
+const FPU_LINE: &str = "double precision in hardware";
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
@@ -35,7 +49,7 @@ const FLAVOR: &str = if cfg!(feature = "test-panic") {
 } else if cfg!(feature = "test-kheap-loud") {
     "test-kheap-loud"
 } else if cfg!(feature = "test-tickcost") { "test-tickcost"
-} else if cfg!(feature = "test-stkof") { "test-stkof"
+} else if cfg!(feature = "test-stackovfl") { "test-stackovfl"
 } else if cfg!(feature = "sched-smoke") {
     "sched-smoke"
 } else if cfg!(feature = "api-smoke") {
@@ -99,6 +113,12 @@ pub extern "C" fn kmain() -> ! {
         );
     }
 
+    entropy::init();
+    kprintln!("[boot] entropy: {}", entropy::banner());
+    calendar::init_at_boot();
+    kprintln!("[boot] calendar: {}", board::RTC_LINE);
+    kprintln!("[boot] fpu: {}", FPU_LINE);
+
     arena::init();
     kheap::init();
     registry::init_module0();
@@ -115,7 +135,7 @@ pub extern "C" fn kmain() -> ! {
 }
 
 #[cfg_attr(
-    any(feature = "test-panic", feature = "test-fault", feature = "payload", feature = "test-kheap-loud", feature = "test-tickcost", feature = "test-stkof", feature = "api-smoke"),
+    any(feature = "test-panic", feature = "test-fault", feature = "payload", feature = "test-kheap-loud", feature = "test-tickcost", feature = "test-stackovfl", feature = "api-smoke"),
     allow(unreachable_code)
 )]
 extern "C" fn kthread_main(_: usize) {
@@ -139,8 +159,8 @@ extern "C" fn kthread_main(_: usize) {
         unsafe { core::arch::asm!("udf #0") };
     }
 
-    #[cfg(feature = "test-stkof")]
-    stkof::run();
+    #[cfg(feature = "test-stackovfl")]
+    stackovfl::run();
 
     #[cfg(feature = "test-kheap-loud")]
     {
@@ -408,7 +428,7 @@ mod api_smoke {
     use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
     use crate::critical::with_cs;
-    use crate::{api, arena, board, kheap, registry, sched};
+    use crate::{api, arena, board, calendar, calendar_math, entropy, kheap, registry, sched};
 
     fn busy_wait_ms(ms: u32) {
         let t0 = sched::now_ms();
@@ -495,7 +515,14 @@ mod api_smoke {
         check_module_roots();
         check_console_pair();
         check_entropy();
+        check_entropy_secure();
         check_host_band();
+        check_calendar();
+        check_fp_double();
+        #[cfg(feature = "fpemul")]
+        check_fp_frames();
+        #[cfg(feature = "fp-cost")]
+        check_fp_cost();
         check_tid_wrap();
         check_null_read();
     }
@@ -536,6 +563,7 @@ mod api_smoke {
         });
         assert!(t_d > t_c, "ns clock stepped backward across a saturated pend window");
         kprintln!("[api] PASS ns-monotonic (5000 paired reads + cs wrap + saturated pend windows)");
+        kprintln!("[api] ns-monotonic: its two designed windows each hold the tick masked across two SysTick reloads; where the witness counts, its 2 lost / 2 late are theirs by construction");
     }
 
     fn check_sleep() {
@@ -1495,6 +1523,43 @@ mod api_smoke {
         kprintln!("[api] PASS host-band (the host joined the band and its door-spawned child at the flat priority started through yield alone at one level, joining re-ran the pick, leaving restored kernel urgency and held a band thread until the host blocked)");
     }
 
+    fn check_calendar() {
+        kprintln!("[api] calendar-door: the calendar base's doors armed (get, two explicit sets, the replace rule, the refusals, the record)");
+        const T1: u64 = 631_167_699_060_000_000;
+        const T2: u64 = T1 + 864_000_000_000;
+        let mut t = 0u64;
+        let mut s = 0i32;
+        assert!(api::rhu_calendar_get(&mut t, &mut s) == 0, "calendar: get refused");
+        assert!(s == 0 || s == 1 || s == 2, "calendar: the source at boot reads {}", s);
+        assert!(api::rhu_calendar_set(T1, 4) == 0, "calendar: the application's set refused");
+        assert!(api::rhu_calendar_get(&mut t, &mut s) == 0, "calendar: get refused after the set");
+        assert!(s == 4, "calendar: the source after the set reads {}", s);
+        assert!(t >= T1 && t < T1 + 500_000, "calendar: read {} after setting {}", t, T1);
+        api::rhu_sleep_ns(25_000_000);
+        assert!(api::rhu_calendar_get(&mut t, &mut s) == 0, "calendar: get refused after the sleep");
+        assert!(t - T1 >= 250_000, "calendar: the elapsed clock did not carry the calendar ({} ticks)", t - T1);
+        assert!(api::rhu_calendar_set(T2, 3) == 0, "calendar: the network set refused");
+        assert!(api::rhu_calendar_get(&mut t, &mut s) == 0, "calendar: get refused after the replace");
+        assert!(s == 3 && t >= T2, "calendar: the replace did not take (source {}, ticks {})", s, t);
+        assert!(api::rhu_calendar_set(T1, 7) == sched::ERR_INVAL, "calendar: source 7 not refused EINVAL");
+        assert!(api::rhu_calendar_set(T1, 1) == sched::ERR_INVAL, "calendar: a hosted set claiming the clock's source not refused");
+        assert!(
+            api::rhu_calendar_set(calendar_math::TICKS_MAX + 1, 4) == sched::ERR_INVAL,
+            "calendar: an instant past the maximum not refused EINVAL"
+        );
+        assert!(api::rhu_calendar_get(core::ptr::null_mut(), &mut s) == sched::ERR_INVAL, "calendar: a null ticks pointer not refused");
+        assert!(api::rhu_calendar_get(&mut t, core::ptr::null_mut()) == sched::ERR_INVAL, "calendar: a null source pointer not refused");
+        let (rtc, lse, _pushes) = calendar::record_states();
+        if board::RTC_PRESENT {
+            assert!(rtc == calendar::RTC_WRITTEN, "calendar: the record's clock state reads {} after the sets", rtc);
+            assert!(lse == calendar::LSE_READY, "calendar: the record's oscillator state reads {}", lse);
+            kprintln!("[api] PASS calendar-door (the epoch or a carried base at boot, the explicit set read back with its source over the elapsed clock, the replace rule, source and range refusals, the real-time clock written back with the crystal ready)");
+        } else {
+            assert!(rtc == calendar::RTC_NONE, "calendar: the record claims a clock state {} on a row without one", rtc);
+            kprintln!("[api] PASS calendar-door (the epoch at boot, the explicit set read back with its source over the elapsed clock, the replace rule, source and range refusals, no real-time clock on this row)");
+        }
+    }
+
     fn check_tid_wrap() {
         kprintln!("[api] tid-wrap: the id space's last two ids + the refusal past it armed");
         sched::probe_tid_seek(0x7FFF_FFFE);
@@ -2410,8 +2475,787 @@ mod api_smoke {
             "entropy: null draw not refused EINVAL"
         );
         assert!(api::rhu_entropy(a.as_mut_ptr(), 0) == 0, "entropy: zero-length draw not 0");
-        assert!(api::rhu_entropy_is_hardware() == 0, "entropy: hardware claim on a software-stream board");
-        kprintln!("[api] PASS entropy-honesty (draws filled and distinct, null refused, zero-length trivial, hardware query answers 0 on this class)");
+        let hw = api::rhu_entropy_is_hardware();
+        let serving = matches!(board::ENTROPY, board::EntropyPosture::Source { .. })
+            && entropy::state() == entropy::STATE_SERVING;
+        assert!(hw == serving as i32, "entropy: the hardware query {} disagrees with the posture", hw);
+        if hw == 1 {
+            kprintln!("[api] PASS entropy-honesty (draws filled and distinct, null refused, zero-length trivial, hardware query answers 1 on this class ({}))", board::ENTROPY.name());
+        } else {
+            kprintln!("[api] PASS entropy-honesty (draws filled and distinct, null refused, zero-length trivial, hardware query answers 0 on this class)");
+        }
+    }
+
+    fn check_entropy_secure() {
+        kprintln!("[api] entropy-secure: the cryptographic door armed (two draws, a null, a zero-length)");
+        let mut a = [0u8; 16];
+        let mut b = [0u8; 64];
+        let (draws0, errors0, refusals0) = entropy::counts();
+        let ra = api::rhu_entropy_secure(a.as_mut_ptr(), 16);
+        let rb = api::rhu_entropy_secure(b.as_mut_ptr(), 64);
+        assert!(
+            api::rhu_entropy_secure(core::ptr::null_mut(), 16) == sched::ERR_INVAL,
+            "entropy-secure: null draw not refused EINVAL"
+        );
+        assert!(api::rhu_entropy_secure(a.as_mut_ptr(), 0) == 0, "entropy-secure: zero-length draw not 0");
+        assert!(
+            api::rhu_entropy_secure(a.as_mut_ptr(), entropy::SECURE_MAX_DRAW + 1) == sched::ERR_INVAL,
+            "entropy-secure: an over-bound draw not refused EINVAL"
+        );
+        let hw = api::rhu_entropy_is_hardware();
+        let (draws1, errors1, refusals1) = entropy::counts();
+        if cfg!(feature = "entropy-accept-software") {
+            assert!(ra == 0 && rb == 0, "entropy-secure: a draw refused under the opt-in ({} {})", ra, rb);
+            assert!(a[..] != b[..16], "entropy-secure: two draws returned identical bytes");
+            assert!(a.iter().any(|&x| x != 0), "entropy-secure: draw left the buffer all-zero");
+            assert!(hw == 0, "entropy-secure: the hardware query answers {} under the opt-in", hw);
+            assert!(draws1 == draws0 + 2, "entropy-secure: the witness counted {} draws, expected {}", draws1, draws0 + 2);
+            kprintln!("[api] PASS entropy-secure (the software stream served two distinct cryptographic draws under the build opt-in, null refused, zero-length and over-bound refused, the hardware query 0)");
+        } else if hw == 1 {
+            assert!(ra == 0 && rb == 0, "entropy-secure: the hardware source refused a draw ({} {})", ra, rb);
+            assert!(a[..] != b[..16], "entropy-secure: two draws returned identical bytes");
+            assert!(a.iter().any(|&x| x != 0), "entropy-secure: draw left the buffer all-zero");
+            assert!(draws1 == draws0 + 2, "entropy-secure: the witness counted {} draws, expected {}", draws1, draws0 + 2);
+            assert!(errors1 == errors0, "entropy-secure: the witness saw {} health flags during the draws", errors1 - errors0);
+            kprintln!("[api] PASS entropy-secure (the hardware source served two distinct cryptographic draws with its health flags clean, null refused, zero-length and over-bound refused, the hardware query 1)");
+        } else {
+            assert!(ra == sched::ERR_NODEV && rb == sched::ERR_NODEV, "entropy-secure: expected RHU_ENODEV twice, got {} {}", ra, rb);
+            assert!(a.iter().all(|&x| x == 0) && b.iter().all(|&x| x == 0), "entropy-secure: a refused draw wrote bytes");
+            assert!(refusals1 == refusals0 + 2, "entropy-secure: the witness counted {} refusals, expected {}", refusals1, refusals0 + 2);
+            kprintln!("[api] PASS entropy-secure (no hardware source on this row and no opt-in: the cryptographic door refused RHU_ENODEV twice and wrote nothing, the query 0, null refused, zero-length and over-bound refused)");
+        }
+    }
+
+
+
+    /// The edge table: every class and boundary a rounding or a NaN rule can
+    /// turn on (zeros of both signs, small integers, thirds, powers, the
+    /// extremes, the integer boundaries, infinities, quiet and signalling
+    /// NaNs, denormals, the neighbours of one).
+    const FP_EDGES: [u64; 32] = [
+        0x0000_0000_0000_0000, 0x8000_0000_0000_0000, 0x3FF0_0000_0000_0000, 0xBFF0_0000_0000_0000,
+        0x4000_0000_0000_0000, 0x3FE0_0000_0000_0000, 0x4008_0000_0000_0000, 0x3FD5_5555_5555_5555,
+        0x4024_0000_0000_0000, 0x4202_A05F_2000_0000, 0x3DDB_7CDF_D9D7_BDBB, 0x7E37_E43C_8800_759C,
+        0x01A5_6E1F_C2F8_F359, 0x7FEF_FFFF_FFFF_FFFF, 0x0010_0000_0000_0000, 0x3CB0_0000_0000_0000,
+        0x4330_0000_0000_0000, 0x4330_0000_0000_0001, 0x4340_0000_0000_0000, 0x41DF_FFFF_FFC0_0000,
+        0x41EF_FFFF_FFE0_0000, 0xC1E0_0000_0020_0000, 0x7FF0_0000_0000_0000, 0xFFF0_0000_0000_0000,
+        0x7FF8_0000_0000_0000, 0x7FF8_0000_0000_0001, 0xFFF8_0000_0000_0002, 0x7FF0_0000_0000_0001,
+        0x0000_0000_0000_0001, 0x000F_FFFF_FFFF_FFFF, 0x3FF0_0000_0000_0001, 0x3FEF_FFFF_FFFF_FFFF,
+    ];
+    /// The FPSCR values the arithmetic runs under: the four rounding modes, then default-NaN and flush-to-zero.
+    const FP_MODES: [u32; 6] = [0, 1 << 22, 2 << 22, 3 << 22, 1 << 25, 1 << 24];
+    /// The flag bits a digest takes from FPSCR: the condition flags and the cumulative exception flags.
+    const FP_FLAGS: u32 = 0xF000_0000 | 0x9F;
+
+    /// A 32-bit digest over words (FNV-1a over their little-endian bytes).
+    struct Fnv(u32);
+    impl Fnv {
+        fn new() -> Fnv {
+            Fnv(0x811C_9DC5)
+        }
+        fn word(&mut self, w: u32) {
+            for b in w.to_le_bytes() {
+                self.0 ^= b as u32;
+                self.0 = self.0.wrapping_mul(0x0100_0193);
+            }
+        }
+        fn pair(&mut self, r: u64, f: u32) {
+            self.word(r as u32);
+            self.word((r >> 32) as u32);
+            self.word(f & FP_FLAGS);
+        }
+    }
+
+    macro_rules! fp_asm_bin {
+        ($ins:literal, $a:expr, $b:expr, $fpscr:expr) => {{
+            let (lo, hi, f): (u32, u32, u32);
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    "vmsr fpscr, {fpscr}",
+                    "vmov d0, {alo}, {ahi}",
+                    "vmov d1, {blo}, {bhi}",
+                    concat!($ins, " d2, d0, d1"),
+                    "vmov {lo}, {hi}, d2",
+                    "vmrs {f}, fpscr",
+                    "vmsr fpscr, {zero}",
+                    fpscr = in(reg) $fpscr, zero = in(reg) 0u32,
+                    alo = in(reg) $a as u32, ahi = in(reg) ($a >> 32) as u32,
+                    blo = in(reg) $b as u32, bhi = in(reg) ($b >> 32) as u32,
+                    lo = out(reg) lo, hi = out(reg) hi, f = out(reg) f,
+                    out("d0") _, out("d1") _, out("d2") _,
+                    options(nostack)
+                )
+            };
+            ((lo as u64) | ((hi as u64) << 32), f)
+        }};
+    }
+    macro_rules! fp_asm_tri {
+        ($ins:literal, $d:expr, $a:expr, $b:expr, $fpscr:expr) => {{
+            let (lo, hi, f): (u32, u32, u32);
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    "vmsr fpscr, {fpscr}",
+                    "vmov d2, {dlo}, {dhi}",
+                    "vmov d0, {alo}, {ahi}",
+                    "vmov d1, {blo}, {bhi}",
+                    concat!($ins, " d2, d0, d1"),
+                    "vmov {lo}, {hi}, d2",
+                    "vmrs {f}, fpscr",
+                    "vmsr fpscr, {zero}",
+                    fpscr = in(reg) $fpscr, zero = in(reg) 0u32,
+                    dlo = in(reg) $d as u32, dhi = in(reg) ($d >> 32) as u32,
+                    alo = in(reg) $a as u32, ahi = in(reg) ($a >> 32) as u32,
+                    blo = in(reg) $b as u32, bhi = in(reg) ($b >> 32) as u32,
+                    lo = out(reg) lo, hi = out(reg) hi, f = out(reg) f,
+                    out("d0") _, out("d1") _, out("d2") _,
+                    options(nostack)
+                )
+            };
+            ((lo as u64) | ((hi as u64) << 32), f)
+        }};
+    }
+    macro_rules! fp_asm_un {
+        ($ins:literal, $a:expr, $fpscr:expr) => {{
+            let (lo, hi, f): (u32, u32, u32);
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    "vmsr fpscr, {fpscr}",
+                    "vmov d0, {alo}, {ahi}",
+                    concat!($ins, " d2, d0"),
+                    "vmov {lo}, {hi}, d2",
+                    "vmrs {f}, fpscr",
+                    "vmsr fpscr, {zero}",
+                    fpscr = in(reg) $fpscr, zero = in(reg) 0u32,
+                    alo = in(reg) $a as u32, ahi = in(reg) ($a >> 32) as u32,
+                    lo = out(reg) lo, hi = out(reg) hi, f = out(reg) f,
+                    out("d0") _, out("d2") _,
+                    options(nostack)
+                )
+            };
+            ((lo as u64) | ((hi as u64) << 32), f)
+        }};
+    }
+    /// A form whose result is one single-precision register (a conversion out of a double).
+    macro_rules! fp_asm_to_s {
+        ($ins:literal, $a:expr, $fpscr:expr) => {{
+            let (r, f): (u32, u32);
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    "vmsr fpscr, {fpscr}",
+                    "vmov d0, {alo}, {ahi}",
+                    "vmov s4, {zero}",
+                    concat!($ins, " s4, d0"),
+                    "vmov {r}, s4",
+                    "vmrs {f}, fpscr",
+                    "vmsr fpscr, {zero}",
+                    fpscr = in(reg) $fpscr, zero = in(reg) 0u32,
+                    alo = in(reg) $a as u32, ahi = in(reg) ($a >> 32) as u32,
+                    r = out(reg) r, f = out(reg) f,
+                    out("d0") _, out("s4") _,
+                    options(nostack)
+                )
+            };
+            (r, f)
+        }};
+    }
+    /// A form whose source is one single-precision register (a conversion into a double).
+    macro_rules! fp_asm_from_s {
+        ($ins:literal, $s:expr, $fpscr:expr) => {{
+            let (lo, hi, f): (u32, u32, u32);
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    "vmsr fpscr, {fpscr}",
+                    "vmov s8, {s}",
+                    concat!($ins, " d2, s8"),
+                    "vmov {lo}, {hi}, d2",
+                    "vmrs {f}, fpscr",
+                    "vmsr fpscr, {zero}",
+                    fpscr = in(reg) $fpscr, zero = in(reg) 0u32, s = in(reg) $s,
+                    lo = out(reg) lo, hi = out(reg) hi, f = out(reg) f,
+                    out("s8") _, out("d2") _,
+                    options(nostack)
+                )
+            };
+            ((lo as u64) | ((hi as u64) << 32), f)
+        }};
+    }
+    /// The in-place fixed-point conversions (the register is source and destination).
+    macro_rules! fp_asm_fixed {
+        ($ins:literal, $a:expr, $fpscr:expr) => {{
+            let (lo, hi, f): (u32, u32, u32);
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    "vmsr fpscr, {fpscr}",
+                    "vmov d2, {alo}, {ahi}",
+                    $ins,
+                    "vmov {lo}, {hi}, d2",
+                    "vmrs {f}, fpscr",
+                    "vmsr fpscr, {zero}",
+                    fpscr = in(reg) $fpscr, zero = in(reg) 0u32,
+                    alo = in(reg) $a as u32, ahi = in(reg) ($a >> 32) as u32,
+                    lo = out(reg) lo, hi = out(reg) hi, f = out(reg) f,
+                    out("d2") _,
+                    options(nostack)
+                )
+            };
+            ((lo as u64) | ((hi as u64) << 32), f)
+        }};
+    }
+    /// A compare: the FPSCR after it (the condition flags and the invalid flag).
+    macro_rules! fp_asm_cmp {
+        ($ins:literal, $a:expr, $b:expr, $fpscr:expr) => {{
+            let f: u32;
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    "vmsr fpscr, {fpscr}",
+                    "vmov d0, {alo}, {ahi}",
+                    "vmov d1, {blo}, {bhi}",
+                    $ins,
+                    "vmrs {f}, fpscr",
+                    "vmsr fpscr, {zero}",
+                    fpscr = in(reg) $fpscr, zero = in(reg) 0u32,
+                    alo = in(reg) $a as u32, ahi = in(reg) ($a >> 32) as u32,
+                    blo = in(reg) $b as u32, bhi = in(reg) ($b >> 32) as u32,
+                    f = out(reg) f,
+                    out("d0") _, out("d1") _,
+                    options(nostack)
+                )
+            };
+            f
+        }};
+    }
+    /// A select under the condition the compare of two core values leaves in the APSR.
+    macro_rules! fp_asm_sel {
+        ($ins:literal, $x:expr, $y:expr, $a:expr, $b:expr) => {{
+            let (lo, hi): (u32, u32);
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    "vmov d0, {alo}, {ahi}",
+                    "vmov d1, {blo}, {bhi}",
+                    "cmp {x}, {y}",
+                    concat!($ins, " d2, d0, d1"),
+                    "vmov {lo}, {hi}, d2",
+                    x = in(reg) $x, y = in(reg) $y,
+                    alo = in(reg) $a as u32, ahi = in(reg) ($a >> 32) as u32,
+                    blo = in(reg) $b as u32, bhi = in(reg) ($b >> 32) as u32,
+                    lo = out(reg) lo, hi = out(reg) hi,
+                    out("d0") _, out("d1") _, out("d2") _,
+                    options(nostack)
+                )
+            };
+            (lo as u64) | ((hi as u64) << 32)
+        }};
+    }
+    macro_rules! fp_asm_imm {
+        ($imm:literal) => {{
+            let (lo, hi): (u32, u32);
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    concat!("vmov.f64 d2, #", $imm),
+                    "vmov {lo}, {hi}, d2",
+                    lo = out(reg) lo, hi = out(reg) hi,
+                    out("d2") _,
+                    options(nomem, nostack)
+                )
+            };
+            (lo as u64) | ((hi as u64) << 32)
+        }};
+    }
+
+    /// A form inside an IT block: the result register preset, the block's
+    /// condition from a compare of two core values (NE: the form runs when
+    /// they differ and is a NOP when they are equal).
+    /// A form whose destination and operands lie in D8-D15 -- the registers no frame carries,
+    /// read and written LIVE by the emulation -- the destination preset before the form so a lost
+    /// write shows in the read-back; the check's own asm declares the eight registers it uses.
+    macro_rules! fp_asm_live {
+        ($ins:literal, $d:literal, $n:literal, $m:literal, $a:expr, $b:expr, $preset:expr) => {{
+            let (lo, hi, f): (u32, u32, u32);
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    "vmsr fpscr, {zero}",
+                    concat!("vmov ", $n, ", {alo}, {ahi}"),
+                    concat!("vmov ", $m, ", {blo}, {bhi}"),
+                    concat!("vmov ", $d, ", {plo}, {phi}"),
+                    $ins,
+                    concat!("vmov {lo}, {hi}, ", $d),
+                    "vmrs {f}, fpscr",
+                    "vmsr fpscr, {zero}",
+                    zero = in(reg) 0u32,
+                    alo = in(reg) $a as u32, ahi = in(reg) ($a >> 32) as u32,
+                    blo = in(reg) $b as u32, bhi = in(reg) ($b >> 32) as u32,
+                    plo = in(reg) $preset as u32, phi = in(reg) ($preset >> 32) as u32,
+                    lo = out(reg) lo, hi = out(reg) hi, f = out(reg) f,
+                    out("d8") _, out("d9") _, out("d10") _, out("d11") _,
+                    out("d12") _, out("d13") _, out("d14") _, out("d15") _,
+                    options(nostack)
+                )
+            };
+            ((lo as u64) | ((hi as u64) << 32), f)
+        }};
+    }
+    /// The twelve live-register forms: every doubleword of D8-D15 a destination once, the
+    /// operands beside it, the fused form's accumulator itself in the live range (preset 1.0 so
+    /// a lost write differs from the sum), the two conversions with a single-precision live
+    /// register as the destination and as the source.
+    fn fp_live(i: u32, a: u64, b: u64, preset: u64) -> (u64, u32) {
+        match i {
+            0 => fp_asm_live!("vadd.f64 d8, d9, d10", "d8", "d9", "d10", a, b, preset),
+            1 => fp_asm_live!("vsub.f64 d9, d10, d11", "d9", "d10", "d11", a, b, preset),
+            2 => fp_asm_live!("vmul.f64 d10, d11, d12", "d10", "d11", "d12", a, b, preset),
+            3 => fp_asm_live!("vadd.f64 d11, d12, d13", "d11", "d12", "d13", a, b, preset),
+            4 => fp_asm_live!("vsub.f64 d12, d13, d14", "d12", "d13", "d14", a, b, preset),
+            5 => fp_asm_live!("vmul.f64 d13, d14, d15", "d13", "d14", "d15", a, b, preset),
+            6 => fp_asm_live!("vadd.f64 d14, d15, d8", "d14", "d15", "d8", a, b, preset),
+            7 => fp_asm_live!("vsub.f64 d15, d8, d9", "d15", "d8", "d9", a, b, preset),
+            8 => fp_asm_live!("vfma.f64 d8, d9, d10", "d8", "d9", "d10", a, b, 0x3FF0_0000_0000_0000u64),
+            9 => fp_asm_live!("vsqrt.f64 d15, d8", "d15", "d8", "d8", a, b, preset),
+            10 => fp_asm_live!("vcvt.f32.f64 s16, d9", "d8", "d9", "d9", a, b, preset),
+            11 => fp_asm_live!("vcvt.f64.f32 d15, s18", "d15", "d9", "d9", a, b, preset),
+            _ => (0, 0),
+        }
+    }
+    macro_rules! fp_asm_cond {
+        ($ins:literal, $x:expr, $y:expr, $a:expr, $b:expr, $preset:expr) => {{
+            let (lo, hi, f): (u32, u32, u32);
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    "vmsr fpscr, {zero}",
+                    "vmov d0, {alo}, {ahi}",
+                    "vmov d1, {blo}, {bhi}",
+                    "vmov d2, {plo}, {phi}",
+                    "cmp {x}, {y}",
+                    "it ne",
+                    $ins,
+                    "vmov {lo}, {hi}, d2",
+                    "vmrs {f}, fpscr",
+                    "vmsr fpscr, {zero}",
+                    zero = in(reg) 0u32, x = in(reg) $x, y = in(reg) $y,
+                    alo = in(reg) $a as u32, ahi = in(reg) ($a >> 32) as u32,
+                    blo = in(reg) $b as u32, bhi = in(reg) ($b >> 32) as u32,
+                    plo = in(reg) $preset as u32, phi = in(reg) ($preset >> 32) as u32,
+                    lo = out(reg) lo, hi = out(reg) hi, f = out(reg) f,
+                    out("d0") _, out("d1") _, out("d2") _,
+                    options(nostack)
+                )
+            };
+            ((lo as u64) | ((hi as u64) << 32), f)
+        }};
+    }
+
+    fn fp_bin(op: u32, a: u64, b: u64, fpscr: u32) -> (u64, u32) {
+        match op {
+            0 => fp_asm_bin!("vadd.f64", a, b, fpscr),
+            1 => fp_asm_bin!("vsub.f64", a, b, fpscr),
+            2 => fp_asm_bin!("vmul.f64", a, b, fpscr),
+            3 => fp_asm_bin!("vdiv.f64", a, b, fpscr),
+            4 => fp_asm_bin!("vnmul.f64", a, b, fpscr),
+            5 => fp_asm_bin!("vmaxnm.f64", a, b, fpscr),
+            _ => fp_asm_bin!("vminnm.f64", a, b, fpscr),
+        }
+    }
+    fn fp_tri(op: u32, d: u64, a: u64, b: u64, fpscr: u32) -> (u64, u32) {
+        match op {
+            0 => fp_asm_tri!("vmla.f64", d, a, b, fpscr),
+            1 => fp_asm_tri!("vmls.f64", d, a, b, fpscr),
+            2 => fp_asm_tri!("vnmla.f64", d, a, b, fpscr),
+            3 => fp_asm_tri!("vnmls.f64", d, a, b, fpscr),
+            4 => fp_asm_tri!("vfma.f64", d, a, b, fpscr),
+            5 => fp_asm_tri!("vfms.f64", d, a, b, fpscr),
+            6 => fp_asm_tri!("vfnma.f64", d, a, b, fpscr),
+            _ => fp_asm_tri!("vfnms.f64", d, a, b, fpscr),
+        }
+    }
+    fn fp_un(op: u32, a: u64, fpscr: u32) -> (u64, u32) {
+        match op {
+            0 => fp_asm_un!("vsqrt.f64", a, fpscr),
+            1 => fp_asm_un!("vneg.f64", a, fpscr),
+            2 => fp_asm_un!("vabs.f64", a, fpscr),
+            3 => fp_asm_un!("vmov.f64", a, fpscr),
+            4 => fp_asm_un!("vrintr.f64", a, fpscr),
+            5 => fp_asm_un!("vrintx.f64", a, fpscr),
+            6 => fp_asm_un!("vrintz.f64", a, fpscr),
+            7 => fp_asm_un!("vrinta.f64", a, fpscr),
+            8 => fp_asm_un!("vrintn.f64", a, fpscr),
+            9 => fp_asm_un!("vrintp.f64", a, fpscr),
+            _ => fp_asm_un!("vrintm.f64", a, fpscr),
+        }
+    }
+    fn fp_cmp(op: u32, a: u64, b: u64, fpscr: u32) -> u32 {
+        match op {
+            0 => fp_asm_cmp!("vcmp.f64 d0, d1", a, b, fpscr),
+            1 => fp_asm_cmp!("vcmpe.f64 d0, d1", a, b, fpscr),
+            2 => fp_asm_cmp!("vcmp.f64 d0, #0.0", a, b, fpscr),
+            _ => fp_asm_cmp!("vcmpe.f64 d0, #0.0", a, b, fpscr),
+        }
+    }
+    fn fp_to_s(op: u32, a: u64, fpscr: u32) -> (u32, u32) {
+        match op {
+            0 => fp_asm_to_s!("vcvt.f32.f64", a, fpscr),
+            1 => fp_asm_to_s!("vcvt.s32.f64", a, fpscr),
+            2 => fp_asm_to_s!("vcvt.u32.f64", a, fpscr),
+            3 => fp_asm_to_s!("vcvtr.s32.f64", a, fpscr),
+            4 => fp_asm_to_s!("vcvtr.u32.f64", a, fpscr),
+            5 => fp_asm_to_s!("vcvta.s32.f64", a, fpscr),
+            6 => fp_asm_to_s!("vcvtn.s32.f64", a, fpscr),
+            7 => fp_asm_to_s!("vcvtp.s32.f64", a, fpscr),
+            8 => fp_asm_to_s!("vcvtm.s32.f64", a, fpscr),
+            9 => fp_asm_to_s!("vcvta.u32.f64", a, fpscr),
+            10 => fp_asm_to_s!("vcvtb.f16.f64", a, fpscr),
+            _ => fp_asm_to_s!("vcvtt.f16.f64", a, fpscr),
+        }
+    }
+    fn fp_from_s(op: u32, s: u32, fpscr: u32) -> (u64, u32) {
+        match op {
+            0 => fp_asm_from_s!("vcvt.f64.f32", s, fpscr),
+            1 => fp_asm_from_s!("vcvt.f64.s32", s, fpscr),
+            2 => fp_asm_from_s!("vcvt.f64.u32", s, fpscr),
+            3 => fp_asm_from_s!("vcvtb.f64.f16", s, fpscr),
+            _ => fp_asm_from_s!("vcvtt.f64.f16", s, fpscr),
+        }
+    }
+    fn fp_fixed(op: u32, a: u64, fpscr: u32) -> (u64, u32) {
+        match op {
+            0 => fp_asm_fixed!("vcvt.s32.f64 d2, d2, #8", a, fpscr),
+            1 => fp_asm_fixed!("vcvt.u32.f64 d2, d2, #8", a, fpscr),
+            2 => fp_asm_fixed!("vcvt.s16.f64 d2, d2, #4", a, fpscr),
+            3 => fp_asm_fixed!("vcvt.u16.f64 d2, d2, #4", a, fpscr),
+            4 => fp_asm_fixed!("vcvt.f64.s32 d2, d2, #8", a, fpscr),
+            5 => fp_asm_fixed!("vcvt.f64.u32 d2, d2, #8", a, fpscr),
+            6 => fp_asm_fixed!("vcvt.f64.s16 d2, d2, #4", a, fpscr),
+            _ => fp_asm_fixed!("vcvt.f64.u16 d2, d2, #4", a, fpscr),
+        }
+    }
+    fn fp_sel(op: u32, x: u32, y: u32, a: u64, b: u64) -> u64 {
+        match op {
+            0 => fp_asm_sel!("vseleq.f64", x, y, a, b),
+            1 => fp_asm_sel!("vselvs.f64", x, y, a, b),
+            2 => fp_asm_sel!("vselge.f64", x, y, a, b),
+            _ => fp_asm_sel!("vselgt.f64", x, y, a, b),
+        }
+    }
+
+    /// The double-precision forms executed as INSTRUCTIONS over the edge
+    /// table under the six FPSCR settings, one digest per group over the
+    /// results and the flags: the hardware computes on the double-precision
+    /// rows, the fault funnel's emulation on the single-precision rows, and
+    /// the digests must agree (the harness pins the hardware row's).
+    fn check_fp_double() {
+        kprintln!("[api] fp-double: the double-precision forms armed as instructions (the edge table under six FPSCR settings; the digests over results and flags)");
+        let e = &FP_EDGES;
+        let mut vectors = 0u32;
+        let mut h = Fnv::new();
+        for &m in &FP_MODES {
+            for &a in e {
+                for &b in e {
+                    for op in 0..7 {
+                        let (r, f) = fp_bin(op, a, b, m);
+                        h.pair(r, f);
+                        vectors += 1;
+                    }
+                }
+            }
+        }
+        kprintln!("[api] fp-double: binary {} vectors digest {:08x}", 7 * 32 * 32 * 6, h.0);
+        let mut h = Fnv::new();
+        for &d in &[e[0], e[2], e[13], e[24]] {
+            for &a in e {
+                for &b in e {
+                    for op in 0..8 {
+                        let (r, f) = fp_tri(op, d, a, b, 0);
+                        h.pair(r, f);
+                        vectors += 1;
+                    }
+                }
+            }
+        }
+        kprintln!("[api] fp-double: accumulate {} vectors digest {:08x}", 8 * 32 * 32 * 4, h.0);
+        let mut h = Fnv::new();
+        for &m in &FP_MODES {
+            for &a in e {
+                for op in 0..11 {
+                    let (r, f) = fp_un(op, a, m);
+                    h.pair(r, f);
+                    vectors += 1;
+                }
+            }
+        }
+        kprintln!("[api] fp-double: unary {} vectors digest {:08x}", 11 * 32 * 6, h.0);
+        let mut h = Fnv::new();
+        for &a in e {
+            for &b in e {
+                for op in 0..4 {
+                    let f = fp_cmp(op, a, b, 0);
+                    h.word(f & FP_FLAGS);
+                    vectors += 1;
+                }
+            }
+        }
+        kprintln!("[api] fp-double: compare {} vectors digest {:08x}", 4 * 32 * 32, h.0);
+        let mut h = Fnv::new();
+        for &m in FP_MODES.iter().chain([1u32 << 26].iter()) {
+            for &a in e {
+                for op in 0..12 {
+                    let (r, f) = fp_to_s(op, a, m);
+                    h.word(r);
+                    h.word(f & FP_FLAGS);
+                    vectors += 1;
+                }
+            }
+        }
+        kprintln!("[api] fp-double: to-single {} vectors digest {:08x}", 12 * 32 * 7, h.0);
+        let mut h = Fnv::new();
+        let words: [u32; 16] = [
+            0, 0x8000_0000, 0x3F80_0000, 0xBF80_0000, 0x7F80_0000, 0xFF80_0000, 0x7FC0_0000, 0x7F80_0001,
+            0x0000_0001, 0x007F_FFFF, 0x7FFF_FFFF, 0xFFFF_FFFF, 0x0000_3C00, 0x0000_7C00, 0x0000_7E01, 0x7BFF_FBFF,
+        ];
+        for &m in FP_MODES.iter().chain([1u32 << 26].iter()) {
+            for &w in &words {
+                for op in 0..5 {
+                    let (r, f) = fp_from_s(op, w, m);
+                    h.pair(r, f);
+                    vectors += 1;
+                }
+            }
+        }
+        kprintln!("[api] fp-double: from-single {} vectors digest {:08x}", 5 * 16 * 7, h.0);
+        let mut h = Fnv::new();
+        for &a in e {
+            for op in 0..8 {
+                let (r, f) = fp_fixed(op, a, 0);
+                h.pair(r, f);
+                vectors += 1;
+            }
+        }
+        kprintln!("[api] fp-double: fixed {} vectors digest {:08x}", 8 * 32, h.0);
+        let mut h = Fnv::new();
+        for &(x, y) in &[(1u32, 1u32), (1, 2), (2, 1), (0x8000_0000u32, 1)] {
+            for op in 0..4 {
+                let r = fp_sel(op, x, y, e[2], e[3]);
+                h.word(r as u32);
+                h.word((r >> 32) as u32);
+                vectors += 1;
+            }
+        }
+        for r in [fp_asm_imm!(1.0), fp_asm_imm!(-1.0), fp_asm_imm!(2.0), fp_asm_imm!(1.75), fp_asm_imm!(31.0), fp_asm_imm!(0.125), fp_asm_imm!(-0.5), fp_asm_imm!(10.0)] {
+            h.word(r as u32);
+            h.word((r >> 32) as u32);
+            vectors += 1;
+        }
+        kprintln!("[api] fp-double: select-imm {} vectors digest {:08x}", 16 + 8, h.0);
+        let mut h = Fnv::new();
+        for &(a, b) in &[(e[2], e[4]), (e[6], e[7]), (e[8], e[5]), (e[13], e[15])] {
+            for i in 0..12 {
+                let (r, f) = fp_live(i, a, b, e[24]);
+                h.pair(r, f);
+                vectors += 1;
+            }
+        }
+        kprintln!("[api] fp-double: live {} vectors digest {:08x}", 12 * 4, h.0);
+        let mut h = Fnv::new();
+        #[cfg(feature = "fpemul")]
+        let (t_before, _, _) = crate::fpemul::counts();
+        for &(x, y) in &[(1u32, 1u32), (1, 2)] {
+            let (r, f) = fp_asm_cond!("vaddne.f64 d2, d0, d1", x, y, e[2], e[5], e[6]);
+            h.pair(r, f);
+            vectors += 1;
+        }
+        kprintln!("[api] fp-double: conditional 2 vectors digest {:08x}", h.0);
+        #[cfg(feature = "fpemul")]
+        let failed_faulted = {
+            let (t_after, _, _) = crate::fpemul::counts();
+            let raised = t_after - t_before;
+            assert!(raised == 1 || raised == 2, "fp-double: the conditional pair raised {} traps, wanted 1 or 2", raised);
+            raised == 2
+        };
+        #[cfg(feature = "fpemul")]
+        {
+            let (traps, promotions, refusals) = crate::fpemul::counts();
+            let skipped = crate::fpemul::skipped();
+            let expected = vectors - if failed_faulted { 0 } else { 1 };
+            assert!(refusals == 0, "fp-double: {} forms refused by the emulation", refusals);
+            assert!(traps == expected, "fp-double: {} forms through the funnel, {} expected of {} vectors", traps, expected, vectors);
+            assert!(skipped == failed_faulted as u32, "fp-double: {} forms skipped on a failed condition, wanted {}", skipped, failed_faulted as u32);
+            assert!(promotions == 0, "fp-double: {} frames promoted on a thread that holds a floating-point context", promotions);
+            if failed_faulted {
+                kprintln!("[api] PASS fp-double ({} vectors: every form emulated through the fault funnel, none refused, no frame promoted; the failed condition faulted and was skipped)", vectors);
+            } else {
+                kprintln!("[api] PASS fp-double ({} vectors: every form emulated through the fault funnel, none refused, no frame promoted; the failed condition did not fault)", vectors);
+            }
+        }
+        #[cfg(not(feature = "fpemul"))]
+        kprintln!("[api] PASS fp-double ({} vectors computed by the hardware: the reference row)", vectors);
+    }
+
+    /// The basic-frame promotion: a thread whose FIRST floating-point
+    /// instruction is a double-precision immediate move (no context yet) must
+    /// come away with the value and a context, and the switch-entry witness
+    /// must stay clean. On the double-precision rows the hardware creates
+    /// the context itself; the words are the same.
+    #[cfg(feature = "fpemul")]
+    fn check_fp_frames() {
+        kprintln!("[api] fp-frames: a fresh thread's first floating-point instruction is a double-precision immediate; the promotion and the switch-entry witness armed");
+        let (w0, _, _) = sched::probe_lazy_fp_witness();
+        assert!(w0 == 0, "fp-frames: {} abandoned lazy floating-point states before the check", w0);
+        let (_, p0, r0) = crate::fpemul::counts();
+        FP_FRAME_LO.store(0, Ordering::Release);
+        FP_FRAME_HI.store(0, Ordering::Release);
+        FP_FRAME_DONE.store(0, Ordering::Release);
+        let (_slot, tid) = sched::try_spawn("dpimm", fp_frame_target, 0, 4, 4096).ok().expect("fp-frames: spawn");
+        wait_until(|| FP_FRAME_DONE.load(Ordering::Acquire) == 1, "the fresh thread's double-precision immediate");
+        join_tid(tid);
+        let (lo, hi) = (FP_FRAME_LO.load(Ordering::Acquire), FP_FRAME_HI.load(Ordering::Acquire));
+        assert!(lo == 0 && hi == 0x3FF8_0000, "fp-frames: the immediate 1.5 read back as {:#010x}:{:#010x}", hi, lo);
+        let (_, p1, r1) = crate::fpemul::counts();
+        assert!(p1 == p0 + 1, "fp-frames: {} frames promoted, wanted 1", p1 - p0);
+        assert!(r1 == r0, "fp-frames: {} refusals", r1 - r0);
+        let (count, fpcar, psp) = sched::probe_lazy_fp_witness();
+        assert!(count == 0, "fp-frames: {} abandoned lazy floating-point states after the promotion (fpcar {:#010x}, psp {:#010x})", count, fpcar, psp);
+        kprintln!("[api] PASS fp-frames (the basic frame promoted once; the value 1.5 read back through the new context; the switch-entry witness clean)");
+    }
+
+    #[cfg(feature = "fpemul")]
+    static FP_FRAME_LO: AtomicU32 = AtomicU32::new(0);
+    #[cfg(feature = "fpemul")]
+    static FP_FRAME_HI: AtomicU32 = AtomicU32::new(0);
+    #[cfg(feature = "fpemul")]
+    static FP_FRAME_DONE: AtomicU32 = AtomicU32::new(0);
+
+    /// The fresh thread: its first floating-point instruction is the
+    /// double-precision immediate, then the value goes out through the core
+    /// registers, then it yields a few times so the witness can count.
+    #[cfg(feature = "fpemul")]
+    extern "C" fn fp_frame_target(_: usize) {
+        let (lo, hi): (u32, u32);
+        unsafe {
+            core::arch::asm!(
+                ".fpu fpv5-d16",
+                "vmov.f64 d0, #1.5",
+                "vmov {lo}, {hi}, d0",
+                lo = out(reg) lo, hi = out(reg) hi,
+                out("d0") _,
+                options(nomem, nostack)
+            )
+        };
+        FP_FRAME_LO.store(lo, Ordering::Release);
+        FP_FRAME_HI.store(hi, Ordering::Release);
+        for _ in 0..4 {
+            api::rhu_thread_yield();
+        }
+        FP_FRAME_DONE.store(1, Ordering::Release);
+    }
+
+
+    /// The cycle counter's word read before and after ONE instruction, the two
+    /// reads fenced so nothing else sits between them. On the single-precision
+    /// class the instruction is the trap and everything the emulation does
+    /// before the program resumes; on the double-precision class the hardware's
+    /// own cost; the same bracket around a nop is the bracket's own cost. The
+    /// first operand's low word also lands in s8 for the forms with a
+    /// single-precision source; d2 starts as the second operand for the
+    /// accumulating and in-place forms.
+    #[cfg(feature = "fp-cost")]
+    macro_rules! fp_cost_of {
+        ($ins:literal, $a:expr, $b:expr) => {{
+            let (c0, c1): (u32, u32);
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    "vmov d0, {alo}, {ahi}",
+                    "vmov d1, {blo}, {bhi}",
+                    "vmov d2, {blo}, {bhi}",
+                    "vmov s8, {alo}",
+                    "dsb",
+                    "isb",
+                    "ldr {c0}, [{dwt}]",
+                    $ins,
+                    "isb",
+                    "ldr {c1}, [{dwt}]",
+                    dwt = in(reg) 0xE000_1004u32,
+                    alo = in(reg) $a as u32, ahi = in(reg) ($a >> 32) as u32,
+                    blo = in(reg) $b as u32, bhi = in(reg) ($b >> 32) as u32,
+                    c0 = out(reg) c0, c1 = out(reg) c1,
+                    out("d0") _, out("d1") _, out("d2") _, out("s8") _,
+                    options(nostack)
+                )
+            };
+            c1.wrapping_sub(c0)
+        }};
+    }
+
+    /// The cost per form, sixteen runs each, the smallest and the middle count
+    /// printed: a measurement record for the silicon leg, never a golden (the
+    /// counts move with the flash's wait states and whatever interrupt lands
+    /// inside a run; the smallest of sixteen is the form's own cost). A row
+    /// without a cycle counter says so and measures nothing.
+    #[cfg(feature = "fp-cost")]
+    fn check_fp_cost() {
+        const A: u64 = 0x3FF8_0000_0000_0000;
+        const B: u64 = 0x4002_0000_0000_0000;
+        const A_F32: u64 = 0x3FC0_0000;
+        const A_F16: u64 = 0x3E00;
+        const A_INT: u64 = 12345;
+        if !board::CYCLE_COUNTER {
+            kprintln!("[api] fp-cost: not counted (no cycle counter on this row)");
+            return;
+        }
+        let (t0, t1) = unsafe { (read_volatile(0xE000_1004 as *const u32), read_volatile(0xE000_1004 as *const u32)) };
+        if t0 == t1 {
+            kprintln!("[api] fp-cost: not counted (the cycle counter did not advance)");
+            return;
+        }
+        kprintln!("[api] fp-cost: the cycle counter around one instruction, sixteen runs per form; the smallest and the middle count");
+        let forms: [(&str, fn() -> u32); 23] = [
+            ("nop (the bracket itself)", || fp_cost_of!("nop", A, B)),
+            ("vadd.f64", || fp_cost_of!("vadd.f64 d2, d0, d1", A, B)),
+            ("vsub.f64", || fp_cost_of!("vsub.f64 d2, d0, d1", A, B)),
+            ("vmul.f64", || fp_cost_of!("vmul.f64 d2, d0, d1", A, B)),
+            ("vdiv.f64", || fp_cost_of!("vdiv.f64 d2, d0, d1", A, B)),
+            ("vsqrt.f64", || fp_cost_of!("vsqrt.f64 d2, d0", B, B)),
+            ("vneg.f64", || fp_cost_of!("vneg.f64 d2, d0", A, B)),
+            ("vabs.f64", || fp_cost_of!("vabs.f64 d2, d0", A, B)),
+            ("vmov.f64 (register)", || fp_cost_of!("vmov.f64 d2, d0", A, B)),
+            ("vmov.f64 #imm", || fp_cost_of!("vmov.f64 d2, #1.5", A, B)),
+            ("vcmp.f64", || fp_cost_of!("vcmp.f64 d0, d1", A, B)),
+            ("vcmpe.f64", || fp_cost_of!("vcmpe.f64 d0, d1", A, B)),
+            ("vfma.f64", || fp_cost_of!("vfma.f64 d2, d0, d1", A, B)),
+            ("vmla.f64", || fp_cost_of!("vmla.f64 d2, d0, d1", A, B)),
+            ("vmaxnm.f64", || fp_cost_of!("vmaxnm.f64 d2, d0, d1", A, B)),
+            ("vrintn.f64", || fp_cost_of!("vrintn.f64 d2, d0", A, B)),
+            ("vcvt.f64.s32", || fp_cost_of!("vcvt.f64.s32 d2, s8", A_INT, B)),
+            ("vcvt.f64.u32", || fp_cost_of!("vcvt.f64.u32 d2, s8", A_INT, B)),
+            ("vcvt.s32.f64", || fp_cost_of!("vcvt.s32.f64 s8, d0", A, B)),
+            ("vcvt.f64.f32", || fp_cost_of!("vcvt.f64.f32 d2, s8", A_F32, B)),
+            ("vcvt.f32.f64", || fp_cost_of!("vcvt.f32.f64 s8, d0", A, B)),
+            ("vcvtb.f64.f16", || fp_cost_of!("vcvtb.f64.f16 d2, s8", A_F16, B)),
+            ("vcvt.s32.f64 #8 (fixed, in place)", || fp_cost_of!("vcvt.s32.f64 d2, d2, #8", A, B)),
+        ];
+        for (name, run) in forms.iter() {
+            let mut counts = [0u32; 16];
+            for c in counts.iter_mut() {
+                *c = run();
+            }
+            for i in 1..counts.len() {
+                let mut j = i;
+                while j > 0 && counts[j - 1] > counts[j] {
+                    counts.swap(j - 1, j);
+                    j -= 1;
+                }
+            }
+            kprintln!("[api] fp-cost: {} min {} mid {} cycles", name, counts[0], counts[8]);
+        }
+        kprintln!("[api] PASS fp-cost ({} forms measured on the cycle counter; the nop line is the bracket's own cost)", forms.len() - 1);
     }
 
     fn check_null_read() {
@@ -2428,5 +3272,5 @@ mod api_smoke {
 }
 
 /// The stack-overflow designed death (the v8-M rows' stack limit).
-#[cfg(feature = "test-stkof")]
-mod stkof;
+#[cfg(feature = "test-stackovfl")]
+mod stackovfl;

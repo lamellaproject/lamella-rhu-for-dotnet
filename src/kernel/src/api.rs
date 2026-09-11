@@ -1,5 +1,5 @@
 //! The RHU hosting API -- the C-ABI waistline between the kernel and
-//! hosted payloads. Thirty-one functions, `rhu_`-prefixed, mirrored
+//! hosted payloads. Thirty-four functions, `rhu_`-prefixed, mirrored
 //! exactly by `include/rhu.h` (contract generation `ABI`, at the end
 //! of this file); the shim backend is the intended consumer. One rule
 //! binds this surface: no second blocking primitive ever joins it, and
@@ -9,7 +9,7 @@
 use core::ffi::{c_char, c_void};
 
 use crate::registry::ModuleDesc;
-use crate::{arena, console, entropy, kheap, registry, sched, semihost};
+use crate::{arena, calendar, console, entropy, kheap, registry, sched, semihost};
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.rhu_api")]
@@ -305,10 +305,63 @@ pub extern "C" fn rhu_entropy_is_hardware() -> i32 {
     entropy::is_hardware()
 }
 
+/// The cryptographic door: bytes from a hardware noise source whose
+/// health flags read clean at this draw, or an honest refusal (the
+/// header states the codes); the build opt-in serves the software
+/// stream here on the emulator rows' gate images. One call is bounded
+/// at `SECURE_MAX_DRAW` bytes and writes nothing on a refusal.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_entropy_secure(buf: *mut u8, n: u32) -> i32 {
+    if (buf.is_null() && n > 0) || n > entropy::SECURE_MAX_DRAW {
+        return sched::ERR_INVAL;
+    }
+    if n == 0 {
+        return 0;
+    }
+    entropy::fill_secure(unsafe { core::slice::from_raw_parts_mut(buf, n as usize) })
+}
+
+
+/// The calendar now -- the base plus the boot clock's elapsed, in
+/// 100-nanosecond ticks since 0001-01-01T00:00:00Z -- and the source
+/// that set the base (0 unset, the epoch). Both pointers 4-aligned and
+/// non-null, or RHU_EINVAL writing nothing.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_calendar_get(ticks: *mut u64, source: *mut i32) -> i32 {
+    if ticks.is_null() || source.is_null() || (ticks as usize) & 3 != 0 || (source as usize) & 3 != 0 {
+        return sched::ERR_INVAL;
+    }
+    let (t, s) = calendar::get();
+    unsafe {
+        ticks.write_unaligned(t);
+        source.write(s);
+    }
+    0
+}
+
+/// The explicit set: the calendar reads the given instant from now on
+/// (the elapsed clock never moves), the source recorded (network time
+/// or the application; the kernel records its own two sources itself),
+/// the real-time clock written back where the part has one. Refuses a
+/// source the hosted side may not claim and an instant past the maximum.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_calendar_set(ticks: u64, source: i32) -> i32 {
+    calendar::set(ticks, source)
+}
+
 /// The hosting-API contract generation this kernel serves: `RHU_ABI`
 /// in `include/rhu.h`, the two moving together or not at all. A
 /// payload that provides its own `rhu_payload_entry` states the
 /// generation it was built against in `rhu_payload_abi`, and the
 /// payload flavor refuses a mismatch before that entry runs
 /// (payload.rs).
-pub const ABI: u32 = 31;
+pub const ABI: u32 = 32;
+/// The window's floor: `RHU_ABI_COMPAT` in `include/rhu.h`, the two
+/// moving together or not at all. A payload built against any
+/// generation from this one through `ABI` runs; only a breaking change
+/// raises it (to the new `ABI`). The judge is `abi_window`.
+pub const ABI_COMPAT: u32 = 31;
+const _: () = assert!(ABI_COMPAT <= ABI);

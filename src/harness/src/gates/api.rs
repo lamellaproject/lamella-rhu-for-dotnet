@@ -5,7 +5,8 @@ use crate::gate::{write_fixture, CaseRun, GateCtx, Selfcheck};
 use crate::image::{check_records, header_abi, synth_records, HEADER_MAGIC, LAYOUT_MAGIC};
 use crate::results::{chain_json_from_env, validate_results, Results};
 use crate::text::{contains_fixed, cr_count, word_sym_present, word_sym_value};
-use crate::tools::{llvm_tool, resolve_qemu, run_captured, rustc_facts, RustcFacts};
+use crate::sha256::sha256_file;
+use crate::tools::{cargo_build_kernel_at, echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts, RustcFacts};
 use std::path::Path;
 use std::process::exit;
 use std::time::Duration;
@@ -18,10 +19,12 @@ const TIMEOUT_S: u64 = 60;
 
 const MARKER_QUIESCENT: &str =
     "[api] PASS tick-quiescent (solo busy 30 ms: 0 switches, clock advanced)";
-/// The ten [api] boot markers, boot order (the far-deadline marker after
-/// futex-timeout, the wake-priority marker after futex-wake-all).
-const MARKERS_A: [&str; 10] = [
+/// The eleven [api] boot markers, boot order (check 1's cost line right
+/// after its PASS, the far-deadline marker after futex-timeout, the
+/// wake-priority marker after futex-wake-all).
+const MARKERS_A: [&str; 11] = [
     "[api] PASS ns-monotonic (5000 paired reads + cs wrap + saturated pend windows)",
+    "[api] ns-monotonic: its two designed windows each hold the tick masked across two SysTick reloads; where the witness counts, its 2 lost / 2 late are theirs by construction",
     "[api] PASS sleep-ns-floor (25 ms request: never early)",
     "[api] PASS futex-eagain (changed value refused: no sleep, 0 switches)",
     "[api] PASS futex-timeout (10 ms deadline honored: never early)",
@@ -111,17 +114,44 @@ const MARKERS_H: [&str; 1] = [
 const MARKERS_I: [&str; 1] = [
     "[api] PASS act-lazy-fp (the handler ran one floating-point instruction on a target whose interrupted frame was basic, the target resumed and yielded eight times after it -- eight switch entries with its own frame basic -- and the witness counted no abandoned lazy floating-point state)",
 ];
+/// The two sources markers: the cryptographic door under the emulator
+/// row's build opt-in (after entropy-honesty) and the calendar doors
+/// (after host-band, before tid-wrap).
+const MARKERS_J: [&str; 2] = [
+    "[api] PASS entropy-secure (the software stream served two distinct cryptographic draws under the build opt-in, null refused, zero-length and over-bound refused, the hardware query 0)",
+    "[api] PASS calendar-door (the epoch at boot, the explicit set read back with its source over the elapsed clock, the replace rule, source and range refusals, no real-time clock on this row)",
+];
 /// The observation of record for the low-address question: pinned as a
 /// required line, counted among no PASS -- red by design, not a check.
+/// The double-precision forms as instructions (the check's armed line, its
+/// ten digest lines over results and flags -- the values the mps2-an500
+/// row's hardware printed, pinned -- and the hardware row's PASS line).
+const MARKERS_K: [&str; 12] = [
+    "[api] fp-double: the double-precision forms armed as instructions (the edge table under six FPSCR settings; the digests over results and flags)",
+    "[api] fp-double: binary 43008 vectors digest 41ec5e6b",
+    "[api] fp-double: accumulate 32768 vectors digest f8b6643d",
+    "[api] fp-double: unary 2112 vectors digest d0b34f72",
+    "[api] fp-double: compare 4096 vectors digest 79b37f44",
+    "[api] fp-double: to-single 2688 vectors digest b56d5bdc",
+    "[api] fp-double: from-single 560 vectors digest f8df090e",
+    "[api] fp-double: fixed 256 vectors digest 9f33a71f",
+    "[api] fp-double: select-imm 24 vectors digest fe549b57",
+    "[api] fp-double: live 48 vectors digest 1bcd7647",
+    "[api] fp-double: conditional 2 vectors digest f3a2ed28",
+    "[api] PASS fp-double (85562 vectors computed by the hardware: the reference row)",
+];
 const MARKER_OBSERVED_NULL: &str = "[api] OBSERVED null-read: the record of address 0 on this row follows (the observation of record: red by design, not a check)";
 /// The emulator row's record: address 0 readable (its own vector table).
 const MARKER_OBS_ROW: &str = "[obs] address 0 on this row: readable -- the read returned without a fault; a hosted null dereference does not trap here";
-const CONTRACT_SYMS: [&str; 5] = [
+const CONTRACT_SYMS: [&str; 8] = [
     "__rhu_debug_layout",
     "__rhu_sched",
     "__rhu_ticks",
     "__rhu_switches",
     "__rhu_lazy_fp_witness",
+    "__rhu_entropy_witness",
+    "__rhu_calendar",
+    "__rhu_calendar_push",
 ];
 /// The module-root bracket pairs, pinned BY VALUE in the api (base-family)
 /// artifact: each pair must be present AND equal (the zero-length
@@ -134,8 +164,8 @@ const BRACKET_PAIRS: [(&str, &str); 3] = [
 /// The futex + nanosecond-time + arena + kheap/TLS/thread/registry +
 /// suspension/activation + module-query + console/exit/entropy C-ABI
 /// surface, pinned in the artifact (the waistline exists and survives
-/// every build of this flavor). 30 exports.
-const API_SYMS: [&str; 30] = [
+/// every build of this flavor). 33 exports.
+const API_SYMS: [&str; 33] = [
     "rhu_now_ns",
     "rhu_sleep_ns",
     "rhu_futex_wait",
@@ -166,11 +196,16 @@ const API_SYMS: [&str; 30] = [
     "rhu_exit",
     "rhu_entropy",
     "rhu_entropy_is_hardware",
+    "rhu_entropy_secure",
+    "rhu_calendar_get",
+    "rhu_calendar_set",
 ];
 
 struct API {
     ctx: GateCtx,
     facts: RustcFacts,
+    /// The api case's raw transcript: the double-precision row's fp-double block for the parity case.
+    api_raw: Vec<u8>,
 }
 
 fn setup(repo: &Path) -> (RustcFacts, std::path::PathBuf, String) {
@@ -241,9 +276,12 @@ impl API {
         markers.extend(MARKERS_G);
         markers.extend(MARKERS_H);
         markers.extend(MARKERS_I);
+        markers.extend(MARKERS_J);
+        markers.extend(MARKERS_K);
         markers.push(MARKER_OBSERVED_NULL);
         markers.push(MARKER_OBS_ROW);
         self.common_asserts("api", &run, 0, &markers, &["KERNEL PANIC", "EXCEPTION:"]);
+        self.api_raw = run.raw.clone();
         let nm = match llvm_tool(&self.facts, "llvm-nm") {
             Ok(p) => p,
             Err(e) => self.ctx.gate_fail(&format!("api: {e}")),
@@ -290,6 +328,92 @@ impl API {
         );
     }
 
+
+    /// The double-precision digests on the single-precision row: the api
+    /// flavor built for the mps2-an505 row (the Cortex-M33, the emulation)
+    /// must print the fp-double block the mps2-an500 run printed from its
+    /// hardware -- one program, two classes, one block -- and its own PASS
+    /// lines for the emulated run and the frame promotion. Then the negative
+    /// control: the decoder with the add and subtract operations swapped
+    /// (the feature `test-fpemul-doctored`) prints a different block.
+    fn run_fp_parity(&mut self) {
+        let hw = fp_block(&self.api_raw);
+        if hw.is_empty() {
+            self.ctx.gate_fail("fp-parity: the double-precision row printed no fp-double block");
+        }
+        let (run, sha, path_rel) = self.build_and_run_an505("fp-parity", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke");
+        let em = fp_block(&run);
+        if run_exit_bad(&run) {
+            self.fail_case("fp-parity", 1, 0, &sha, &path_rel, "the emulated row died: a fault or a panic in the transcript");
+        }
+        if em != hw {
+            let first = hw.iter().zip(em.iter()).position(|(a, b)| a != b).unwrap_or(hw.len().min(em.len()));
+            self.fail_case("fp-parity", 0, 0, &sha, &path_rel, &format!("the fp-double block differs between the classes at line {} of {} (hardware: {:?}; emulated: {:?})", first + 1, hw.len(), hw.get(first), em.get(first)));
+        }
+        for want in ["[api] PASS fp-double (", "every form emulated through the fault funnel, none refused, no frame promoted", "[api] PASS fp-frames (the basic frame promoted once"] {
+            if !contains_fixed(&run, want) {
+                self.fail_case("fp-parity", 0, 0, &sha, &path_rel, &format!("the emulated row lacks '{want}'"));
+            }
+        }
+        self.emit_case("fp-parity", "pass", 0, 0, &sha, &path_rel);
+        println!("== case fp-parity: PASS (the fp-double block of {} lines byte-equal across the classes -- the hardware row and the emulated row; the emulated row's own PASS lines present) ==", hw.len());
+
+        let (run2, sha2, path_rel2) = self.build_and_run_an505("fp-doctored-control", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke,test-fpemul-doctored");
+        let doc = fp_block(&run2);
+        if doc == hw {
+            self.emit_control("fp-doctored-control", "fail", FP_DOCTORED_BROKE, &sha2, &path_rel2);
+            self.ctx.gate_fail("fp-doctored-control: the doctored decoder's fp-double block equals the hardware row's (the control did not bite)");
+        }
+        self.emit_control("fp-doctored-control", "pass", FP_DOCTORED_BROKE, &sha2, &path_rel2);
+        println!("== control fp-doctored-control: PASS (the decoder with add and subtract swapped prints a different fp-double block: the parity case would refuse it) ==");
+    }
+
+    /// A case record for a negative control of this gate, naming what the control broke.
+    fn emit_control(&mut self, case: &str, verdict: &str, broke: &str, sha: &str, path_rel: &str) {
+        self.ctx.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"api\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"exit\":0,\"exit_want\":0,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{path_rel}\",\"sha256\":\"{sha}\"}},\"golden\":null}}"
+        ));
+        self.ctx.results.tally(verdict, "negative");
+    }
+
+    /// Build the kernel for the mps2-an505 row into the gate's own second
+    /// target directory, stage it, run it on the an505 machine, and return
+    /// the raw transcript with the staged image's identity.
+    fn build_and_run_an505(&mut self, name: &str, feats: &str) -> (Vec<u8>, String, String) {
+        println!("== case {name} ==");
+        let target_dir = self.ctx.repo.join("src").join("kernel").join("target").join("api-gate-an505");
+        let log = self.ctx.out.join(format!("build-{name}.log"));
+        let ok = cargo_build_kernel_at(&self.ctx.repo, &target_dir, &["--target", "thumbv8m.main-none-eabihf", "--no-default-features", "--features", feats], &log);
+        if !matches!(ok, Ok(true)) {
+            echo_file(&log, "");
+            self.ctx.gate_fail(&format!("{name}: build error"));
+        }
+        let built = target_dir.join("thumbv8m.main-none-eabihf").join("release").join("rhu-kernel");
+        let staged = self.ctx.out.join(format!("rhu-kernel-{name}.elf"));
+        if std::fs::copy(&built, &staged).is_err() {
+            self.ctx.gate_fail(&format!("{name}: built kernel not found at {}", built.display()));
+        }
+        let sha = match sha256_file(&staged) {
+            Ok(s) => s,
+            Err(e) => self.ctx.gate_fail(&format!("{name}: cannot hash staged artifact: {e}")),
+        };
+        let path_rel = format!("{}/rhu-kernel-{name}.elf", self.ctx.out_rel);
+        let raw_path = self.ctx.out.join(format!("{name}.raw"));
+        let stderr_path = self.ctx.out.join(format!("{name}.stderr"));
+        let staged_arg = staged.to_string_lossy().into_owned();
+        let args = ["-M", "mps2-an505", "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting", "-kernel", &staged_arg];
+        let outcome = match run_captured(&self.ctx.qemu, &args, &raw_path, &stderr_path, self.ctx.timeout) {
+            Ok(o) => o,
+            Err(e) => self.ctx.gate_fail(&format!("{name}: {e}")),
+        };
+        if outcome.timed_out {
+            println!("  (run killed at its timeout; a hang is observed, never a pass)");
+        }
+        let raw = std::fs::read(&raw_path).unwrap_or_default();
+        echo_file(&raw_path, "  | ");
+        (raw, sha, path_rel)
+    }
+
     /// The kheap-loud designed death: the corrupted
     /// free-block canary must kill the very next walk through the
     /// funnel. Exit 1, constant panic text; the UNREACHABLE line is
@@ -316,6 +440,29 @@ impl API {
 }
 
 /// Run the api gate.
+
+/// What the api gate's negative control breaks, for its case record: the
+/// emulation's decoder with the add and subtract operations swapped (the
+/// feature `test-fpemul-doctored`).
+const FP_DOCTORED_BROKE: &str = "the emulation decoder with the add and subtract operations swapped (the feature test-fpemul-doctored)";
+
+/// The fp-double block of a transcript: every line that starts with the
+/// check's tag, in order, without the line ending (the PASS line is not in
+/// it: it names the row's class).
+fn fp_block(raw: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(raw)
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| l.starts_with("[api] fp-double:"))
+        .map(String::from)
+        .collect()
+}
+
+/// A transcript that died: a fault report or a panic.
+fn run_exit_bad(raw: &[u8]) -> bool {
+    contains_fixed(raw, "EXCEPTION:") || contains_fixed(raw, "KERNEL PANIC")
+}
+
 pub fn run(repo: &Path) -> ! {
     let (facts, qemu, qemu_v) = setup(repo);
     let out = repo.join("src").join("kernel").join("target").join("api-gate");
@@ -343,6 +490,7 @@ pub fn run(repo: &Path) -> ! {
             timeout: Duration::from_secs(TIMEOUT_S),
         },
         facts,
+        api_raw: Vec::new(),
     };
     api.ctx.results.emit(&format!(
         "{{\"schema\":1,\"type\":\"run\",\"gate\":\"api\",\"run\":\"api-{}\",\"host\":\"{HOST}\",\"runner\":\"{RUNNER}\",\"chain\":{},\"tools\":{{\"qemu\":\"{}\",\"rustc\":\"{}\"}}}}",
@@ -353,12 +501,13 @@ pub fn run(repo: &Path) -> ! {
     ));
     api.run_api();
     api.run_kheap_loud();
+    api.run_fp_parity();
     api.ctx.results.emit_summary(GATE, "pass", 0);
     if !validate_results(repo, api.ctx.results.path()) {
         println!("{DISPLAY}: FAIL -- results file failed schema validation");
         exit(1);
     }
-    println!("{DISPLAY}: PASS (2/2)  [{qemu_v} | {rustc_v}]");
+    println!("{DISPLAY}: PASS (4/4)  [{qemu_v} | {rustc_v}]");
     exit(0);
 }
 
@@ -831,6 +980,21 @@ pub fn selfcheck(repo: &Path) -> ! {
         "i-marker-present",
         "genuine act-lazy-fp PASS marker accepted by the I sweep",
         MARKERS_I.iter().all(|m| contains_fixed(&std::fs::read(&igreen).unwrap_or_default(), m)),
+    );
+
+    let jgone = tmp.join("j-marker-gone.raw");
+    write_fixture(&jgone, format!("{}\r\n", MARKERS_I[0]).as_bytes());
+    sc.probe(
+        "j-marker-gone",
+        "transcript with the act-lazy-fp marker and neither sources marker",
+        MARKERS_J.iter().all(|m| contains_fixed(&std::fs::read(&jgone).unwrap_or_default(), m)),
+    );
+    let jgreen = tmp.join("j-marker-present.raw");
+    write_fixture(&jgreen, format!("{}\r\n{}\r\n", MARKERS_J[0], MARKERS_J[1]).as_bytes());
+    sc.accept_probe(
+        "j-marker-present",
+        "genuine entropy-secure and calendar-door PASS markers accepted by the J sweep",
+        MARKERS_J.iter().all(|m| contains_fixed(&std::fs::read(&jgreen).unwrap_or_default(), m)),
     );
 
     let header_text = std::fs::read_to_string(repo.join("src/kernel/include/rhu.h")).unwrap_or_default();
