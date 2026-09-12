@@ -47,14 +47,21 @@ const COLLECTIONS_EXACT: &str = "62";
 /// lines at or after a run under the profile: no run, no clock claim.
 const TIMING_DET: &str = "icount-shift0";
 
-/// The rt-link family's frozen input: the merged runtime object of the rt
-/// tier and its demand list (goldens/rt-m7, tied through that tier's
-/// manifest pin), the object's section classes as the tier states them
-/// (llvm-size -A over the object; the maps' brackets read them exactly),
-/// the roots the host's initialization contract names beyond the two the
-/// kernel's default entry references, and the family's linker words.
-const RT_MERGED_O: &str = "goldens/rt-m7/rthello-merged.o";
-const RT_DEMAND_TXT: &str = "goldens/rt-m7/rthello-merged.undef.txt";
+/// The rt-link family's frozen input: the merged runtime object of each
+/// board's class world and that world's demand list (goldens/rt-m7 for
+/// the Cortex-M7 boards, goldens/rt-m33 for the Cortex-M33 boards, each
+/// tied through its tier's manifest pin), the object's section classes as
+/// the tiers state them (llvm-size -A over the object; the same program
+/// object merged in both worlds, so one record of brackets; the maps'
+/// brackets read them exactly), the roots the host's initialization
+/// contract names beyond the two the kernel's default entry references,
+/// and the family's linker words.
+fn rt_merged_o(w: &crate::gates::rt::RtWorld) -> String {
+    format!("{}/{}", w.tier, crate::gates::rt::MERGED)
+}
+fn rt_demand_txt(w: &crate::gates::rt::RtWorld) -> String {
+    format!("{}/{}", w.tier, crate::gates::rt::UNDEF_FILE)
+}
 const RT_MANAGED_BYTES: u64 = 389_414;
 const RT_UNBOX_BYTES: u64 = 766;
 const RT_HYDRATED_BYTES: u64 = 77_204;
@@ -84,6 +91,41 @@ pub(crate) const RT_HELLO_BRACKETS: RtBrackets = RtBrackets {
 };
 const RT_LD_WORDS: [&str; 5] = ["-u", "RhInitialize", "-u", "RhRegisterOSModule", "--warn-unresolved-symbols"];
 
+/// The sixteen AEABI double-precision helpers the Cortex-M33 world's merged
+/// runtime demands and the Cortex-M7 world's does not (the single-precision
+/// archives call them; the class's kernel staticlib defines them): the
+/// marker that tells the two worlds' demand lists apart, so a row's list is
+/// checked to be its world's. The list is the difference of the two tiers'
+/// frozen demand lists and is derived from them again whenever either tier
+/// is frozen again.
+const AEABI_DOUBLE_HELPERS: [&str; 16] = [
+    "__aeabi_d2f", "__aeabi_d2iz", "__aeabi_d2uiz", "__aeabi_dadd",
+    "__aeabi_dcmpeq", "__aeabi_dcmpge", "__aeabi_dcmpgt", "__aeabi_dcmple",
+    "__aeabi_dcmplt", "__aeabi_dcmpun", "__aeabi_ddiv", "__aeabi_dmul",
+    "__aeabi_dsub", "__aeabi_f2d", "__aeabi_i2d", "__aeabi_ui2d",
+];
+
+/// A demand list is its world's: the Cortex-M33 world's list carries every
+/// one of the sixteen double helpers, the Cortex-M7 world's none of them;
+/// any other world is refused. The complaint names the first helper that
+/// breaks the rule.
+pub(crate) fn check_world_demand(world_gate: &str, demand: &[String]) -> Result<(), String> {
+    let has = |n: &str| demand.iter().any(|d| d == n);
+    if world_gate == crate::gates::rt::WORLD_M33.gate {
+        match AEABI_DOUBLE_HELPERS.iter().find(|n| !has(n)) {
+            None => Ok(()),
+            Some(n) => Err(format!("the {world_gate} world's demand list lacks {n}: not the Cortex-M33 world's list")),
+        }
+    } else if world_gate == crate::gates::rt::WORLD_M7.gate {
+        match AEABI_DOUBLE_HELPERS.iter().find(|n| has(n)) {
+            None => Ok(()),
+            Some(n) => Err(format!("the {world_gate} world's demand list carries {n}: not the Cortex-M7 world's list")),
+        }
+    } else {
+        Err(format!("no demand-list rule for the world '{world_gate}'"))
+    }
+}
+
 /// The frozen minirt objects' own managed code: the brackets on every
 /// payload-family link read these exactly.
 const MANAGED_BYTES_RTSMOKE: u64 = 5_534;
@@ -106,15 +148,18 @@ struct RtBoard {
     board: &'static str,
     target: &'static str,
     features: &'static str,
+    /// The runtime world the row links: the frozen tier of the board's
+    /// processor class, one world per class.
+    world: &'static crate::gates::rt::RtWorld,
 }
 
 const RT_BOARDS: [RtBoard; 6] = [
-    RtBoard { board: "mps2-an500", target: "thumbv7em-none-eabihf", features: "qemu-exit,board-mps2-an500,payload" },
-    RtBoard { board: "mps2-an505", target: "thumbv8m.main-none-eabihf", features: "qemu-exit,board-mps2-an505,payload" },
-    RtBoard { board: "nucleo-u5a5zj-q", target: "thumbv8m.main-none-eabihf", features: "board-nucleo-u5a5zj-q,payload" },
-    RtBoard { board: "stm32f769i-disco", target: "thumbv7em-none-eabihf", features: "board-stm32f769i-disco,payload" },
-    RtBoard { board: "pico-2", target: "thumbv8m.main-none-eabihf", features: "board-pico-2,payload" },
-    RtBoard { board: "pico-plus-2", target: "thumbv8m.main-none-eabihf", features: "board-pico-plus-2,payload" },
+    RtBoard { board: "mps2-an500", target: "thumbv7em-none-eabihf", features: "qemu-exit,board-mps2-an500,payload", world: &crate::gates::rt::WORLD_M7 },
+    RtBoard { board: "mps2-an505", target: "thumbv8m.main-none-eabihf", features: "qemu-exit,board-mps2-an505,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "nucleo-u5a5zj-q", target: "thumbv8m.main-none-eabihf", features: "board-nucleo-u5a5zj-q,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "stm32f769i-disco", target: "thumbv7em-none-eabihf", features: "board-stm32f769i-disco,payload", world: &crate::gates::rt::WORLD_M7 },
+    RtBoard { board: "pico-2", target: "thumbv8m.main-none-eabihf", features: "board-pico-2,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "pico-plus-2", target: "thumbv8m.main-none-eabihf", features: "board-pico-plus-2,payload", world: &crate::gates::rt::WORLD_M33 },
 ];
 
 /// What the rt-link checker reads off a linked artifact.
@@ -908,7 +953,10 @@ struct MPayload {
     /// The frozen merged runtime object's demand list (sorted), read at
     /// the frozen-inputs case; every unresolved name of an rt-link must be
     /// in it.
-    rt_demand: Vec<String>,
+    rt_demand_m7: Vec<String>,
+    /// The Cortex-M33 world's frozen demand list, read the same way for
+    /// the rows that link that world.
+    rt_demand_m33: Vec<String>,
 }
 
 /// One linked-and-run payload case: staged artifact identity + the run.
@@ -1048,23 +1096,12 @@ impl MPayload {
                 self.fail_case("frozen-inputs", "null", "null", "", "", None, msg);
             }
         }
-        let mpath = self.ctx.repo.join("goldens").join("rt-m7").join("MANIFEST.md");
-        let msha = sha256_file(&mpath).unwrap_or_default();
-        if msha != crate::gates::rt::SHA_FROZEN_MANIFEST_M7 {
-            self.fail_case(
-                "frozen-inputs",
-                "null",
-                "null",
-                "",
-                "",
-                None,
-                "goldens/rt-m7/MANIFEST.md sha256 does not match the rt-m7 tier's pin (the frozen record moved; this gate links its merged object)",
-            );
-        }
-        let mtext = std::fs::read_to_string(&mpath).unwrap_or_default();
-        let records = crate::gates::gc::parse_vendored_manifest(&mtext);
-        for want in [RT_MERGED_O, RT_DEMAND_TXT] {
-            let Some((_, sha)) = records.iter().find(|(p, _)| p.as_str() == want) else {
+        let mut counts: Vec<usize> = Vec::new();
+        let mut mshas: Vec<String> = Vec::new();
+        for w in [&crate::gates::rt::WORLD_M7, &crate::gates::rt::WORLD_M33] {
+            let mpath = self.ctx.repo.join(w.tier.replace('/', std::path::MAIN_SEPARATOR_STR)).join("MANIFEST.md");
+            let msha = sha256_file(&mpath).unwrap_or_default();
+            if msha != w.pin {
                 self.fail_case(
                     "frozen-inputs",
                     "null",
@@ -1072,51 +1109,99 @@ impl MPayload {
                     "",
                     "",
                     None,
-                    &format!("{want} has no record in goldens/rt-m7/MANIFEST.md"),
-                );
-            };
-            let got = sha256_file(&self.ctx.repo.join(want.replace('/', std::path::MAIN_SEPARATOR_STR)))
-                .unwrap_or_default();
-            if &got != sha {
-                self.fail_case(
-                    "frozen-inputs",
-                    "null",
-                    "null",
-                    "",
-                    "",
-                    None,
-                    &format!("{want} sha256 mismatch against goldens/rt-m7/MANIFEST.md (frozen artifact moved)"),
+                    &format!(
+                        "{}/MANIFEST.md sha256 does not match the {} tier's pin (the frozen record moved; this gate links its merged object)",
+                        w.tier, w.gate
+                    ),
                 );
             }
+            let mtext = std::fs::read_to_string(&mpath).unwrap_or_default();
+            let records = crate::gates::gc::parse_vendored_manifest(&mtext);
+            let merged = rt_merged_o(w);
+            let demand_txt = rt_demand_txt(w);
+            for want in [merged.as_str(), demand_txt.as_str()] {
+                let Some((_, sha)) = records.iter().find(|(p, _)| p.as_str() == want) else {
+                    self.fail_case(
+                        "frozen-inputs",
+                        "null",
+                        "null",
+                        "",
+                        "",
+                        None,
+                        &format!("{want} has no record in {}/MANIFEST.md", w.tier),
+                    );
+                };
+                let got = sha256_file(&self.ctx.repo.join(want.replace('/', std::path::MAIN_SEPARATOR_STR)))
+                    .unwrap_or_default();
+                if &got != sha {
+                    self.fail_case(
+                        "frozen-inputs",
+                        "null",
+                        "null",
+                        "",
+                        "",
+                        None,
+                        &format!("{want} sha256 mismatch against {}/MANIFEST.md (frozen artifact moved)", w.tier),
+                    );
+                }
+            }
+            let demand = std::fs::read_to_string(
+                self.ctx.repo.join(demand_txt.replace('/', std::path::MAIN_SEPARATOR_STR)),
+            )
+            .unwrap_or_default();
+            let mut names: Vec<String> = demand
+                .lines()
+                .map(|l| l.trim_end_matches('\r').trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            names.sort();
+            names.dedup();
+            if names.is_empty() {
+                self.fail_case(
+                    "frozen-inputs",
+                    "null",
+                    "null",
+                    "",
+                    "",
+                    None,
+                    &format!("the {} world's frozen demand list is empty", w.gate),
+                );
+            }
+            counts.push(names.len());
+            mshas.push(msha);
+            if w.gate == crate::gates::rt::WORLD_M33.gate {
+                self.rt_demand_m33 = names;
+            } else {
+                self.rt_demand_m7 = names;
+            }
         }
-        let demand = std::fs::read_to_string(
-            self.ctx.repo.join(RT_DEMAND_TXT.replace('/', std::path::MAIN_SEPARATOR_STR)),
-        )
-        .unwrap_or_default();
-        let mut names: Vec<String> = demand
-            .lines()
-            .map(|l| l.trim_end_matches('\r').trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect();
-        names.sort();
-        names.dedup();
-        if names.is_empty() {
-            self.fail_case("frozen-inputs", "null", "null", "", "", None, "the frozen demand list is empty");
-        }
-        self.rt_demand = names;
         let stats = format!(
-            "{{\"rtsmoke_o\":\"{SHA_RTSMOKE_O}\",\"gctest_o\":\"{SHA_GCTEST_O}\",\"rtsmoke_golden\":\"{SHA_RTSMOKE_G}\",\"gctest_golden\":\"{SHA_GCTEST_G}\",\"rt_manifest\":\"{msha}\",\"rt_demand_names\":{}}}",
-            self.rt_demand.len()
+            "{{\"rtsmoke_o\":\"{SHA_RTSMOKE_O}\",\"gctest_o\":\"{SHA_GCTEST_O}\",\"rtsmoke_golden\":\"{SHA_RTSMOKE_G}\",\"gctest_golden\":\"{SHA_GCTEST_G}\",\"rt_manifest\":\"{}\",\"rt_demand_names\":{},\"rt_m33_manifest\":\"{}\",\"rt_m33_demand_names\":{}}}",
+            mshas[0], counts[0], mshas[1], counts[1]
         );
         self.emit_case("frozen-inputs", "pass", "null", "null", "", "", "null", None, Some(&stats));
         println!(
-            "== frozen inputs: PASS (4/4 hashes match the MANIFEST; the rt-m7 tier's merged object and demand list tie goldens/rt-m7/MANIFEST.md, {} names) ==",
-            self.rt_demand.len()
+            "== frozen inputs: PASS (4/4 hashes match the MANIFEST; the rt-m7 and rt-m33 tiers' merged objects and demand lists tie goldens/rt-m7/MANIFEST.md ({} names) and goldens/rt-m33/MANIFEST.md ({} names)) ==",
+            counts[0], counts[1]
+        );
+        let world_lists = [
+            (crate::gates::rt::WORLD_M7.gate, self.rt_demand_m7.clone()),
+            (crate::gates::rt::WORLD_M33.gate, self.rt_demand_m33.clone()),
+        ];
+        for (gate, list) in world_lists.iter() {
+            if let Err(e) = check_world_demand(gate, list) {
+                self.fail_case("frozen-inputs", "null", "null", "", "", None, &format!("world lists: {e}"));
+            }
+        }
+        println!(
+            "== world lists: PASS (the rt-m7 list {} names without the sixteen double helpers; the rt-m33 list {} names with all sixteen) ==",
+            self.rt_demand_m7.len(),
+            self.rt_demand_m33.len()
         );
     }
 
     fn build_staticlib(&mut self) {
-        println!("== build kernel staticlib (--lib --features payload) ==");
+        println!("== build kernel staticlib (--lib --features payload,entropy-accept-software) ==");
         let log = self.ctx.out.join("build-staticlib.log");
         let ok = match crate::tools::cargo_build_kernel(
             &self.ctx.repo,
@@ -1865,6 +1950,16 @@ impl MPayload {
         println!("== case gctest: PASS (exit 0, 5 pins + ALL GOOD, final free={free_v}, collections={gcs_v}) ==");
     }
 
+    /// The frozen demand list of a board's runtime world (read at the
+    /// frozen-inputs case).
+    fn rt_demand_for(&self, w: &crate::gates::rt::RtWorld) -> &[String] {
+        if w.gate == crate::gates::rt::WORLD_M33.gate {
+            &self.rt_demand_m33
+        } else {
+            &self.rt_demand_m7
+        }
+    }
+
     /// The staticlib an rt-link case links: the gate's shared an500 one,
     /// or the board's own under the gate's target dir.
     fn rt_staticlib_rel(b: &RtBoard) -> String {
@@ -1954,7 +2049,8 @@ impl MPayload {
         let case = format!("rt-link-{}", b.board);
         let map_rel = format!("src/kernel/payload-{}.x", b.board);
         let lib_rel = Self::rt_staticlib_rel(b);
-        let (ok, ld_log, path_rel) = self.link_raw(&case, RT_MERGED_O, &[], &lib_rel, &map_rel, &RT_LD_WORDS);
+        let merged = rt_merged_o(b.world);
+        let (ok, ld_log, path_rel) = self.link_raw(&case, &merged, &[], &lib_rel, &map_rel, &RT_LD_WORDS);
         if !ok {
             let text = String::from_utf8_lossy(&std::fs::read(&ld_log).unwrap_or_default()).into_owned();
             let (_, other) = split_ld_log(&text);
@@ -1994,7 +2090,11 @@ impl MPayload {
         let Some(code) = map_region(&map_text, "CODE") else {
             self.ctx.gate_fail(&format!("{case}: {map_rel} states no CODE region"));
         };
-        let facts = match check_rt_placement(&dump, &phdrs, &unresolved, &self.rt_demand, code, &RT_HELLO_BRACKETS) {
+        let demand = self.rt_demand_for(b.world).to_vec();
+        if let Err(e) = check_world_demand(b.world.gate, &demand) {
+            self.fail_case(&case, "null", "null", &sha, &path_rel, None, &format!("the row's demand list: {e}"));
+        }
+        let facts = match check_rt_placement(&dump, &phdrs, &unresolved, &demand, code, &RT_HELLO_BRACKETS) {
             Ok(f) => f,
             Err(e) => self.fail_case(&case, "null", "null", &sha, &path_rel, None, &format!("placement: {e}")),
         };
@@ -2010,8 +2110,11 @@ impl MPayload {
         );
         self.emit_case(&case, "pass", "null", "null", &sha, &path_rel, "null", None, Some(&stats));
         println!(
-            "== case {case}: PASS (the frozen runtime linked under payload-{}.x, placement asserted off the artifact) ==",
-            b.board
+            "== case {case}: PASS (the frozen runtime of the {} world linked under payload-{}.x against its world's demand list of {} names, the double helpers {}; placement asserted off the artifact) ==",
+            b.world.gate,
+            b.board,
+            demand.len(),
+            if b.world.gate == crate::gates::rt::WORLD_M33.gate { "present" } else { "absent" }
         );
     }
 
@@ -2032,7 +2135,8 @@ impl MPayload {
         let doctored = map.replacen(anchor, "", 1);
         let map_rel = "src/kernel/target/payload-gate/rt/control.x";
         write_fixture(&self.ctx.repo.join(map_rel), doctored.as_bytes());
-        let (ok, ld_log, path_rel) = self.link_raw(CASE, RT_MERGED_O, &[], AN500_LIB, map_rel, &RT_LD_WORDS);
+        let merged = rt_merged_o(&crate::gates::rt::WORLD_M7);
+        let (ok, ld_log, path_rel) = self.link_raw(CASE, &merged, &[], AN500_LIB, map_rel, &RT_LD_WORDS);
         if !ok {
             echo_file(&ld_log, "  | ");
             self.emit_control_case(CASE, "fail", BROKE);
@@ -2044,7 +2148,8 @@ impl MPayload {
         let phdrs = elf32_phdrs(&elf_bytes).unwrap_or_default();
         let map_text = std::fs::read_to_string(self.ctx.repo.join(AN500_MAP)).unwrap_or_default();
         let code = map_region(&map_text, "CODE").unwrap_or((0, 0));
-        match check_rt_placement(&dump, &phdrs, &unresolved, &self.rt_demand, code, &RT_HELLO_BRACKETS) {
+        let demand = self.rt_demand_m7.clone();
+        match check_rt_placement(&dump, &phdrs, &unresolved, &demand, code, &RT_HELLO_BRACKETS) {
             Ok(_) => {
                 self.emit_control_case(CASE, "fail", BROKE);
                 self.ctx.gate_fail(&format!(
@@ -2120,7 +2225,8 @@ pub fn run(repo: &Path) -> ! {
         gold_dir,
         abi,
         compat,
-        rt_demand: Vec::new(),
+        rt_demand_m7: Vec::new(),
+        rt_demand_m33: Vec::new(),
     };
     g.ctx.results.emit(&format!(
         "{{\"schema\":1,\"type\":\"run\",\"gate\":\"payload\",\"run\":\"payload-{}\",\"host\":\"{HOST}\",\"runner\":\"{RUNNER}\",\"chain\":{},\"tools\":{{\"qemu\":\"{}\",\"rustc\":\"{}\",\"ld\":\"{}\"}}}}",
@@ -2690,6 +2796,40 @@ pub fn selfcheck(repo: &Path) -> ! {
         "rt-arena-under-floor",
         "arena window under the board's floor",
         check(&rt_dump(g_m, g_u, g_h, g_t, g_i, (0x2002_c408, 0x2002_c408 + 0x10_0000)), &ph(0x2000_21d8), &unresolved),
+    );
+
+    let m7_list: Vec<String> = ["SystemNative_Abort", "malloc", "pthread_self"].iter().map(|s| s.to_string()).collect();
+    let mut m33_list = m7_list.clone();
+    m33_list.extend(AEABI_DOUBLE_HELPERS.iter().map(|s| s.to_string()));
+    let mut m33_short = m33_list.clone();
+    m33_short.retain(|n| n != "__aeabi_dcmpun");
+    let mut m7_tainted = m7_list.clone();
+    m7_tainted.push("__aeabi_dadd".to_string());
+    let (gate_m7, gate_m33) = (crate::gates::rt::WORLD_M7.gate, crate::gates::rt::WORLD_M33.gate);
+    sc.accept_probe(
+        "world-list-m7-genuine",
+        "the Cortex-M7 world's list without the double helpers accepted",
+        check_world_demand(gate_m7, &m7_list).is_ok(),
+    );
+    sc.accept_probe(
+        "world-list-m33-genuine",
+        "the Cortex-M33 world's list with all sixteen double helpers accepted",
+        check_world_demand(gate_m33, &m33_list).is_ok(),
+    );
+    sc.probe(
+        "world-list-m7-tainted",
+        "the Cortex-M7 world handed a list carrying a double helper",
+        check_world_demand(gate_m7, &m7_tainted).is_ok(),
+    );
+    sc.probe(
+        "world-list-m33-short",
+        "the Cortex-M33 world handed a list missing one double helper",
+        check_world_demand(gate_m33, &m33_short).is_ok(),
+    );
+    sc.probe(
+        "world-list-unknown",
+        "a world with no demand-list rule",
+        check_world_demand("rt-other", &m33_list).is_ok(),
     );
 
     sc.finish("genuine inputs accepted");

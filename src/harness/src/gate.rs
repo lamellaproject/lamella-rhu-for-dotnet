@@ -228,11 +228,11 @@ pub fn write_fixture(path: &Path, bytes: &[u8]) {
 /// selfcheck asserts over its two flag sets (`class_flag_sets_tie`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
-    /// The Cortex-M7 with the double-precision FPv5: the an500 and F769
-    /// rows' objects, the flag set of record.
+    /// The Cortex-M7 with the double-precision FPv5: the objects of every
+    /// row of that class, the flag set of record.
     CortexM7,
-    /// The Cortex-M33 with the single-precision FPv5: the mps2-an505 row's
-    /// objects, the same flag set apart from the core and FPU words.
+    /// The Cortex-M33 with the single-precision FPv5: the objects of every
+    /// row of that class, the same flag set apart from the core and FPU words.
     CortexM33,
 }
 

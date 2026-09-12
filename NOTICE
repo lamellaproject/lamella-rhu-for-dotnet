@@ -12,3 +12,8 @@ Third-party components:
 - src/vendor/ -- GC interface headers from the dotnet/runtime repository,
   Copyright (c) .NET Foundation and Contributors, MIT license. See
   src/vendor/gcinterface/NOTICE and src/VENDORED.md.
+- src/payload/minirt/minirt.cs -- Lamella RHU code, except for the parts that
+  the .NET NativeAOT compiler dictates: the type layouts, the type and member
+  names and the error messages of its system-module contracts, etc. (which come
+  from the dotnet/runtime repository, Copyright (c) .NET Foundation and
+  Contributors, MIT license).

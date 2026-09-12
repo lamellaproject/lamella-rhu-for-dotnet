@@ -116,6 +116,13 @@ test-fpemul-doctored = []
 # the api flavor's fp-cost check: a measurement image for a board flight, never a
 # chain row.
 fp-cost = []
+# The unhosted-main flavor: an image whose kmain thread, after the selftests,
+# calls a main the program defines (`rhu_unhosted_main`) instead of hosting a
+# runtime, and exits with the code it returns. The kernel declares that main
+# and never defines it, so an image with this feature links only against the
+# program that defines it; a measurement image for a board flight, never a
+# chain row. Without the feature the kernel moves by nothing.
+unhosted-main = []
 
 [profile.release]
 opt-level = 2

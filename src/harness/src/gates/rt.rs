@@ -256,11 +256,11 @@ const FROZEN_FILES: [(&str, &str); 15] = [
 ];
 const PAYLOAD: &str = "rthello.o";
 const SURGERY: &str = "startup-cookie-copied.o";
-const MERGED: &str = "rthello-merged.o";
+pub(crate) const MERGED: &str = "rthello-merged.o";
 const DONOR: &str = "attr-donor-v7em.bin";
 const CONTROL_ATTRS: &str = "control-attr-a-profile.bin";
 const SET_FILE: &str = "archives-rc1-rhu-cortex-m7-sgc-enabled.txt";
-const UNDEF_FILE: &str = "rthello-merged.undef.txt";
+pub(crate) const UNDEF_FILE: &str = "rthello-merged.undef.txt";
 const LIBC: &str = "rt-libc.o";
 const LIBC_MEMBERS: &str = "rt-libc.members.txt";
 const GOLDEN: &str = "rthello.golden.txt";

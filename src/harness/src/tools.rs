@@ -443,9 +443,16 @@ pub fn cargo_build_kernel_at(
     let log2 = log
         .try_clone()
         .map_err(|e| format!("cannot clone build log handle: {e}"))?;
+    let remap = format!("--remap-path-prefix={}=/rhu", repo.display());
+    let remap_m7 = format!("target.thumbv7em-none-eabihf.rustflags=['{remap}']");
+    let remap_m33 = format!("target.thumbv8m.main-none-eabihf.rustflags=['{remap}']");
     let status = Command::new("cargo")
         .arg("build")
         .arg("--release")
+        .arg("--config")
+        .arg(&remap_m7)
+        .arg("--config")
+        .arg(&remap_m33)
         .args(extra)
         .current_dir(&crate_dir)
         .env("CARGO_TARGET_DIR", target_dir)

@@ -97,8 +97,8 @@ const SHA_FROZEN_MANIFEST: &str = "fec5029357ef8bfb4d8514b59982022af64ea0cd5a2ab
 
 /// The frozen-object plan of record: file name under goldens/shim/,
 /// source TU, extra defines beyond the class's flag set, and the class
-/// (the Cortex-M7 for the an500 and F769 rows' objects, the Cortex-M33 for
-/// the mps2-an505 row's). The manifest's records must tie this table by
+/// (the processor class whose flag set compiles the row's objects). The
+/// manifest's records must tie this table by
 /// name both directions; 'rhu-gate shim rederive' recompiles every row
 /// under its class's flag set and byte-asserts the output against the
 /// frozen bytes.
@@ -613,9 +613,9 @@ pub(crate) fn generation_fault(name: &str, frozen: &[u8], header_abi: u32) -> Op
 const INTERNAL_CASES: [&str; 7] = [
     "shim.foreign-errno-refused -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record",
     "shim.newlib-header-ties-kit -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the generated C-library layout header against the kit's own headers",
-    "shim.classlib-order-ties-pin -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the host against a copy of the generated runtime-entry header with one class-library slot shifted, refused at the assertion that names the slot",
+    "shim.classlib-order-ties-pin -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the host's copy tying the frozen host object apart from the producer stamp, then the same compile against a copy of the generated runtime-entry header with one class-library slot shifted, refused at the assertion that names the slot",
     "shim.newlib-retarget -- link-tier; runs under 'rhu-gate shim rederive' when the kit's C library is resolved",
-    "shim.f769-shared-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the sysnative and host objects under the F769 selector tie the frozen an500 objects, the F769 core differs from the an500 core",
+    "shim.f769-shared-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the sysnative and host objects under the F769 selector tie the frozen an500 objects apart from the producer stamp, the F769 core differs from the an500 core",
     "shim.fp-census-instrument -- compile-tier; runs under 'rhu-gate shim rederive': a compiled double multiply-add must be counted by the census the shim.fp-census case runs over the frozen tier",
     "shim.an505-row-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the core, sysnative and host sources under the an505 selector with the Cortex-M7 flag set tie the frozen an500 objects apart from the producer stamp, so the class flag set is the one variable behind the row's Cortex-M33 objects",
 ];
@@ -1738,7 +1738,8 @@ impl Shim {
 
     /// The compile-tier control for the F769 rider's shared objects: the
     /// sysnative and host translation units compiled under the F769 row
-    /// selector must tie the frozen an500 objects byte for byte (neither
+    /// selector must tie the frozen an500 objects apart from the producer
+    /// stamp, through the leg's helper (neither
     /// consumes a field that differs between the rows), which is the fact
     /// that lets the rider link them from the an500 line; and the frozen
     /// F769 core object must differ from the an500 core (the core consumes
@@ -1747,33 +1748,42 @@ impl Shim {
     fn run_f769_shared_control(&mut self, gxx: &ToolCmd) {
         const CASE: &str = "shim.f769-shared-ties-an500";
         println!("== case {CASE} (compile-tier control) ==");
+        let facts = match rustc_facts() {
+            Ok(f) => f,
+            Err(e) => self.fail(CASE, &e),
+        };
+        let stripped = self.out.join("obj").join("stripped");
         for (src, frozen, tag) in [("src/shim/rhu_sysnative.c", "shim-sysnative.o", "sysnative"), ("src/shim/rhu_host.c", "shim-host.o", "host")] {
             let out_rel = format!("src/kernel/target/shim-gate/obj/{tag}-f769-control.o");
             let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
             let _ = std::fs::remove_file(&out_abs);
             self.compile(gxx, CASE, src, &["-DMGC_HOST_ROW_F769"], &out_rel, Class::CortexM7);
-            let got = match sha256_file(&out_abs) {
+            let got = match sha256_without_stamp(&facts, &out_abs, &stripped.join(format!("f769-shared-{tag}.o"))) {
                 Ok(s) => s,
-                Err(e) => self.fail(CASE, &format!("{src} under the F769 selector produced no object ({e})")),
+                Err(e) => self.fail(CASE, &format!("{src} under the F769 selector produced no object, or its copy failed ({e})")),
             };
-            let want = match sha256_file(&self.repo.join("goldens").join("shim").join(frozen)) {
+            let frozen_abs = self.repo.join("goldens").join("shim").join(frozen);
+            let want = match sha256_without_stamp(&facts, &frozen_abs, &stripped.join(format!("f769-shared-frozen-{tag}.o"))) {
                 Ok(s) => s,
-                Err(e) => self.fail(CASE, &format!("goldens/shim/{frozen} unreadable: {e}")),
+                Err(e) => self.fail(CASE, &format!("goldens/shim/{frozen} unreadable, or its copy failed: {e}")),
             };
             if got != want {
-                self.fail(CASE, &format!("{src} under the F769 selector compiled to {got}, not the frozen an500 {frozen} {want}: the rows no longer share this object, so the F769 image needs its own frozen copy"));
+                self.fail(CASE, &format!("{src} under the F769 selector compiled to {got}, not the frozen an500 {frozen} {want} (apart from the producer stamp): the rows no longer share this object, so the F769 image needs its own frozen copy"));
             }
-            println!("   {frozen}: the compile under the F769 selector ties the frozen an500 object ({})", &got[..16]);
+            println!("   {frozen}: the compile under the F769 selector ties the frozen an500 object apart from the producer stamp ({})", &got[..16]);
         }
-        let core = sha256_file(&self.repo.join("goldens").join("shim").join("shim-core.o")).unwrap_or_default();
-        let core_f769 = sha256_file(&self.repo.join("goldens").join("shim").join("shim-core-f769.o")).unwrap_or_default();
-        if core.is_empty() || core_f769.is_empty() {
-            self.fail(CASE, "the two frozen core objects are not both readable");
-        }
+        let core = match sha256_without_stamp(&facts, &self.repo.join("goldens").join("shim").join("shim-core.o"), &stripped.join("f769-shared-core.o")) {
+            Ok(s) => s,
+            Err(e) => self.fail(CASE, &format!("goldens/shim/shim-core.o unreadable, or its copy failed: {e}")),
+        };
+        let core_f769 = match sha256_without_stamp(&facts, &self.repo.join("goldens").join("shim").join("shim-core-f769.o"), &stripped.join("f769-shared-core-f769.o")) {
+            Ok(s) => s,
+            Err(e) => self.fail(CASE, &format!("goldens/shim/shim-core-f769.o unreadable, or its copy failed: {e}")),
+        };
         if core == core_f769 {
-            self.fail(CASE, "shim-core-f769.o ties shim-core.o byte for byte: the F769 row moves nothing in the core object, so a separate frozen object is unfounded");
+            self.fail(CASE, "shim-core-f769.o ties shim-core.o apart from the producer stamp: the F769 row moves nothing in the core object, so a separate frozen object is unfounded");
         }
-        println!("   shim-core.o ({}) and shim-core-f769.o ({}) differ: the row's region reaches the core, and the tier carries both", &core[..16], &core_f769[..16]);
+        println!("   shim-core.o ({}) and shim-core-f769.o ({}) differ apart from the producer stamp: the row's region reaches the core, and the tier carries both", &core[..16], &core_f769[..16]);
         self.results.emit(&format!(
             "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"shared\":2}}}}",
             self.gate_id
@@ -1894,7 +1904,8 @@ impl Shim {
     /// refusal alone cannot be told from a compile that fails for another
     /// reason: (a) with nothing beside it the copy reads the genuine
     /// generated header through the include path, compiles, and its object
-    /// ties the frozen host object byte for byte -- the copy IS the host;
+    /// ties the frozen host object apart from the producer stamp -- the
+    /// copy IS the host;
     /// (b) with a copy of the generated runtime-entry header beside it in
     /// which one slot is shifted, the same compile must be REFUSED at the
     /// assertion that names that slot. The doctored copy is removed
@@ -1902,6 +1913,11 @@ impl Shim {
     fn run_classlib_order_control(&mut self, gxx: &ToolCmd) {
         const CASE: &str = "shim.classlib-order-ties-pin";
         println!("== case {CASE} (compile-tier control) ==");
+        let facts = match rustc_facts() {
+            Ok(f) => f,
+            Err(e) => self.fail(CASE, &e),
+        };
+        let stripped = self.out.join("obj").join("stripped");
         let dir = self.out.join("obj").join("classlib-order");
         if std::fs::create_dir_all(&dir).is_err() {
             self.fail(CASE, "cannot create the control's directory");
@@ -1916,18 +1932,18 @@ impl Shim {
         write_fixture(&self.repo.join(copy_rel.replace('/', std::path::MAIN_SEPARATOR_STR)), &host);
         let out_rel = "src/kernel/target/shim-gate/obj/classlib-order/rhu_host.o";
         self.compile(gxx, CASE, copy_rel, &["-DMGC_HOST_ROW_AN500"], out_rel, Class::CortexM7);
-        let got = match sha256_file(&self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR))) {
+        let got = match sha256_without_stamp(&facts, &self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR)), &stripped.join("classlib-order-host.o")) {
             Ok(s) => s,
-            Err(e) => self.fail(CASE, &format!("the copy's compile produced no object ({e})")),
+            Err(e) => self.fail(CASE, &format!("the copy's compile produced no object, or its copy failed ({e})")),
         };
-        let want = match sha256_file(&self.repo.join("goldens").join("shim").join("shim-host.o")) {
+        let want = match sha256_without_stamp(&facts, &self.repo.join("goldens").join("shim").join("shim-host.o"), &stripped.join("classlib-order-frozen-host.o")) {
             Ok(s) => s,
-            Err(e) => self.fail(CASE, &format!("goldens/shim/shim-host.o unreadable: {e}")),
+            Err(e) => self.fail(CASE, &format!("goldens/shim/shim-host.o unreadable, or its copy failed: {e}")),
         };
         if got != want {
-            self.fail(CASE, &format!("the host's copy compiled to {got}, not the frozen host object {want}: the copy is not the host, so a refusal would prove nothing about it"));
+            self.fail(CASE, &format!("the host's copy compiled to {got}, not the frozen host object {want} (apart from the producer stamp): the copy is not the host, so a refusal would prove nothing about it"));
         }
-        println!("   (a) the host's copy compiles against the genuine generated header and ties the frozen host object ({})", &got[..16]);
+        println!("   (a) the host's copy compiles against the genuine generated header and ties the frozen host object apart from the producer stamp ({})", &got[..16]);
 
         let genuine = std::fs::read_to_string(self.repo.join("src").join("shim").join("rhu_rt_entry_net11_rc1.h")).unwrap_or_default();
         if !genuine.contains(RT_ENTRY_DOCTOR_FROM) {
@@ -2134,6 +2150,20 @@ pub fn rederive(repo: &Path) -> ! {
 /// failure detector, the exit-code and verdict-line checks -- each must
 /// REJECT its doctored input, with the accept side pinned on genuine
 /// inputs.
+/// A frozen input of the selfcheck's own probes, read whole from the shim
+/// tier -- or a loud refusal naming the file. The probes doctor REAL frozen
+/// bytes; an empty default in their place would let a probe report the
+/// checker broken when it is the tier that is absent.
+fn selfcheck_frozen(repo: &Path, name: &str) -> Vec<u8> {
+    match std::fs::read(repo.join("goldens").join("shim").join(name)) {
+        Ok(b) => b,
+        Err(e) => {
+            println!("rhu-gate shim selfcheck: goldens/shim/{name} unreadable: {e}");
+            exit(1);
+        }
+    }
+}
+
 pub fn selfcheck(repo: &Path) -> ! {
     let facts = match rustc_facts() {
         Ok(f) => f,
@@ -2143,6 +2173,10 @@ pub fn selfcheck(repo: &Path) -> ! {
         }
     };
     let rustc_v = facts.version.clone();
+    if !repo.join("goldens").join("shim").join("MANIFEST.md").is_file() {
+        println!("rhu-gate shim selfcheck: frozen inputs missing (goldens/shim)");
+        exit(1);
+    }
     let out = repo.join("src").join("kernel").join("target").join("shim-gate");
     if std::fs::create_dir_all(&out).is_err() {
         println!("rhu-gate: cannot create {}", out.display());
@@ -2196,12 +2230,18 @@ pub fn selfcheck(repo: &Path) -> ! {
     sc.probe("tls-span-unparsed", "a dump the bracket pair cannot be read from", template_span_fault(None, Some(0x2000_1008), TLS_TEMPLATE_SPAN).is_none());
 
     let mpath = repo.join("goldens").join("shim").join("MANIFEST.md");
-    let msha = sha256_file(&mpath).unwrap_or_default();
+    let msha = match sha256_file(&mpath) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("rhu-gate shim selfcheck: goldens/shim/MANIFEST.md unreadable: {e}");
+            exit(1);
+        }
+    };
     sc.accept_probe("manifest-pin", "goldens/shim/MANIFEST.md ties the in-code pin", msha == SHA_FROZEN_MANIFEST);
     let doctored_pin = format!("{}{}", &SHA_FROZEN_MANIFEST[..63], if SHA_FROZEN_MANIFEST.ends_with('0') { "1" } else { "0" });
     sc.probe("manifest-pin-doctored", "manifest sha compared against a pin with one flipped digit", msha == doctored_pin);
 
-    let text = std::fs::read_to_string(&mpath).unwrap_or_default();
+    let text = String::from_utf8_lossy(&selfcheck_frozen(repo, "MANIFEST.md")).into_owned();
     let records = parse_vendored_manifest(&text);
     let on_disk: Vec<String> = FROZEN_PLAN.iter().map(|(n, _, _, _)| n.to_string()).collect();
     sc.accept_probe("records-genuine", "the manifest's records tie the plan and goldens both directions", frozen_consistency(&records, &on_disk).is_ok());
@@ -2215,7 +2255,7 @@ pub fn selfcheck(repo: &Path) -> ! {
     sc.probe("object-unrecorded", "an object on disk with no manifest record", frozen_consistency(&records, &extra).is_ok());
 
     let want = records.iter().find(|(p, _)| p == "goldens/shim/shim-core.o").map(|(_, s)| s.clone()).unwrap_or_default();
-    let genuine = std::fs::read(repo.join("goldens").join("shim").join("shim-core.o")).unwrap_or_default();
+    let genuine = selfcheck_frozen(repo, "shim-core.o");
     let mut doctored = genuine.clone();
     if let Some(b) = doctored.get_mut(64) {
         *b ^= 0x01;
@@ -2225,7 +2265,7 @@ pub fn selfcheck(repo: &Path) -> ! {
     sc.accept_probe("object-genuine", "the frozen core object ties its record", sha256_file(&repo.join("goldens").join("shim").join("shim-core.o")).map(|s| s == want).unwrap_or(false));
     sc.probe("object-doctored", "frozen object with one flipped byte", sha256_file(&dpath).map(|s| s == want).unwrap_or(false));
 
-    let golden = std::fs::read(repo.join("goldens").join("shim").join(GOLDENS[0])).unwrap_or_default();
+    let golden = selfcheck_frozen(repo, GOLDENS[0]);
     let mut wrapped: Vec<u8> = b"rhu 0.2.0 -- kernel banner\r\n[boot] kernel line\r\n".to_vec();
     wrapped.extend_from_slice(&golden);
     wrapped.extend_from_slice(b"[payload] managed Main returned 0\r\n");
@@ -2233,7 +2273,7 @@ pub fn selfcheck(repo: &Path) -> ! {
     let flipped: Vec<u8> = String::from_utf8_lossy(&wrapped).replace("ALL GOOD", "ALL G00D").into_bytes();
     sc.probe("golden-flipped", "payload stream with the verdict line's GOOD changed to G00D", eq_lf_normalized(&payload_stream(&flipped), &golden));
 
-    let act_golden = std::fs::read(repo.join("goldens").join("shim").join(GOLDENS[2])).unwrap_or_default();
+    let act_golden = selfcheck_frozen(repo, GOLDENS[2]);
     sc.accept_probe("activation-verdict-last", "the activation golden ends on its verdict line", String::from_utf8_lossy(&act_golden).lines().last() == Some(ACT_ALL_GOOD));
     let act_flipped: Vec<u8> = String::from_utf8_lossy(&act_golden).replace("ALL GOOD", "ALL G00D").into_bytes();
     sc.probe("activation-golden-flipped", "the activation golden with its verdict line's GOOD changed to G00D", eq_lf_normalized(&act_flipped, &act_golden));
@@ -2301,7 +2341,7 @@ pub fn selfcheck(repo: &Path) -> ! {
     let header_text = std::fs::read_to_string(repo.join("src").join("kernel").join("include").join("rhu.h")).unwrap_or_default();
     let abi = header_abi(&header_text).unwrap_or(0);
     let host_path = repo.join("goldens").join("shim").join("shim-host.o");
-    let host_obj = std::fs::read(&host_path).unwrap_or_default();
+    let host_obj = selfcheck_frozen(repo, "shim-host.o");
     let stated = stated_generation(&host_obj);
     sc.accept_probe(
         "generation-genuine",
@@ -2325,7 +2365,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         stated_generation(&genuine).is_none() && generation_fault("shim-core.o", &genuine, abi).is_none(),
     );
 
-    let host_an505 = std::fs::read(repo.join("goldens").join("shim").join("shim-host-an505.o")).unwrap_or_default();
+    let host_an505 = selfcheck_frozen(repo, "shim-host-an505.o");
     sc.accept_probe(
         "generation-genuine-an505",
         "the frozen an505 host object states the contract generation include/rhu.h states",

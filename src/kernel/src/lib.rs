@@ -56,6 +56,8 @@ const FLAVOR: &str = if cfg!(feature = "test-panic") {
     "api-smoke"
 } else if cfg!(feature = "payload") {
     "payload"
+} else if cfg!(feature = "unhosted-main") {
+    "unhosted-main"
 } else {
     "boot"
 };
@@ -135,7 +137,7 @@ pub extern "C" fn kmain() -> ! {
 }
 
 #[cfg_attr(
-    any(feature = "test-panic", feature = "test-fault", feature = "payload", feature = "test-kheap-loud", feature = "test-tickcost", feature = "test-stackovfl", feature = "api-smoke"),
+    any(feature = "test-panic", feature = "test-fault", feature = "payload", feature = "test-kheap-loud", feature = "test-tickcost", feature = "test-stackovfl", feature = "api-smoke", feature = "unhosted-main"),
     allow(unreachable_code)
 )]
 extern "C" fn kthread_main(_: usize) {
@@ -218,6 +220,15 @@ extern "C" fn kthread_main(_: usize) {
     {
         kprintln!("[api] exit-door: handing the machine exit to rhu_exit(0)");
         api::rhu_exit(0);
+    }
+    #[cfg(feature = "unhosted-main")]
+    {
+        unsafe extern "C" {
+            fn rhu_unhosted_main() -> i32;
+        }
+        let code = unsafe { rhu_unhosted_main() };
+        kprintln!("[unhosted-main] entry returned {}", code);
+        semihost::exit(code as u32)
     }
     semihost::exit(0)
 }
