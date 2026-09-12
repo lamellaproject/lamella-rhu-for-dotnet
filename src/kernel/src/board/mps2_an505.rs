@@ -29,6 +29,11 @@ pub const KMAIN_STACK_BYTES: usize = 16 * 1024;
 /// probed live against QEMU; the AN505 note's interrupt map agrees).
 pub const NIRQ: usize = 124;
 
+/// The vector line a test image may claim: the table's last, implemented
+/// by the machine model and claimed by no kernel handler.
+#[allow(dead_code)]
+pub const SPARE_IRQ: usize = NIRQ - 1;
+
 /// FPU shape: the AN505's Cortex-M33 carries FPv5 SINGLE precision
 /// only -- kernel f64 stays on the soft-float path, byte-for-byte the
 /// an500 posture. Consumed by records and gates, never by

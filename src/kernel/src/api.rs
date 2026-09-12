@@ -1,5 +1,5 @@
 //! The RHU hosting API -- the C-ABI waistline between the kernel and
-//! hosted payloads. Thirty-four functions, `rhu_`-prefixed, mirrored
+//! hosted payloads. Forty-one functions, `rhu_`-prefixed, mirrored
 //! exactly by `include/rhu.h` (contract generation `ABI`, at the end
 //! of this file); the shim backend is the intended consumer. One rule
 //! binds this surface: no second blocking primitive ever joins it, and
@@ -9,7 +9,7 @@
 use core::ffi::{c_char, c_void};
 
 use crate::registry::ModuleDesc;
-use crate::{arena, calendar, console, entropy, kheap, registry, sched, semihost};
+use crate::{arena, calendar, console, entropy, gpio, kheap, registry, sched, semihost};
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.rhu_api")]
@@ -352,13 +352,63 @@ pub extern "C" fn rhu_calendar_set(ticks: u64, source: i32) -> i32 {
     calendar::set(ticks, source)
 }
 
+/// The GPIO doors (the device seam's first peripheral; the seven verbs the
+/// header states): the line space, a claim (an input with its pull, or an
+/// output at its initial level; a claim on a line this program already
+/// holds re-configures it), its release, a write on a claimed output, a
+/// read of the pad on any claimed line, an armed event kind, and the
+/// line's event word -- the futex word a waiting thread sleeps on through
+/// rhu_futex_wait, incremented once per detected edge. The codes are the
+/// header's; a refusal programs nothing.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_gpio_count() -> i32 {
+    gpio::count()
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_gpio_claim(line: u32, mode: u32, pull: u32, initial: u32) -> i32 {
+    gpio::claim(line, mode, pull, initial)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_gpio_release(line: u32) -> i32 {
+    gpio::release(line)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_gpio_write(line: u32, value: u32) -> i32 {
+    gpio::write(line, value)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_gpio_read(line: u32) -> i32 {
+    gpio::read(line)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_gpio_edge(line: u32, kind: u32) -> i32 {
+    gpio::edge(line, kind)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_gpio_event_word(line: u32) -> *const u32 {
+    gpio::event_word(line)
+}
+
 /// The hosting-API contract generation this kernel serves: `RHU_ABI`
 /// in `include/rhu.h`, the two moving together or not at all. A
 /// payload that provides its own `rhu_payload_entry` states the
 /// generation it was built against in `rhu_payload_abi`, and the
 /// payload flavor refuses a mismatch before that entry runs
 /// (payload.rs).
-pub const ABI: u32 = 32;
+pub const ABI: u32 = 33;
 /// The window's floor: `RHU_ABI_COMPAT` in `include/rhu.h`, the two
 /// moving together or not at all. A payload built against any
 /// generation from this one through `ABI` runs; only a breaking change

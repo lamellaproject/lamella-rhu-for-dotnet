@@ -61,6 +61,10 @@ In the tree today:
   at the cost of one fault per emulated instruction (the hosting-api gate
   computes one vector set on the Cortex-M7 row's FPU and on the Cortex-M33
   row through the emulation and compares the results)
+- GPIO for a program's `System.Device.Gpio` driver: a pin is claimed by one
+  owner at a time, read as an input or driven as an output, with edge events
+  delivered to a waiting thread, on the emulator and on every supported board
+  (the hosting-api gate's three GPIO cases and a doctored control)
 - Supported boards: NUCLEO-U5A5ZJ-Q, Pimoroni Pico Plus 2 W,
   Raspberry Pi Pico 2, STM32F769I-DISCO
 

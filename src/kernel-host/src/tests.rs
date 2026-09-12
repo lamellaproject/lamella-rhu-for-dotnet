@@ -3,7 +3,7 @@
 //! init re-carves, so the cases are independent in any order); the wake
 //! cases are pure arithmetic.
 
-use crate::{abi_window, arena, board, calendar_math, kheap, wake};
+use crate::{abi_window, arena, board, calendar_math, claims, gpio_math, kheap, wake};
 
 fn boot() {
     arena::init();
@@ -562,4 +562,67 @@ fn fpemul_decoder_matches_the_assembler() {
             assert_eq!(condition_passed(cond, xpsr), judge[cond as usize](n, z, c, v), "condition {cond:x} under flags {flags:x}");
         }
     }
+}
+
+#[test]
+fn claims_board_fold_and_program_claims() {
+    let bits = claims::fold_board(&[4, 9, 33]);
+    assert_eq!(bits[0], (1 << 4) | (1 << 9));
+    assert_eq!(bits[1], 1 << 1);
+    let mut c = claims::EMPTY;
+    claims::init(&mut c, 48, bits);
+    assert_eq!(claims::claim(&mut c, 4), claims::REFUSED_BUSY, "a board line");
+    assert_eq!(claims::claim(&mut c, 5), 0, "a free line");
+    assert_eq!(claims::claim(&mut c, 5), claims::REFUSED_BUSY, "the line already held");
+    assert!(claims::is_program(&c, 5) && !claims::is_board(&c, 5) && claims::is_board(&c, 33));
+    assert_eq!(claims::claim(&mut c, 48), claims::REFUSED_INVAL, "past the count");
+    assert_eq!(claims::release(&mut c, 6), claims::REFUSED_INVAL, "a line not held");
+    assert_eq!(claims::release(&mut c, 5), 0);
+    assert!(!claims::is_program(&c, 5));
+    assert_eq!((c.claims_taken, c.releases, c.refused_busy, c.refused_inval, c.last_refused_line), (1, 1, 2, 2, 6));
+}
+
+#[test]
+fn claims_irq_slots_and_tenants() {
+    let mut c = claims::EMPTY;
+    claims::init(&mut c, 176, [0; claims::BANKS]);
+    assert_eq!(claims::irq_slot_claim(&mut c, 3, 3), 0, "PA3 takes slot 3");
+    assert_eq!(claims::irq_slot_claim(&mut c, 3, 19), claims::REFUSED_BUSY, "PB3 refused on slot 3");
+    assert_eq!(claims::irq_slot_claim(&mut c, 3, 3), 0, "PA3 re-arms its own slot");
+    assert_eq!(claims::irq_slot_owner(&c, 3), Some(3));
+    claims::irq_slot_release(&mut c, 3, 19);
+    assert_eq!(claims::irq_slot_owner(&c, 3), Some(3), "a release by another line is ignored");
+    claims::irq_slot_release(&mut c, 3, 3);
+    assert_eq!(claims::irq_slot_owner(&c, 3), None);
+    assert_eq!(claims::irq_slot_claim(&mut c, 32, 5), claims::REFUSED_INVAL, "a slot outside the table");
+    assert_eq!(claims::tenant_add(&mut c, 0x4002_8254, 1, 0x2000_1000), 0, "the first tenant");
+    assert_eq!(claims::tenant_add(&mut c, 0x4002_8254, 1, 0x2000_2000), claims::REFUSED_BUSY, "the same bit twice");
+    assert_eq!(claims::tenant_for(&c, 0x4002_8254, 1).map(|t| t.wake), Some(0x2000_1000));
+    assert_eq!(claims::tenant_for(&c, 0x4002_8254, 2), None);
+    for b in 2..5 {
+        assert_eq!(claims::tenant_add(&mut c, 0x4002_8254, b, 0x2000_1000 + b), 0);
+    }
+    assert_eq!(claims::tenant_add(&mut c, 0x4002_8254, 9, 0x2000_9000), claims::REFUSED_BUSY, "the table full");
+}
+
+#[test]
+fn gpio_math_partition_wrap_and_families() {
+    use gpio_math::KindClass;
+    assert_eq!(gpio_math::kind_class(gpio_math::KIND_NONE), KindClass::None);
+    assert_eq!(gpio_math::kind_class(gpio_math::KIND_RISING), KindClass::Edge { rising: true, falling: false });
+    assert_eq!(gpio_math::kind_class(gpio_math::KIND_FALLING), KindClass::Edge { rising: false, falling: true });
+    assert_eq!(gpio_math::kind_class(gpio_math::KIND_BOTH), KindClass::Edge { rising: true, falling: true });
+    for k in gpio_math::KIND_LEVEL_LOW..=gpio_math::KIND_WAKE_BOTH {
+        assert_eq!(gpio_math::kind_class(k), KindClass::Unsupported, "kind {k}");
+    }
+    assert_eq!(gpio_math::kind_class(9), KindClass::Invalid);
+    assert!(gpio_math::mode_valid(2) && !gpio_math::mode_valid(3) && gpio_math::pull_valid(2) && !gpio_math::pull_valid(3));
+    assert_eq!(gpio_math::edges_since(3, 0xFFFF_FFFE), 5, "the counter wraps");
+    assert_eq!(gpio_math::edges_since(7, 7), 0);
+    assert_eq!(gpio_math::st_split(110), (6, 14), "PG14");
+    assert_eq!((gpio_math::st_f7_nvic(0), gpio_math::st_f7_nvic(4), gpio_math::st_f7_nvic(5), gpio_math::st_f7_nvic(9), gpio_math::st_f7_nvic(10), gpio_math::st_f7_nvic(15)), (6, 10, 23, 23, 40, 40));
+    assert_eq!((gpio_math::st_u5_nvic(0), gpio_math::st_u5_nvic(13), gpio_math::st_u5_nvic(15)), (11, 24, 26));
+    assert_eq!(gpio_math::rp_word(24), (3, 0), "GPIO 24: the fourth word, the lowest nibble");
+    assert_eq!(gpio_math::rp_word(31), (3, 28));
+    assert_eq!(gpio_math::rp_word(47), (5, 28));
 }

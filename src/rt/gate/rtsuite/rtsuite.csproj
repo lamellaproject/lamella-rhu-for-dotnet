@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Lamella.Rhu.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -7,10 +7,6 @@
     <RootNamespace>Rhu.Hosted</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
-    <!-- The three lines the restore graph reads from the project itself. -->
-    <PublishAot>true</PublishAot>
-    <RuntimeIdentifier>linux-arm</RuntimeIdentifier>
-    <SelfContained>true</SelfContained>
   </PropertyGroup>
 
 </Project>

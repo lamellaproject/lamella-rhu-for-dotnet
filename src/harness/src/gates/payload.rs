@@ -4,6 +4,7 @@
 use crate::gate::{write_fixture, GateCtx, Selfcheck};
 use crate::image::{check_records, elf32_phdrs, header_abi, header_abi_compat, synth_elf32, Phdr, PT_LOAD, PT_TLS};
 use crate::results::{chain_json_from_env, golden_json, validate_results, Results};
+use crate::objfile::sha256_loadable;
 use crate::sha256::sha256_file;
 use crate::text::{
     contains_fixed, cr_count, final_free, final_gcs, final_verdict_has, lf_normalize,
@@ -29,8 +30,8 @@ const TIMEOUT_S: u64 = 120;
 const LINK_TIMEOUT_S: u64 = 120;
 
 /// Frozen-input pin table: must equal goldens/payload/MANIFEST.md.
-const SHA_RTSMOKE_O: &str = "9df5a916053a0417eed6107a1656c47786d49814093ee44b9d28e4249be66ad4";
-const SHA_GCTEST_O: &str = "234c41569f26f190d12220d1e13799a34e05ccebb11f0b57cea4cd3ff21d7cc2";
+const SHA_RTSMOKE_O: &str = "8f0e4e4caaccf0dc23133df72b15ce1a4dd3c79c1f5a567d0e0ec919397c6b92";
+const SHA_GCTEST_O: &str = "1d15b7f19bc9c0606ed50056875e07a3064dd30cdc866f46153c67965f87c61f";
 const SHA_RTSMOKE_G: &str = "d6c040565d4346117cac8d750244ec62a9cffbb228fdd6088d5dfc8336df1dc5";
 const SHA_GCTEST_G: &str = "5900b85b44294d57e75e9160feed525a8f0465b481d6992e716d6331b5d49fa1";
 
@@ -61,6 +62,126 @@ fn rt_merged_o(w: &crate::gates::rt::RtWorld) -> String {
 }
 fn rt_demand_txt(w: &crate::gates::rt::RtWorld) -> String {
     format!("{}/{}", w.tier, crate::gates::rt::UNDEF_FILE)
+}
+
+/// The objects a reader published from src/payload, named by
+/// RHU_PAYLOAD_OBJECTS: a directory holding rtsmoke.o and gctest.o, the
+/// first fault named.
+fn objects_dir_fault(dir: &Path) -> Option<String> {
+    if !dir.is_dir() {
+        return Some(format!(
+            "{} is not a directory (RHU_PAYLOAD_OBJECTS names the directory holding the published rtsmoke.o and gctest.o)",
+            dir.display()
+        ));
+    }
+    for f in ["rtsmoke.o", "gctest.o"] {
+        if !dir.join(f).is_file() {
+            return Some(format!("{f} is absent from {} (published from src/payload by the documented commands)", dir.display()));
+        }
+    }
+    None
+}
+
+/// A hosted-runtime world's tier on this checkout: present when its
+/// directory exists (the chain's own rule for a tier), absent otherwise.
+/// A present tier is tied whole -- a directory without its manifest, a
+/// manifest off its pin, a missing or moved row, an empty demand list each
+/// fail the frozen-inputs case -- so a doctored tier never passes as
+/// absent; an absent one is declared, never skipped in silence.
+fn rt_world_present(repo: &Path, w: &crate::gates::rt::RtWorld) -> bool {
+    repo.join(w.tier.replace('/', std::path::MAIN_SEPARATOR_STR)).is_dir()
+}
+
+/// One present world's frozen inputs, tied: the manifest's sha256 against
+/// the world's pin, the merged object's and the demand list's rows against
+/// the files' hashes, the demand list non-empty; the sorted demand names on
+/// success. Pure over the values read, so the selfcheck probes it on
+/// fixtures.
+fn rt_world_tie(
+    gate: &str,
+    tier: &str,
+    pin: &str,
+    mtext: &str,
+    msha: &str,
+    merged: (&str, &str),
+    demand: (&str, &str, &str),
+) -> Result<Vec<String>, String> {
+    if msha != pin {
+        return Err(format!(
+            "{tier}/MANIFEST.md sha256 does not match the {gate} tier's pin (the frozen record moved; this gate links its merged object)"
+        ));
+    }
+    let records = crate::gates::gc::parse_vendored_manifest(mtext);
+    for (want, got) in [merged, (demand.0, demand.1)] {
+        let Some((_, sha)) = records.iter().find(|(p, _)| p.as_str() == want) else {
+            return Err(format!("{want} has no record in {tier}/MANIFEST.md"));
+        };
+        if got != sha {
+            return Err(format!("{want} sha256 mismatch against {tier}/MANIFEST.md (frozen artifact moved)"));
+        }
+    }
+    let mut names: Vec<String> = demand
+        .2
+        .lines()
+        .map(|l| l.trim_end_matches('\r').trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return Err(format!("the {gate} world's frozen demand list is empty"));
+    }
+    Ok(names)
+}
+
+/// The frozen-inputs line's world clause when a world is absent: the
+/// present world's tie, then each absent world declared with its tier.
+fn frozen_inputs_clause(ties: &[String], absent: &[(&str, &str)]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !ties.is_empty() {
+        parts.push(format!("the present world's merged object and demand list tie {}", ties.join(" and ")));
+    }
+    for (gate, tier) in absent {
+        parts.push(format!("the {gate} tier NOT RUN (frozen inputs absent: {tier})"));
+    }
+    parts.join("; ")
+}
+
+/// The world-lists line's clause: each present world's list described, an
+/// absent world's list not read.
+fn world_lists_clause(m7_names: usize, m33_names: usize, absent: &[(&str, &str)]) -> String {
+    let is_absent = |g: &str| absent.iter().any(|(a, _)| *a == g);
+    let a = if is_absent(crate::gates::rt::WORLD_M7.gate) {
+        "the rt-m7 list NOT READ (tier absent)".to_string()
+    } else {
+        format!("the rt-m7 list {m7_names} names without the sixteen double helpers")
+    };
+    let b = if is_absent(crate::gates::rt::WORLD_M33.gate) {
+        "the rt-m33 list NOT READ (tier absent)".to_string()
+    } else {
+        format!("the rt-m33 list {m33_names} names with all sixteen")
+    };
+    format!("{a}; {b}")
+}
+
+/// The gate's verdict text from the results tally: the complete form when
+/// every world was present, else the same counts with the rt-link cases of
+/// the absent worlds NOT RUN and their tiers named -- a declaration is a
+/// printed reason, never a counted skip.
+fn payload_verdict(cases: usize, negative: usize, absent: &[(&str, &str)]) -> String {
+    if absent.is_empty() {
+        return format!("PASS ({cases}/{cases} cases incl. {negative} negative controls)");
+    }
+    let tiers: Vec<&str> = absent.iter().map(|(_, t)| *t).collect();
+    let what = if absent.len() >= 2 {
+        "the rt-link family NOT RUN".to_string()
+    } else {
+        format!("the rt-link cases of the {} world NOT RUN", absent[0].0)
+    };
+    format!(
+        "PASS ({cases}/{cases} cases incl. {negative} negative controls; {what}: frozen inputs absent ({}))",
+        tiers.join(", ")
+    )
 }
 const RT_MANAGED_BYTES: u64 = 389_414;
 const RT_UNBOX_BYTES: u64 = 766;
@@ -957,6 +1078,10 @@ struct MPayload {
     /// The Cortex-M33 world's frozen demand list, read the same way for
     /// the rows that link that world.
     rt_demand_m33: Vec<String>,
+    /// The hosted-runtime worlds whose tier is absent from this checkout
+    /// (gate, tier): declared at the frozen-inputs case, their rt-link
+    /// cases NOT RUN with the reason on the verdict line.
+    rt_absent: Vec<(&'static str, &'static str)>,
 }
 
 /// One linked-and-run payload case: staged artifact identity + the run.
@@ -1004,6 +1129,7 @@ impl MPayload {
         timing: Option<&str>,
         stats: Option<&str>,
     ) {
+        let gate = &self.ctx.gate;
         let img = if sha.is_empty() {
             "null".to_string()
         } else {
@@ -1018,7 +1144,7 @@ impl MPayload {
             None => String::new(),
         };
         self.ctx.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"payload\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"exit\":{exit_s},\"exit_want\":{want_s},\"control\":\"positive\"{clk},\"image\":{img},\"golden\":{golden}{tail}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{gate}\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"exit\":{exit_s},\"exit_want\":{want_s},\"control\":\"positive\"{clk},\"image\":{img},\"golden\":{golden}{tail}}}"
         ));
         self.ctx.results.tally(verdict, "positive");
     }
@@ -1040,8 +1166,9 @@ impl MPayload {
     /// Case line for a negative control: no exit (a refused link has
     /// none), no artifact, the breakage named in `broke`.
     fn emit_control_case(&mut self, case: &str, verdict: &str, broke: &str) {
+        let gate = &self.ctx.gate;
         self.ctx.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"payload\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"exit\":null,\"exit_want\":null,\"control\":\"negative\",\"image\":null,\"broke\":\"{broke}\"}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{gate}\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"exit\":null,\"exit_want\":null,\"control\":\"negative\",\"image\":null,\"broke\":\"{broke}\"}}"
         ));
         self.ctx.results.tally(verdict, "negative");
     }
@@ -1058,8 +1185,9 @@ impl MPayload {
         path_rel: &str,
         broke: &str,
     ) {
+        let gate = &self.ctx.gate;
         self.ctx.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"payload\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"exit\":{code},\"exit_want\":{want},\"control\":\"negative\",\"image\":{{\"path\":\"{path_rel}\",\"sha256\":\"{sha}\"}},\"broke\":\"{broke}\"}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{gate}\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"exit\":{code},\"exit_want\":{want},\"control\":\"negative\",\"image\":{{\"path\":\"{path_rel}\",\"sha256\":\"{sha}\"}},\"broke\":\"{broke}\"}}"
         ));
         self.ctx.results.tally(verdict, "negative");
     }
@@ -1096,77 +1224,42 @@ impl MPayload {
                 self.fail_case("frozen-inputs", "null", "null", "", "", None, msg);
             }
         }
+        let mut ties: Vec<String> = Vec::new();
         let mut counts: Vec<usize> = Vec::new();
         let mut mshas: Vec<String> = Vec::new();
         for w in [&crate::gates::rt::WORLD_M7, &crate::gates::rt::WORLD_M33] {
-            let mpath = self.ctx.repo.join(w.tier.replace('/', std::path::MAIN_SEPARATOR_STR)).join("MANIFEST.md");
-            let msha = sha256_file(&mpath).unwrap_or_default();
-            if msha != w.pin {
-                self.fail_case(
-                    "frozen-inputs",
-                    "null",
-                    "null",
-                    "",
-                    "",
-                    None,
-                    &format!(
-                        "{}/MANIFEST.md sha256 does not match the {} tier's pin (the frozen record moved; this gate links its merged object)",
-                        w.tier, w.gate
-                    ),
+            if !rt_world_present(&self.ctx.repo, w) {
+                println!(
+                    "== frozen inputs: the {} tier absent ({}) -- its rt-link cases DECLARED, not run ==",
+                    w.gate, w.tier
                 );
+                self.rt_absent.push((w.gate, w.tier));
+                counts.push(0);
+                mshas.push("absent".to_string());
+                continue;
             }
+            let rel = |p: &str| self.ctx.repo.join(p.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let mpath = rel(w.tier).join("MANIFEST.md");
+            let msha = sha256_file(&mpath).unwrap_or_default();
             let mtext = std::fs::read_to_string(&mpath).unwrap_or_default();
-            let records = crate::gates::gc::parse_vendored_manifest(&mtext);
             let merged = rt_merged_o(w);
             let demand_txt = rt_demand_txt(w);
-            for want in [merged.as_str(), demand_txt.as_str()] {
-                let Some((_, sha)) = records.iter().find(|(p, _)| p.as_str() == want) else {
-                    self.fail_case(
-                        "frozen-inputs",
-                        "null",
-                        "null",
-                        "",
-                        "",
-                        None,
-                        &format!("{want} has no record in {}/MANIFEST.md", w.tier),
-                    );
-                };
-                let got = sha256_file(&self.ctx.repo.join(want.replace('/', std::path::MAIN_SEPARATOR_STR)))
-                    .unwrap_or_default();
-                if &got != sha {
-                    self.fail_case(
-                        "frozen-inputs",
-                        "null",
-                        "null",
-                        "",
-                        "",
-                        None,
-                        &format!("{want} sha256 mismatch against {}/MANIFEST.md (frozen artifact moved)", w.tier),
-                    );
-                }
-            }
-            let demand = std::fs::read_to_string(
-                self.ctx.repo.join(demand_txt.replace('/', std::path::MAIN_SEPARATOR_STR)),
-            )
-            .unwrap_or_default();
-            let mut names: Vec<String> = demand
-                .lines()
-                .map(|l| l.trim_end_matches('\r').trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect();
-            names.sort();
-            names.dedup();
-            if names.is_empty() {
-                self.fail_case(
-                    "frozen-inputs",
-                    "null",
-                    "null",
-                    "",
-                    "",
-                    None,
-                    &format!("the {} world's frozen demand list is empty", w.gate),
-                );
-            }
+            let merged_sha = sha256_file(&rel(&merged)).unwrap_or_default();
+            let demand_sha = sha256_file(&rel(&demand_txt)).unwrap_or_default();
+            let demand = std::fs::read_to_string(rel(&demand_txt)).unwrap_or_default();
+            let names = match rt_world_tie(
+                w.gate,
+                w.tier,
+                w.pin,
+                &mtext,
+                &msha,
+                (&merged, &merged_sha),
+                (&demand_txt, &demand_sha, &demand),
+            ) {
+                Ok(names) => names,
+                Err(e) => self.fail_case("frozen-inputs", "null", "null", "", "", None, &e),
+            };
+            ties.push(format!("{}/MANIFEST.md ({} names)", w.tier, names.len()));
             counts.push(names.len());
             mshas.push(msha);
             if w.gate == crate::gates::rt::WORLD_M33.gate {
@@ -1180,23 +1273,30 @@ impl MPayload {
             mshas[0], counts[0], mshas[1], counts[1]
         );
         self.emit_case("frozen-inputs", "pass", "null", "null", "", "", "null", None, Some(&stats));
-        println!(
-            "== frozen inputs: PASS (4/4 hashes match the MANIFEST; the rt-m7 and rt-m33 tiers' merged objects and demand lists tie goldens/rt-m7/MANIFEST.md ({} names) and goldens/rt-m33/MANIFEST.md ({} names)) ==",
-            counts[0], counts[1]
-        );
+        if self.rt_absent.is_empty() {
+            println!(
+                "== frozen inputs: PASS (4/4 hashes match the MANIFEST; the rt-m7 and rt-m33 tiers' merged objects and demand lists tie goldens/rt-m7/MANIFEST.md ({} names) and goldens/rt-m33/MANIFEST.md ({} names)) ==",
+                counts[0], counts[1]
+            );
+        } else {
+            println!(
+                "== frozen inputs: PASS (4/4 hashes match the MANIFEST; {}) ==",
+                frozen_inputs_clause(&ties, &self.rt_absent)
+            );
+        }
         let world_lists = [
             (crate::gates::rt::WORLD_M7.gate, self.rt_demand_m7.clone()),
             (crate::gates::rt::WORLD_M33.gate, self.rt_demand_m33.clone()),
         ];
-        for (gate, list) in world_lists.iter() {
+        let absent = self.rt_absent.clone();
+        for (gate, list) in world_lists.iter().filter(|(g, _)| !absent.iter().any(|(a, _)| a == g)) {
             if let Err(e) = check_world_demand(gate, list) {
                 self.fail_case("frozen-inputs", "null", "null", "", "", None, &format!("world lists: {e}"));
             }
         }
         println!(
-            "== world lists: PASS (the rt-m7 list {} names without the sixteen double helpers; the rt-m33 list {} names with all sixteen) ==",
-            self.rt_demand_m7.len(),
-            self.rt_demand_m33.len()
+            "== world lists: PASS ({}) ==",
+            world_lists_clause(self.rt_demand_m7.len(), self.rt_demand_m33.len(), &self.rt_absent)
         );
     }
 
@@ -1889,21 +1989,36 @@ impl MPayload {
         let gjson = golden_json("goldens/payload/gctest-mps2.golden.txt", SHA_GCTEST_G, "pins");
         let (sha, path_rel) = self.link_payload("gctest");
         let run = self.run_payload_qemu("gctest", &sha, &path_rel, ExecProfile::Deterministic);
+        let (code_s, free_v, gcs_v) = self.check_gctest_run("gctest", &run, Some(COLLECTIONS_EXACT));
+        let stats = format!("{{\"collections\":{gcs_v},\"final_free\":{free_v}}}");
+        self.emit_case("gctest", "pass", &code_s, "0", &run.sha, &run.path_rel, &gjson, Some(TIMING_DET), Some(&stats));
+        println!("== case gctest: PASS (exit 0, 5 pins + ALL GOOD, final free={free_v}, collections={gcs_v}) ==");
+    }
+
+    /// The gctest run checks, shared by the gctest case and the
+    /// re-derivation leg's read of a rebuilt gctest: flavor line, managed
+    /// Main return, the handshake line, the five PASS markers, ALL GOOD on
+    /// the verdict line, no panic or exception, CR bytes present, exit 0,
+    /// the final free value the golden's own; `collections` pins the count
+    /// exact (the gate's derived value) or, when None, asks the golden's
+    /// floor of ten. Returns the exit code rendered for the case line, the
+    /// final free value and the collection count.
+    fn check_gctest_run(&mut self, case: &str, run: &PayloadRun, collections: Option<&str>) -> (String, String, String) {
         let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
         let code_s = code.to_string();
         let golden = std::fs::read(self.gold_dir.join("gctest-mps2.golden.txt")).unwrap_or_default();
         let stream = payload_stream(&run.raw);
         let glf = lf_normalize(&golden);
-        let _ = std::fs::write(self.ctx.out.join("gctest.stream"), &stream);
-        let _ = std::fs::write(self.ctx.out.join("gctest.golden.lf"), &glf);
+        let _ = std::fs::write(self.ctx.out.join(format!("{case}.stream")), &stream);
+        let _ = std::fs::write(self.ctx.out.join(format!("{case}.golden.lf")), &glf);
         if !contains_fixed(&run.raw, "flavor: payload") {
-            self.fail_case("gctest", &code_s, "0", &sha, &path_rel, Some(TIMING_DET), "kernel flavor line missing");
+            self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), "kernel flavor line missing");
         }
         if !contains_fixed(&run.raw, "[payload] managed Main returned 0") {
-            self.fail_case("gctest", &code_s, "0", &sha, &path_rel, Some(TIMING_DET), "managed Main return marker missing");
+            self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), "managed Main return marker missing");
         }
         if !contains_fixed(&run.raw, &default_entry_line(self.abi)) {
-            self.fail_case("gctest", &code_s, "0", &sha, &path_rel, Some(TIMING_DET), "the kernel-default handshake line is missing");
+            self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), "the kernel-default handshake line is missing");
         }
         for m in [
             "PASS list-survives",
@@ -1913,22 +2028,22 @@ impl MPayload {
             "PASS did-collect",
         ] {
             if !contains_fixed(&stream, m) {
-                self.fail_case("gctest", &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("pin '{m}' not found in payload stream"));
+                self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("pin '{m}' not found in payload stream"));
             }
         }
         if !final_verdict_has(&stream, "ALL GOOD") {
-            self.fail_case("gctest", &code_s, "0", &sha, &path_rel, Some(TIMING_DET), "verdict 'ALL GOOD' absent from the final summary line");
+            self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), "verdict 'ALL GOOD' absent from the final summary line");
         }
         for m in ["KERNEL PANIC", "EXCEPTION:"] {
             if contains_fixed(&run.raw, m) {
-                self.fail_case("gctest", &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("forbidden pattern '{m}' present"));
+                self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("forbidden pattern '{m}' present"));
             }
         }
         if cr_count(&run.raw) == 0 {
-            self.fail_case("gctest", &code_s, "0", &sha, &path_rel, Some(TIMING_DET), "no CR bytes in raw capture");
+            self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), "no CR bytes in raw capture");
         }
         if code != 0 {
-            self.fail_case("gctest", &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("exit {code}, wanted 0"));
+            self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("exit {code}, wanted 0"));
         }
         let want_free = final_free(&glf);
         let got_free = final_free(&stream);
@@ -1936,18 +2051,167 @@ impl MPayload {
         if !free_ok {
             let got = got_free.clone().unwrap_or_default();
             let want = want_free.clone().unwrap_or_default();
-            self.fail_case("gctest", &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("final free={got} != golden's {want}"));
+            self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("final free={got} != golden's {want}"));
         }
         let got_gcs = final_gcs(&stream);
-        if got_gcs.as_deref() != Some(COLLECTIONS_EXACT) {
-            let got = got_gcs.clone().unwrap_or_default();
-            self.fail_case("gctest", &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("collections={got} != pinned {COLLECTIONS_EXACT}"));
+        match collections {
+            Some(want) => {
+                if got_gcs.as_deref() != Some(want) {
+                    let got = got_gcs.clone().unwrap_or_default();
+                    self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("collections={got} != pinned {want}"));
+                }
+            }
+            None => {
+                let n: u64 = got_gcs.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
+                if n < 10 {
+                    let got = got_gcs.clone().unwrap_or_default();
+                    self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("collections={got} under the golden's floor of 10"));
+                }
+            }
         }
-        let free_v = got_free.unwrap_or_default();
-        let gcs_v = got_gcs.unwrap_or_default();
-        let stats = format!("{{\"collections\":{gcs_v},\"final_free\":{free_v}}}");
-        self.emit_case("gctest", "pass", &code_s, "0", &sha, &path_rel, &gjson, Some(TIMING_DET), Some(&stats));
-        println!("== case gctest: PASS (exit 0, 5 pins + ALL GOOD, final free={free_v}, collections={gcs_v}) ==");
+        (code_s, got_free.unwrap_or_default(), got_gcs.unwrap_or_default())
+    }
+
+    /// The re-derivation leg's read of one rebuilt object: linked under the
+    /// map of record against the gate's staticlib on the gate's own linker
+    /// line, booted with the program's profile, its payload stream against
+    /// the golden (rtsmoke byte for byte; gctest's pins: the five markers,
+    /// ALL GOOD on the verdict line, the final free value the golden's, ten
+    /// collections or more). Returns the image's managed-code bracket in
+    /// bytes, printed beside the frozen object's own for the record.
+    fn rederive_boot(&mut self, prog: &str, profile: ExecProfile) -> u64 {
+        let case = format!("rederive-boot-{prog}");
+        let obj_rel = format!("src/kernel/target/payload-gate/rederive/record-{prog}.o");
+        println!("== case {case}: the rebuilt {prog} linked and booted by the gate's own method against the golden ==");
+        let (ok, ld_log, path_rel) = self.link_raw(&case, &obj_rel, &[], AN500_LIB, AN500_MAP, &[]);
+        if !ok {
+            echo_file(&ld_log, "  | ");
+            self.fail_case(&case, "null", "0", "", &path_rel, None, "the rebuilt object did not link");
+        }
+        let elf = self.ctx.repo.join(&path_rel);
+        let sha = match sha256_file(&elf) {
+            Ok(s) => s,
+            Err(e) => self.ctx.gate_fail(&format!("{case}: cannot hash linked artifact: {e}")),
+        };
+        let nm = match llvm_tool(&self.facts, "llvm-nm") {
+            Ok(p) => p,
+            Err(e) => self.ctx.gate_fail(&format!("{case}: {e}")),
+        };
+        let elf_arg = elf.to_string_lossy().into_owned();
+        let sym = self.ctx.out.join(format!("{case}.nm"));
+        let scratch = self.ctx.out.join(format!("{case}.tool.stderr"));
+        let nm_run = run_captured(&nm, &[&elf_arg], &sym, &scratch, Duration::from_secs(60));
+        if !matches!(nm_run, Ok(ref o) if o.exit == 0) {
+            self.fail_case(&case, "null", "0", &sha, &path_rel, None, "llvm-nm failed on the linked ELF");
+        }
+        let dump = std::fs::read(&sym).unwrap_or_default();
+        if !word_sym_present(&dump, "__managed__Main") {
+            self.fail_case(&case, "null", "0", &sha, &path_rel, None, "symbol '__managed__Main' absent from the linked artifact");
+        }
+        let (m_lo, m_hi) = match bracket(&dump, "__rhu_managedcode_lo", "__rhu_managedcode_hi") {
+            Ok(b) => b,
+            Err(e) => self.fail_case(&case, "null", "0", &sha, &path_rel, None, &e),
+        };
+        let managed = m_hi - m_lo;
+        let frozen_managed = if prog == "gctest" { MANAGED_BYTES_GCTEST } else { MANAGED_BYTES_RTSMOKE };
+        println!("  managed code {managed} bytes (the frozen object's {frozen_managed})");
+        if prog == "gctest" {
+            let gjson = golden_json("goldens/payload/gctest-mps2.golden.txt", SHA_GCTEST_G, "pins");
+            let run = self.run_payload_qemu(&case, &sha, &path_rel, profile);
+            let (code_s, free_v, gcs_v) = self.check_gctest_run(&case, &run, None);
+            let stats = format!("{{\"collections\":{gcs_v},\"final_free\":{free_v},\"managed_bytes\":{managed}}}");
+            self.emit_case(&case, "pass", &code_s, "0", &sha, &path_rel, &gjson, Some(TIMING_DET), Some(&stats));
+            println!("== case {case}: PASS (exit 0, 5 pins + ALL GOOD, final free={free_v}, collections={gcs_v}) ==");
+        } else {
+            let gjson = golden_json("goldens/payload/rtsmoke-mps2.golden.txt", SHA_RTSMOKE_G, "bytes");
+            let run = self.run_payload_qemu(&case, &sha, &path_rel, profile);
+            let code_s = self.check_rtsmoke_run(&case, &run);
+            let stats = format!("{{\"managed_bytes\":{managed}}}");
+            self.emit_case(&case, "pass", &code_s, "0", &sha, &path_rel, &gjson, None, Some(&stats));
+            println!("== case {case}: PASS (exit 0, the payload stream byte-identical to the golden) ==");
+        }
+        managed
+    }
+
+    /// Negative control: a scratch copy of the tree with one comment line
+    /// inserted at the top of the shared system module's source, published
+    /// through the real tool -- its object must move against the record's.
+    fn rederive_control_doctored_source(&mut self, rd: &Path) {
+        const CASE: &str = "rederive-control-doctored-source";
+        const BROKE: &str = "one comment line inserted at the top of minirt.cs in a scratch copy of the payload tree";
+        println!("== control {CASE}: {BROKE} -- the object must move ==");
+        let obj = rd.join("control-doctored-source-rtsmoke.o");
+        if !obj.is_file() {
+            let log = std::fs::read_to_string(rd.join("control-doctored-source-rtsmoke.publish.log")).unwrap_or_default();
+            for l in compiler_refusal_lines(&log) {
+                println!("  | {l}");
+            }
+            self.emit_control_case(CASE, "fail", BROKE);
+            self.ctx.gate_fail(&format!("{CASE}: the doctored copy did not publish, so the control cannot read"));
+        }
+        let record = rd.join("record-rtsmoke.o");
+        match tie_object(&self.facts, &obj, &record, rd) {
+            Ok(Tie::Identical) => {
+                self.emit_control_case(CASE, "fail", BROKE);
+                self.ctx.gate_fail(&format!("{CASE}: the doctored source's object ties the record's byte for byte -- the control does not distinguish"));
+            }
+            Ok(Tie::Moved { fresh_len, frozen_len, code_moved }) => {
+                let diag = if code_moved { "the code moved" } else { "the debug strings moved, the loadable code the same" };
+                println!("  moved as predicted: {fresh_len} bytes against the record's {frozen_len} ({diag})");
+            }
+            Err(e) => {
+                self.emit_control_case(CASE, "fail", BROKE);
+                self.ctx.gate_fail(&format!("{CASE}: {e}"));
+            }
+        }
+        self.emit_control_case(CASE, "pass", BROKE);
+        println!("== control {CASE}: PASS (a source that moves is read: the object moved) ==");
+    }
+
+    /// Negative control: the same tree published with the path map absent
+    /// -- its object names the checkout and the neutral-path read refuses it.
+    fn rederive_control_unmapped(&mut self, rd: &Path, root: &str) {
+        const CASE: &str = "rederive-control-unmapped";
+        const BROKE: &str = "the path map absent (a scratch copy published with Deterministic on and no map)";
+        println!("== control {CASE}: {BROKE} -- the object must be refused as a per-checkout object ==");
+        let bytes = std::fs::read(rd.join("control-unmapped-rtsmoke.o")).unwrap_or_default();
+        if bytes.is_empty() {
+            self.emit_control_case(CASE, "fail", BROKE);
+            self.ctx.gate_fail(&format!("{CASE}: the unmapped copy did not publish, so the control cannot read"));
+        }
+        let Some(fault) = neutral_path_fault(&bytes, root) else {
+            self.emit_control_case(CASE, "fail", BROKE);
+            self.ctx.gate_fail(&format!("{CASE}: the unmapped copy's object passed the neutral-path read -- the control does not bite"));
+        };
+        println!("  refused as predicted: {fault}");
+        self.emit_control_case(CASE, "pass", BROKE);
+        println!("== control {CASE}: PASS (an object naming its checkout is refused) ==");
+    }
+
+    /// Negative control: a scratch copy whose project renames the
+    /// system-module property -- the compiler must refuse with no object,
+    /// its lines read as the leg's loud failure reads them.
+    fn rederive_control_doctored_project(&mut self, rd: &Path) {
+        const CASE: &str = "rederive-control-doctored-project";
+        const BROKE: &str = "the system-module property renamed in a scratch copy of the rtsmoke project";
+        println!("== control {CASE}: {BROKE} -- the compiler must refuse, no object ==");
+        let obj = rd.join("control-doctored-project-rtsmoke.o");
+        let log = std::fs::read_to_string(rd.join("control-doctored-project-rtsmoke.publish.log")).unwrap_or_default();
+        let lines = compiler_refusal_lines(&log);
+        if obj.is_file() {
+            self.emit_control_case(CASE, "fail", BROKE);
+            self.ctx.gate_fail(&format!("{CASE}: the doctored project published an object -- the compiler did not refuse"));
+        }
+        if lines.is_empty() {
+            self.emit_control_case(CASE, "fail", BROKE);
+            self.ctx.gate_fail(&format!("{CASE}: no object and no error line in the publish log -- the refusal cannot be read"));
+        }
+        for l in &lines {
+            println!("  | {l}");
+        }
+        println!("  refused as predicted: {} error line(s), no object", lines.len());
+        self.emit_control_case(CASE, "pass", BROKE);
+        println!("== control {CASE}: PASS (the compiler's refusal read with its lines) ==");
     }
 
     /// The frozen demand list of a board's runtime world (read at the
@@ -2033,13 +2297,27 @@ impl MPayload {
     /// control on the an500 map.
     fn run_rt_links(&mut self) {
         let _ = std::fs::create_dir_all(self.ctx.repo.join("src/kernel/target/payload-gate/rt"));
+        let absent = |w: &crate::gates::rt::RtWorld, list: &[(&str, &str)]| list.iter().any(|(g, _)| *g == w.gate);
         for b in RT_BOARDS.iter().filter(|b| b.board != "mps2-an500") {
-            self.build_rt_staticlib(b);
+            if !absent(b.world, &self.rt_absent) {
+                self.build_rt_staticlib(b);
+            }
         }
         for b in RT_BOARDS.iter() {
-            self.run_rt_link(b);
+            if absent(b.world, &self.rt_absent) {
+                println!("== case rt-link-{}: NOT RUN (frozen inputs absent: {}) ==", b.board, b.world.tier);
+            } else {
+                self.run_rt_link(b);
+            }
         }
-        self.run_rt_link_control();
+        if absent(&crate::gates::rt::WORLD_M7, &self.rt_absent) {
+            println!(
+                "== case rt-link-control: NOT RUN (frozen inputs absent: {}) ==",
+                crate::gates::rt::WORLD_M7.tier
+            );
+        } else {
+            self.run_rt_link_control();
+        }
     }
 
     /// One board: the frozen merged runtime object linked under the
@@ -2166,6 +2444,32 @@ impl MPayload {
 }
 
 /// Run the payload gate.
+/// RHU_ABI and RHU_ABI_COMPAT as include/rhu.h states them, read at gate
+/// start: the contract generation the entry handshake pins and the window's
+/// floor (1 or more, never above the generation).
+fn read_generations(repo: &Path) -> (u32, u32) {
+    let header = std::fs::read_to_string(repo.join("src/kernel/include/rhu.h")).unwrap_or_default();
+    let abi = match header_abi(&header) {
+        Some(n) => n,
+        None => {
+            println!("rhu-gate: src/kernel/include/rhu.h states no RHU_ABI (the contract generation the entry handshake pins)");
+            exit(1);
+        }
+    };
+    let compat = match header_abi_compat(&header) {
+        Some(n) if n >= 1 && n <= abi => n,
+        Some(n) => {
+            println!("rhu-gate: src/kernel/include/rhu.h states RHU_ABI_COMPAT {n} against RHU_ABI {abi} (the floor is 1 or more and never above the generation)");
+            exit(1);
+        }
+        None => {
+            println!("rhu-gate: src/kernel/include/rhu.h states no RHU_ABI_COMPAT (the window's floor the entry handshake pins)");
+            exit(1);
+        }
+    };
+    (abi, compat)
+}
+
 pub fn run(repo: &Path) -> ! {
     let (facts, qemu, qemu_v) = setup(repo);
     let ld = match resolve_payload_ld(repo, &facts) {
@@ -2190,25 +2494,7 @@ pub fn run(repo: &Path) -> ! {
     };
     let rustc_v = facts.version.clone();
     let ld_v = ld.version.clone();
-    let header = std::fs::read_to_string(repo.join("src/kernel/include/rhu.h")).unwrap_or_default();
-    let abi = match header_abi(&header) {
-        Some(n) => n,
-        None => {
-            println!("rhu-gate: src/kernel/include/rhu.h states no RHU_ABI (the contract generation the entry handshake pins)");
-            exit(1);
-        }
-    };
-    let compat = match header_abi_compat(&header) {
-        Some(n) if n >= 1 && n <= abi => n,
-        Some(n) => {
-            println!("rhu-gate: src/kernel/include/rhu.h states RHU_ABI_COMPAT {n} against RHU_ABI {abi} (the floor is 1 or more and never above the generation)");
-            exit(1);
-        }
-        None => {
-            println!("rhu-gate: src/kernel/include/rhu.h states no RHU_ABI_COMPAT (the window's floor the entry handshake pins)");
-            exit(1);
-        }
-    };
+    let (abi, compat) = read_generations(repo);
     let mut g = MPayload {
         ctx: GateCtx {
             repo: repo.to_path_buf(),
@@ -2227,6 +2513,7 @@ pub fn run(repo: &Path) -> ! {
         compat,
         rt_demand_m7: Vec::new(),
         rt_demand_m33: Vec::new(),
+        rt_absent: Vec::new(),
     };
     g.ctx.results.emit(&format!(
         "{{\"schema\":1,\"type\":\"run\",\"gate\":\"payload\",\"run\":\"payload-{}\",\"host\":\"{HOST}\",\"runner\":\"{RUNNER}\",\"chain\":{},\"tools\":{{\"qemu\":\"{}\",\"rustc\":\"{}\",\"ld\":\"{}\"}}}}",
@@ -2253,7 +2540,357 @@ pub fn run(repo: &Path) -> ! {
         println!("{DISPLAY}: FAIL -- results file failed schema validation");
         exit(1);
     }
-    println!("{DISPLAY}: PASS (20/20 cases incl. 7 negative controls)  [{qemu_v} | {rustc_v} | {ld_v}]");
+    let cases = (g.ctx.results.n_pass + g.ctx.results.n_fail + g.ctx.results.n_skip) as usize;
+    let negative = g.ctx.results.n_neg as usize;
+    let verdict = payload_verdict(cases, negative, &g.rt_absent);
+    println!("{DISPLAY}: {verdict}  [{qemu_v} | {rustc_v} | {ld_v}]");
+    exit(0);
+}
+
+/// The mapped path the tier's objects carry: the SDK's path map over the
+/// whole payload tree, one string on every host, so an object published at
+/// any directory is byte-identical and names no checkout.
+const PAYLOAD_MAPPED_PATH: &str = "/rhu/src/payload";
+
+/// The re-derivation leg's reading of one rebuilt object against its
+/// frozen one.
+enum Tie {
+    /// The bytes equal: the object re-derived.
+    Identical,
+    /// The bytes differ; whether the loadable identity (the debug sections
+    /// and the comment section removed) moved too names the class.
+    Moved { fresh_len: u64, frozen_len: u64, code_moved: bool },
+}
+
+/// The tier's presence: every frozen input the leg ties, the first absent
+/// one named.
+fn tier_fault(gold_dir: &Path) -> Option<String> {
+    for f in ["MANIFEST.md", "rtsmoke.o", "gctest.o", "rtsmoke-mps2.golden.txt", "gctest-mps2.golden.txt"] {
+        if !gold_dir.join(f).is_file() {
+            return Some(format!("goldens/payload/{f} is absent -- the tier's frozen inputs are not present, so there is nothing to tie"));
+        }
+    }
+    None
+}
+
+/// The object rows of the tier's manifest: (file, sha256, bytes) for every
+/// `.o` row of its Files table (a row is `| name | sha256 | bytes | class |`
+/// with the name and the digest in code spans, the byte count with
+/// thousands separators).
+fn manifest_object_rows(text: &str) -> Vec<(String, String, u64)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let l = line.trim_end_matches('\r').trim();
+        if !l.starts_with("| `") {
+            continue;
+        }
+        let cells: Vec<&str> = l.split('|').map(str::trim).collect();
+        if cells.len() < 5 {
+            continue;
+        }
+        let name = cells[1].trim_matches('`');
+        if !name.ends_with(".o") {
+            continue;
+        }
+        let Ok(bytes) = cells[3].replace(',', "").parse::<u64>() else {
+            continue;
+        };
+        out.push((name.to_string(), cells[2].trim_matches('`').to_string(), bytes));
+    }
+    out
+}
+
+/// The manifest's rows tie the gate's in-code pins and the objects on
+/// disk: each frozen object's row names the pinned sha256 and the file's
+/// byte count. The complaint names the first row that breaks the rule.
+fn manifest_ties(rows: &[(String, String, u64)], pins: &[(&str, &str, u64)]) -> Result<(), String> {
+    for (name, want_sha, want_len) in pins {
+        let Some((_, sha, len)) = rows.iter().find(|(n, _, _)| n == name) else {
+            return Err(format!("{name} has no object row in goldens/payload/MANIFEST.md"));
+        };
+        if sha != want_sha {
+            return Err(format!("{name}: the manifest's row names {sha}, the gate pins {want_sha}"));
+        }
+        if len != want_len {
+            return Err(format!("{name}: the manifest's row says {len} bytes, the file is {want_len}"));
+        }
+    }
+    Ok(())
+}
+
+/// A rebuilt object's paths: it carries the mapped payload path (the map
+/// applied) and never the checkout's own root -- an object that names its
+/// checkout is a per-checkout object, never tied and never frozen.
+fn neutral_path_fault(obj: &[u8], checkout_root: &str) -> Option<String> {
+    let carries = |s: &str| !s.is_empty() && obj.windows(s.len()).any(|w| w == s.as_bytes());
+    if !carries(PAYLOAD_MAPPED_PATH) {
+        return Some(format!("the object does not carry the mapped path {PAYLOAD_MAPPED_PATH} (the SDK's path map did not apply)"));
+    }
+    if carries(checkout_root) {
+        return Some(format!("the object carries the checkout's own path '{checkout_root}' (a per-checkout object)"));
+    }
+    None
+}
+
+/// The compiler's refusal, read off a publish log: its lines carrying
+/// "error" (the compiler's and the build's), the first eight.
+fn compiler_refusal_lines(log: &str) -> Vec<String> {
+    log.lines()
+        .map(|l| l.trim_end_matches('\r').trim())
+        .filter(|l| l.contains("error"))
+        .take(8)
+        .map(str::to_string)
+        .collect()
+}
+
+/// One rebuilt object against its frozen one: identical, or moved with
+/// the diagnosis from the loadable identity of both (the debug sections
+/// and the comment section removed by the toolchain's object copier, the
+/// copies hashed under `scratch_dir`).
+fn tie_object(facts: &RustcFacts, fresh: &Path, frozen: &Path, scratch_dir: &Path) -> Result<Tie, String> {
+    let a = std::fs::read(fresh).map_err(|e| format!("{}: {e}", fresh.display()))?;
+    let b = std::fs::read(frozen).map_err(|e| format!("{}: {e}", frozen.display()))?;
+    if a == b {
+        return Ok(Tie::Identical);
+    }
+    let stem = |p: &Path| p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let la = sha256_loadable(facts, fresh, &scratch_dir.join(format!("{}.fresh.loadable.o", stem(fresh))))?;
+    let lb = sha256_loadable(facts, frozen, &scratch_dir.join(format!("{}.frozen.loadable.o", stem(frozen))))?;
+    Ok(Tie::Moved { fresh_len: a.len() as u64, frozen_len: b.len() as u64, code_moved: la != lb })
+}
+
+/// THE RE-DERIVATION LEG: the tier's two programs rebuilt from
+/// `src/payload/` through the pinned .NET SDK in the publish world (the
+/// publish-side script through the publish pointer: the tree's own pin,
+/// Deterministic on, the whole payload tree mapped to one fixed string,
+/// nothing fetched) -- or, without a publish world, read from a directory
+/// named by RHU_PAYLOAD_OBJECTS holding the two objects a reader published
+/// from src/payload by the documented commands, the controls then NOT RUN
+/// with the reason on the verdict line -- each object tied
+/// byte for byte to the frozen one, the rebuilt objects linked and booted
+/// by this gate's own method against the goldens (rtsmoke's stream byte
+/// for byte, gctest's pins), then the controls through the real tool (a
+/// doctored source, the map absent, a doctored project). A compiler that
+/// refuses the system module at the pin is the leg's loud FAIL with the
+/// compiler's lines; a passing build whose bytes differ from the frozen
+/// object's reads MOVED with the diagnosis from the loadable identity, and
+/// the leg exits nonzero until the tier is re-frozen under this read. A
+/// maintainer's leg beside the gate: it needs the publish world (the pinned
+/// .NET SDK on the Linux side), NOT RUN and exit 1 without it -- never a
+/// pass.
+pub fn rederive(repo: &Path) -> ! {
+    const GATE_ID: &str = "payload-rederive";
+    const DISPLAY_ID: &str = "PAYLOAD REDERIVE";
+    const OUT_REL: &str = "src/kernel/target/payload-gate/rederive";
+    let (facts, qemu, qemu_v) = setup(repo);
+    let ld = match resolve_payload_ld(repo, &facts) {
+        Ok(l) => l,
+        Err(e) => {
+            println!("rhu-gate: {e}");
+            exit(1);
+        }
+    };
+    let gold_dir = repo.join("goldens").join("payload");
+    if let Some(f) = tier_fault(&gold_dir) {
+        println!("{DISPLAY_ID}: NOT RUN ({f})");
+        exit(1);
+    }
+    let publish = crate::gates::rt::resolve_publish(repo);
+    let objects_dir = std::env::var("RHU_PAYLOAD_OBJECTS").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    if publish.is_none() && objects_dir.is_none() {
+        println!("{DISPLAY_ID}: NOT RUN (no publish world resolved: set RHU_PUBLISH to the command prefix that runs a script in the publish world and RHU_PUBLISH_ROOT to this checkout's root there, or write tools/toolchains/publish.local with those two lines; or set RHU_PAYLOAD_OBJECTS to a directory holding rtsmoke.o and gctest.o published from src/payload by the documented commands)");
+        exit(1);
+    }
+    let words: Vec<String> = match publish.as_ref().map(|(p, _)| command_words(p)) {
+        None => Vec::new(),
+        Some(Ok(v)) if !v.is_empty() => v,
+        Some(Ok(_)) => {
+            println!("{DISPLAY_ID}: NOT RUN (the publish command prefix is empty)");
+            exit(1);
+        }
+        Some(Err(e)) => {
+            println!("{DISPLAY_ID}: NOT RUN ({e})");
+            exit(1);
+        }
+    };
+    let out = repo.join("src").join("kernel").join("target").join("payload-gate");
+    let rd = out.join("rederive");
+    if std::fs::create_dir_all(&rd).is_err() {
+        println!("rhu-gate: cannot create {}", rd.display());
+        exit(1);
+    }
+    let results = match Results::create(&out.join("payload-rederive.results.jsonl")) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("rhu-gate: cannot create results file: {e}");
+            exit(1);
+        }
+    };
+    let (abi, compat) = read_generations(repo);
+    let rustc_v = facts.version.clone();
+    let ld_v = ld.version.clone();
+    let mut g = MPayload {
+        ctx: GateCtx {
+            repo: repo.to_path_buf(),
+            gate: GATE_ID.to_string(),
+            display: DISPLAY_ID.to_string(),
+            out,
+            out_rel: "src/kernel/target/payload-gate".to_string(),
+            results,
+            qemu,
+            timeout: Duration::from_secs(TIMEOUT_S),
+        },
+        facts,
+        ld,
+        gold_dir,
+        abi,
+        compat,
+        rt_demand_m7: Vec::new(),
+        rt_demand_m33: Vec::new(),
+        rt_absent: Vec::new(),
+    };
+    g.ctx.results.emit(&format!(
+        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"{GATE_ID}\",\"run\":\"{GATE_ID}-{}\",\"host\":\"{HOST}\",\"runner\":\"{RUNNER}\",\"tools\":{{\"qemu\":\"{}\",\"rustc\":\"{}\",\"ld\":\"{}\"}}}}",
+        std::process::id(),
+        qemu_v,
+        rustc_v,
+        ld_v
+    ));
+    g.verify_frozen_inputs();
+    let mtext = std::fs::read_to_string(g.gold_dir.join("MANIFEST.md")).unwrap_or_default();
+    let len_of = |f: &str| std::fs::metadata(g.gold_dir.join(f)).map(|m| m.len()).unwrap_or(0);
+    let pins = [("rtsmoke.o", SHA_RTSMOKE_O, len_of("rtsmoke.o")), ("gctest.o", SHA_GCTEST_O, len_of("gctest.o"))];
+    if let Err(e) = manifest_ties(&manifest_object_rows(&mtext), &pins) {
+        g.fail_case("rederive-manifest", "null", "null", "", "", None, &e);
+    }
+    println!(
+        "== the manifest's object rows tie the gate's pins and the files' sizes (rtsmoke.o {} bytes, gctest.o {} bytes) ==",
+        pins[0].2, pins[1].2
+    );
+    g.build_staticlib();
+
+    let (root, controls_run) = if let Some((_, root)) = publish {
+        let case = "rederive-publish";
+        let script = format!("{root}/tools/rt-publish/payload-rebuild.sh");
+        let out_there = format!("{root}/{OUT_REL}");
+        let mut args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
+        args.push(&script);
+        args.push(&out_there);
+        println!("== case {case}: the publish world: {} {} {} ==", words.join(" "), script, out_there);
+        let script_out = rd.join("script.stdout");
+        let script_err = rd.join("script.stderr");
+        let outcome = run_captured(Path::new(&words[0]), &args, &script_out, &script_err, Duration::from_secs(2400));
+        let script_text = std::fs::read_to_string(&script_out).unwrap_or_default();
+        for l in script_text.lines() {
+            println!("  | {}", l.trim_end_matches('\r'));
+        }
+        match outcome {
+            Ok(o) if o.exit == 0 => {}
+            Ok(o) => {
+                echo_file(&script_err, "  | ");
+                g.fail_case(case, "null", "null", "", "", None, &format!("the publish-side script failed (exit {}, timed out {})", o.exit, o.timed_out));
+            }
+            Err(e) => g.fail_case(case, "null", "null", "", "", None, &format!("the publish-side script did not run: {e}")),
+        }
+        let fetched = script_text
+            .lines()
+            .filter(|l| l.starts_with("cache: ") && l.contains("fetched: ") && !l.trim_end().ends_with("fetched: none"))
+            .count();
+        if fetched != 0 {
+            g.fail_case(case, "null", "null", "", "", None, "the publish fetched into the package cache (the script's cache lines above)");
+        }
+        g.emit_case(case, "pass", "null", "null", "", "", "null", None, Some("{\"fetched\":0}"));
+        println!("== case {case}: PASS (the two programs published at the tree's pin with the payload tree mapped; nothing fetched) ==");
+        (root, true)
+    } else {
+        let dir = std::path::PathBuf::from(objects_dir.clone().unwrap_or_default());
+        let case = "rederive-objects";
+        println!("== case {case}: the objects published from src/payload by the documented commands, read from {} ==", dir.display());
+        if let Some(f) = objects_dir_fault(&dir) {
+            g.fail_case(case, "null", "null", "", "", None, &f);
+        }
+        for prog in ["rtsmoke", "gctest"] {
+            let dst = rd.join(format!("record-{prog}.o"));
+            if std::fs::copy(dir.join(format!("{prog}.o")), &dst).is_err() {
+                g.fail_case(case, "null", "null", "", "", None, &format!("{prog}.o could not be read from {}", dir.display()));
+            }
+            let _ = std::fs::remove_file(rd.join(format!("record-{prog}.publish.log")));
+        }
+        g.emit_case(case, "pass", "null", "null", "", "", "null", None, Some("{\"source\":\"objects\"}"));
+        println!("== case {case}: PASS (rtsmoke.o and gctest.o read from the directory; the publish's transcript is the reader's) ==");
+        (repo.display().to_string(), false)
+    };
+
+    let short = |s: &str| s.get(..16).unwrap_or(s).to_string();
+    let mut moved: Vec<String> = Vec::new();
+    for (prog, sha_pin) in [("rtsmoke", SHA_RTSMOKE_O), ("gctest", SHA_GCTEST_O)] {
+        let case = format!("rederive-{prog}");
+        println!("== case {case}: the object published from src/payload/{prog} against the frozen goldens/payload/{prog}.o ==");
+        let fresh = rd.join(format!("record-{prog}.o"));
+        if !fresh.is_file() {
+            let log = std::fs::read_to_string(rd.join(format!("record-{prog}.publish.log"))).unwrap_or_default();
+            for l in compiler_refusal_lines(&log) {
+                println!("  | {l}");
+            }
+            println!("{DISPLAY_ID}: FAIL (the compiler refuses the system module at this pin -- minirt no longer satisfies the ILCompiler; its lines above, the log under {OUT_REL}/record-{prog}.publish.log)");
+            g.fail_case(&case, "null", "null", "", "", None, "the publish left no object: the compiler refused");
+        }
+        let bytes = std::fs::read(&fresh).unwrap_or_default();
+        if let Some(f) = neutral_path_fault(&bytes, &root) {
+            g.fail_case(&case, "null", "null", "", "", None, &f);
+        }
+        println!("  the object carries the mapped path {PAYLOAD_MAPPED_PATH} and never the checkout's ({root})");
+        let frozen = g.gold_dir.join(format!("{prog}.o"));
+        match tie_object(&g.facts, &fresh, &frozen, &rd) {
+            Ok(Tie::Identical) => {
+                println!("  byte-identical to the frozen object ({}...; {} bytes)", short(sha_pin), bytes.len());
+                g.emit_case(&case, "pass", "null", "null", "", "", "null", None, Some(&format!("{{\"object_sha\":\"{sha_pin}\",\"bytes\":{}}}", bytes.len())));
+                println!("  PASS");
+            }
+            Ok(Tie::Moved { fresh_len, frozen_len, code_moved }) => {
+                let diag = if code_moved { "the code moved" } else { "the debug strings moved, the loadable code the same" };
+                let fresh_sha = sha256_file(&fresh).unwrap_or_default();
+                println!("  MOVED: the rebuilt object {fresh_len} bytes ({}...) against the frozen {frozen_len} bytes ({}...) -- {diag}", short(&fresh_sha), short(sha_pin));
+                g.emit_case(&case, "fail", "null", "null", "", "", "null", None, Some(&format!("{{\"fresh_sha\":\"{fresh_sha}\",\"fresh_bytes\":{fresh_len},\"frozen_bytes\":{frozen_len},\"code_moved\":{code_moved}}}")));
+                moved.push(format!("{prog}.o {frozen_len} -> {fresh_len} bytes, {diag}"));
+            }
+            Err(e) => g.fail_case(&case, "null", "null", "", "", None, &e),
+        }
+    }
+
+    let managed_rtsmoke = g.rederive_boot("rtsmoke", ExecProfile::Parity);
+    let managed_gctest = g.rederive_boot("gctest", ExecProfile::Deterministic);
+
+    if controls_run {
+        g.rederive_control_doctored_source(&rd);
+        g.rederive_control_unmapped(&rd, &root);
+        g.rederive_control_doctored_project(&rd);
+    } else {
+        for c in ["doctored-source", "unmapped", "doctored-project"] {
+            println!("== case rederive-control-{c}: NOT RUN (no publish world: the controls run each through the real tool there) ==");
+        }
+    }
+
+    let tools = format!("[{qemu_v} | {rustc_v} | {ld_v}]");
+    if !moved.is_empty() {
+        g.ctx.results.emit_summary(GATE_ID, "fail", 1);
+        let _ = validate_results(repo, g.ctx.results.path());
+        println!(
+            "{DISPLAY_ID}: MOVED ({}; the rebuilt objects boot to the goldens, their managed code {managed_rtsmoke} and {managed_gctest} bytes -- the tier is re-frozen under this read, or the source is fixed; the objects under {OUT_REL})  {tools}",
+            moved.join("; ")
+        );
+        exit(1);
+    }
+    g.ctx.results.emit_summary(GATE_ID, "pass", 0);
+    if !validate_results(repo, g.ctx.results.path()) {
+        println!("{DISPLAY_ID}: FAIL -- results file failed schema validation");
+        exit(1);
+    }
+    if controls_run {
+        println!("{DISPLAY_ID}: PASS (2/2 frozen objects re-derived byte-identical from src/payload at the pin with the payload tree mapped; the rebuilt objects boot to the goldens; 3 negative controls through the real tool; the publish world's transcript under {OUT_REL})  {tools}");
+    } else {
+        println!("{DISPLAY_ID}: PASS (2/2 frozen objects re-derived byte-identical from the objects read from the directory named, published from src/payload by the documented commands with the payload tree mapped; the rebuilt objects boot to the goldens; the 3 negative controls NOT RUN (no publish world); the objects under {OUT_REL})  {tools}");
+    }
     exit(0);
 }
 
@@ -2830,6 +3467,141 @@ pub fn selfcheck(repo: &Path) -> ! {
         "world-list-unknown",
         "a world with no demand-list rule",
         check_world_demand("rt-other", &m33_list).is_ok(),
+    );
+
+    sc.probe(
+        "rederive-tier-absent",
+        "the payload tier absent (no frozen inputs to tie)",
+        tier_fault(&tmp.join("no-such-tier")).is_none(),
+    );
+    let mtext = std::fs::read_to_string(gold_dir.join("MANIFEST.md")).unwrap_or_default();
+    let len_of = |f: &str| std::fs::metadata(gold_dir.join(f)).map(|m| m.len()).unwrap_or(0);
+    let pins = [("rtsmoke.o", SHA_RTSMOKE_O, len_of("rtsmoke.o")), ("gctest.o", SHA_GCTEST_O, len_of("gctest.o"))];
+    sc.accept_probe(
+        "rederive-manifest-genuine",
+        "the manifest's object rows tie the gate's pins and the files' sizes",
+        manifest_ties(&manifest_object_rows(&mtext), &pins).is_ok(),
+    );
+    let flipped_sha = format!("{}{}", &SHA_RTSMOKE_O[..63], if SHA_RTSMOKE_O.ends_with('0') { "1" } else { "0" });
+    let doctored_manifest = mtext.replacen(SHA_RTSMOKE_O, &flipped_sha, 1);
+    if doctored_manifest == mtext {
+        println!("PAYLOAD SELFCHECK: FAIL -- the doctored manifest edit was a no-op");
+        exit(1);
+    }
+    sc.probe(
+        "rederive-manifest-doctored",
+        "the manifest's rtsmoke.o row with one hex digit of its sha256 changed",
+        manifest_ties(&manifest_object_rows(&doctored_manifest), &pins).is_ok(),
+    );
+    let neutral = b"\x7fELF\0/rhu/src/payload/minirt/minirt.cs\0".to_vec();
+    let per_checkout = b"\x7fELF\0/checkout-a/src/payload/minirt/minirt.cs\0".to_vec();
+    sc.accept_probe(
+        "rederive-path-neutral",
+        "an object carrying the mapped payload path and no checkout path accepted",
+        neutral_path_fault(&neutral, "/checkout-a").is_none(),
+    );
+    sc.probe(
+        "rederive-path-checkout",
+        "an object carrying its checkout's own path (the map absent)",
+        neutral_path_fault(&per_checkout, "/checkout-a").is_none(),
+    );
+
+    let w7 = &crate::gates::rt::WORLD_M7;
+    let absent_root = tmp.join("rt-absent-root");
+    let _ = std::fs::remove_dir_all(&absent_root);
+    let _ = std::fs::create_dir_all(&absent_root);
+    sc.accept_probe(
+        "rt-world-absent-declared",
+        "a hosted-runtime tier absent from the checkout reads absent (declared, never tied)",
+        !rt_world_present(&absent_root, w7),
+    );
+    let present_root = tmp.join("rt-present-root");
+    let _ = std::fs::remove_dir_all(&present_root);
+    let _ = std::fs::create_dir_all(present_root.join(w7.tier.replace('/', std::path::MAIN_SEPARATOR_STR)));
+    sc.probe(
+        "rt-world-present-dir",
+        "a hosted-runtime tier directory present without its manifest (present is tied and refused, never declared)",
+        !rt_world_present(&present_root, w7)
+            || rt_world_tie(w7.gate, w7.tier, w7.pin, "", "", ("fx/merged.o", "x"), ("fx/demand.txt", "y", "")).is_ok(),
+    );
+    let fx_merged_sha = crate::sha256::sha256_hex(b"the merged object's bytes");
+    let fx_demand = "malloc\npthread_self\nSystemNative_Abort\n";
+    let fx_demand_sha = crate::sha256::sha256_hex(fx_demand.as_bytes());
+    let fx_text = format!("- `fx/merged.o`\n`{fx_merged_sha}`\n- `fx/demand.txt`\n`{fx_demand_sha}`\n");
+    let fx_pin = crate::sha256::sha256_hex(fx_text.as_bytes());
+    let tie = |text: &str, pin: &str, demand_sha: &str, demand_text: &str| {
+        rt_world_tie(
+            "rt-fx",
+            "goldens/fx",
+            pin,
+            text,
+            &crate::sha256::sha256_hex(text.as_bytes()),
+            ("fx/merged.o", &fx_merged_sha),
+            ("fx/demand.txt", demand_sha, demand_text),
+        )
+    };
+    sc.accept_probe(
+        "rt-world-tie-genuine",
+        "a present world's record ties: the manifest at its pin, both rows at the files' hashes, three demand names",
+        tie(&fx_text, &fx_pin, &fx_demand_sha, fx_demand).map(|n| n.len()) == Ok(3),
+    );
+    let flip = |s: &str| format!("{}{}", &s[..63], if s.ends_with('0') { "1" } else { "0" });
+    sc.probe(
+        "rt-world-tie-pin",
+        "the world's manifest off its pin by one hex digit",
+        tie(&fx_text, &flip(&fx_pin), &fx_demand_sha, fx_demand).is_ok(),
+    );
+    let no_merged = fx_text.replacen("- `fx/merged.o`\n", "- `fx/other.o`\n", 1);
+    sc.probe(
+        "rt-world-tie-row-missing",
+        "the merged object's row missing from the world's manifest",
+        tie(&no_merged, &crate::sha256::sha256_hex(no_merged.as_bytes()), &fx_demand_sha, fx_demand).is_ok(),
+    );
+    sc.probe(
+        "rt-world-tie-sha",
+        "the demand list's bytes off the manifest's row by one hex digit",
+        tie(&fx_text, &fx_pin, &flip(&fx_demand_sha), fx_demand).is_ok(),
+    );
+    let empty_sha = crate::sha256::sha256_hex(b"");
+    let empty_text = format!("- `fx/merged.o`\n`{fx_merged_sha}`\n- `fx/demand.txt`\n`{empty_sha}`\n");
+    sc.probe(
+        "rt-world-tie-demand-empty",
+        "the world's demand list empty (its row at the empty file's hash)",
+        tie(&empty_text, &crate::sha256::sha256_hex(empty_text.as_bytes()), &empty_sha, "").is_ok(),
+    );
+    sc.accept_probe(
+        "verdict-complete",
+        "the verdict line with every world present is the complete form",
+        payload_verdict(20, 7, &[]) == "PASS (20/20 cases incl. 7 negative controls)",
+    );
+    sc.accept_probe(
+        "verdict-declared",
+        "the verdict line with both worlds absent names the rt-link family NOT RUN and both tiers",
+        payload_verdict(13, 6, &[("rt-m7", "goldens/rt-m7"), ("rt-m33", "goldens/rt-m33")])
+            == "PASS (13/13 cases incl. 6 negative controls; the rt-link family NOT RUN: frozen inputs absent (goldens/rt-m7, goldens/rt-m33))",
+    );
+    sc.accept_probe(
+        "verdict-one-declared",
+        "the verdict line with one world absent names that world's rt-link cases and its tier",
+        payload_verdict(16, 7, &[("rt-m33", "goldens/rt-m33")])
+            == "PASS (16/16 cases incl. 7 negative controls; the rt-link cases of the rt-m33 world NOT RUN: frozen inputs absent (goldens/rt-m33))",
+    );
+
+    let objs = tmp.join("objects-dir");
+    let _ = std::fs::remove_dir_all(&objs);
+    let _ = std::fs::create_dir_all(&objs);
+    write_fixture(&objs.join("rtsmoke.o"), b"o");
+    write_fixture(&objs.join("gctest.o"), b"o");
+    sc.accept_probe(
+        "rederive-objects-genuine",
+        "a directory holding the two published objects accepted as the leg's source",
+        objects_dir_fault(&objs).is_none(),
+    );
+    let _ = std::fs::remove_file(objs.join("gctest.o"));
+    sc.probe(
+        "rederive-objects-missing",
+        "a directory missing one of the two published objects",
+        objects_dir_fault(&objs).is_none(),
     );
 
     sc.finish("genuine inputs accepted");

@@ -15,9 +15,12 @@ mod board;
 mod boot;
 mod calendar;
 mod calendar_math;
+mod claims;
 mod critical;
 mod entropy;
 mod funnel;
+mod gpio;
+mod gpio_math;
 #[cfg(feature = "fpemul")]
 mod fpemul;
 mod header;
@@ -28,6 +31,13 @@ mod abi_window;
 mod payload;
 mod registry;
 mod sched;
+
+/// The api flavor's band-interrupt control line and its handler, folded into
+/// the vector table beside the board's own lines; empty in every other image.
+#[cfg(feature = "api-smoke")]
+pub const TEST_IRQS: &[(usize, unsafe extern "C" fn())] = &[(api_smoke::FP_BAND_LINE, api_smoke::__rhu_fp_band_irq)];
+#[cfg(not(feature = "api-smoke"))]
+pub const TEST_IRQS: &[(usize, unsafe extern "C" fn())] = &[];
 mod semihost;
 
 /// The floating-point posture of this row, one line at boot: the Cortex-M7 class
@@ -120,6 +130,8 @@ pub extern "C" fn kmain() -> ! {
     calendar::init_at_boot();
     kprintln!("[boot] calendar: {}", board::RTC_LINE);
     kprintln!("[boot] fpu: {}", FPU_LINE);
+    gpio::init();
+    kprintln!("[boot] gpio: {}", gpio::banner());
 
     arena::init();
     kheap::init();
@@ -146,7 +158,9 @@ extern "C" fn kthread_main(_: usize) {
     #[cfg(feature = "sched-smoke")]
     smoke::run();
 
-    #[cfg(feature = "api-smoke")]
+    #[cfg(all(feature = "api-smoke", feature = "test-gpio-button"))]
+    api_smoke::button_flight();
+    #[cfg(all(feature = "api-smoke", not(feature = "test-gpio-button")))]
     api_smoke::run();
 
     #[cfg(feature = "payload")]
@@ -223,9 +237,9 @@ extern "C" fn kthread_main(_: usize) {
     }
     #[cfg(feature = "unhosted-main")]
     {
-        unsafe extern "C" {
-            fn rhu_unhosted_main() -> i32;
-        }
+        unsafe extern "C" { fn rhu_unhosted_main() -> i32; }
+        let tenancy = board::unhosted_tenant_init();
+        if tenancy != 0 { kprintln!("[unhosted-main] the wireless tenancy was refused: {}", tenancy); }
         let code = unsafe { rhu_unhosted_main() };
         kprintln!("[unhosted-main] entry returned {}", code);
         semihost::exit(code as u32)
@@ -433,13 +447,14 @@ __rhu_fp_clobber:
 
 
 #[cfg(feature = "api-smoke")]
+#[cfg_attr(feature = "test-gpio-button", allow(dead_code))]
 mod api_smoke {
     use core::ffi::c_void;
     use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
     use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
     use crate::critical::with_cs;
-    use crate::{api, arena, board, calendar, calendar_math, entropy, kheap, registry, sched};
+    use crate::{api, arena, board, calendar, calendar_math, entropy, gpio, gpio_math, kheap, registry, sched};
 
     fn busy_wait_ms(ms: u32) {
         let t0 = sched::now_ms();
@@ -529,7 +544,13 @@ mod api_smoke {
         check_entropy_secure();
         check_host_band();
         check_calendar();
+        check_gpio_claim();
+        check_gpio_refuse();
+        check_gpio_edge();
+        #[cfg(not(any(feature = "board-mps2-an500", feature = "board-mps2-an505")))]
+        check_gpio_edge_one_kind();
         check_fp_double();
+        check_fp_band();
         #[cfg(feature = "fpemul")]
         check_fp_frames();
         #[cfg(feature = "fp-cost")]
@@ -1569,6 +1590,238 @@ mod api_smoke {
             assert!(rtc == calendar::RTC_NONE, "calendar: the record claims a clock state {} on a row without one", rtc);
             kprintln!("[api] PASS calendar-door (the epoch at boot, the explicit set read back with its source over the elapsed clock, the replace rule, source and range refusals, no real-time clock on this row)");
         }
+    }
+
+    fn check_gpio_claim() {
+        kprintln!("[api] gpio-claim: the line space stated; a free line claimed, re-configured by the same program, released, claimed again (an output at its initial level read back before a write where the row has one)");
+        let n = api::rhu_gpio_count();
+        assert!(n == board::facts::LINE_COUNT as i32, "gpio-claim: the line space reads {}", n);
+        let l = board::facts::CHECK_FREE;
+        if let Some(o) = board::facts::CHECK_OUT {
+            assert!(api::rhu_gpio_claim(o, gpio_math::MODE_OUTPUT, gpio_math::PULL_NONE, 1) == 0, "gpio-claim: the output claim refused");
+            assert!(api::rhu_gpio_read(o) == 1, "gpio-claim: the output's initial level did not read back before a write");
+            assert!(api::rhu_gpio_claim(o, gpio_math::MODE_OUTPUT, gpio_math::PULL_NONE, 0) == 0, "gpio-claim: the same program's second claim (a re-configuration) refused");
+            assert!(api::rhu_gpio_read(o) == 0, "gpio-claim: the re-configured initial level did not read back");
+            assert!(api::rhu_gpio_write(o, 1) == 0 && api::rhu_gpio_read(o) == 1, "gpio-claim: a write did not read back");
+            assert!(api::rhu_gpio_write(o, 0) == 0 && api::rhu_gpio_read(o) == 0, "gpio-claim: a second write did not read back");
+            assert!(api::rhu_gpio_release(o) == 0, "gpio-claim: the output's release refused");
+        }
+        assert!(api::rhu_gpio_claim(l, gpio_math::MODE_INPUT, gpio_math::PULL_UP, 0) == 0, "gpio-claim: the input claim refused");
+        assert!(api::rhu_gpio_claim(l, gpio_math::MODE_INPUT, gpio_math::PULL_DOWN, 0) == 0, "gpio-claim: the input's re-configuration refused");
+        let level = api::rhu_gpio_read(l);
+        assert!(level == 0 || level == 1, "gpio-claim: the input read {}", level);
+        assert!(api::rhu_gpio_release(l) == 0, "gpio-claim: the release refused");
+        assert!(api::rhu_gpio_read(l) == sched::ERR_INVAL, "gpio-claim: a read on a released line not refused EINVAL");
+        assert!(api::rhu_gpio_claim(l, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == 0, "gpio-claim: the claim after the release refused");
+        assert!(api::rhu_gpio_release(l) == 0, "gpio-claim: the second release refused");
+        let (taken, re) = unsafe { ((*addr_of!(gpio::WITNESS)).claims_taken, (*addr_of!(gpio::WITNESS)).reconfigured) };
+        assert!(taken >= 2 && re >= 1, "gpio-claim: the witness counts {} claims and {} re-configurations", taken, re);
+        kprintln!("[api] PASS gpio-claim (the line space stated, a claim taken, the same program's second claim a re-configuration, a released line refused a read, claimed again; the output's initial level read back before a write where the row has an output)");
+    }
+
+    fn check_gpio_refuse() {
+        kprintln!("[api] gpio-refuse: the board's line, a line past the space, an unpopulated line, an input-only output claim, a write on an input, an unclaimed read and release, a bad selector -- each refused with its code");
+        let n = api::rhu_gpio_count() as u32;
+        assert!(api::rhu_gpio_claim(board::facts::CHECK_BOARD, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == gpio::ERR_BUSY, "gpio-refuse: the board's line not refused EBUSY");
+        assert!(api::rhu_gpio_claim(n, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == sched::ERR_INVAL, "gpio-refuse: the line at the space's end not refused EINVAL");
+        assert!(api::rhu_gpio_claim(n + 1000, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == sched::ERR_INVAL, "gpio-refuse: a line far past the space not refused EINVAL");
+        if let Some(u) = board::facts::CHECK_UNPOPULATED {
+            assert!(api::rhu_gpio_claim(u, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == sched::ERR_INVAL, "gpio-refuse: an unpopulated line not refused EINVAL");
+        }
+        if let Some(io) = board::facts::CHECK_INPUT_ONLY {
+            assert!(api::rhu_gpio_claim(io, gpio_math::MODE_OUTPUT, gpio_math::PULL_NONE, 0) == gpio::ERR_ACCES, "gpio-refuse: an output claim on an input-only line not refused EACCES");
+            assert!(api::rhu_gpio_claim(io, gpio_math::MODE_INPUT, gpio_math::PULL_DOWN, 0) == 0, "gpio-refuse: the input claim on the input-only line refused");
+            assert!(api::rhu_gpio_release(io) == 0, "gpio-refuse: the input-only line's release refused");
+        }
+        let l = board::facts::CHECK_FREE;
+        assert!(api::rhu_gpio_claim(l, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == 0, "gpio-refuse: the input claim refused");
+        assert!(api::rhu_gpio_write(l, 1) == gpio::ERR_ACCES, "gpio-refuse: a write on an input not refused EACCES");
+        assert!(api::rhu_gpio_release(l) == 0, "gpio-refuse: the release refused");
+        assert!(api::rhu_gpio_read(l) == sched::ERR_INVAL, "gpio-refuse: a read on an unclaimed line not refused EINVAL");
+        assert!(api::rhu_gpio_write(l, 0) == sched::ERR_INVAL, "gpio-refuse: a write on an unclaimed line not refused EINVAL");
+        assert!(api::rhu_gpio_release(l) == sched::ERR_INVAL, "gpio-refuse: a release of an unclaimed line not refused EINVAL");
+        assert!(api::rhu_gpio_edge(l, gpio_math::KIND_RISING) == sched::ERR_INVAL, "gpio-refuse: an edge on an unclaimed line not refused EINVAL");
+        assert!(api::rhu_gpio_event_word(l).is_null(), "gpio-refuse: an unclaimed line's event word not NULL");
+        assert!(api::rhu_gpio_claim(l, 7, gpio_math::PULL_NONE, 0) == sched::ERR_INVAL, "gpio-refuse: a bad mode not refused EINVAL");
+        assert!(api::rhu_gpio_claim(l, gpio_math::MODE_INPUT, 5, 0) == sched::ERR_INVAL, "gpio-refuse: a bad pull not refused EINVAL");
+        assert!(api::rhu_gpio_claim(l, gpio_math::MODE_OUTPUT, gpio_math::PULL_NONE, 2) == sched::ERR_INVAL, "gpio-refuse: a bad initial level not refused EINVAL");
+        let w = unsafe { &*addr_of!(gpio::WITNESS) };
+        assert!(w.refused_busy >= 1 && w.refused_inval >= 8 && w.refused_acces >= 1, "gpio-refuse: the witness counts busy {} inval {} acces {}", w.refused_busy, w.refused_inval, w.refused_acces);
+        assert!(w.last_refused_code == sched::ERR_INVAL, "gpio-refuse: the last refusal's code reads {}", w.last_refused_code);
+        kprintln!("[api] PASS gpio-refuse (the board's line EBUSY, the space's end and a far line EINVAL, an unpopulated line EINVAL and an input-only output claim EACCES where the row has them, a write on an input EACCES, an unclaimed read, write, release and edge EINVAL with a NULL event word, three bad selectors EINVAL, the witness's counts and last code as expected)");
+    }
+
+    static EDGE_WAIT_WORD: AtomicUsize = AtomicUsize::new(0);
+    static EDGE_WAIT_RESULT: AtomicI32 = AtomicI32::new(-1);
+    static EDGE_WAIT_DONE: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn edge_waiter(_arg: *mut c_void) {
+        let w = EDGE_WAIT_WORD.load(Ordering::Acquire) as *const u32;
+        let v = unsafe { *w };
+        let r = api::rhu_futex_wait(w, v, u64::MAX);
+        EDGE_WAIT_RESULT.store(r, Ordering::Release);
+        EDGE_WAIT_DONE.store(1, Ordering::Release);
+        api::rhu_thread_exit();
+    }
+
+    /// One edge on the armed input: the loop's output toggled where the row
+    /// has one, the software-triggered edge otherwise.
+    /// The one-kind arm on the boards' software trigger (a wire-only check:
+    /// the virtual backend has no trigger): RISING armed alone, the trigger
+    /// fired, the word moves by exactly one -- the family's handler reports
+    /// the armed kind, never a later look at the pad.
+    #[cfg(not(any(feature = "board-mps2-an500", feature = "board-mps2-an505")))]
+    fn check_gpio_edge_one_kind() {
+        kprintln!("[api] gpio-edge-one-kind: a rising-only arm on the software trigger, the word moved by one");
+        let inp = board::facts::CHECK_IN;
+        assert!(api::rhu_gpio_claim(inp, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == 0, "gpio-edge-one-kind: the input claim refused");
+        assert!(api::rhu_gpio_edge(inp, gpio_math::KIND_RISING) == 0, "gpio-edge-one-kind: the arm refused");
+        let w = api::rhu_gpio_event_word(inp);
+        assert!(!w.is_null(), "gpio-edge-one-kind: the armed line's event word is NULL");
+        let start = unsafe { *w };
+        assert!(gpio::software_edge(inp), "gpio-edge-one-kind: the software-triggered edge refused");
+        let _ = gpio_wait_count(w, start, 1);
+        api::rhu_sleep_ns(5_000_000);
+        let d = gpio_math::edges_since(unsafe { *w }, start);
+        assert!(d == 1, "gpio-edge-one-kind: the trigger counted {} times, want 1", d);
+        assert!(api::rhu_gpio_edge(inp, gpio_math::KIND_NONE) == 0, "gpio-edge-one-kind: the disarm refused");
+        assert!(api::rhu_gpio_release(inp) == 0, "gpio-edge-one-kind: the release refused");
+        kprintln!("[api] PASS gpio-edge-one-kind (a rising-only arm counted the software-triggered edge exactly once)");
+    }
+
+    /// THE BUTTON FLIGHT (the feature test-gpio-button, never a shipped
+    /// image; the boards with a button row): the LED row blinks five times
+    /// at 250 ms for the eye, then the button row is claimed with its pull
+    /// and both edges armed, and a ten-second wait on its event word lights
+    /// the LED on the first event; the outcome is printed either way -- an
+    /// interactive step that says "no press" honestly.
+    #[cfg(all(feature = "test-gpio-button", any(feature = "board-stm32f769i-disco", feature = "board-nucleo-u5a5zj-q", feature = "board-pico-2")))]
+    pub fn button_flight() {
+        let led = board::facts::LED0_LINE;
+        let off = board::facts::LED0_ACTIVE_LOW as u32;
+        let on = 1 - off;
+        assert!(api::rhu_gpio_claim(led, gpio_math::MODE_OUTPUT, gpio_math::PULL_NONE, off) == 0, "flight: the LED claim refused");
+        kprintln!("[flight] blinky: the LED row toggled five times at 250 ms");
+        for _ in 0..5 {
+            assert!(api::rhu_gpio_write(led, on) == 0, "flight: the LED write refused");
+            api::rhu_sleep_ns(250_000_000);
+            assert!(api::rhu_gpio_write(led, off) == 0, "flight: the LED write refused");
+            api::rhu_sleep_ns(250_000_000);
+        }
+        let b = board::facts::BUTTON0_LINE;
+        assert!(api::rhu_gpio_claim(b, gpio_math::MODE_INPUT, board::facts::BUTTON0_PULL, 0) == 0, "flight: the button claim refused");
+        assert!(api::rhu_gpio_edge(b, gpio_math::KIND_BOTH) == 0, "flight: the arm refused");
+        let w = api::rhu_gpio_event_word(b);
+        assert!(!w.is_null(), "flight: the button's event word is NULL");
+        let start = unsafe { *w };
+        let t0 = api::rhu_now_ns();
+        kprintln!("[flight] button: waiting up to 10 s for a press on the button row (an interactive step)");
+        let r = api::rhu_futex_wait(w, start, t0 + 10_000_000_000);
+        if gpio_math::edges_since(unsafe { *w }, start) > 0 {
+            assert!(api::rhu_gpio_write(led, on) == 0, "flight: the LED write refused");
+            kprintln!("[flight] button: pressed after {} ms; the LED lit", (api::rhu_now_ns() - t0) / 1_000_000);
+        } else {
+            kprintln!("[flight] button: no press within 10 s (an interactive step; the wait returned {})", r);
+        }
+    }
+
+    /// One edge on the input: on a row whose output loops back to the input
+    /// (the virtual backend) the toggle IS the edge; on a board the toggle
+    /// drives the LED row for the eye and the family's software trigger
+    /// makes the edge on the input.
+    fn gpio_fire_one(out: Option<u32>, inp: u32, i: u32) {
+        if let Some(o) = out {
+            assert!(api::rhu_gpio_write(o, (i % 2 == 0) as u32) == 0, "gpio-edge: the toggle {} refused", i);
+        }
+        if out.is_none() || !board::facts::LOOPBACK {
+            assert!(gpio::software_edge(inp), "gpio-edge: the software-triggered edge {} refused", i);
+        }
+    }
+
+    /// The word read until it has moved by at least `want` since `v`, within a bound.
+    fn gpio_wait_count(w: *const u32, v: u32, want: u32) -> u32 {
+        let mut spins = 0u32;
+        loop {
+            let now = unsafe { *w };
+            if gpio_math::edges_since(now, v) >= want {
+                return now;
+            }
+            spins += 1;
+            assert!(spins < 200, "gpio-edge: the word did not move by {} within the bound (at {} since {})", want, gpio_math::edges_since(now, v), v);
+            api::rhu_sleep_ns(1_000_000);
+        }
+    }
+
+    fn check_gpio_edge() {
+        kprintln!("[api] gpio-edge: an armed input counted eight spaced edges once each, a parked waiter woken by one edge through the futex, the compare-and-wait, a burst coalesced, the level and wakeup kinds refused");
+        let inp = board::facts::CHECK_IN;
+        let out = board::facts::CHECK_OUT;
+        assert!(api::rhu_gpio_claim(inp, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == 0, "gpio-edge: the input claim refused");
+        assert!(api::rhu_gpio_edge(inp, gpio_math::KIND_LEVEL_HIGH) == gpio::ERR_NOTSUP, "gpio-edge: a level kind not refused ENOTSUP");
+        assert!(api::rhu_gpio_edge(inp, gpio_math::KIND_WAKE_BOTH) == gpio::ERR_NOTSUP, "gpio-edge: a wakeup kind not refused ENOTSUP");
+        assert!(api::rhu_gpio_edge(inp, 9) == sched::ERR_INVAL, "gpio-edge: an unknown kind not refused EINVAL");
+        if let Some(o) = out {
+            assert!(api::rhu_gpio_claim(o, gpio_math::MODE_OUTPUT, gpio_math::PULL_NONE, 0) == 0, "gpio-edge: the output claim refused");
+        }
+        assert!(api::rhu_gpio_edge(inp, gpio_math::KIND_BOTH) == 0, "gpio-edge: the arm refused");
+        let w = api::rhu_gpio_event_word(inp);
+        assert!(!w.is_null(), "gpio-edge: the armed line's event word is NULL");
+        let start = unsafe { *w };
+        let mut v = start;
+        for i in 0..8u32 {
+            gpio_fire_one(out, inp, i);
+            let now = gpio_wait_count(w, v, 1);
+            let d = gpio_math::edges_since(now, v);
+            assert!(d == 1, "gpio-edge: edge {} counted {} times", i, d);
+            v = now;
+        }
+        EDGE_WAIT_WORD.store(w as usize, Ordering::Release);
+        EDGE_WAIT_RESULT.store(-1, Ordering::Release);
+        EDGE_WAIT_DONE.store(0, Ordering::Release);
+        let t = api::rhu_thread_spawn(Some(edge_waiter), core::ptr::null_mut(), 4 * 1024, 0x40, c"gpiow".as_ptr());
+        assert!(t > 0, "gpio-edge: the waiter's spawn refused {}", t);
+        let mut spins = 0u32;
+        while sched::probe_futex_waiting(w) != 1 {
+            api::rhu_sleep_ns(1_000_000);
+            spins += 1;
+            assert!(spins < 200, "gpio-edge: the waiter never parked on the event word");
+        }
+        gpio_fire_one(out, inp, 8);
+        spins = 0;
+        while EDGE_WAIT_DONE.load(Ordering::Acquire) == 0 {
+            api::rhu_sleep_ns(1_000_000);
+            spins += 1;
+            assert!(spins < 200, "gpio-edge: the waiter was not woken by the edge");
+        }
+        assert!(EDGE_WAIT_RESULT.load(Ordering::Acquire) == 0, "gpio-edge: the waiter returned {}", EDGE_WAIT_RESULT.load(Ordering::Acquire));
+        v = gpio_wait_count(w, v, 1);
+        let snap = v;
+        gpio_fire_one(out, inp, 9);
+        v = gpio_wait_count(w, snap, 1);
+        assert!(api::rhu_futex_wait(w, snap, u64::MAX) == sched::ERR_AGAIN, "gpio-edge: a wait on a moved word did not return EAGAIN at once");
+        let snap2 = v;
+        gpio_fire_one(out, inp, 10);
+        gpio_fire_one(out, inp, 11);
+        v = gpio_wait_count(w, snap2, 2);
+        assert!(gpio_math::edges_since(v, snap2) == 2, "gpio-edge: the burst counted {}", gpio_math::edges_since(v, snap2));
+        let total = gpio_math::edges_since(v, start);
+        assert!(total == 12, "gpio-edge: {} edges in all, want 12", total);
+        let counted = unsafe { (*addr_of!(gpio::WITNESS)).edges_counted };
+        assert!(counted == 12, "gpio-edge: the witness counted {} edges, the word 12", counted);
+        assert!(api::rhu_gpio_edge(inp, gpio_math::KIND_NONE) == 0, "gpio-edge: the disarm refused");
+        if let Some(o) = out {
+            assert!(api::rhu_gpio_write(o, 1) == 0, "gpio-edge: the toggle 12 refused");
+        }
+        if out.is_none() || !board::facts::LOOPBACK {
+            assert!(!gpio::software_edge(inp), "gpio-edge: the software trigger on a disarmed line was not refused");
+        }
+        api::rhu_sleep_ns(5_000_000);
+        assert!(gpio_math::edges_since(unsafe { *w }, v) == 0, "gpio-edge: a disarmed line counted an edge");
+        if let Some(o) = out {
+            assert!(api::rhu_gpio_release(o) == 0, "gpio-edge: the output's release refused");
+        }
+        assert!(api::rhu_gpio_release(inp) == 0, "gpio-edge: the input's release refused");
+        kprintln!("[api] PASS gpio-edge (eight spaced edges counted once each, a parked waiter woken by one edge through the futex, an edge between the snapshot and the wait returned EAGAIN at once, a burst of two coalesced into one count of two, the witness's count equal to the word's, a disarmed line counting nothing, the level and wakeup kinds refused)");
     }
 
     fn check_tid_wrap() {
@@ -3107,6 +3360,178 @@ mod api_smoke {
         }
         #[cfg(not(feature = "fpemul"))]
         kprintln!("[api] PASS fp-double ({} vectors computed by the hardware: the reference row)", vectors);
+    }
+
+    /// The band-interrupt control (the double-precision emulation's fault at
+    /// the floor): a band-priority exception on the row's last vector line,
+    /// pended by the tick while armed, does single-precision math on the
+    /// caller-saved and the callee-saved registers and counts how often it
+    /// landed inside an emulated form; the binary double-precision group's
+    /// digest is computed unarmed and armed and must not move; the
+    /// switch-entry witness stays clean; the emulation's counts move by the
+    /// forms alone. The counts are asserted, never printed, so the transcript
+    /// stays constant per class; the armed digest is printed, a constant the
+    /// harness pins.
+    fn check_fp_band() {
+        kprintln!("[api] fp-band: a band-priority exception firing every tick through the binary double-precision group, doing single-precision math on the caller-saved and the callee-saved registers; the digest, the switch-entry witness and the emulation's counts armed");
+        let (w0, _, _) = sched::probe_lazy_fp_witness();
+        assert!(w0 == 0, "fp-band: {} abandoned lazy floating-point states before the check", w0);
+        #[cfg(feature = "fpemul")]
+        let (t0, p0, r0) = crate::fpemul::counts();
+        let unarmed = fp_band_group();
+        #[cfg(feature = "fpemul")]
+        let (t1, _, _) = crate::fpemul::counts();
+        FP_BAND.hits.store(0, Ordering::Release);
+        FP_BAND.in_form.store(0, Ordering::Release);
+        FP_BAND.lspact.store(0, Ordering::Release);
+        fp_band_arm(true);
+        let armed = fp_band_group();
+        fp_band_arm(false);
+        let hits = FP_BAND.hits.load(Ordering::Acquire);
+        let in_form = FP_BAND.in_form.load(Ordering::Acquire);
+        let lspact = FP_BAND.lspact.load(Ordering::Acquire);
+        assert!(armed == unarmed, "fp-band: the binary group's digest moved under preemption ({:08x} armed, {:08x} unarmed)", armed, unarmed);
+        assert!(hits >= 1, "fp-band: the band exception never fired");
+        let _ = lspact;
+        #[cfg(feature = "fpemul")]
+        {
+            let (t2, p2, r2) = crate::fpemul::counts();
+            assert!(t1 - t0 == t2 - t1, "fp-band: the armed group raised {} traps, the unarmed {}", t2 - t1, t1 - t0);
+            assert!(p2 == p0 && r2 == r0, "fp-band: a promotion or a refusal during the groups ({} promoted, {} refused)", p2 - p0, r2 - r0);
+            assert!(in_form >= 1, "fp-band: no hit landed inside an emulated form ({} hits)", hits);
+        }
+        #[cfg(not(feature = "fpemul"))]
+        assert!(in_form == 0, "fp-band: {} hits found the fault active on a hardware row", in_form);
+        let (w1, fpcar, psp) = sched::probe_lazy_fp_witness();
+        assert!(w1 == 0, "fp-band: {} abandoned lazy floating-point states after the armed group (fpcar {:#010x}, psp {:#010x})", w1, fpcar, psp);
+        kprintln!("[api] fp-band: binary {} vectors digest {:08x} under preemption", 7 * 32 * 32 * 6, armed);
+        #[cfg(feature = "fpemul")]
+        kprintln!("[api] PASS fp-band (the band exception fired every tick and preempted emulated forms; the digest held under preemption; the switch-entry witness clean; the emulation's counts moved by the forms alone)");
+        #[cfg(not(feature = "fpemul"))]
+        kprintln!("[api] PASS fp-band (the band exception fired every tick through the hardware block; the digest held under preemption; the switch-entry witness clean)");
+    }
+
+    /// The binary group of the double-precision block, silent: the digest alone.
+    fn fp_band_group() -> u32 {
+        let e = &FP_EDGES;
+        let mut h = Fnv::new();
+        for &m in &FP_MODES {
+            for &a in e {
+                for &b in e {
+                    for op in 0..7 {
+                        let (r, f) = fp_bin(op, a, b, m);
+                        h.pair(r, f);
+                    }
+                }
+            }
+        }
+        h.0
+    }
+
+    /// The control's record, debug-facing and exported by symbol (four words):
+    /// armed; the hits; the hits taken while the UsageFault was active (inside
+    /// an emulated form); the hits whose body still found a lazy floating-point
+    /// save pending (0 when the handler's own prologue completed it first).
+    #[repr(C)]
+    pub struct FpBandWitness {
+        pub armed: AtomicU32,
+        pub hits: AtomicU32,
+        pub in_form: AtomicU32,
+        pub lspact: AtomicU32,
+    }
+
+    #[unsafe(export_name = "__rhu_fp_band_witness")]
+    pub static FP_BAND: FpBandWitness = FpBandWitness {
+        armed: AtomicU32::new(0),
+        hits: AtomicU32::new(0),
+        in_form: AtomicU32::new(0),
+        lspact: AtomicU32::new(0),
+    };
+
+    /// The control's line: the row's spare vector line -- one the part
+    /// implements and no handler of the kernel's claims (the table refuses
+    /// a double claim at compile time); the arming reads the line's priority
+    /// byte back, so a line the part does not implement refuses loudly
+    /// instead of never firing.
+    pub const FP_BAND_LINE: usize = crate::board::SPARE_IRQ;
+    const NVIC_ISER: usize = 0xE000_E100;
+    const NVIC_ICER: usize = 0xE000_E180;
+    const NVIC_ISPR: usize = 0xE000_E200;
+    const NVIC_ICPR: usize = 0xE000_E280;
+    const NVIC_IPR: usize = 0xE000_E400;
+    const SCB_SHCSR: *const u32 = 0xE000_ED24 as *const u32;
+    const SHCSR_USGFAULTACT: u32 = 1 << 3;
+    const FPCCR: *const u32 = 0xE000_EF34 as *const u32;
+    const FPCCR_LSPACT: u32 = 1 << 0;
+    /// The priority the control's line takes: inside the zero-latency band.
+    const FP_BAND_PRIO: u8 = 0x20;
+    const FP_BAND_BIT: u32 = 1 << ((FP_BAND_LINE % 32) as u32);
+
+    fn fp_band_reg(base: usize) -> *mut u32 {
+        (base + 4 * (FP_BAND_LINE / 32)) as *mut u32
+    }
+
+    /// The line armed: its priority in the band, read back (a priority byte
+    /// that does not take the write is a line the part does not implement:
+    /// the arming refuses, naming the line), any stale pend cleared, the
+    /// line enabled, the record's flag set; disarmed: the flag cleared, the
+    /// line disabled, the pend cleared, and the pend bit asserted clear after.
+    fn fp_band_arm(on: bool) {
+        unsafe {
+            if on {
+                write_volatile((NVIC_IPR + FP_BAND_LINE) as *mut u8, FP_BAND_PRIO);
+                let got = read_volatile((NVIC_IPR + FP_BAND_LINE) as *const u8);
+                assert!(got == FP_BAND_PRIO, "fp-band: the control line {} is not implemented on this row (its priority byte does not take a write)", FP_BAND_LINE);
+                write_volatile(fp_band_reg(NVIC_ICPR), FP_BAND_BIT);
+                write_volatile(fp_band_reg(NVIC_ISER), FP_BAND_BIT);
+                FP_BAND.armed.store(1, Ordering::Release);
+            } else {
+                FP_BAND.armed.store(0, Ordering::Release);
+                write_volatile(fp_band_reg(NVIC_ICER), FP_BAND_BIT);
+                write_volatile(fp_band_reg(NVIC_ICPR), FP_BAND_BIT);
+                assert!(read_volatile(fp_band_reg(NVIC_ISPR)) & FP_BAND_BIT == 0, "fp-band: the line still pending after the disarm");
+            }
+        }
+    }
+
+    /// The tick's hook: one pend per tick while armed (the api flavor only).
+    pub fn fp_band_tick() {
+        if FP_BAND.armed.load(Ordering::Relaxed) != 0 {
+            unsafe { write_volatile(fp_band_reg(NVIC_ISPR), FP_BAND_BIT) };
+        }
+    }
+
+    /// The control's handler: the record first (the fault active means the
+    /// hit landed inside an emulated form; the lazy-save word is what the body
+    /// still sees after the prologue's own save of d8 ran, the interrupted
+    /// context's floating-point state stacked by that first instruction), then single-precision
+    /// math through the caller-saved s0-s2 and the callee-saved s16-s17 (d8):
+    /// the registers declared, so this handler's own prologue and epilogue
+    /// carry d8 as the procedure-call standard requires of every handler.
+    pub unsafe extern "C" fn __rhu_fp_band_irq() {
+        unsafe {
+            let shcsr = read_volatile(SCB_SHCSR);
+            let fpccr = read_volatile(FPCCR);
+            FP_BAND.hits.fetch_add(1, Ordering::AcqRel);
+            if shcsr & SHCSR_USGFAULTACT != 0 {
+                FP_BAND.in_form.fetch_add(1, Ordering::AcqRel);
+            }
+            if fpccr & FPCCR_LSPACT != 0 {
+                FP_BAND.lspact.fetch_add(1, Ordering::AcqRel);
+            }
+            core::arch::asm!(
+                "vmov s1, {a}",
+                "vmov s2, {b}",
+                "vdiv.f32 s0, s1, s2",
+                "vmov s16, {a}",
+                "vmov s17, {b}",
+                "vmul.f32 s16, s16, s17",
+                a = in(reg) 0x3F80_0000u32,
+                b = in(reg) 0x4040_0000u32,
+                out("s0") _, out("s1") _, out("s2") _, out("s16") _, out("s17") _,
+                options(nomem, nostack),
+            );
+        }
     }
 
     /// The basic-frame promotion: a thread whose FIRST floating-point

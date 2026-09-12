@@ -10,6 +10,7 @@
  * crosses the boundary through the generated mapping in both directions.
  * Every descriptor belongs to exactly one band, and the console never
  * answers for a file. */
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -36,6 +37,7 @@
 #include "rhu_pal_threading_net11_rc1.h"
 #include "rhu_pal_time_net11_rc1.h"
 #include "rhu_pal_uid_net11_rc1.h"
+#include "rhu_pal_surface_net11_rc1.h"
 
 #ifndef RHU_SHIM_BREAK_FD_BASE
 _Static_assert(RHU_SHIM_FD_FILE_LO >= RHU_SHIM_FD_CONSOLE_HI, "the file band starts above the console band");
@@ -218,6 +220,8 @@ typedef struct rfs_fd {
     uint8_t used;
     uint8_t file;
     uint8_t lock;
+    uint8_t cloexec;  /* the close-on-exec bit, kept as bookkeeping */
+    uint8_t nonblock; /* the non-blocking flag, kept as bookkeeping */
     int32_t access;
     uint32_t pos;
 } rfs_fd;
@@ -225,6 +229,12 @@ typedef struct rfs_fd {
 static rfs_file g_files[RFS_FILES];
 static rfs_dir g_dirs[RFS_DIRS];
 static rfs_fd g_fds[RHU_SHIM_FD_FILE_COUNT];
+
+/* The working directory: the store's root at start; ChDir moves it to a
+ * directory that exists. The class library resolves every relative path
+ * against it before a store verb sees the path, so the store itself keys
+ * absolute paths only. */
+static char g_cwd[RFS_PATH] = "/";
 
 /* One store, one lock: every verb that reads or writes the file,
  * directory or descriptor tables holds the shim's own mutex, allocation
@@ -435,13 +445,27 @@ static int32_t file_pwrite(rfs_fd *h, const void *buf, int32_t count, int64_t at
         ERRNO = RHU_GERR_EINVAL;
         return -1;
     }
+    /* The offset against the maximum first, then the count against what
+     * remains: neither sum can wrap, and the narrowing below happens only
+     * once both fit. The summed form under the define is the one an offset
+     * near the top of the range wraps past in the C; the compiler of record
+     * folds it into the same safe comparison, so no built object carries it
+     * and no control is built from it. */
+#ifdef RHU_SHIM_BREAK_STORE_OVERFLOW
     if (at + (int64_t)count > RFS_MAX_FILE) {
+#else
+    if (at > RFS_MAX_FILE || (int64_t)count > RFS_MAX_FILE - at) {
+#endif
         ERRNO = RHU_GERR_EFBIG;
         return -1;
     }
     if (count == 0)
         return 0;
+#ifdef RHU_SHIM_BREAK_STORE_OVERFLOW
     uint32_t end = (uint32_t)(at + (int64_t)count);
+#else
+    uint32_t end = (uint32_t)at + (uint32_t)count;
+#endif
     if (file_grow(f, end) != 0) {
         ERRNO = RHU_GERR_ENOSPC;
         return -1;
@@ -665,6 +689,16 @@ static int64_t vectored(intptr_t fd, rhu_pal_iovector *v, int32_t n, int64_t at,
 {
     if (v == NULL || n < 0) {
         ERRNO = RHU_GERR_EFAULT;
+        return -1;
+    }
+    /* A positional transfer's offset is judged before any vector, so an
+     * empty transfer at an impossible offset refuses like a full one. */
+    if (positional && at < 0) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    if (positional && writing && at > RFS_MAX_FILE) {
+        ERRNO = RHU_GERR_EFBIG;
         return -1;
     }
     int64_t total = 0;
@@ -1986,16 +2020,18 @@ int32_t SystemNative_SetSignalForBreak(int32_t signalForBreak)
 /* working directory, identity, the environment, the log streams       */
 /* ------------------------------------------------------------------ */
 
-/* No served descriptor is ever non-blocking: the console answers what it
- * has and a file in the store is always ready. The query reports that,
- * and the non-blocking read is the plain read. */
+/* No served descriptor ever blocks: the console answers what it has and a
+ * file in the store is always ready. The flag a caller sets on a file
+ * descriptor is kept as bookkeeping and reported back; the console's
+ * reads 0; and the non-blocking read is the plain read. */
 int32_t SystemNative_FcntlGetIsNonBlocking(intptr_t fd, int32_t *isNonBlocking)
 {
-    if (!(fd_is_console(fd) || fd_file(fd) != NULL)) {
+    rfs_fd *h = fd_file(fd);
+    if (!(fd_is_console(fd) || h != NULL)) {
         ERRNO = RHU_GERR_EBADF;
         return -1;
     }
-    *isNonBlocking = 0;
+    *isNonBlocking = h != NULL && h->nonblock != 0 ? 1 : 0;
     return 0;
 }
 
@@ -2004,16 +2040,19 @@ int32_t SystemNative_ReadFromNonblocking(intptr_t fd, void *buffer, int32_t buff
     return SystemNative_Read(fd, buffer, bufferSize);
 }
 
-/* The working directory is the root of the file store: the one directory
- * this hosting has, so a relative path resolves under it. */
+/* The working directory is the store's word for it: the root until ChDir
+ * moves it, so a relative path resolves under the directory named. */
 char *SystemNative_GetCwd(char *buffer, int32_t bufferSize)
 {
-    if (buffer == NULL || bufferSize < 2) {
+    store_lock();
+    size_t n = strlen(g_cwd);
+    if (buffer == NULL || bufferSize <= 0 || (size_t)bufferSize <= n) {
+        store_unlock();
         ERRNO = RHU_GERR_ERANGE;
         return NULL;
     }
-    buffer[0] = '/';
-    buffer[1] = 0;
+    memcpy(buffer, g_cwd, n + 1u);
+    store_unlock();
     return buffer;
 }
 
@@ -2090,4 +2129,904 @@ void SystemNative_LogError(uint8_t *buffer, int32_t length)
 {
     if (length > 0)
         rhu_console_write(buffer, (uint32_t)length);
+}
+
+/* ------------------------------------------------------------------ */
+/* the surface beyond the gate programs' demand (F135): the answers    */
+/* RHU serves, over the store, the calendar and the kernel             */
+/* ------------------------------------------------------------------ */
+
+void *dlopen(const char *file, int mode);
+void *dlsym(void *handle, const char *name);
+
+/* The formatters: the PAL's snprintf entry points over the shim's own
+ * conversion core (the diagnostic line's set; an unsupported conversion
+ * is a loud death, never a silent wrong string), the C library's
+ * formatter never pulled. The count returned is the text's full length,
+ * the vsnprintf contract the header states. */
+static int32_t snprintf_core(char *string, int32_t size, const char *format, va_list ap)
+{
+    if (string == NULL || format == NULL || size < 0) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    return rhu_shim_vformat(string, (uint32_t)size, format, ap);
+}
+
+int32_t SystemNative_SNPrintF(char *string, int32_t size, const char *format, ...)
+{
+    va_list ap;
+    va_start(ap, format);
+    int32_t n = snprintf_core(string, size, format, ap);
+    va_end(ap);
+    return n;
+}
+
+int32_t SystemNative_SNPrintF_1S(char *string, int32_t size, const char *format, char *str)
+{
+    return SystemNative_SNPrintF(string, size, format, str);
+}
+
+int32_t SystemNative_SNPrintF_1I(char *string, int32_t size, const char *format, int arg)
+{
+    return SystemNative_SNPrintF(string, size, format, arg);
+}
+
+/* One process, one session, one principal (uid 0, gid 0, no supplementary
+ * group), one core. */
+#define RHU_SHIM_PID 1
+#define RHU_SHIM_GID 0u
+
+/* A heap copy for the answers the class library frees after marshalling. */
+static char *heap_copy(const char *s)
+{
+    size_t n = strlen(s) + 1u;
+    char *p = (char *)malloc(n);
+    if (p == NULL) {
+        ERRNO = RHU_GERR_ENOMEM;
+        return NULL;
+    }
+    memcpy(p, s, n);
+    return p;
+}
+
+int32_t SystemNative_GetPid(void)
+{
+    return RHU_SHIM_PID;
+}
+
+int32_t SystemNative_GetSid(int32_t pid)
+{
+    if (pid == 0 || pid == RHU_SHIM_PID)
+        return RHU_SHIM_PID;
+    ERRNO = RHU_GERR_ESRCH;
+    return -1;
+}
+
+uint32_t SystemNative_GetEGid(void)
+{
+    return RHU_SHIM_GID;
+}
+
+int32_t SystemNative_GetGroups(int32_t ngroups, uint32_t *groups)
+{
+    (void)groups;
+    if (ngroups < 0) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+/* The one user belongs to the group given and to no other; a buffer too
+ * small answers -1 with the count needed, the library function's contract. */
+int32_t SystemNative_GetGroupList(const char *name, uint32_t group, uint32_t *groups, int32_t *ngroups)
+{
+    if (name == NULL || groups == NULL || ngroups == NULL) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    if (strcmp(name, g_principal_name) != 0) {
+        ERRNO = RHU_GERR_ENOENT;
+        return -1;
+    }
+    if (*ngroups < 1) {
+        *ngroups = 1;
+        return -1;
+    }
+    groups[0] = group;
+    *ngroups = 1;
+    return 1;
+}
+
+char *SystemNative_GetGroupName(uint32_t gid)
+{
+    if (gid != RHU_SHIM_GID) {
+        ERRNO = RHU_GERR_ENOENT;
+        return NULL;
+    }
+    return heap_copy(g_principal_name);
+}
+
+int32_t SystemNative_GetPwNamR(const char *name, rhu_pal_passwd *pwd, char *buf, int32_t buflen)
+{
+    if (name == NULL)
+        return RHU_GERR_EINVAL;
+    if (strcmp(name, g_principal_name) != 0)
+        return -1;
+    return SystemNative_GetPwUidR(RHU_SHIM_UID, pwd, buf, buflen);
+}
+
+char **SystemNative_GetEnviron(void)
+{
+    return rhu_shim_environ();
+}
+
+void SystemNative_FreeEnviron(char **environ)
+{
+    (void)environ; /* the table is the shim's own: nothing to free */
+}
+
+/* The host name and the domain name: the device's one name. */
+static int32_t put_name(uint8_t *name, int32_t nameLength, const char *s)
+{
+    size_t n = strlen(s) + 1u;
+    if (name == NULL || nameLength <= 0 || (size_t)nameLength < n) {
+        ERRNO = RHU_GERR_ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(name, s, n);
+    return 0;
+}
+
+int32_t SystemNative_GetHostName(uint8_t *name, int32_t nameLength)
+{
+    return put_name(name, nameLength, g_principal_name);
+}
+
+int32_t SystemNative_GetDomainName(uint8_t *name, int32_t nameLength)
+{
+    return put_name(name, nameLength, g_principal_name);
+}
+
+/* The release and the version words: RHU by name, and the hosting-API
+ * contract generation as the version this image states (the sysname,
+ * release and version words the library function reports, in that
+ * order). */
+#define RHU_SHIM_STR2(x) #x
+#define RHU_SHIM_STR(x) RHU_SHIM_STR2(x)
+#define RHU_SHIM_RELEASE "rhu"
+static const char g_version_words[] = "Lamella RHU " RHU_SHIM_RELEASE " " RHU_SHIM_STR(RHU_ABI);
+
+char *SystemNative_GetUnixRelease(void)
+{
+    return heap_copy(RHU_SHIM_RELEASE);
+}
+
+/* The buffer's capacity comes in; the length needed goes out with -1 when
+ * the text does not fit, the header's contract. */
+int32_t SystemNative_GetUnixVersion(char *version, int *capacity)
+{
+    if (version == NULL || capacity == NULL || *capacity < 0) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    size_t n = strlen(g_version_words);
+    if (n + 1u > (size_t)*capacity) {
+        *capacity = (int)n + 1;
+        return -1;
+    }
+    memcpy(version, g_version_words, n + 1u);
+    return 0;
+}
+
+/* The PAL's architecture word for ARM: the third member (0-based 2) of
+ * the enumeration in pal_runtimeinformation.c at the pin (x86, x64, ARM,
+ * ARM64, ...), read off the source and stated here. */
+#define RHU_SHIM_PAL_ARCH_ARM 2
+
+int32_t SystemNative_GetOSArchitecture(void)
+{
+    return RHU_SHIM_PAL_ARCH_ARM;
+}
+
+/* The image is the one program; its path names it at the store's root,
+ * so the runtime's base directory is the root every file answer keys. */
+char *SystemNative_GetProcessPath(void)
+{
+    return heap_copy("/program");
+}
+
+/* No zone data: the calendar is UTC and every wall-clock answer says so. */
+char *SystemNative_GetDefaultTimeZone(void)
+{
+    return heap_copy("UTC");
+}
+
+const char *SystemNative_GetTimeZoneData(const char *name, int *length)
+{
+    (void)name;
+    if (length != NULL)
+        *length = 0;
+    return NULL;
+}
+
+/* The boot instant as calendar ticks since 0001-01-01: the calendar now,
+ * through the one reader, less the monotonic clock's reading. */
+int64_t SystemNative_GetBootTimeTicks(void)
+{
+    int64_t now_ticks = RHU_SHIM_UNIX_EPOCH_TICKS + rhu_shim_calendar_unix_ticks();
+    return now_ticks - (int64_t)(rhu_now_ns() / 100ull);
+}
+
+const char *SystemNative_SearchPath(int32_t folderId)
+{
+    (void)folderId;
+    return NULL;
+}
+
+const char *SystemNative_SearchPath_TempDirectory(void)
+{
+    return heap_copy("/tmp");
+}
+
+/* The file-system answers over the store. */
+int32_t SystemNative_ChDir(const char *path)
+{
+    char nb[RFS_PATH];
+    if (path == NULL) {
+        ERRNO = RHU_GERR_EFAULT;
+        return -1;
+    }
+    path = path_norm(path, nb);
+    if (strlen(path) >= RFS_PATH) {
+        ERRNO = RHU_GERR_ENAMETOOLONG;
+        return -1;
+    }
+    store_lock();
+    int is_dir = dir_exists(path);
+    int is_file = !is_dir && file_find(path) >= 0;
+    if (is_dir)
+        strcpy(g_cwd, path);
+    store_unlock();
+    if (is_dir)
+        return 0;
+    ERRNO = is_file ? RHU_GERR_ENOTDIR : RHU_GERR_ENOENT;
+    return -1;
+}
+
+/* Every byte of the source, from its start, to the destination from its
+ * start, in bounded pieces under the one store lock; the source's mode
+ * follows, as the library's copy carries the permission bits. */
+int32_t SystemNative_CopyFile(intptr_t sourceFd, intptr_t destinationFd, int64_t sourceLength)
+{
+    uint8_t chunk[256];
+    (void)sourceLength; /* the store knows the source's length */
+    store_lock();
+    rfs_fd *s = fd_file(sourceFd);
+    rfs_fd *d = fd_file(destinationFd);
+    if (s == NULL || d == NULL) {
+        store_unlock();
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    int64_t at = 0;
+    for (;;) {
+        int32_t n = file_pread(s, chunk, (int32_t)sizeof chunk, at);
+        if (n < 0) {
+            store_unlock();
+            return -1;
+        }
+        if (n == 0)
+            break;
+        if (file_pwrite(d, chunk, n, at) != n) {
+            store_unlock();
+            return -1;
+        }
+        at += n;
+    }
+    g_files[d->file].mode = g_files[s->file].mode;
+    store_unlock();
+    return 0;
+}
+
+/* The object grows to cover the region, zero-filled, as the library's
+ * preallocation does when the region lies past the end. */
+int32_t SystemNative_FAllocate(intptr_t fd, int64_t offset, int64_t length)
+{
+    if (offset < 0 || length <= 0) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    if (offset > RFS_MAX_FILE || length > RFS_MAX_FILE - offset) {
+        ERRNO = RHU_GERR_EFBIG;
+        return -1;
+    }
+    store_lock();
+    rfs_fd *h = fd_file(fd);
+    if (h == NULL || h->access == RHU_PAL_O_RDONLY) {
+        store_unlock();
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    rfs_file *f = &g_files[h->file];
+    uint32_t end = (uint32_t)(offset + length);
+    int32_t r = 0;
+    if (end > f->size) {
+        if (file_grow(f, end) != 0) {
+            ERRNO = RHU_GERR_ENOSPC;
+            r = -1;
+        } else {
+            memset(f->data + f->size, 0, end - f->size);
+            f->size = end;
+            f->mtime = rfs_now();
+        }
+    }
+    store_unlock();
+    return r;
+}
+
+/* Every byte of the store is in memory: every advice is already honored.
+ * The error code is the answer, errno untouched -- the header's contract. */
+int32_t SystemNative_PosixFAdvise(intptr_t fd, int64_t offset, int64_t length, int32_t advice)
+{
+    (void)offset;
+    (void)length;
+    (void)advice;
+    return (fd_is_console(fd) || fd_file(fd) != NULL) ? 0 : RHU_GERR_EBADF;
+}
+
+uint32_t SystemNative_FileSystemSupportsLocking(intptr_t fd, int32_t lockOperation, int32_t accessWrite)
+{
+    (void)lockOperation;
+    (void)accessWrite;
+    return fd_file(fd) != NULL ? 1u : 0u;
+}
+
+/* Region locks are the process's own in the library function this row
+ * stands for: one process never conflicts with itself, so a region lock
+ * or unlock on a store descriptor succeeds and records nothing (the
+ * sharing between descriptors is the store's advisory lock, FLock). The
+ * lock types are the class library's values at the pin: a read lock 0,
+ * a write lock 1, an unlock 2. */
+int32_t SystemNative_LockFileRegion(intptr_t fd, int64_t offset, int64_t length, int16_t lockType)
+{
+    if (offset < 0 || length < 0 || lockType < 0 || lockType > 2) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    if (fd_file(fd) == NULL) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    return 0;
+}
+
+/* The close-on-exec bit is kept and reported back (the value 1 is the
+ * glibc personality's FD_CLOEXEC); the console's descriptors carry none. */
+int32_t SystemNative_FcntlGetFD(intptr_t fd)
+{
+    if (fd_is_console(fd))
+        return 0;
+    rfs_fd *h = fd_file(fd);
+    if (h == NULL) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    return h->cloexec != 0 ? 1 : 0;
+}
+
+int32_t SystemNative_FcntlSetFD(intptr_t fd, int32_t flags)
+{
+    if (fd_is_console(fd))
+        return 0;
+    rfs_fd *h = fd_file(fd);
+    if (h == NULL) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    h->cloexec = (flags & 1) != 0 ? 1u : 0u;
+    return 0;
+}
+
+int32_t SystemNative_FcntlSetIsNonBlocking(intptr_t fd, int32_t isNonBlocking)
+{
+    if (fd_is_console(fd))
+        return 0;
+    rfs_fd *h = fd_file(fd);
+    if (h == NULL) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    h->nonblock = isNonBlocking != 0 ? 1u : 0u;
+    return 0;
+}
+
+int32_t SystemNative_FcntlCanGetSetPipeSz(void)
+{
+    return 0;
+}
+
+int32_t SystemNative_CanGetHiddenFlag(void)
+{
+    return 0;
+}
+
+int32_t SystemNative_LChflagsCanSetHiddenFlag(void)
+{
+    return 0;
+}
+
+int32_t SystemNative_IsAtomicNonInheritablePipeCreationSupported(void)
+{
+    return 1;
+}
+
+void SystemNative_GetDeviceIdentifiers(uint64_t dev, uint32_t *majorNumber, uint32_t *minorNumber)
+{
+    (void)dev;
+    if (majorNumber != NULL)
+        *majorNumber = 0;
+    if (minorNumber != NULL)
+        *minorNumber = 0;
+}
+
+char *SystemNative_RealPath(const char *path)
+{
+    return realpath(path, NULL);
+}
+
+/* The temporary makers: the template's six trailing X's (before the
+ * suffix, when one is named) are replaced from a counter in base 36 and
+ * the object is created exclusively; a name taken moves the counter and
+ * tries again, a bounded number of times. */
+static uint32_t g_temp_counter;
+
+static int temp_template(const char *tmpl, int32_t suffixLength, size_t *xs_end)
+{
+    size_t n = strlen(tmpl);
+    if (suffixLength < 0 || (size_t)suffixLength > n || n - (size_t)suffixLength < 6u)
+        return -1;
+    *xs_end = n - (size_t)suffixLength;
+    for (size_t i = *xs_end - 6u; i < *xs_end; i++) {
+        if (tmpl[i] != 'X')
+            return -1;
+    }
+    return 0;
+}
+
+static void temp_stamp(char *tmpl, size_t xs_end)
+{
+    static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    uint32_t v = ++g_temp_counter;
+    for (size_t i = 0; i < 6u; i++) {
+        tmpl[xs_end - 1u - i] = digits[v % 36u];
+        v /= 36u;
+    }
+}
+
+char *SystemNative_MkdTemp(char *pathTemplate)
+{
+    size_t xe;
+    if (pathTemplate == NULL || temp_template(pathTemplate, 0, &xe) != 0) {
+        ERRNO = RHU_GERR_EINVAL;
+        return NULL;
+    }
+    store_lock();
+    for (int tries = 0; tries < 64; tries++) {
+        temp_stamp(pathTemplate, xe);
+        if (mkdir_locked(pathTemplate) == 0) {
+            store_unlock();
+            return pathTemplate;
+        }
+        if (ERRNO != RHU_GERR_EEXIST) {
+            store_unlock();
+            return NULL;
+        }
+    }
+    store_unlock();
+    ERRNO = RHU_GERR_EEXIST;
+    return NULL;
+}
+
+intptr_t SystemNative_MksTemps(char *pathTemplate, int32_t suffixLength)
+{
+    size_t xe;
+    if (pathTemplate == NULL || temp_template(pathTemplate, suffixLength, &xe) != 0) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    store_lock();
+    for (int tries = 0; tries < 64; tries++) {
+        temp_stamp(pathTemplate, xe);
+        intptr_t fd = open_locked(pathTemplate, RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0600);
+        if (fd >= 0) {
+            store_unlock();
+            return fd;
+        }
+        if (ERRNO != RHU_GERR_EEXIST) {
+            store_unlock();
+            return -1;
+        }
+    }
+    store_unlock();
+    ERRNO = RHU_GERR_EEXIST;
+    return -1;
+}
+
+void SystemNative_Sync(void)
+{
+    /* the store is memory: every write is already durable as far as it goes */
+}
+
+int32_t SystemNative_WriteToNonblocking(intptr_t fd, const void *buffer, int32_t bufferSize)
+{
+    return SystemNative_Write(fd, buffer, bufferSize);
+}
+
+/* One mount point, the store's root; its space is the store's stated
+ * bounds (the file slots times the maximum file size) less what the files
+ * hold; its type name the store's own. */
+static int mount_known(const char *name, char *nb)
+{
+    const char *p = path_norm(name, nb);
+    return strcmp(p, "/") == 0 || dir_exists(p) || file_find(p) >= 0;
+}
+
+int32_t SystemNative_GetAllMountPoints(MountPointFound onFound, void *context)
+{
+    if (onFound == NULL) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    onFound(context, "/");
+    return 0;
+}
+
+int32_t SystemNative_GetSpaceInfoForMountPoint(const char *name, rhu_pal_mountpointinformation *mpi)
+{
+    char nb[RFS_PATH];
+    if (name == NULL || mpi == NULL) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    store_lock();
+    int known = mount_known(name, nb);
+    uint64_t used = 0;
+    for (int i = 0; i < RFS_FILES; i++) {
+        if (g_files[i].used != 0)
+            used += g_files[i].size;
+    }
+    store_unlock();
+    if (!known) {
+        ERRNO = RHU_GERR_ENOENT;
+        return -1;
+    }
+    uint64_t total = (uint64_t)RFS_FILES * (uint64_t)RFS_MAX_FILE;
+    mpi->TotalSize = total;
+    mpi->TotalFreeSpace = total > used ? total - used : 0u;
+    mpi->AvailableFreeSpace = mpi->TotalFreeSpace;
+    return 0;
+}
+
+int32_t SystemNative_GetFileSystemTypeNameForMountPoint(const char *name, char *formatNameBuffer, int32_t bufferLength, int64_t *formatType)
+{
+    char nb[RFS_PATH];
+    static const char fs_name[] = "rhustore";
+    if (name == NULL || formatNameBuffer == NULL || formatType == NULL || bufferLength < (int32_t)sizeof fs_name) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    store_lock();
+    int known = mount_known(name, nb);
+    store_unlock();
+    if (!known) {
+        ERRNO = RHU_GERR_ENOENT;
+        return -1;
+    }
+    memcpy(formatNameBuffer, fs_name, sizeof fs_name);
+    *formatType = 0;
+    return 0;
+}
+
+/* The process knobs: the hosted band runs at one flat priority by the
+ * kernel's law, so a priority reads 0 and a change is accepted without
+ * effect; the limits are the kernel's and the store's, the ones RHU has
+ * no bound for unbounded (the PAL's word for infinity); the path limits
+ * the store's; one core. */
+int32_t SystemNative_GetPriority(int32_t which, int32_t who)
+{
+    (void)which;
+    (void)who;
+    return 0;
+}
+
+int32_t SystemNative_SetPriority(int32_t which, int32_t who, int32_t nice)
+{
+    (void)which;
+    (void)who;
+    (void)nice;
+    return 0;
+}
+
+#define RHU_SHIM_RLIM_INFINITY UINT64_MAX
+
+int32_t SystemNative_GetRLimit(int32_t resourceType, rhu_pal_rlimit *limits)
+{
+    uint64_t v;
+    if (limits == NULL) {
+        ERRNO = RHU_GERR_EFAULT;
+        return -1;
+    }
+    switch (resourceType) {
+    case RHU_PAL_RLIMIT_NOFILE:
+        v = (uint64_t)(RHU_SHIM_FD_FILE_LO + RHU_SHIM_FD_FILE_COUNT);
+        break;
+    case RHU_PAL_RLIMIT_FSIZE:
+        v = (uint64_t)RFS_MAX_FILE;
+        break;
+    case RHU_PAL_RLIMIT_NPROC:
+        v = 1u;
+        break;
+    case RHU_PAL_RLIMIT_CPU:
+    case RHU_PAL_RLIMIT_DATA:
+    case RHU_PAL_RLIMIT_STACK:
+    case RHU_PAL_RLIMIT_CORE:
+    case RHU_PAL_RLIMIT_AS:
+    case RHU_PAL_RLIMIT_RSS:
+    case RHU_PAL_RLIMIT_MEMLOCK:
+        v = RHU_SHIM_RLIM_INFINITY;
+        break;
+    default:
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    limits->CurrentLimit = v;
+    limits->MaximumLimit = v;
+    return 0;
+}
+
+int32_t SystemNative_SetRLimit(int32_t resourceType, const rhu_pal_rlimit *limits)
+{
+    if (limits == NULL) {
+        ERRNO = RHU_GERR_EFAULT;
+        return -1;
+    }
+    if (resourceType < RHU_PAL_RLIMIT_CPU || resourceType > RHU_PAL_RLIMIT_NOFILE) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+int64_t SystemNative_PathConf(const char *path, int32_t name)
+{
+    (void)path;
+    switch (name) {
+    case RHU_PAL_PC_LINK_MAX:
+        return 1;
+    case RHU_PAL_PC_MAX_CANON:
+    case RHU_PAL_PC_MAX_INPUT:
+        return 255;
+    case RHU_PAL_PC_NAME_MAX:
+    case RHU_PAL_PC_PATH_MAX:
+        return RFS_PATH - 1;
+    case RHU_PAL_PC_PIPE_BUF:
+    case RHU_PAL_PC_VDISABLE:
+        return 0;
+    case RHU_PAL_PC_CHOWN_RESTRICTED:
+    case RHU_PAL_PC_NO_TRUNC:
+        return 1;
+    default:
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+}
+
+int32_t SystemNative_SchedGetAffinity(int32_t pid, intptr_t *mask)
+{
+    if (mask == NULL) {
+        ERRNO = RHU_GERR_EFAULT;
+        return -1;
+    }
+    if (pid != 0 && pid != RHU_SHIM_PID) {
+        ERRNO = RHU_GERR_ESRCH;
+        return -1;
+    }
+    *mask = 1;
+    return 0;
+}
+
+int32_t SystemNative_SchedSetAffinity(int32_t pid, intptr_t *mask)
+{
+    if (mask == NULL) {
+        ERRNO = RHU_GERR_EFAULT;
+        return -1;
+    }
+    if (pid != 0 && pid != RHU_SHIM_PID) {
+        ERRNO = RHU_GERR_ESRCH;
+        return -1;
+    }
+    if ((*mask & 1) == 0) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+/* The system log is the console: the message, a format with one string
+ * conversion as the class library writes it, through the shim's core. */
+static int32_t format_one(char *buf, uint32_t cap, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int32_t n = rhu_shim_vformat(buf, cap, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+void SystemNative_SysLog(int32_t priority, const char *message, const char *arg1)
+{
+    char text[160];
+    if (message == NULL)
+        return;
+    format_one(text, (uint32_t)sizeof text, message, arg1 != NULL ? arg1 : "(null)");
+    rhu_shim_log("syslog priority %d: %s", priority, text);
+}
+
+/* The cross-process mutex on a single-program device: a futex word (0
+ * free, 1 held) with the owner and abandoned words the class library
+ * keeps through the accessors, in the block of _Size bytes the class
+ * library allocates. Acquire's timeout follows the library's own
+ * dispatch (-1 waits, 0 tries, else a bounded wait) and the answers are
+ * the PAL's own errors: success, EBUSY for a failed try, ETIMEDOUT for a
+ * passed deadline. */
+typedef struct rhu_xpm {
+    uint32_t word;
+    uint32_t owner_pid;
+    uint32_t owner_tid;
+    uint8_t abandoned;
+    uint8_t pad[3];
+} rhu_xpm;
+
+static int xpm_try(rhu_xpm *m)
+{
+    uint32_t expected = 0u;
+    return __atomic_compare_exchange_n(&m->word, &expected, 1u, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+
+int32_t SystemNative_LowLevelCrossProcessMutex_Size(void)
+{
+    return (int32_t)sizeof(rhu_xpm);
+}
+
+int32_t SystemNative_LowLevelCrossProcessMutex_Init(LowLevelCrossProcessMutex *mutex)
+{
+    if (mutex == NULL)
+        return RHU_PAL_EINVAL;
+    memset(mutex, 0, sizeof(rhu_xpm));
+    return RHU_PAL_SUCCESS;
+}
+
+int32_t SystemNative_LowLevelCrossProcessMutex_Acquire(LowLevelCrossProcessMutex *mutex, int32_t timeoutMilliseconds)
+{
+    rhu_xpm *m = (rhu_xpm *)mutex;
+    if (m == NULL)
+        return RHU_PAL_EINVAL;
+    if (xpm_try(m))
+        return RHU_PAL_SUCCESS;
+    if (timeoutMilliseconds == 0)
+        return RHU_PAL_EBUSY;
+    uint64_t deadline = timeoutMilliseconds < 0 ? RHU_DEADLINE_NONE
+                                                : rhu_now_ns() + (uint64_t)timeoutMilliseconds * 1000000ull;
+    for (;;) {
+        int32_t rc = rhu_futex_wait(&m->word, 1u, deadline);
+        if (xpm_try(m))
+            return RHU_PAL_SUCCESS;
+        if (rc == RHU_ETIMEDOUT)
+            return RHU_PAL_ETIMEDOUT;
+    }
+}
+
+int32_t SystemNative_LowLevelCrossProcessMutex_Release(LowLevelCrossProcessMutex *mutex)
+{
+    rhu_xpm *m = (rhu_xpm *)mutex;
+    if (m == NULL)
+        return RHU_PAL_EINVAL;
+    __atomic_store_n(&m->word, 0u, __ATOMIC_RELEASE);
+    rhu_futex_wake(&m->word, 1u);
+    return RHU_PAL_SUCCESS;
+}
+
+int32_t SystemNative_LowLevelCrossProcessMutex_Destroy(LowLevelCrossProcessMutex *mutex)
+{
+    return mutex != NULL ? RHU_PAL_SUCCESS : RHU_PAL_EINVAL;
+}
+
+void SystemNative_LowLevelCrossProcessMutex_GetOwnerProcessAndThreadId(LowLevelCrossProcessMutex *mutex, uint32_t *pOwnerProcessId, uint32_t *pOwnerThreadId)
+{
+    rhu_xpm *m = (rhu_xpm *)mutex;
+    if (m == NULL)
+        return;
+    if (pOwnerProcessId != NULL)
+        *pOwnerProcessId = m->owner_pid;
+    if (pOwnerThreadId != NULL)
+        *pOwnerThreadId = m->owner_tid;
+}
+
+void SystemNative_LowLevelCrossProcessMutex_SetOwnerProcessAndThreadId(LowLevelCrossProcessMutex *mutex, uint32_t ownerProcessId, uint32_t ownerThreadId)
+{
+    rhu_xpm *m = (rhu_xpm *)mutex;
+    if (m == NULL)
+        return;
+    m->owner_pid = ownerProcessId;
+    m->owner_tid = ownerThreadId;
+}
+
+uint8_t SystemNative_LowLevelCrossProcessMutex_IsAbandoned(LowLevelCrossProcessMutex *mutex)
+{
+    rhu_xpm *m = (rhu_xpm *)mutex;
+    return m != NULL ? m->abandoned : 0u;
+}
+
+void SystemNative_LowLevelCrossProcessMutex_SetAbandoned(LowLevelCrossProcessMutex *mutex, uint8_t isAbandoned)
+{
+    rhu_xpm *m = (rhu_xpm *)mutex;
+    if (m != NULL)
+        m->abandoned = isAbandoned;
+}
+
+/* The loader, through the shim's one library-load path (the loader seam
+ * with its hooks): no loadable library exists on this system, so a load
+ * answers null with its reason and a lookup on a null handle answers
+ * null; a native library reaches a program at build time, linked into
+ * the image. */
+void *SystemNative_LoadLibrary(const char *filename)
+{
+    return dlopen(filename, 1);
+}
+
+void *SystemNative_GetLoadLibraryError(void)
+{
+    return (void *)"no loadable library on this system";
+}
+
+void *SystemNative_GetProcAddress(void *handle, const char *symbol)
+{
+    return dlsym(handle, symbol);
+}
+
+void SystemNative_FreeLibrary(void *handle)
+{
+    (void)handle;
+}
+
+void *SystemNative_GetDefaultSearchOrderPseudoHandle(void)
+{
+    return NULL;
+}
+
+/* The platform-foreign names, answered as their platforms' absence. */
+void *SystemNative_CreateAutoreleasePool(void)
+{
+    return NULL;
+}
+
+void SystemNative_DrainAutoreleasePool(void *pool)
+{
+    (void)pool;
+}
+
+const char *SystemNative_iOSSupportVersion(void)
+{
+    return NULL;
+}
+
+int32_t SystemNative_GetNextAreaInfo(int32_t team, intptr_t *cookie, AreaInfo *areaInfo)
+{
+    (void)team;
+    (void)cookie;
+    (void)areaInfo;
+    ERRNO = RHU_GERR_ENOSYS;
+    return -1;
 }

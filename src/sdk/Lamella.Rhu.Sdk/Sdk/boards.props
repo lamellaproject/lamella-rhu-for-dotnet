@@ -1,0 +1,32 @@
+<Project>
+
+  <!-- The board table: one row per target name, spelled maker-product.
+       A row names the processor class, the payload map, the prebuilt
+       kernel, the runtime archive set, the build-attributes donor, the
+       tier objects the image links in the link's order (the five shim
+       objects and the P/Invoke-facing surface object, the three collector
+       row objects, the C-library closure),
+       the emulator machine and the image base. Every path is relative to
+       the package root. -->
+  <ItemGroup>
+    <RhuBoardRow Include="arm-mps2-an500"
+                 Class="cortex-m7"
+                 Map="maps/payload-mps2-an500.x"
+                 Kernel="kernels/arm-mps2-an500/librhu_kernel.a"
+                 Archives="archives/cortex-m7"
+                 Donor="tier/cortex-m7/attr-donor-v7em.bin"
+                 Objects="tier/cortex-m7/shim-core.o tier/cortex-m7/shim-sysnative.o tier/cortex-m7/shim-libc-glue.o tier/cortex-m7/shim-stdio-sym.o tier/cortex-m7/shim-host.o tier/cortex-m7/shim-pal-surface.o tier/cortex-m7/skel-row.o tier/cortex-m7/heap-row.o tier/cortex-m7/collect-row.o tier/cortex-m7/rt-libc.o"
+                 Machine="mps2-an500"
+                 Base="0x00000000" />
+    <RhuBoardRow Include="arm-mps2-an505"
+                 Class="cortex-m33"
+                 Map="maps/payload-mps2-an505.x"
+                 Kernel="kernels/arm-mps2-an505/librhu_kernel.a"
+                 Archives="archives/cortex-m33"
+                 Donor="tier/cortex-m33/attr-donor-v8m.bin"
+                 Objects="tier/cortex-m33/shim-core-an505.o tier/cortex-m33/shim-sysnative-an505.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-an505.o tier/cortex-m33/collect-row-an505.o tier/cortex-m33/rt-libc.o"
+                 Machine="mps2-an505"
+                 Base="0x10000000" />
+  </ItemGroup>
+
+</Project>

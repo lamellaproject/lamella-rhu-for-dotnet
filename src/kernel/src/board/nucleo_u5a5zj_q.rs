@@ -48,6 +48,14 @@ pub const KMAIN_STACK_BYTES: usize = 16 * 1024;
 /// fires, and its slot costs eight bytes of flash.
 pub const NIRQ: usize = 141;
 
+/// The vector line a test image may claim: RM0456's position 138 (DCACHE2),
+/// the last line this part implements -- the two reserved positions above
+/// it take no priority write, so a control pended there would never fire;
+/// its peripheral is never clocked by the kernel, the line claimed by no
+/// kernel handler.
+#[allow(dead_code)]
+pub const SPARE_IRQ: usize = 138;
+
 /// FPU shape: FPv5 SINGLE precision (the Cortex-M33 FPU) -- kernel
 /// f64 stays on the soft-float path. Consumed by records and gates,
 /// never by context-switch code (lazy stacking is FP-shape-agnostic).
@@ -189,6 +197,8 @@ const USART1_IRQ_PRIO: u8 = 0xE0;
 /// into the vector table by the boot module: USART1's line, the console
 /// ring's transmit drain.
 pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[(USART1_IRQ, __rhu_u5a5_usart1_irq)];
+/// The family GPIO driver's external-interrupt lines (the U5 arm).
+pub use super::stm32_gpio::IRQS as GPIO_IRQS;
 
 /// Enforce the HSI16 posture. Entry assumes nothing: out of reset the
 /// part runs on MSIS at 0 wait states, and a probe or resident image
@@ -581,35 +591,49 @@ pub fn entropy_init() -> bool {
     }
 }
 
-/// One draw: per 32-bit word, under the kernel critical section, the
-/// status first -- an error flag is the health check failing at this
-/// draw (counted; the policy retires the source), a ready word is read
-/// (a zero word is the raced seed error the manual names, treated the
-/// same) -- and the wait for a word is bounded. The bytes land in the
+/// One draw: per 32-bit word, THE WAIT OUTSIDE ANY SECTION -- the status
+/// polled in the caller's thread until a word is ready or a flag is set,
+/// under the bound -- then, under the kernel critical section, the status
+/// read again and, still ready and clean, the data word read: an error
+/// flag is the health check failing at this draw (counted; the policy
+/// retires the source), a zero word the raced seed error the manual names,
+/// treated the same. The section covers two or three bus reads and never
+/// a wait: an interrupt at or above the ceiling is delayed by those reads
+/// alone, the zero-latency band below it never. The bytes land in the
 /// caller's buffer word by word; the policy layer copies out only when
 /// the whole draw succeeded.
 pub fn entropy_draw(buf: &mut [u8], counters: &mut super::DrawCounters) -> Result<(), super::EntropyErr> {
     for chunk in buf.chunks_mut(4) {
-        let word = crate::critical::with_cs(|| unsafe {
-            let mut n = 0u32;
-            loop {
-                let sr = read_volatile(RNG_SR);
-                if sr & RNG_SR_ERRORS != 0 {
-                    return Err(super::EntropyErr::Health);
-                }
-                if sr & RNG_SR_DRDY != 0 {
+        let mut n = 0u32;
+        let word = loop {
+            let sr = unsafe { read_volatile(RNG_SR) };
+            if sr & RNG_SR_ERRORS != 0 {
+                break Err(super::EntropyErr::Health);
+            }
+            if sr & RNG_SR_DRDY != 0 {
+                let got = crate::critical::with_cs(|| unsafe {
+                    let sr = read_volatile(RNG_SR);
+                    if sr & RNG_SR_ERRORS != 0 {
+                        return Some(Err(super::EntropyErr::Health));
+                    }
+                    if sr & RNG_SR_DRDY == 0 {
+                        return None;
+                    }
                     let w = read_volatile(RNG_DR);
                     if w == 0 {
-                        return Err(super::EntropyErr::Health);
+                        return Some(Err(super::EntropyErr::Health));
                     }
-                    return Ok(w);
-                }
-                n += 1;
-                if n > SPIN_2MS {
-                    return Err(super::EntropyErr::Timeout);
+                    Some(Ok(w))
+                });
+                if let Some(r) = got {
+                    break r;
                 }
             }
-        });
+            n += 1;
+            if n > SPIN_2MS {
+                break Err(super::EntropyErr::Timeout);
+            }
+        };
         match word {
             Ok(w) => chunk.copy_from_slice(&w.to_le_bytes()[..chunk.len()]),
             Err(e) => {

@@ -1,0 +1,78 @@
+<Project>
+
+  <!-- Lamella RHU for .NET: the SDK's properties, evaluated before the
+       project's own body. The .NET SDK is imported first, so a project's
+       Directory.Build.props is read before the defaults below; every
+       default yields to a value the project or its environment sets, and
+       the targets refuse a value the build contract forbids. -->
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+
+  <PropertyGroup>
+    <UsingLamellaRhuSdk>true</UsingLamellaRhuSdk>
+    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">0.1.0-a</RhuSdkVersion>
+    <!-- The runtime build this SDK version was tested against: the
+         ILCompiler pack and the runtime pack are pinned at it, whatever
+         .NET SDK is installed. -->
+    <RhuRuntimeVersion Condition="'$(RhuRuntimeVersion)' == ''">11.0.0-rc.1.26425.128</RhuRuntimeVersion>
+    <RhuSdkRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..'))</RhuSdkRoot>
+    <RhuHostRid Condition="'$(RhuHostRid)' == ''">$(NETCoreSdkPortableRuntimeIdentifier)</RhuHostRid>
+    <RhuToolsPackageId>Lamella.Rhu.Tools.$(RhuHostRid)</RhuToolsPackageId>
+  </PropertyGroup>
+
+  <!-- The defaults of an RHU project: full .NET at net11.0, compiled ahead
+       of time for the ARM runtime identifier, self-contained. -->
+  <PropertyGroup>
+    <TargetFramework Condition="'$(TargetFramework)' == ''">net11.0</TargetFramework>
+    <OutputType Condition="'$(OutputType)' == ''">Exe</OutputType>
+    <PublishAot Condition="'$(PublishAot)' == ''">true</PublishAot>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">linux-arm</RuntimeIdentifier>
+    <SelfContained Condition="'$(SelfContained)' == ''">true</SelfContained>
+    <RuntimeFrameworkVersion Condition="'$(RuntimeFrameworkVersion)' == ''">$(RhuRuntimeVersion)</RuntimeFrameworkVersion>
+  </PropertyGroup>
+
+  <!-- The two knobs of an RHU image and their mapping to the runtime's own
+       build properties, so a value in a build log says what it means:
+
+         knob            values       default   underlying
+         RhuDiag         min | rich   min       StackTraceSupport, UseSystemResourceKeys
+         RhuReflection   on  | off    on        the compiler argument reflectiondata:none
+
+       The fixed posture of every image follows: invariant culture, no
+       event source, no metrics, no debugger support, size over speed. -->
+  <PropertyGroup>
+    <RhuDiag Condition="'$(RhuDiag)' == ''">min</RhuDiag>
+    <RhuReflection Condition="'$(RhuReflection)' == ''">on</RhuReflection>
+    <StackTraceSupport Condition="'$(RhuDiag)' == 'rich'">true</StackTraceSupport>
+    <StackTraceSupport Condition="'$(RhuDiag)' == 'min'">false</StackTraceSupport>
+    <UseSystemResourceKeys Condition="'$(RhuDiag)' == 'rich'">false</UseSystemResourceKeys>
+    <UseSystemResourceKeys Condition="'$(RhuDiag)' == 'min'">true</UseSystemResourceKeys>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EventSourceSupport>false</EventSourceSupport>
+    <MetricsSupport>false</MetricsSupport>
+    <DebuggerSupport>false</DebuggerSupport>
+    <OptimizationPreference>Size</OptimizationPreference>
+  </PropertyGroup>
+
+  <!-- The build is deterministic and the project's directory is mapped to
+       one fixed string, the same on every host, so a program's assembly,
+       its compiled object and its image are byte-identical across desks
+       and directories; a project's own PathMap value wins. -->
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+    <PathMap Condition="'$(PathMap)' == ''">$(MSBuildProjectDirectory)=/rhu/src/$(MSBuildProjectName)</PathMap>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(RhuReflection)' == 'off'">
+    <IlcArg Include="--reflectiondata:none" />
+  </ItemGroup>
+
+  <!-- The ILCompiler pack at the tested runtime build, and the tools
+       package for this host (the linker and the object copier the link
+       step runs); the tools package contributes its build properties and
+       nothing else. -->
+  <ItemGroup>
+    <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler" ILCompilerPackVersion="$(RhuRuntimeVersion)" />
+    <PackageReference Include="$(RhuToolsPackageId)" Version="$(RhuSdkVersion)" PrivateAssets="all" ExcludeAssets="compile;runtime;native;contentFiles;analyzers" />
+  </ItemGroup>
+
+</Project>

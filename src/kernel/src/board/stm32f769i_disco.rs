@@ -59,6 +59,12 @@ pub const KMAIN_STACK_BYTES: usize = 16 * 1024;
 /// 0..=109) -- sizes the vector table.
 pub const NIRQ: usize = 110;
 
+/// The vector line a test image may claim: RM0410's position 109 (MDIOS),
+/// implemented on this part, its peripheral never clocked by the kernel,
+/// the line claimed by no kernel handler.
+#[allow(dead_code)]
+pub const SPARE_IRQ: usize = 109;
+
 /// FPU shape: FPv5 double precision. Consumed by records and gates,
 /// never by context-switch code.
 #[allow(dead_code)]
@@ -194,6 +200,8 @@ const USART1_IRQ_PRIO: u8 = 0xE0;
 /// into the vector table by the boot module: USART1's line, the console
 /// ring's transmit drain.
 pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[(USART1_IRQ, __rhu_stm32f769_usart1_irq)];
+/// The family GPIO driver's external-interrupt lines (the F7 arm).
+pub use super::stm32_gpio::IRQS as GPIO_IRQS;
 
 /// Enforce the HSI-16 posture. On a cold flash boot every write below
 /// restates reset state; with a probe or resident image on the bus,
@@ -428,13 +436,178 @@ pub fn console_getb() -> Option<u8> {
 #[allow(dead_code)]
 pub const ADDRESS_ZERO_READABLE: bool = true;
 
-/// The entropy posture of this row: the part carries an RNG block that no driver
-/// serves on this row, so no source serves.
-pub const ENTROPY: super::EntropyPosture = super::EntropyPosture::None;
+/// The entropy posture of this row, feature-selected with the clock posture
+/// (RM0410 chapter 22): the part's RNG block samples its noise source on the
+/// 48 MHz clock the main PLL's Q output forms (RCC_DCKCFGR2's CK48MSEL at its
+/// reset value selects that output), so the source serves on the PLL216
+/// posture -- whose PLLQ of 9 taps the 432 MHz VCO to exactly 48 MHz -- and
+/// is absent by posture on the HSI default, where the PLL is off: no driver
+/// runs there and cryptographic draws refuse honestly.
+#[cfg(feature = "stm32f769i-disco-pll216")]
+pub const ENTROPY: super::EntropyPosture = super::EntropyPosture::Source {
+    id: 1,
+    name: "STM32F7 RNG",
+    line: "hardware source STM32F7 RNG enabled on PLL48CLK; its self-tests gate every draw",
+};
+#[cfg(not(feature = "stm32f769i-disco-pll216"))]
+pub const ENTROPY: super::EntropyPosture = super::EntropyPosture::AbsentByPosture {
+    name: "STM32F7 RNG",
+    line: "hardware source STM32F7 RNG needs PLL48CLK, absent on this clock posture; cryptographic draws are refused, the software stream serves the rest",
+};
 /// Whether this row carries a real-time clock the kernel reads at boot and
 /// writes at an explicit set.
 #[allow(dead_code)]
 pub const RTC_PRESENT: bool = false;
 /// The calendar banner's text for this row, constant per image.
 pub const RTC_LINE: &str = "RTC block present on this part, a mounted 32.768 kHz crystal, no backup cell; this row does not read the clock: the base is the epoch until set";
-pub use super::absent::{entropy_draw, entropy_init, rtc_read_at_boot, rtc_write};
+#[cfg(not(feature = "stm32f769i-disco-pll216"))]
+pub use super::absent::{entropy_draw, entropy_init};
+pub use super::absent::{rtc_read_at_boot, rtc_write};
+
+/// The RNG block (RM0410 chapter 22) at 0x5006_0800 on the AHB2 bus: three
+/// registers. RNG_CR: CED bit 5 (0 = the clock checker on; its reset value,
+/// and it cannot change while the block is enabled), IE bit 3, RNGEN bit 2;
+/// every other bit reserved on this part (no conditioning reset and no
+/// configuration fields here). RNG_SR: SEIS bit 6 and CEIS bit 5 (the seed
+/// and clock error interrupt flags, cleared by writing 0), SECS bit 2 and
+/// CECS bit 1 (the current seed and clock error status, read-only), DRDY
+/// bit 0. RNG_DR: the 32-bit sample, valid when DRDY is set and the value is
+/// not zero.
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RNG: usize = 0x5006_0800;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RNG_CR: *mut u32 = RNG as *mut u32;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RNG_SR: *mut u32 = (RNG + 0x04) as *mut u32;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RNG_DR: *mut u32 = (RNG + 0x08) as *mut u32;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RNG_CR_RNGEN: u32 = 1 << 2;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RNG_SR_SEIS: u32 = 1 << 6;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RNG_SR_CEIS: u32 = 1 << 5;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RNG_SR_SECS: u32 = 1 << 2;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RNG_SR_CECS: u32 = 1 << 1;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RNG_SR_DRDY: u32 = 1 << 0;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RNG_SR_ERRORS: u32 = RNG_SR_SEIS | RNG_SR_CEIS | RNG_SR_SECS | RNG_SR_CECS;
+/// The block's bus clock (RCC_AHB2ENR, RNGEN bit 6) and the 48 MHz clock's
+/// source select (RCC_DCKCFGR2, CK48MSEL bit 27: 0 = the main PLL's Q output,
+/// the reset value, which this posture forms; 1 = the PLLSAI's, which it
+/// does not form).
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RCC_AHB2ENR: *mut u32 = (RCC + 0x34) as *mut u32;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const AHB2ENR_RNGEN: u32 = 1 << 6;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const RCC_DCKCFGR2: *mut u32 = (RCC + 0x90) as *mut u32;
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const DCKCFGR2_CK48MSEL: u32 = 1 << 27;
+/// A bounded wait's iteration count for at least two milliseconds: the loop
+/// body is at least four cycles, so the count is the cycles of two
+/// milliseconds over four -- at the boot the tick clock is not yet running,
+/// so every wait here is an iteration bound, never a clock. The block
+/// delivers a word every 42 of its 48 MHz clocks and its first word 46
+/// clocks after the enable, three orders of magnitude inside the bound: the
+/// bound is a fault detector, never a wait.
+#[cfg(feature = "stm32f769i-disco-pll216")]
+const SPIN_2MS: u32 = SYSCLK_HZ / 500 / 4;
+
+/// The block started on the PLL216 posture: the bus clock enabled and read
+/// back, the 48 MHz source select read (the main PLL's Q output, or the
+/// source is absent), the block enabled with the clock checker on, the first
+/// ready word waited for under the bound, the status read. False when the
+/// checker or the noise source flagged, or no word came (the witness then
+/// reads the source absent and every secure draw refuses). With the checker
+/// on, the block flags a clock error whenever its clock is slower than a
+/// sixteenth of the bus clock; 48 MHz against 216 / 16 = 13.5 MHz clears it.
+/// Nothing here masks an interrupt: the boot path runs before the scheduler.
+#[cfg(feature = "stm32f769i-disco-pll216")]
+pub fn entropy_init() -> bool {
+    unsafe {
+        write_volatile(RCC_AHB2ENR, read_volatile(RCC_AHB2ENR) | AHB2ENR_RNGEN);
+        let _ = read_volatile(RCC_AHB2ENR);
+        if read_volatile(RCC_DCKCFGR2) & DCKCFGR2_CK48MSEL != 0 {
+            return false;
+        }
+        write_volatile(RNG_CR, RNG_CR_RNGEN);
+        let mut n = 0u32;
+        loop {
+            let sr = read_volatile(RNG_SR);
+            if sr & RNG_SR_ERRORS != 0 {
+                return false;
+            }
+            if sr & RNG_SR_DRDY != 0 {
+                return true;
+            }
+            n += 1;
+            if n > SPIN_2MS {
+                return false;
+            }
+        }
+    }
+}
+
+/// One draw: per 32-bit word, THE WAIT OUTSIDE ANY SECTION -- the status
+/// polled until a word is ready, an error flag shows or the bound is met --
+/// then, under the kernel critical section, the status-and-data pair: the
+/// status read again (an error flag is the health check failing at this
+/// draw: counted, and the policy retires the source), a ready word read (a
+/// zero word is the seed error that raced the status read, treated the
+/// same), a word that was ready and is not any more sends the wait round
+/// again. The section covers two or three register reads and never a wait,
+/// so an interrupt at or above the ceiling is delayed by those reads alone
+/// and the zero-latency band below it never. The bytes land in the caller's
+/// buffer word by word; the policy layer copies out only when the whole
+/// draw succeeded.
+#[cfg(feature = "stm32f769i-disco-pll216")]
+pub fn entropy_draw(buf: &mut [u8], counters: &mut super::DrawCounters) -> Result<(), super::EntropyErr> {
+    for chunk in buf.chunks_mut(4) {
+        let mut n = 0u32;
+        let word = loop {
+            let sr = unsafe { read_volatile(RNG_SR) };
+            if sr & RNG_SR_ERRORS != 0 {
+                break Err(super::EntropyErr::Health);
+            }
+            if sr & RNG_SR_DRDY != 0 {
+                let pair = crate::critical::with_cs(|| unsafe {
+                    let sr = read_volatile(RNG_SR);
+                    if sr & RNG_SR_ERRORS != 0 {
+                        return Err(super::EntropyErr::Health);
+                    }
+                    if sr & RNG_SR_DRDY == 0 {
+                        return Ok(None);
+                    }
+                    let w = read_volatile(RNG_DR);
+                    if w == 0 {
+                        return Err(super::EntropyErr::Health);
+                    }
+                    Ok(Some(w))
+                });
+                match pair {
+                    Ok(Some(w)) => break Ok(w),
+                    Ok(None) => {}
+                    Err(e) => break Err(e),
+                }
+            }
+            n += 1;
+            if n > SPIN_2MS {
+                break Err(super::EntropyErr::Timeout);
+            }
+        };
+        match word {
+            Ok(w) => chunk.copy_from_slice(&w.to_le_bytes()[..chunk.len()]),
+            Err(e) => {
+                if matches!(&e, super::EntropyErr::Health) {
+                    counters.errors += 1;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}

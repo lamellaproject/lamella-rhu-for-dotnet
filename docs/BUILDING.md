@@ -17,10 +17,11 @@ support:
 
 Exactly one board feature is selected per build; the crate refuses a build
 that selects none or two. The boards and the build each one selects; the
-verification chain builds every one of them with the `payload` feature
-described below, and the gate's library build of the default configuration
-also with `entropy-accept-software`, the software-entropy opt-in its checks
-need:
+verification chain's payload gate builds the default board with the
+`payload` feature described below (and the gate's library build of the
+default configuration also with `entropy-accept-software`, the
+software-entropy opt-in its checks need), and every other board too when
+the two hosted-runtime tiers it links are present:
 
 | Board | Target | Features |
 | --- | --- | --- |
@@ -46,7 +47,9 @@ the kernel as a library, `librhu_kernel.a` under `target/<target>/release/`,
 that a hosted program is linked against under the board's linker map,
 `src/kernel/payload-<board>.x`. The map places the program's sections, the
 kernel's, and the memory arena the hosted runtime allocates from. The
-verification chain's payload gate performs these six builds and links a
-frozen program object under every map, and checks the placement, the code
-region's free space and the arena window off each linked image; see
-[docs/VERIFYING.md](./VERIFYING.md).
+verification chain's payload gate performs these six builds and links the
+hosted runtime's frozen merged object under every map, checking the
+placement, the code region's free space and the arena window off each
+linked image, when the two hosted-runtime tiers are present; a checkout
+without them runs the gate's other cases and names these NOT RUN on its
+verdict line; see [docs/VERIFYING.md](./VERIFYING.md).

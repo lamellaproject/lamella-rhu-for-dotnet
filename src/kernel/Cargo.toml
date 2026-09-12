@@ -116,6 +116,14 @@ test-fpemul-doctored = []
 # the api flavor's fp-cost check: a measurement image for a board flight, never a
 # chain row.
 fp-cost = []
+# The GPIO doors' two doctored controls (the device seam), never a shipped image:
+# on the emulator rows the virtual loopback latch fires the input's event twice
+# per change; on a board the family handler's pending-mask clear is removed.
+test-gpio-doctored-latch = []
+test-gpio-doctored-mask = []
+# The GPIO acceptance flight's image on the boards with a button row (never a shipped image):
+# the LED row blinked for the eye, then a bounded wait for a press that lights it.
+test-gpio-button = []
 # The unhosted-main flavor: an image whose kmain thread, after the selftests,
 # calls a main the program defines (`rhu_unhosted_main`) instead of hosting a
 # runtime, and exits with the code it returns. The kernel declares that main

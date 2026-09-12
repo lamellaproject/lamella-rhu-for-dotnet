@@ -53,73 +53,84 @@ refusal honored, and every wall-clock answer (the system time, the C
 library's real-time clock and time(), the file store's times) reads the
 kernel's calendar, each with a negative control built from the shim with
 that answer's defect restored; the host states hosting-API contract
-generation 32; the mps2-an505 row's five link objects are the an500 row's
+generation 33; the mps2-an505 row's five link objects are the an500 row's
 sources and defines compiled for the Cortex-M33 (the row's fields equal
 the an500's, so the class flag set is the one variable), each carrying no
-double-precision instruction; 34 objects and 5 goldens,
-byte-tied by the rederive leg at the freeze.
+double-precision instruction; the shim answers the pinned runtime pack's
+whole P/Invoke-facing native surface (the five class-library families'
+export tables, 757 names at this pin): the names the hand-written units
+serve over the RAM file store, the kernel's calendar and its secure door,
+and for every name of an area this system does not serve a generated
+refusal (nothing printed, nothing trapped; the errno of record where the
+convention is errno-style) in the surface object beside the five link
+objects, with its Cortex-M33 twin for the an505 row; the expectation the
+gate's surface case reads -- generated from the pack's archives and the
+runtime's headers at the pin, never typed -- is the tier's text record,
+tied to the pin and to every family name the objects define; 36
+objects, 5 goldens and 1 record, byte-tied by the rederive
+leg at the freeze.
 
 Records (repo-relative path, sha256; source and defines per object):
 
 - `goldens/shim/shim-core.o`
-  `b8926fcc9c7184a511a1e552c2d112f700a3f2df9c2b28114676eb0f26cf3070`
+  `496ab1bc2f7534c36007e8c0010095fe13641a1ad3c2b32a98c8f6cfbf882c34`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500)
 - `goldens/shim/shim-core-break-sipid.o`
-  `3ab96d903bf2119b497738e7bede50f7a3257c1a256bdb3d86e28e7a4b44434e`
+  `e132e31f424b3cb683da0221d4ac664ae5a6b6c36f48ca891fb64d6bcb125b0c`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_SIPID)
 - `goldens/shim/shim-core-break-ctxpc.o`
-  `9544348eae92505f50f7ed117a7207f09958666ea8efdfbae8119b2e35504c42`
+  `f70ffd9d5c65617ece2df08c419ada7b2e22253cc6e286b518ce11d5def6c69a`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_CTXPC)
 - `goldens/shim/shim-core-break-tlsoff.o`
-  `da4793d036e0eb45e7f62cb00742b68411122c3023dfff1437e2fb18ad415520`
+  `1d5cd933a58c8085df8cf0bbee1cbd383276a1fd384ad653c729b87eeb86b1b4`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_TLSOFF)
 - `goldens/shim/shim-core-break-tlscache.o`
-  `15da3c760bef6217d5eb08fdc800b3a1f2484dc1889488666c374556d471c737`
+  `4d0b93ea4e7bf0d35467ad621da0847bccb5be9960c05fb76d080dab775cc0c0`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_TLSCACHE)
 - `goldens/shim/shim-sysnative.o`
-  `86a6e1b803cedb3e8c837db2274beaa8097e770fc48d41d03235bf221476678e`
+  `cac8eaad8c5d77b9221383dad35b96d22be34a36213cc1be133e42ff9167cc35`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500)
 - `goldens/shim/shim-sysnative-break-fdbase.o`
-  `5af1e28ab092e367adcd59c0ae6339114ce4473a3a2b883d18483317f82fd984`
+  `c5e8760710c36f4a4a69490caf13f83d66cd67e6fff1a40a87fb3a4994a6d70d`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_FD_BASE)
 - `goldens/shim/shim-sysnative-break-store-bounds.o`
-  `191d44cc3acb17ac4d155b6fd62c053dfda20d8e18d3bd6fb90b13b28d1b3a18`
+  `42b685b27763276ac250cd91a8fcbbf0b6ffed44afa8ced1f159415bfa6dd9f0`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_BOUNDS)
 - `goldens/shim/shim-sysnative-break-store-lifetime.o`
-  `e16fc44042d15f6c7ed4b03b0da3e68830419f99df04c4256050cc06fb26b43a`
+  `785d333735bb5dbd3359b550a8782c6dd47fd7461f398e4c05f7b2d46e3f5fd9`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_LIFETIME)
 - `goldens/shim/shim-sysnative-break-store-lock.o`
-  `67e27ef65cdc9fffd925369e27f4d9ab36d69f9daf7fb2dee6853c44ad57e4b4`
+  `d56ca99cf630ec6ae02c9b28ca56097386ab48f8652abee88e6018926d566c09`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_LOCK)
 - `goldens/shim/shim-sysnative-break-store-open-order.o`
-  `5f1ed4499f36066b20d79625f6cb0b68fe434f14f9a554b0609f07250d063728`
+  `0e53ed5e72648f4abebe4c9c4240318bfa1f1883d3ffb5a26e697cf103baf502`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_OPEN_ORDER)
 - `goldens/shim/shim-sysnative-break-store-access.o`
-  `3c3212c64c5ff34187b2c528b637c3cb802807112ad8d3ca9a68e20e2edcdbfa`
+  `521fde3667486ce5cb82d047214ca596338da4d46d31149807b1f41affecfdba`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_ACCESS)
 - `goldens/shim/shim-sysnative-break-store-flock.o`
-  `b6e928530f2dc944c9583fd3964a6276186ef72572825cae412cc65b7f3489f1`
+  `1d965c1d18ba904c077535ef431080f77d10aa9727ed1cc6d5284c76dfee27dd`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_FLOCK)
 - `goldens/shim/shim-sysnative-break-store-slash.o`
-  `37f24d1cc1833a2ed095dfa40ef1db590cf676045a33e4e3fee61ac2f85943a5`
+  `3ba27a45d222ae1060a05f25f111b452d8bd41f86f9df3efb155004ce15c67c5`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_SLASH)
 - `goldens/shim/shim-sysnative-break-store-times.o`
-  `afeff2790f6caf706ac27dcd6f3bbe34d072788ccb48e54c62a769b3d4b76fc3`
+  `d1aff9dfe19ac6ff292ae9d67347deed1a45e0ab2214adce3e3ad93491d32c80`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_TIMES)
 - `goldens/shim/shim-sysnative-break-entropy-refusal.o`
-  `db3cc00a9455405145cbd4ceec76e8c81c5dc1abf1bfa077fa7bdbe1d0217874`
+  `a1d17969916384ba438fb27a556dd02beed6ea336960091926e1bd81047045fc`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_ENTROPY_REFUSAL)
 - `goldens/shim/shim-sysnative-break-calendar-clock.o`
-  `ece6c859b19b3140c7c07ca72160dab2dfca9791d573ade425aa9d56a8e649d8`
+  `c695e5de2f2c5ad0148b656971f81a7d09b40d99f7843071e73df79c14edb8ee`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_CALENDAR_CLOCK)
 - `goldens/shim/shim-libc-glue.o`
   `8ffb50ca37ba98ee58a69b71156472609af785bb1dacd5e68bb2103b59ebe267`
   (src/shim/rhu_libc_glue.c; no extra defines)
 - `goldens/shim/shim-host.o`
-  `573835f6df56af3812736c2c4e686f579941e7a63df0de34a8664a484f6dccd7`
+  `696b047d428b67ba1503de6a0b67a005f105fc139ea11bc5cfcde18bc6bb0033`
   (src/shim/rhu_host.c; -DMGC_HOST_ROW_AN500)
 - `goldens/shim/shim-host-break-dataverify.o`
-  `c503fd9d021f22861d50db03514648d802bb10f45c9bdb83b4320cab5dc0d3b3`
+  `fae0129a212520221e35d60e0ae736a89621b593c28dd7510226390b70db19a0`
   (src/shim/rhu_host.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_DATAVERIFY)
 - `goldens/shim/shim-stdio-sym.o`
   `8428ce33a5f364f458b0ccaa949e3398470a9b05500810c6a62109731033a28d`
@@ -134,7 +145,7 @@ Records (repo-relative path, sha256; source and defines per object):
   `27579c4a76072fe13f2e71cec2b518eb5e24ebacd37f3b2a7a8601a68e2703c5`
   (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_CORE -DRHU_SHIMTEST_BREAK_CANARY)
 - `goldens/shim/shimtest-fdmap.o`
-  `9cd185e754d7492f508278a809c79b72c8e3bcb9dba420182e3ebd8f8585335f`
+  `00239bffb34b4e16db54f6bc13ce3f4ffafd163b50c18ccfc399bbfda01f13a9`
   (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_FDMAP)
 - `goldens/shim/shimtest-activation.o`
   `6c97b3c291d79eddb1158ac9a08999de5b6f91936ceeed63b2d66e0cd7891273`
@@ -146,23 +157,29 @@ Records (repo-relative path, sha256; source and defines per object):
   `e247afc48310917018461b543e0c3a60dd9031cdf53321c10ddf83c8c4694371`
   (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_HOST)
 - `goldens/shim/shim-core-f769.o`
-  `e29367975b5a97b8268eb3c672b684ff83b0fb97d6406bdc62c6d7707524f944`
+  `65f7da6ad2923c1f851021793310bfaabf574f0372cc1c9f65f324c1c390ce7d`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_F769)
 - `goldens/shim/shim-core-an505.o`
-  `b327eff4fefc537f1a986309fc7b2319a847221e986b3bb77e8821d39ea9f574`
+  `ddf55edd85bdb6bdba480a381b8f39294fa410bd1b00a201cc3ed49789c4dd33`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
 - `goldens/shim/shim-sysnative-an505.o`
-  `b41585fd27a74c8877dc1e5707524d460c8355322c7c0d9651b392d2ffbaa4ef`
+  `f797c034b791e8966487e1247da0094268d8bb16cc137a5cf374c01ddee735df`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
 - `goldens/shim/shim-libc-glue-an505.o`
   `586fde3e983c35ec2d724ee0b5b692ba61a64552e917a9c6b7d519e69fe609da`
   (src/shim/rhu_libc_glue.c; no extra defines; the Cortex-M33 class flag set)
 - `goldens/shim/shim-host-an505.o`
-  `e361b86101621e63dc7cdf0a6b58b077cf72457e4937e0211d90075b9a4bb734`
+  `91bef3e9759203cc03af25af9c8a8cb0850bf0eb9a69cf8f091ea930adf1a8d2`
   (src/shim/rhu_host.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
 - `goldens/shim/shim-stdio-sym-an505.o`
   `49a42ffaf600fe1315997337de4e9457f6454072c823f8ce3be0d7e4abfb3bb9`
   (src/shim/rhu_stdio_sym.c; no extra defines; the Cortex-M33 class flag set)
+- `goldens/shim/shim-pal-surface.o`
+  `ba588dc52d48b2df933c27836f398783917a371933d62be18c10927f3842750c`
+  (src/shim/rhu_pal_surface_net11_rc1.c; -DMGC_HOST_ROW_AN500)
+- `goldens/shim/shim-pal-surface-an505.o`
+  `3e49d989d3b8626b510b1b529fe043a26b9195203feb6b6e7045cb48efe73499`
+  (src/shim/rhu_pal_surface_net11_rc1.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
 - `goldens/shim/shimtest-core.golden.txt`
   `3afa478aaa0da5fdaff61ada500f52eb26c47fbdb2ad8a0e93fb2a48593aa9ac`
   (the payload stream of the shim.core image (class bytes))
@@ -178,3 +195,6 @@ Records (repo-relative path, sha256; source and defines per object):
 - `goldens/shim/shimtest-host.golden.txt`
   `aeb710f3cdc677e9c5ba29a1c4a432fe2389fda884b05a54dfcd2d910191cfb5`
   (the payload stream of the shim.host image (class bytes))
+- `goldens/shim/pal-surface.txt`
+  `1835f4cb31b605811c3d8e17356510a5e79a200849352ad540ce9fcf14a4020e`
+  (the P/Invoke-facing surface expectation the shim.pal-surface case reads: the pin, the pack's five archives with their sha256s, one line per surface name with its family and class; GENERATED from the pinned pack's archives and the runtime's headers, regenerated at a re-pin, never edited)

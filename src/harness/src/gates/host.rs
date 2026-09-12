@@ -24,7 +24,7 @@ const TIMEOUT_S: u64 = 900;
 /// The cases pinned, in the order cargo's single-threaded runner reports
 /// them (alphabetical by name). A case added to the host crate joins this
 /// list in the same change, or the gate refuses the run.
-pub const CASES: [&str; 20] = [
+pub const CASES: [&str; 23] = [
     "tests::abi_window_judges_the_window",
     "tests::arena_overflow_refused_headroom_intact",
     "tests::calendar_bcd_packs_both_ways",
@@ -32,12 +32,15 @@ pub const CASES: [&str; 20] = [
     "tests::calendar_civil_from_days_at_the_maximum",
     "tests::calendar_days_from_civil_round_trips_the_constants",
     "tests::calendar_set_saturates_at_the_epoch",
+    "tests::claims_board_fold_and_program_claims",
+    "tests::claims_irq_slots_and_tenants",
     "tests::fpemul_arithmetic_matches_the_host_in_round_to_nearest",
     "tests::fpemul_compare_max_min_match_the_host",
     "tests::fpemul_conversions_match_the_host",
     "tests::fpemul_decoder_matches_the_assembler",
     "tests::fpemul_flags_and_directed_rounding_by_hand",
     "tests::fpemul_fma_is_fused_and_matches_the_host",
+    "tests::gpio_math_partition_wrap_and_families",
     "tests::kheap_largest_fits_and_one_more_byte_does_not",
     "tests::kheap_rounding_wraps_refused",
     "tests::kheap_wrapping_request_refused_null_heap_intact",

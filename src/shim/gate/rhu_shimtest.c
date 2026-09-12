@@ -1158,6 +1158,27 @@ static int fdmap_ladder(void)
         SCHECK(SystemNative_LSeek(fd, 0xFFFFFFFFll, RHU_PAL_SEEK_SET) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-bounds", "(a seek past the maximum was accepted)");
         SCHECK(SystemNative_Write(fd, "x", 1) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a write past the maximum was accepted)");
         SCHECK(SystemNative_FStat(fd, &st) == 0 && st.Size == 4, "shim-fdmap-bounds", "(the size moved on a refused write)");
+        /* the offset's own bound before any sum: near the top of the range, at the maximum and one past it, whole and empty, direct and vectored */
+        int64_t mt0 = st.MTime;
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 4, 9223372036854775805ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a write near the top of the offset range was not refused with EFBIG)");
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 0, 9223372036854775807ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(an empty write at the top of the offset range was accepted)");
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 0, 1048577ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(an empty write one past the maximum was accepted)");
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 1, 1048576ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a one-byte write at the maximum was accepted)");
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 0, 1048576ll) == 0, "shim-fdmap-bounds", "(an empty write at the maximum was refused)");
+        rhu_pal_iovector top[1] = {{(uint8_t *)"XYZW", 4}};
+        SCHECK(SystemNative_PWriteV(fd, top, 1, 9223372036854775805ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a vectored write near the top of the offset range was not refused with EFBIG)");
+        SCHECK(SystemNative_PWriteV(fd, top, 1, -1) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-bounds", "(a vectored write at a negative offset was not refused)");
+        SCHECK(SystemNative_PRead(fd, buf, 4, 9223372036854775807ll) == 0, "shim-fdmap-bounds", "(a read at the top of the offset range did not answer end of file)");
+        SCHECK(SystemNative_FStat(fd, &st) == 0 && st.Size == 4 && st.MTime == mt0, "shim-fdmap-bounds", "(the size or the modification time moved on a refused write near the top of the range)");
+        {
+            /* the last valid byte: admitted by the bound; the row's heap decides whether the object can grow to the maximum */
+            int32_t last = SystemNative_PWrite(fd, "Z", 1, 1048575ll);
+            SCHECK(last == 1 || (last == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOSPC), "shim-fdmap-bounds", "(the last valid byte was refused by the bound)");
+            if (last == 1)
+                SCHECK(SystemNative_FStat(fd, &st) == 0 && st.Size == 1048576 && SystemNative_FTruncate(fd, 4) == 0, "shim-fdmap-bounds", "(the size did not follow the last valid byte, or the truncation back failed)");
+            else
+                SCHECK(SystemNative_FStat(fd, &st) == 0 && st.Size == 4, "shim-fdmap-bounds", "(the size moved on a write refused for want of space)");
+        }
         SCHECK(SystemNative_Close(fd) == 0 && SystemNative_Unlink("/tmp/bounds.txt") == 0, "shim-fdmap-bounds", "(close, unlink)");
         pass("shim-fdmap-bounds", " (offsets, counts and lengths checked in 64 bits against the stated maximum: EFBIG past it, EINVAL below zero, the bytes and the size untouched)");
     }

@@ -37,18 +37,24 @@ int strncmp(const char *a, const char *b, size_t n);
 
 #define LOG_LINE_BYTES 256u
 
-typedef struct log_line {
-    char buf[LOG_LINE_BYTES];
+/* A formatting sink: the caller's buffer and its capacity (the terminator
+ * included; 0 measures without writing), and the count of bytes the text
+ * takes whether written or not -- the vsnprintf contract the PAL's
+ * formatters state. The diagnostic line is one sink over its own line. */
+typedef struct fmt_sink {
+    char *buf;
+    uint32_t cap;
     uint32_t n;
-} log_line;
+} fmt_sink;
 
-static void line_put(log_line *l, char c)
+static void line_put(fmt_sink *l, char c)
 {
-    if (l->n < LOG_LINE_BYTES - 1u)
-        l->buf[l->n++] = c;
+    if (l->cap != 0 && l->n < l->cap - 1u)
+        l->buf[l->n] = c;
+    l->n++;
 }
 
-static void line_puts(log_line *l, const char *s)
+static void line_puts(fmt_sink *l, const char *s)
 {
     while (*s != 0)
         line_put(l, *s++);
@@ -56,7 +62,7 @@ static void line_puts(log_line *l, const char *s)
 
 /* An unsigned value in base 10 or 16, at least `width` digits, zero-padded
  * when `pad0`; lowercase hex digits. */
-static void line_num(log_line *l, unsigned long long v, unsigned base, unsigned width, int pad0)
+static void line_num(fmt_sink *l, unsigned long long v, unsigned base, unsigned width, int pad0)
 {
     char tmp[24];
     unsigned n = 0;
@@ -71,7 +77,7 @@ static void line_num(log_line *l, unsigned long long v, unsigned base, unsigned 
         line_put(l, tmp[--n]);
 }
 
-static void line_format(log_line *l, const char *fmt, va_list ap)
+static void line_format(fmt_sink *l, const char *fmt, va_list ap)
 {
     for (const char *p = fmt; *p != 0; p++) {
         if (*p != '%') {
@@ -146,7 +152,10 @@ static void line_format(log_line *l, const char *fmt, va_list ap)
 
 void rhu_shim_log(const char *fmt, ...)
 {
-    log_line l;
+    char line[LOG_LINE_BYTES];
+    fmt_sink l;
+    l.buf = line;
+    l.cap = LOG_LINE_BYTES;
     l.n = 0;
     line_puts(&l, "[shim] ");
     va_list ap;
@@ -154,7 +163,19 @@ void rhu_shim_log(const char *fmt, ...)
     line_format(&l, fmt, ap);
     va_end(ap);
     line_put(&l, '\n');
-    rhu_console_write(l.buf, l.n);
+    rhu_console_write(line, l.n < LOG_LINE_BYTES - 1u ? l.n : LOG_LINE_BYTES - 1u);
+}
+
+int32_t rhu_shim_vformat(char *buf, uint32_t cap, const char *fmt, va_list ap)
+{
+    fmt_sink l;
+    l.buf = buf;
+    l.cap = cap;
+    l.n = 0;
+    line_format(&l, fmt, ap);
+    if (cap != 0)
+        buf[l.n < cap - 1u ? l.n : cap - 1u] = 0;
+    return (int32_t)l.n;
 }
 
 void rhu_shim_exit(int code)
@@ -250,12 +271,18 @@ static const char *g_env[] = {
 
 static void env_build(void)
 {
-    log_line l;
+    fmt_sink l;
+    l.buf = g_env_hard_limit;
+    l.cap = (uint32_t)sizeof g_env_hard_limit;
     l.n = 0;
     line_puts(&l, "DOTNET_GCHeapHardLimit=0x");
     line_num(&l, (unsigned long long)MGC_ROW_REGION_BYTES, 16u, 0u, 0);
-    l.buf[l.n] = 0;
-    memcpy(g_env_hard_limit, l.buf, l.n + 1u);
+    g_env_hard_limit[l.n < sizeof g_env_hard_limit - 1u ? l.n : sizeof g_env_hard_limit - 1u] = 0;
+}
+
+char **rhu_shim_environ(void)
+{
+    return (char **)g_env;
 }
 
 char *getenv(const char *name)

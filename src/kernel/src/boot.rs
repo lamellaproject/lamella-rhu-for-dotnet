@@ -68,12 +68,33 @@ static __INTERRUPTS: [Vector; crate::board::NIRQ] = interrupts();
 /// refuses to compile.
 const fn interrupts() -> [Vector; crate::board::NIRQ] {
     let mut table = [Vector { handler: ExceptionTrampoline }; crate::board::NIRQ];
+    let mut claimed = [0u64; (crate::board::NIRQ + 63) / 64];
     let mut i = 0;
     while i < crate::board::BOARD_IRQS.len() {
         let (line, handler) = crate::board::BOARD_IRQS[i];
         assert!(line < crate::board::NIRQ, "a board interrupt handler names a line outside the vector table");
+        assert!(claimed[line / 64] & (1u64 << (line % 64)) == 0, "an interrupt line is claimed twice");
+        claimed[line / 64] |= 1u64 << (line % 64);
         table[line] = Vector { handler };
         i += 1;
+    }
+    let mut j = 0;
+    while j < crate::board::GPIO_IRQS.len() {
+        let (line, handler) = crate::board::GPIO_IRQS[j];
+        assert!(line < crate::board::NIRQ, "a GPIO handler names a line outside the vector table");
+        assert!(claimed[line / 64] & (1u64 << (line % 64)) == 0, "an interrupt line is claimed twice");
+        claimed[line / 64] |= 1u64 << (line % 64);
+        table[line] = Vector { handler };
+        j += 1;
+    }
+    let mut k = 0;
+    while k < crate::TEST_IRQS.len() {
+        let (line, handler) = crate::TEST_IRQS[k];
+        assert!(line < crate::board::NIRQ, "a test handler names a line outside the vector table");
+        assert!(claimed[line / 64] & (1u64 << (line % 64)) == 0, "an interrupt line is claimed twice");
+        claimed[line / 64] |= 1u64 << (line % 64);
+        table[line] = Vector { handler };
+        k += 1;
     }
     table
 }

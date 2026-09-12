@@ -35,6 +35,7 @@ const ICSR_PENDSVSET: u32 = 1 << 28;
 const ICSR_PENDSTSET: u32 = 1 << 26;
 const SHPR2: *mut u32 = 0xE000_ED1C as *mut u32;
 const SHPR3: *mut u32 = 0xE000_ED20 as *mut u32;
+const SHPR1: *mut u32 = 0xE000_ED18 as *mut u32;
 const SYST_CSR: *mut u32 = 0xE000_E010 as *mut u32;
 const SYST_RVR: *mut u32 = 0xE000_E014 as *mut u32;
 const SYST_CVR: *mut u32 = 0xE000_E018 as *mut u32;
@@ -1657,6 +1658,8 @@ pub unsafe extern "C" fn systick_vector() { unsafe {
             w.entries = w.entries.wrapping_add(1);
         }
     }
+    #[cfg(feature = "api-smoke")]
+    crate::api_smoke::fp_band_tick();
     crate::calendar::tick_poll();
     let now = TICKS.fetch_add(1, Ordering::Release).wrapping_add(1);
     if now == 0 {
@@ -1697,6 +1700,7 @@ extern "C" fn idle_entry(_: usize) {
 /// Configure exception priorities + SysTick and create the idle thread.
 pub fn init() {
     unsafe {
+        write_volatile(SHPR1, 0xF0 << 16);
         write_volatile(SHPR2, 0xF0 << 24);
         write_volatile(SHPR3, (0x80 << 24) | (0xF0 << 16));
         write_volatile(SYST_RVR, board::SYSCLK_HZ / board::TICK_HZ - 1);

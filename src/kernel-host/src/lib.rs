@@ -27,6 +27,11 @@ mod wake;
 mod calendar_math;
 #[path = "../../kernel/src/abi_window.rs"]
 mod abi_window;
+/// The GPIO doors' pure halves: the claims table and the doors' arithmetic.
+#[path = "../../kernel/src/claims.rs"]
+mod claims;
+#[path = "../../kernel/src/gpio_math.rs"]
+mod gpio_math;
 /// The double-precision emulation's pure halves: the arithmetic and the decoder.
 mod fpemul {
     #[path = "../../../kernel/src/fpemul/soft.rs"]

@@ -39,7 +39,7 @@ extern "C" {
  *     [payload] entry REFUSED: the payload was built for hosting-API
  *     contract generation N, outside this kernel's window C..A
  * where C is RHU_ABI_COMPAT and A is RHU_ABI. */
-#define RHU_ABI 32
+#define RHU_ABI 33
 #define RHU_ABI_COMPAT 31
 
 /* Error surface (RHU-owned values, errno-mirroring by convention). */
@@ -450,6 +450,64 @@ void rhu_exit(int32_t code);
 #define RHU_ENTROPY_SECURE_MAX 256
 int32_t rhu_entropy(void *buf, uint32_t n);
 int32_t rhu_entropy_secure(void *buf, uint32_t n);
+
+/* The GPIO doors: a program's GPIO driver over the kernel's lines. A line
+ * is the chip's own number (the RP2350's GPIO index; ST's port letter
+ * index times sixteen plus the bit: PA0 = 0, PB0 = 16). rhu_gpio_count is
+ * the line SPACE (the highest line plus one); a line inside it with no pad
+ * is refused RHU_EINVAL at the claim. rhu_gpio_claim takes a line as an
+ * input with its pull (RHU_GPIO_INPUT with RHU_GPIO_PULL_*) or as an
+ * output (push-pull or open-drain) at an initial level, written to the
+ * data register before the mode so the pad never shows the wrong level at
+ * open: 0 when taken; RHU_EBUSY when the board or another claim holds the
+ * line; RHU_EINVAL past the space, on an unpopulated line or a bad
+ * selector; RHU_EACCES for an output mode on a line the board's facts mark
+ * input-only; RHU_ENODEV on a row with no lines. A claim on a line this
+ * program already holds RE-CONFIGURES it (idempotent: the mode and the pull
+ * re-applied, an output's initial level re-applied, an armed edge dropped
+ * when an input becomes an output). A refusal programs nothing.
+ * rhu_gpio_release gives the line back (RHU_EINVAL when the program does
+ * not hold it). rhu_gpio_write drives a claimed output (RHU_EACCES on an
+ * input, RHU_EINVAL on an unclaimed line); rhu_gpio_read returns the pad,
+ * 0 or 1, on any claimed line (an output reads what the pad sees).
+ * rhu_gpio_edge arms an event kind on a claimed line: RHU_GPIO_EDGE_NONE
+ * disarms; RISING, FALLING and BOTH are served; the level-triggered kinds
+ * and the wakeup variants are refused RHU_ENOTSUP (an edge block cannot
+ * serve a level contract honestly); RHU_EBUSY when
+ * the family's routing cannot serve the line (ST's sixteen interrupt lines
+ * are shared by line number across the ports). rhu_gpio_event_word returns
+ * the line's event counter, typed as the futex's word (NULL on an
+ * unclaimed line): the kernel increments it once per detected edge and
+ * wakes its waiters, so the wait recipe is -- read the word, call
+ * rhu_futex_wait(word, the value read, deadline), re-read: an edge between
+ * the read and the wait returns RHU_EAGAIN at once, an edge during the
+ * wait wakes it, a burst coalesces into one wake and a count of two. No
+ * callback and no blocking verb: the program's own thread waits. */
+#define RHU_EBUSY (-16)     /* the line, or its interrupt routing, is held   */
+#define RHU_EACCES (-13)    /* a write on an input; an output on input-only  */
+#define RHU_ENOTSUP (-95)   /* a level-triggered or wakeup event kind        */
+#define RHU_GPIO_INPUT 0
+#define RHU_GPIO_OUTPUT 1
+#define RHU_GPIO_OUTPUT_OPEN_DRAIN 2
+#define RHU_GPIO_PULL_NONE 0
+#define RHU_GPIO_PULL_UP 1
+#define RHU_GPIO_PULL_DOWN 2
+#define RHU_GPIO_EDGE_NONE 0
+#define RHU_GPIO_EDGE_RISING 1
+#define RHU_GPIO_EDGE_FALLING 2
+#define RHU_GPIO_EDGE_BOTH 3
+#define RHU_GPIO_LEVEL_LOW 4
+#define RHU_GPIO_LEVEL_HIGH 5
+#define RHU_GPIO_WAKE_RISING 6
+#define RHU_GPIO_WAKE_FALLING 7
+#define RHU_GPIO_WAKE_BOTH 8
+int32_t rhu_gpio_count(void);
+int32_t rhu_gpio_claim(uint32_t line, uint32_t mode, uint32_t pull, uint32_t initial);
+int32_t rhu_gpio_release(uint32_t line);
+int32_t rhu_gpio_write(uint32_t line, uint32_t value);
+int32_t rhu_gpio_read(uint32_t line);
+int32_t rhu_gpio_edge(uint32_t line, uint32_t kind);
+const uint32_t *rhu_gpio_event_word(uint32_t line);
 int32_t rhu_entropy_is_hardware(void);
 
 /* --- The payload entry seam: the one member of this surface the

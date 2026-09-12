@@ -28,6 +28,9 @@ addition:
 - For the two hosted-runtime legs, the .NET 11 SDK at the pin carried by the
   projects under `src/rt/gate`, and the runtime archives built for each
   processor class as described under "Where the hosted runtime comes from".
+- For the payload leg, the same .NET 11 SDK at the pin carried by
+  `src/payload/global.json`, run in a Linux environment where that SDK is
+  installed (see "The payload leg" below).
 
 Each of these is named through an environment variable or an untracked
 pointer file under `tools/toolchains/`, listed under "Re-deriving the frozen
@@ -62,9 +65,17 @@ whose bytes the gate pins). The chain runs every gate whose
 inputs are present and names each tier it could not run on its verdict line:
 a passing chain never overstates what it checked.
 
-This repository publishes the garbage-collector and shim tiers' inputs
-(`goldens/gc`, `goldens/shim`; both carry objects for every processor class);
-their re-derivation legs run with the prerequisites above.
+This repository publishes the payload, garbage-collector and shim tiers'
+inputs (`goldens/payload`; `goldens/gc` and `goldens/shim`, which carry
+objects for every processor class); their re-derivation legs run with the
+prerequisites above. The payload gate's two programs, a boot smoke test and
+a collector test compiled against a minimal runtime, are the payload tier's
+frozen objects, built from the sources under `src/payload/`; the payload leg
+rebuilds them with the pinned .NET SDK and ties them to the tier byte for
+byte. The payload gate's rt-link cases link the hosted runtime's frozen
+merged object under every board's payload map and need the two
+hosted-runtime tiers; without them the gate runs its other cases and names
+those cases NOT RUN, with the absent tier, on its verdict line.
 
 ## Re-deriving the frozen objects
 
@@ -77,6 +88,7 @@ From `src/harness`:
     cargo run --release -- shim rederive
     cargo run --release -- rt-m7 rederive
     cargo run --release -- rt-m33 rederive
+    cargo run --release -- payload rederive
 
 The garbage-collector and shim legs compile with clang 22.1.8; the C library
 and headers they compile against are the Arm GNU Toolchain 12.2.MPACBTI-Rel1's
@@ -92,24 +104,71 @@ Choose the compiler and the sysroot through environment variables:
     RHU_RT_ARCHIVES_M7=<the directory of the Cortex-M7 runtime archives described below>
     RHU_NEWLIB_M33=<the kit's directory holding libc_nano.a for v8-m.main+fp/hard>
     RHU_RT_ARCHIVES_M33=<the directory of the Cortex-M33 runtime archives>
+    RHU_NET_PACK=<the pinned .NET runtime pack's native directory, runtimes/linux-arm/native>
 
 or through untracked pointer files under `tools/toolchains/`, one value per
 line: `clang.local` (two lines: the command, then the sysroot),
-`newlib-m7.local`, `rtarchives-m7.local`, `newlib-m33.local` and
-`rtarchives-m33.local`. The shim leg's C-library case needs `RHU_NEWLIB_M7`;
-each hosted-runtime leg needs its class's archive set and C-library
-directory. The kit's directory layout differs by host: the Linux kit keeps
+`newlib-m7.local`, `rtarchives-m7.local`, `newlib-m33.local`,
+`rtarchives-m33.local` and `netpack.local`. The shim leg's C-library case
+needs `RHU_NEWLIB_M7`; its survey control, which re-reads the pinned runtime
+pack's five class-library archives against the frozen surface expectation
+(`goldens/shim/pal-surface.txt`), needs `RHU_NET_PACK` and is declared, not
+run, without it; each hosted-runtime leg needs its class's archive set and
+C-library directory. The kit's directory layout differs by host: the Linux kit keeps
 the Cortex-M7 library under `arm-none-eabi/lib/thumb/v7e-m+dp/hard` and
 the Cortex-M33 one under `arm-none-eabi/lib/thumb/v8-m.main+fp/hard`,
 whereas the Windows kit keeps them under
 `lib/gcc/arm-none-eabi/12.2.1/thumb/v7e-m+dp/hard` and
 `lib/gcc/arm-none-eabi/12.2.1/thumb/v8-m.main+fp/hard`.
 
+### The payload leg
+
+The payload leg rebuilds the payload tier's two programs from `src/payload`
+through the pinned .NET SDK with the compiler's deterministic option and a
+path map over the whole `src/payload` tree, so the objects carry no checkout
+path and are byte-identical at any directory; each rebuilt object is
+compared whole against the frozen one, and the rebuilt objects are linked
+and booted by the payload gate's own method against the goldens. Name the
+directory holding the two rebuilt objects by `RHU_PAYLOAD_OBJECTS`; without
+it, and without the publish environment of the second form below, the leg is
+declared not run.
+
+Publish the two objects from this checkout's `src/payload` in a Linux
+environment where the SDK named by `src/payload/global.json` is installed
+(on a Windows host, a WSL distribution: from a Windows host the SDK refuses
+a cross-OS native publish). Each command runs in its program's directory,
+where `dotnet` reads that pin:
+
+    (cd src/payload/rtsmoke && dotnet publish rtsmoke.csproj -c Release -r linux-arm -p:Deterministic=true "-p:PathMap=<this checkout's src/payload directory>=/rhu/src/payload")
+    (cd src/payload/gctest && dotnet publish gctest.csproj -c Release -r linux-arm -p:Deterministic=true "-p:PathMap=<this checkout's src/payload directory>=/rhu/src/payload")
+
+Each publish writes its object at
+`src/payload/<program>/obj/Release/net11.0/linux-arm/native/<program>.o` and
+then fails at the host's native link step, by design (the host cannot link
+an ARM image); copy the two objects into one directory, name it, and run
+the leg. A compiler that refuses the programs' system module at the pin
+fails the publish with the compiler's lines; a build whose bytes differ
+from the tier's reads MOVED, and the leg's boot of the rebuilt objects
+against the goldens is the read a re-freeze of the tier rests on.
+
+The leg's second form drives the publish itself, through a script the
+harness runs in that Linux environment, when `RHU_PUBLISH` (the command
+prefix that runs a script there) and `RHU_PUBLISH_ROOT` (this checkout's
+root as that environment sees it) are set, or the two lines of the
+untracked pointer file `tools/toolchains/publish.local` are present; on a
+Windows host use the pointer file, since a POSIX-emulating shell converts a
+path-shaped value typed into a variable before the harness reads it.
+That form is the one the maintainers run, and it adds three controls through
+the real tool: a source with one line moved, the path map absent, and a
+project with its system-module property renamed; from an objects directory
+the three are named NOT RUN on the verdict line.
+
 The frozen objects were produced by the LLVM 22.1.8 release from llvm.org,
 run on Linux. Another build of clang 22.1.8 carries another producer stamp,
 which the object comparisons set aside: a difference in that section alone
-is not a difference in the code, and every comparison of the shim leg,
-its internal controls included, is made that way.
+is not a difference in the code, and every comparison of the shim and
+garbage-collector legs, their internal controls included, is made that
+way.
 
 Where the toolchain's object copier can remove an object's producer stamp (the
 section naming the compiler build that produced it), the comparison is made

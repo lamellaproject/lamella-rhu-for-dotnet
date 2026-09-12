@@ -4420,25 +4420,55 @@ impl Gc {
             shared_rel,
             Class::CortexM7,
         );
-        let shared_got = match sha256_file(&shared_abs) {
+        let shared_got = match sha256_without_stamp(&facts, &shared_abs, &stripped.join("f769-control.o")) {
             Ok(s) => s,
-            Err(e) => self.fail("gc.f769-shared-control", &format!("the skeleton's compile under the F769 row produced no object ({e})")),
+            Err(e) => self.fail("gc.f769-shared-control", &format!("the skeleton's compile under the F769 row produced no object, or the copier refused it ({e})")),
         };
-        let shared_want = match sha256_file(&self.repo.join("goldens").join("gc").join("skel-row.o")) {
+        let frozen_abs = self.repo.join("goldens").join("gc").join("skel-row.o");
+        let shared_want = match sha256_without_stamp(&facts, &frozen_abs, &stripped.join("skel-row.o")) {
             Ok(s) => s,
-            Err(e) => self.fail("gc.f769-shared-control", &format!("goldens/gc/skel-row.o unreadable: {e}")),
+            Err(e) => self.fail("gc.f769-shared-control", &format!("goldens/gc/skel-row.o unreadable, or the copier refused it: {e}")),
         };
+        println!("   the frozen skeleton's producer stamp (report-only): '{}'", producer_stamp_of(&frozen_abs));
+        println!("   the F769 compile's producer stamp (report-only): '{}'", producer_stamp_of(&shared_abs));
         if shared_got != shared_want {
             self.fail(
                 "gc.f769-shared-control",
-                &format!("the skeleton under the F769 row's defines compiled to {shared_got}, not the frozen an500 skel-row.o {shared_want}: the rows no longer share the skeleton, so the F769 image needs its own frozen skeleton object"),
+                &format!("the skeleton under the F769 row's defines compiled to {shared_got}, not the frozen an500 skel-row.o {shared_want}, apart from the producer stamp: the rows no longer share the skeleton, so the F769 image needs its own frozen skeleton object"),
             );
         }
+        let frozen_bytes = match std::fs::read(&frozen_abs) {
+            Ok(b) => b,
+            Err(e) => self.fail("gc.f769-shared-control", &format!("goldens/gc/skel-row.o unreadable: {e}")),
+        };
+        let Some((code_at, _)) = section_span_prefixed(&frozen_bytes, ".text") else {
+            self.fail("gc.f769-shared-control", "goldens/gc/skel-row.o carries no code section to doctor: the control cannot fire");
+        };
+        let mut doctored = frozen_bytes.clone();
+        match doctored.get_mut(code_at) {
+            Some(b) => *b ^= 0x01,
+            None => self.fail("gc.f769-shared-control", "goldens/gc/skel-row.o's code section lies outside the file: the control cannot fire"),
+        }
+        let doctored_abs = self.repo.join("src").join("kernel").join("target").join("gc-gate").join("obj").join("skel-row-doctored-control.o");
+        if let Some(dir) = doctored_abs.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(&doctored_abs, &doctored) {
+            self.fail("gc.f769-shared-control", &format!("the doctored copy could not be written: {e}"));
+        }
+        let doctored_sha = match sha256_without_stamp(&facts, &doctored_abs, &stripped.join("skel-row-doctored.o")) {
+            Ok(s) => s,
+            Err(e) => self.fail("gc.f769-shared-control", &format!("the doctored copy: the copier refused it ({e})")),
+        };
+        if doctored_sha == shared_want {
+            self.fail("gc.f769-shared-control", "a copy of the frozen skeleton with one code byte moved ties apart from the stamp: the comparison cannot see code");
+        }
+        println!("   the doctored control: a copy of the frozen skeleton with one code byte moved is refused apart from the stamp ({} != {})", &doctored_sha[..16], &shared_want[..16]);
         self.results.emit(&format!(
             "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc-rederive\",\"case\":\"gc.f769-shared-control\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"shared_sha\":\"{shared_want}\"}}}}"
         ));
         self.results.tally("pass", "positive");
-        println!("== case gc.f769-shared-control: PASS (the skeleton under the F769 row's defines ties the frozen an500 skel-row.o {}: one skeleton object serves both rows) ==", &shared_want[..16]);
+        println!("== case gc.f769-shared-control: PASS (the skeleton under the F769 row's defines ties the frozen an500 skel-row.o {} apart from the producer stamp: one skeleton object serves both rows; a copy with one code byte moved refused) ==", &shared_want[..16]);
 
         println!("== case gc.E-posture-refused (negative control) ==");
         self.compile_expect_fail(
@@ -4598,7 +4628,7 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "GC REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; the F769 row's shared skeleton ties the an500 object; posture control refused at compile)  [{}]",
+        "GC REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; the F769 row's shared skeleton ties the an500 object apart from the stamp, a copy with one code byte moved refused; posture control refused at compile)  [{}]",
         FROZEN_PLAN.len(),
         FROZEN_PLAN.len(),
         gxx.version

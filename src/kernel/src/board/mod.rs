@@ -29,6 +29,40 @@ pub struct ClockReadback {
 ))]
 pub mod ring;
 
+/// The GPIO facts per board (the device seam): the emulator rows' virtual
+/// facts; the silicon rows' facts read from the vendored board description
+/// beside each module where one exists, and stated by the kernel itself,
+/// with no named signal, where none does.
+#[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
+#[path = "facts/mps2.rs"]
+pub mod facts;
+#[cfg(feature = "board-stm32f769i-disco")]
+#[path = "facts/stm32f769i_disco.rs"]
+pub mod facts;
+#[cfg(feature = "board-nucleo-u5a5zj-q")]
+#[path = "facts/nucleo_u5a5zj_q.rs"]
+pub mod facts;
+#[cfg(feature = "board-pico-2")]
+#[path = "facts/pico_2.rs"]
+pub mod facts;
+#[cfg(feature = "board-pico-plus-2")]
+#[path = "facts/pico_plus_2.rs"]
+pub mod facts;
+
+/// The GPIO family driver behind the doors (`crate::board::gpio_backend`):
+/// the virtual backend on the emulator rows, ST's block with its family's
+/// interrupt arm on the ST boards, the RP2350's half on the Picos.
+#[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
+pub mod virt_gpio;
+#[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
+pub use virt_gpio as gpio_backend;
+#[cfg(any(feature = "board-stm32f769i-disco", feature = "board-nucleo-u5a5zj-q"))]
+pub mod stm32_gpio;
+#[cfg(any(feature = "board-stm32f769i-disco", feature = "board-nucleo-u5a5zj-q"))]
+pub use stm32_gpio as gpio_backend;
+#[cfg(any(feature = "board-pico-2", feature = "board-pico-plus-2"))]
+pub use rp2350::gpio_backend;
+
 #[cfg(feature = "board-mps2-an500")]
 mod mps2_an500;
 #[cfg(feature = "board-mps2-an500")]
@@ -68,6 +102,10 @@ pub use pico_plus_2::*;
 /// board states its own list (its console ring's transmit drain).
 #[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
 pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[];
+/// The family GPIO driver's lines: none on the emulator rows (the virtual
+/// backend fires in thread context).
+#[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
+pub const GPIO_IRQS: &[(usize, unsafe extern "C" fn())] = &[];
 
 /// Exactly one board feature: the count of selected boards, asserted at
 /// compile time (a pairwise refusal would need one arm per pair).
@@ -208,4 +246,26 @@ pub fn arena_window() -> (usize, usize) {
         core::ptr::addr_of!(__rhu_arena_lo) as usize,
         core::ptr::addr_of!(__rhu_arena_hi) as usize,
     )
+}
+
+/// The board's initialization hook for a program built with the
+/// `unhosted-main` feature (a test program the kernel hands its main
+/// thread to; no hosted runtime in that image): called once on that thread
+/// just before the program's entry, with the board's boot-time GPIO claims
+/// already in place; returns 0, or the claims table's code when a
+/// registration is refused. A board with nothing to register answers 0.
+///
+/// The Pico family's rows: the wireless module's interrupt line is
+/// registered as a tenant of the GPIO bank's handler (the wireless variants
+/// carry the module), so the wifi test program can wait on the module's
+/// wake word.
+#[cfg(all(feature = "unhosted-main", any(feature = "board-pico-2", feature = "board-pico-plus-2")))]
+pub fn unhosted_tenant_init() -> i32 {
+    rp2350::wireless_tenant::init()
+}
+
+/// Every other row: nothing to register.
+#[cfg(all(feature = "unhosted-main", not(any(feature = "board-pico-2", feature = "board-pico-plus-2"))))]
+pub fn unhosted_tenant_init() -> i32 {
+    0
 }

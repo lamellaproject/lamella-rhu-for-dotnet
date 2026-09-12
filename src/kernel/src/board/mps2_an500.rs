@@ -28,6 +28,11 @@ pub const KMAIN_STACK_BYTES: usize = 16 * 1024;
 /// table.
 pub const NIRQ: usize = 32;
 
+/// The vector line a test image may claim: the table's last, implemented
+/// by the machine model and claimed by no kernel handler.
+#[allow(dead_code)]
+pub const SPARE_IRQ: usize = NIRQ - 1;
+
 /// FPU shape: the AN500's Cortex-M7 carries FPv5 double precision.
 /// Consumed by records and gates, never by context-switch code (lazy
 /// stacking of S0-S31 is FP-shape-agnostic).

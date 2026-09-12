@@ -14,7 +14,7 @@ mod tools;
 use std::process::exit;
 
 fn usage() -> ! {
-    println!("usage: rhu-gate <base | sched | payload | api | gc | shim | rt-m7 | rt-m33 | host | chain | selfcheck> [selfcheck | rederive | attrs <pre> <donor> <out>]");
+    println!("usage: rhu-gate <base | sched | payload | api | gc | shim | rt-m7 | rt-m33 | host | chain | selfcheck> [selfcheck | rederive | sdk-parity | attrs <pre> <donor> <out>]");
     exit(2);
 }
 
@@ -34,6 +34,7 @@ fn main() {
         (Some("sched"), Some("selfcheck"), 2) => gates::sched::selfcheck(&repo),
         (Some("payload"), None, 1) => gates::payload::run(&repo),
         (Some("payload"), Some("selfcheck"), 2) => gates::payload::selfcheck(&repo),
+        (Some("payload"), Some("rederive"), 2) => gates::payload::rederive(&repo),
         (Some("api"), None, 1) => gates::api::run(&repo),
         (Some("api"), Some("selfcheck"), 2) => gates::api::selfcheck(&repo),
         (Some("gc"), None, 1) => gates::gc::run(&repo),
@@ -45,9 +46,11 @@ fn main() {
         (Some("rt-m7"), None, 1) => gates::rt::run(&repo, &gates::rt::WORLD_M7),
         (Some("rt-m7"), Some("selfcheck"), 2) => gates::rt::selfcheck(&repo, &gates::rt::WORLD_M7),
         (Some("rt-m7"), Some("rederive"), 2) => gates::rt::rederive(&repo, &gates::rt::WORLD_M7),
+        (Some("rt-m7"), Some("sdk-parity"), 2) => gates::rt::sdk_parity(&repo, &gates::rt::WORLD_M7),
         (Some("rt-m33"), None, 1) => gates::rt::run(&repo, &gates::rt::WORLD_M33),
         (Some("rt-m33"), Some("selfcheck"), 2) => gates::rt::selfcheck(&repo, &gates::rt::WORLD_M33),
         (Some("rt-m33"), Some("rederive"), 2) => gates::rt::rederive(&repo, &gates::rt::WORLD_M33),
+        (Some("rt-m33"), Some("sdk-parity"), 2) => gates::rt::sdk_parity(&repo, &gates::rt::WORLD_M33),
         (Some("host"), None, 1) => gates::host::run(&repo),
         (Some("host"), Some("selfcheck"), 2) => gates::host::selfcheck(&repo),
         (Some("rt"), Some("attrs"), _) => gates::rt::attrs(&repo, &args[2..]),

@@ -8,6 +8,7 @@
 #ifndef RHU_SHIM_H
 #define RHU_SHIM_H
 
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -55,6 +56,18 @@ uint32_t rhu_shim_activation_count(void);
  * length and an optional zero-padded width on the integer conversions;
  * an unsupported conversion is a loud death, never a silent wrong line. */
 void rhu_shim_log(const char *fmt, ...);
+
+/* The diagnostic line's conversion core over a caller's buffer: the same
+ * conversion set as rhu_shim_log, written into buf up to cap - 1 bytes and
+ * terminated when cap is not 0 (cap 0 measures without writing), the full
+ * length of the formatted text returned -- the C library's vsnprintf
+ * contract, which the PAL's snprintf entry points state; an unsupported
+ * conversion is a loud death here too, never a silent wrong string. */
+int32_t rhu_shim_vformat(char *buf, uint32_t cap, const char *fmt, va_list ap);
+
+/* The environment table the shim built at initialization, as the C
+ * library's environ: the rows in the order stated, then a null. */
+char **rhu_shim_environ(void);
 
 /* Spawn a hosted thread on the shim's thread path: a stack request of 0
  * means the board row's default; a request above the row's clamp is

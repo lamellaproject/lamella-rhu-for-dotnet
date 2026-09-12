@@ -23,7 +23,7 @@ use crate::image::{check_records, elf32_phdrs, header_abi};
 use crate::results::{chain_json_from_env, validate_results, Results};
 use crate::sha256::{sha256_file, sha256_hex};
 use crate::text::{contains_fixed, cr_count, eq_lf_normalized, payload_stream, word_sym_present, word_sym_value};
-use crate::tools::{cargo_build_kernel, cargo_build_kernel_at, echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts, ExecProfile, RustcFacts};
+use crate::tools::{cargo_build_kernel, cargo_build_kernel_at, command_words, echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts, ExecProfile, RustcFacts};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::time::Duration;
@@ -80,7 +80,7 @@ pub(crate) struct RtWorld {
     /// the kernel's own target directory; Some((target dir, target,
     /// features)) builds under a directory of the gate's own.
     pub(crate) lib_build: Option<(&'static str, &'static str, &'static str)>,
-    pub(crate) shim_objects: [&'static str; 5],
+    pub(crate) shim_objects: [&'static str; 6],
     pub(crate) gc_objects: [&'static str; 3],
     pub(crate) archives_env: &'static str,
     pub(crate) archives_local: &'static str,
@@ -90,6 +90,12 @@ pub(crate) struct RtWorld {
     pub(crate) rider: bool,
     /// The verdict's case count, as the line prints it.
     pub(crate) cases: &'static str,
+    /// The board the SDK parity leg publishes the gate's program for
+    /// (the SDK's board table's target name), and the leg's own names.
+    pub(crate) sdk_board: &'static str,
+    pub(crate) sdk_gate: &'static str,
+    pub(crate) sdk_display: &'static str,
+    pub(crate) sdk_results: &'static str,
 }
 
 /// The Cortex-M7 world: the gate as it stood, every field a constant of
@@ -126,6 +132,10 @@ pub(crate) const WORLD_M7: RtWorld = RtWorld {
     newlib_local: "newlib-m7.local",
     rider: true,
     cases: "17/17 cases incl. 9 negative controls",
+    sdk_board: "arm-mps2-an500",
+    sdk_gate: "rt-m7-sdk-parity",
+    sdk_display: "RT-M7 SDK PARITY",
+    sdk_results: "rt-m7-sdk-parity.results.jsonl",
 };
 
 /// The Cortex-M33 world: the gate `rt-m33` on the class's own frozen tier
@@ -166,6 +176,7 @@ pub(crate) const WORLD_M33: RtWorld = RtWorld {
         "goldens/shim/shim-libc-glue-an505.o",
         "goldens/shim/shim-stdio-sym-an505.o",
         "goldens/shim/shim-host-an505.o",
+        "goldens/shim/shim-pal-surface-an505.o",
     ],
     gc_objects: ["goldens/gc/skel-row-an505.o", "goldens/gc/heap-row-an505.o", "goldens/gc/collect-row-an505.o"],
     archives_env: "RHU_RT_ARCHIVES_M33",
@@ -174,6 +185,10 @@ pub(crate) const WORLD_M33: RtWorld = RtWorld {
     newlib_local: "newlib-m33.local",
     rider: false,
     cases: "16/16 cases incl. 9 negative controls",
+    sdk_board: "arm-mps2-an505",
+    sdk_gate: "rt-m33-sdk-parity",
+    sdk_display: "RT-M33 SDK PARITY",
+    sdk_results: "rt-m33-sdk-parity.results.jsonl",
 };
 
 /// The tier a frozen file lives in: the program objects' tier for the two
@@ -224,17 +239,17 @@ fn resolve_kit_dir(repo: &Path, w: &RtWorld) -> Option<String> {
 /// goldens/rt-m7/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates the objects, the lists, the manifest
 /// and this pin together in one reviewed commit.
-pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "fbb618ffd30a36a71c797f83ec149dbc950a62bf4b2d65be98cd8f1aea9aa673";
+pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "39b26b589e0072d860367b23b19619cc1502f80e5e333187a41f42be35c76558";
 
 /// goldens/rt-m33/MANIFEST.md's own sha256: the Cortex-M33 world's pin,
 /// beside its manifest the way the Cortex-M7 world's is; a re-freeze of
 /// that tier moves this line and nothing of the other world's.
-pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "fa651e390e2451d35bac1f07ba3d946a7f0ea8b2fdc9b99293821b2243ab9e87";
+pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "a09c0adf78b9de2cbb9128fc7b7c0b0f68b63645e16208f762b25abe6033c998";
 
 /// The archive set the frozen merge consumed. The manifest's `archives:`
 /// line and the frozen set file must both name it; a merge recorded under
 /// another set is refused before its bytes are trusted.
-const ARCHIVE_SET: &str = "rc1-rhu-cortex-m7-sgc-enabled";
+const ARCHIVE_SET: &str = "net11-rc1-rhu-cortex-m7-sgc-enabled";
 
 /// The frozen tier: the file names under goldens/rt-m7/ and what each is.
 const FROZEN_FILES: [(&str, &str); 15] = [
@@ -243,7 +258,7 @@ const FROZEN_FILES: [(&str, &str); 15] = [
     ("rthello-merged.o", "the merged object: the program object, the surgery object and the runtime archives, the descriptor rooted, attributes neutralized"),
     ("attr-donor-v7em.bin", "the build-attributes blob the merges apply (a donor compiled at the image ABI)"),
     ("control-attr-a-profile.bin", "the archives' own merged attributes (application profile), the negative control's input"),
-    ("archives-rc1-rhu-cortex-m7-sgc-enabled.txt", "the archive set's identity: what built it, each archive by size and sha256, the set's demand and surface shas"),
+    ("archives-net11-rc1-rhu-cortex-m7-sgc-enabled.txt", "the archive set's identity: what built it, each archive by size and sha256, the set's demand and surface shas"),
     ("rthello-merged.undef.txt", "the merged object's undefined names, sorted: the demand surface pinned exactly"),
     ("rt-libc.o", "the C and math libraries' closure merged into one relocatable, attributes neutralized"),
     ("rt-libc.members.txt", "the closure's member list by archive and name, with the kit's two libraries by size and sha256"),
@@ -259,7 +274,7 @@ const SURGERY: &str = "startup-cookie-copied.o";
 pub(crate) const MERGED: &str = "rthello-merged.o";
 const DONOR: &str = "attr-donor-v7em.bin";
 const CONTROL_ATTRS: &str = "control-attr-a-profile.bin";
-const SET_FILE: &str = "archives-rc1-rhu-cortex-m7-sgc-enabled.txt";
+const SET_FILE: &str = "archives-net11-rc1-rhu-cortex-m7-sgc-enabled.txt";
 pub(crate) const UNDEF_FILE: &str = "rthello-merged.undef.txt";
 const LIBC: &str = "rt-libc.o";
 const LIBC_MEMBERS: &str = "rt-libc.members.txt";
@@ -412,12 +427,13 @@ const AN500_MAP: &str = "src/kernel/payload-mps2-an500.x";
 const AN500_LIB: &str = "src/kernel/target/thumbv7em-none-eabihf/release/librhu_kernel.a";
 /// The frozen shim objects and collector row objects the image links,
 /// in the order the line takes them.
-const SHIM_OBJECTS: [&str; 5] = [
+const SHIM_OBJECTS: [&str; 6] = [
     "goldens/shim/shim-core.o",
     "goldens/shim/shim-sysnative.o",
     "goldens/shim/shim-libc-glue.o",
     "goldens/shim/shim-stdio-sym.o",
     "goldens/shim/shim-host.o",
+    "goldens/shim/shim-pal-surface.o",
 ];
 const GC_OBJECTS: [&str; 3] = ["goldens/gc/skel-row.o", "goldens/gc/heap-row.o", "goldens/gc/collect-row.o"];
 
@@ -432,7 +448,7 @@ const FLAVOUR_MARK: &str = "Object reference not set to an instance";
 /// entry, the program's start, one collection, the verdict, the host's
 /// exit line, the kernel's return.
 const BOOT_MARKERS: [&str; 24] = [
-    "[payload] entry: payload-provided, built for hosting-API contract generation 32 (this kernel: 32)",
+    "[payload] entry: payload-provided, built for hosting-API contract generation 33 (this kernel: 33)",
     "[shim] init: per-thread block registered as module 1 (48 bytes)",
     "[host] stdio: standard error bound to the C library's stream",
     "[host] stdio: standard output line buffered",
@@ -469,7 +485,7 @@ const PENDING: [&str; 0] = [];
 /// worker and the activation section's worker at the row's default),
 /// every section's verdict line, the summary last.
 const SUITE_MARKERS: [&str; 19] = [
-    "[payload] entry: payload-provided, built for hosting-API contract generation 32 (this kernel: 32)",
+    "[payload] entry: payload-provided, built for hosting-API contract generation 33 (this kernel: 33)",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
     "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
     "[host] entering managed entry",
@@ -515,12 +531,13 @@ const F769_TARGET: &str = "thumbv7em-none-eabihf";
 const F769_FEATURES: &str = "board-stm32f769i-disco,payload";
 const F769_MAP: &str = "src/kernel/payload-stm32f769i-disco.x";
 const F769_LIB: &str = "src/kernel/target/payload-gate/rt/stm32f769i-disco/thumbv7em-none-eabihf/release/librhu_kernel.a";
-const F769_SHIM_OBJECTS: [&str; 5] = [
+const F769_SHIM_OBJECTS: [&str; 6] = [
     "goldens/shim/shim-core-f769.o",
     "goldens/shim/shim-sysnative.o",
     "goldens/shim/shim-libc-glue.o",
     "goldens/shim/shim-stdio-sym.o",
     "goldens/shim/shim-host.o",
+    "goldens/shim/shim-pal-surface.o",
 ];
 const F769_GC_OBJECTS: [&str; 3] = ["goldens/gc/skel-row.o", "goldens/gc/heap-row-f769.o", "goldens/gc/collect-row-f769.o"];
 
@@ -3058,4 +3075,305 @@ pub fn selfcheck(repo: &Path, w: &'static RtWorld) -> ! {
     );
 
     sc.finish("genuine inputs accepted");
+}
+
+/// The publish world the parity leg runs the SDK in: `RHU_PUBLISH` (the
+/// command prefix that runs a script there; a double-quoted word keeps
+/// its spaces) with `RHU_PUBLISH_ROOT` (this checkout's root in that
+/// world), else the two lines of the untracked machine-local
+/// tools/toolchains/publish.local, else None.
+pub(crate) fn resolve_publish(repo: &Path) -> Option<(String, String)> {
+    let env_prefix = std::env::var("RHU_PUBLISH").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let env_root = std::env::var("RHU_PUBLISH_ROOT").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    if let (Some(p), Some(r)) = (env_prefix.clone(), env_root.clone()) {
+        return Some((p, r));
+    }
+    let local = repo.join("tools").join("toolchains").join("publish.local");
+    let text = std::fs::read_to_string(&local).unwrap_or_default();
+    let mut lines = text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
+    let file_prefix = lines.next();
+    let file_root = lines.next();
+    match (env_prefix.or(file_prefix), env_root.or(file_root)) {
+        (Some(p), Some(r)) => Some((p, r)),
+        _ => None,
+    }
+}
+
+/// The project directory a compiled program object embeds: the printable
+/// run ending in the gate's project path as the SDK's map writes it
+/// (/rhu/src/rthello), read off the object's bytes.
+/// The compiler records the directory it ran in -- the SDK's path map
+/// maps it to one fixed string, so an object published at any directory
+/// under the map carries the same run, and one published with the map
+/// off carries its own directory: the exact tie refuses that one.
+fn embedded_project_path(obj: &[u8]) -> Option<String> {
+    let needle = b"/rhu/src/rthello";
+    let pos = obj.windows(needle.len()).position(|w| w == needle)?;
+    let mut start = pos;
+    while start > 0 && obj[start - 1] >= 0x20 && obj[start - 1] < 0x7f {
+        start -= 1;
+    }
+    let end = pos + needle.len();
+    Some(String::from_utf8_lossy(&obj[start..end]).into_owned())
+}
+
+/// One `control <name>: rc=<n> elf=<state> refuse=<text>` line of the
+/// publish-side script's control summary.
+fn control_line<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let head = format!("control {name}: ");
+    text.lines().find(|l| l.starts_with(&head))
+}
+
+fn control_field<'a>(line: &'a str, key: &str) -> &'a str {
+    let key_eq = format!("{key}=");
+    line.split(' ').find_map(|w| w.strip_prefix(key_eq.as_str())).unwrap_or("")
+}
+
+/// THE PARITY LEG: the gate's own program published through the SDK
+/// package from the local feed in the publish world, and its object, its
+/// surgery object, its merged object and its image tied byte for byte to
+/// the frozen tier and to this runner's own link of the tier's merged
+/// object; then the SDK's refusals exercised through the real tool on
+/// doctored inputs. A maintainer's leg beside `rederive`: it needs the
+/// publish world (the pinned .NET SDK, the archive sets and the LLVM
+/// release on the Linux side), NOT RUN and exit 1 without it -- never a
+/// pass. The exact tie of the object needs the SDK's path map (the same
+/// project maps to the same string at any directory), so the leg refuses
+/// a publish world whose object does not carry the frozen object's mapped
+/// path.
+pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
+    let facts = match rustc_facts() {
+        Ok(f) => f,
+        Err(e) => {
+            println!("rhu-gate: {e}");
+            exit(1);
+        }
+    };
+    let ld = match resolve_ld(&facts) {
+        Ok(l) => l,
+        Err(e) => {
+            println!("rhu-gate: {e}");
+            exit(1);
+        }
+    };
+    let Some((prefix, root)) = resolve_publish(repo) else {
+        println!(
+            "{}: NOT RUN (no publish world resolved: set RHU_PUBLISH to the command prefix that runs a script in the publish world and RHU_PUBLISH_ROOT to this checkout's root there, or write tools/toolchains/publish.local with those two lines)",
+            w.sdk_display
+        );
+        exit(1);
+    };
+    let words = match command_words(&prefix) {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => {
+            println!("{}: NOT RUN (the publish command prefix is empty)", w.sdk_display);
+            exit(1);
+        }
+        Err(e) => {
+            println!("{}: NOT RUN ({e})", w.sdk_display);
+            exit(1);
+        }
+    };
+    let mut rt = open(repo, w, w.sdk_gate, w.sdk_display, w.sdk_results);
+    rt.results.emit(&format!(
+        "{{\"schema\":1,\"type\":\"run\",\"gate\":\"{}\",\"run\":\"{}-{}\",\"host\":\"host-native\",\"runner\":\"{RUNNER}\",\"tools\":{{\"rustc\":\"{}\",\"ld\":\"{}\"}}}}",
+        w.sdk_gate,
+        w.sdk_gate,
+        std::process::id(),
+        facts.version,
+        ld.version
+    ));
+    rt.verify_frozen();
+
+    let case = "rt.sdk-parity-object";
+    let log = rt.out.join("sdk-parity-staticlib-build.log");
+    match rt.build_lib(&log) {
+        Ok(true) => {}
+        Ok(false) => {
+            echo_file(&log, "");
+            rt.fail(case, "kernel staticlib build error");
+        }
+        Err(e) => rt.fail(case, &e),
+    }
+
+    let out_rel = format!("src/kernel/target/{}/sdk-parity", w.out_dir);
+    let out = rt.out.join("sdk-parity");
+    if std::fs::create_dir_all(&out).is_err() {
+        rt.fail(case, &format!("cannot create {}", out.display()));
+    }
+    let script = format!("{root}/tools/rt-publish/sdk-parity.sh");
+    let lib_there = format!("{root}/{}", w.lib);
+    let out_there = format!("{root}/{out_rel}");
+    let mut args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
+    args.push(&script);
+    args.push(w.sdk_board);
+    args.push(&lib_there);
+    args.push(&out_there);
+    println!("== the publish world: {} {} {} {} {} ==", words.join(" "), script, w.sdk_board, lib_there, out_there);
+    let script_out = out.join("script.stdout");
+    let script_err = out.join("script.stderr");
+    let outcome = run_captured(Path::new(&words[0]), &args, &script_out, &script_err, Duration::from_secs(2400));
+    let script_text = std::fs::read_to_string(&script_out).unwrap_or_default();
+    for l in script_text.lines() {
+        println!("  | {}", l.trim_end_matches('\r'));
+    }
+    match outcome {
+        Ok(o) if o.exit == 0 => {}
+        Ok(o) => {
+            echo_file(&script_err, "  | ");
+            rt.fail(case, &format!("the publish-side script failed (exit {}, timed out {})", o.exit, o.timed_out));
+        }
+        Err(e) => rt.fail(case, &format!("the publish-side script did not run: {e}")),
+    }
+
+    println!("== case {case}: the object published through the SDK against the frozen program object ==");
+    let fresh_obj = std::fs::read(out.join("rthello.o")).unwrap_or_default();
+    let frozen_obj = std::fs::read(rt.frozen(PAYLOAD)).unwrap_or_default();
+    if fresh_obj.is_empty() {
+        rt.fail(case, "the publish left no object under sdk-parity/");
+    }
+    let frozen_path = embedded_project_path(&frozen_obj).unwrap_or_default();
+    if frozen_path.is_empty() {
+        rt.fail(case, "the frozen program object embeds no project path (the guard has nothing to read)");
+    }
+    let carries_record_path = |obj: &[u8]| obj.windows(frozen_path.len()).any(|w| w == frozen_path.as_bytes());
+    if !carries_record_path(&fresh_obj) {
+        println!(
+            "{}: REFUSED -- the object published in the publish world does not carry the record's project path '{frozen_path}'; the exact tie needs the same project at the same path, and the tie apart from the embedded path strings is a separate instrument",
+            w.sdk_display
+        );
+        exit(1);
+    }
+    println!("  the object carries the record's project path: {frozen_path}");
+    let want = rt.record_sha(PAYLOAD);
+    let got = sha256_hex(&fresh_obj);
+    if got != want {
+        rt.fail(case, &format!("the object's sha256 {got} != the frozen {want} -- the compiler's output moved (the response file, the pack or the SDK's posture)"));
+    }
+    println!("  the object byte-identical to {}/{PAYLOAD} ({}...; {} bytes)", rt.w.program_tier, &want[..16], fresh_obj.len());
+    rt.pass(case, "positive", "", &format!("{{\"object_sha\":\"{want}\",\"bytes\":{}}}", fresh_obj.len()));
+    println!("  PASS");
+
+    let case = "rt.sdk-parity-surgery";
+    println!("== case {case}: the startup member printed out of the shipped archive and its cookie section renamed, against the frozen surgery object ==");
+    let got = sha256_file(&out.join("startup-cookie-copied.o")).unwrap_or_default();
+    let want = rt.record_sha(SURGERY);
+    if got != want {
+        rt.fail(case, &format!("the surgery object's sha256 {got} != the frozen {want} -- the member, the archive or the copier moved"));
+    }
+    println!("  the surgery object byte-identical to {}/{SURGERY} ({}...)", rt.w.tier, &want[..16]);
+    rt.pass(case, "positive", "", &format!("{{\"surgery_sha\":\"{want}\"}}"));
+    println!("  PASS");
+
+    let case = "rt.sdk-parity-merge";
+    println!("== case {case}: the merge the SDK made with the tools package's linker and the task assembly's attributes update, against the frozen merged object ==");
+    let got = sha256_file(&out.join("rthello-merged.o")).unwrap_or_default();
+    let want = rt.record_sha(MERGED);
+    if got != want {
+        rt.fail(case, &format!("the merged object's sha256 {got} != the frozen {want} (whole) -- the merge moved (the linker, the archives, the surgery object or the attributes update)"));
+    }
+    println!("  the merged object byte-identical to {}/{MERGED} ({}...; whole)", rt.w.tier, &want[..16]);
+    rt.pass(case, "positive", "", &format!("{{\"merged_sha\":\"{want}\"}}"));
+    println!("  PASS");
+
+    let case = "rt.sdk-parity-link";
+    println!("== case {case}: the image the SDK linked against this runner's link of the frozen merged object on the gate's line ==");
+    let record_rel = format!("{out_rel}/rt-link-of-record.elf");
+    let map_rel = format!("{out_rel}/rt-link-of-record.map");
+    let mut largs: Vec<String> = vec!["-T".to_string(), w.map.to_string(), "--gc-sections".to_string(), format!("-Map={map_rel}")];
+    largs.extend(RT_LINK_WORDS.iter().map(|s| s.to_string()));
+    largs.push(format!("{}/{MERGED}", w.tier));
+    largs.extend(w.shim_objects.iter().map(|s| s.to_string()));
+    largs.extend(w.gc_objects.iter().map(|s| s.to_string()));
+    largs.push(format!("{}/{LIBC}", w.tier));
+    largs.push(w.lib.to_string());
+    largs.push("-o".to_string());
+    largs.push(record_rel.clone());
+    let ld_out = out.join("rt-link-of-record.ld.stdout");
+    let ld_log = out.join("rt-link-of-record.ld.stderr");
+    match run_tool_bounded(repo, &ld, &largs, &ld_out, &ld_log) {
+        Ok(true) => {}
+        Ok(false) => {
+            echo_file(&ld_log, "  | ");
+            rt.fail(case, "the link of record did not link");
+        }
+        Err(e) => rt.fail(case, &e),
+    }
+    let record_elf = repo.join(record_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let want = sha256_file(&record_elf).unwrap_or_default();
+    let fresh_elf = out.join("rthello.elf");
+    let got = sha256_file(&fresh_elf).unwrap_or_default();
+    let bytes = std::fs::metadata(&fresh_elf).map(|m| m.len()).unwrap_or(0);
+    if got.is_empty() || want.is_empty() {
+        rt.fail(case, "the image or the link of record is missing");
+    }
+    if got != want {
+        rt.fail(case, &format!("the image's sha256 {got} != the link of record's {want} -- the SDK's link is not the gate's"));
+    }
+    println!("  the image byte-identical to this runner's link of record ({}...; {} bytes; this runner's linker {})", &want[..16], bytes, ld.version);
+    rt.pass(case, "positive", "", &format!("{{\"image_sha\":\"{want}\",\"bytes\":{bytes}}}"));
+    println!("  PASS");
+
+    let controls = std::fs::read_to_string(out.join("controls.txt")).unwrap_or_default();
+    for (name, broke, needle, what) in [
+        ("frozen", "frozen-byte", "does not tie its record", "one byte of a frozen tier object changed"),
+        ("board-missing", "board-missing", "RhuBoard is not set", "no board named"),
+        ("board-unknown", "board-unknown", "is not in the table", "a board not in the table"),
+        ("tool", "tool-byte", "does not tie its record", "one byte of the object copier changed"),
+        ("posture", "posture", "InvariantGlobalization", "the fixed posture moved"),
+    ] {
+        let case = format!("rt.sdk-parity-control-{name}");
+        println!("== case {case}: {what} -- the publish must refuse, nothing linked ==");
+        let Some(line) = control_line(&controls, name) else {
+            rt.fail_control(&case, broke, "the publish-side script left no summary line for this control");
+        };
+        let rc = control_field(line, "rc");
+        let elf = control_field(line, "elf");
+        let refuse = line.split_once("refuse=").map(|(_, r)| r).unwrap_or("");
+        if rc == "0" || elf != "absent" || !refuse.contains(needle) {
+            rt.fail_control(&case, broke, &format!("the doctored input was not refused as registered: {line}"));
+        }
+        println!("  refused (rc {rc}, no image): {}", refuse.trim());
+        rt.pass(&case, "negative", broke, "");
+        println!("  PASS");
+    }
+    let case = "rt.sdk-parity-control-path-mapped";
+    println!("== case {case}: the same project published through the SDK at another directory under the SDK's path map -- its object must be the record's, byte for byte ==");
+    let copy_obj = std::fs::read(out.join("control-path").join("rthello.o")).unwrap_or_default();
+    if copy_obj.is_empty() {
+        rt.fail(case, "the publish at the other directory left no object");
+    }
+    if !carries_record_path(&copy_obj) {
+        rt.fail(case, &format!("the mapped copy's object does not carry the record's project path '{frozen_path}' -- the SDK's path map did not apply"));
+    }
+    if copy_obj != frozen_obj {
+        rt.fail(case, &format!("the mapped copy's object ({} bytes) is not the record's ({} bytes) -- the path map does not make the object path-independent", copy_obj.len(), frozen_obj.len()));
+    }
+    println!("  the mapped copy's object carries the record's path '{frozen_path}' and ties the record byte for byte ({} bytes)", copy_obj.len());
+    rt.pass(case, "positive", "", &format!("{{\"bytes\":{}}}", copy_obj.len()));
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-path-unmapped";
+    println!("== case {case}: the same copy published with the SDK's path map disabled -- its object embeds its own directory and the guard refuses it ==");
+    let unmapped_obj = std::fs::read(out.join("control-path-unmapped").join("rthello.o")).unwrap_or_default();
+    if unmapped_obj.is_empty() {
+        rt.fail_control(case, "project-path", "the unmapped publish left no object");
+    }
+    if carries_record_path(&unmapped_obj) {
+        rt.fail_control(case, "project-path", &format!("the unmapped copy's object carries the record's project path '{frozen_path}' -- the map was not disabled, the control would not bite"));
+    }
+    if unmapped_obj == frozen_obj {
+        rt.fail_control(case, "project-path", "the unmapped copy's object is the record's byte for byte -- the control does not distinguish");
+    }
+    let unmapped_run = control_line(&controls, "path-unmapped").and_then(|l| l.split_once("embedded=")).map(|(_, r)| r.trim().to_string()).unwrap_or_default();
+    println!("  the unmapped copy's object does not carry the record's path '{frozen_path}' (the publish world read '{unmapped_run}' in it) and differs from the record: the guard refuses");
+    rt.pass(case, "negative", "project-path", "");
+    println!("  PASS");
+
+    rt.results.emit_summary(w.sdk_gate, "pass", 0);
+    if !validate_results(repo, rt.results.path()) {
+        println!("{}: FAIL -- results file failed schema validation", w.sdk_display);
+        exit(1);
+    }
+    println!("{}: PASS (5 ties byte for byte, the fifth the same project at another directory under the SDK's path map, + 6 negative controls through the real tool; the publish world's transcript under {out_rel})  [{} | {}]", w.sdk_display, facts.version, ld.version);
+    exit(0);
 }

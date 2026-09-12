@@ -1,0 +1,23 @@
+=== gctest: conservative mark-sweep on 96KB heap ===
+free at start: 98280
+i=0 gcs=0 free=91872
+i=4096 gcs=4 free=83768
+i=8192 gcs=8 free=75024
+i=12288 gcs=12 free=66416
+i=16384 gcs=16 free=57432
+i=20480 gcs=20 free=48392
+i=24576 gcs=24 free=39080
+i=28672 gcs=28 free=30272
+i=32768 gcs=32 free=20792
+i=36864 gcs=36 free=11472
+i=40960 gcs=40 free=2160
+i=45056 gcs=45 free=84872
+i=49152 gcs=49 free=76688
+i=53248 gcs=53 free=67872
+i=57344 gcs=57 free=58608
+PASS list-survives
+PASS boxes-survive
+PASS explicit-collect
+PASS post-churn-alloc
+PASS did-collect
+gctest: collections=62 free=89016  ALL GOOD

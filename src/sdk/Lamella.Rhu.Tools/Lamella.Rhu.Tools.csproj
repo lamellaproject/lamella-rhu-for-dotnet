@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The tools package for one host: the linker and the object copier
+       of the pinned LLVM release, their identity record and the build
+       properties that name them, packed from the directory RhuStage
+       names; RhuRid names the host. -->
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">0.1.0-a</RhuSdkVersion>
+    <RhuRid Condition="'$(RhuRid)' == ''">linux-x64</RhuRid>
+    <PackageId>Lamella.Rhu.Tools.$(RhuRid)</PackageId>
+    <Version>$(RhuSdkVersion)</Version>
+    <Authors>Lamella LLC</Authors>
+    <Company>Lamella LLC</Company>
+    <Copyright>Copyright (c) 2026 Lamella LLC and the Lamella project authors</Copyright>
+    <Description>The linker and the object copier the Lamella RHU SDK runs on a $(RhuRid) host: the LLVM release's own binaries, unchanged, with their identity record.</Description>
+    <PackageLicenseExpression>Apache-2.0 WITH LLVM-exception</PackageLicenseExpression>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <IncludeSymbols>false</IncludeSymbols>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <NoWarn>$(NoWarn);CS2008;NU5100;NU5110;NU5111;NU5128</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(RhuStage)' != ''">
+    <None Include="$(RhuStage)/**" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <Target Name="RhuRequireStage" BeforeTargets="GenerateNuspec">
+    <Error Condition="'$(RhuStage)' == '' or !Exists('$(RhuStage)/bin/ld.lld')" Text="REFUSE: RhuStage must name the staged tools" />
+  </Target>
+
+</Project>

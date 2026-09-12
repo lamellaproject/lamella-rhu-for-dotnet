@@ -165,7 +165,28 @@ const BRACKET_PAIRS: [(&str, &str); 3] = [
 /// suspension/activation + module-query + console/exit/entropy C-ABI
 /// surface, pinned in the artifact (the waistline exists and survives
 /// every build of this flavor). 33 exports.
-const API_SYMS: [&str; 33] = [
+/// The GPIO doors' three checks (the device seam's first peripheral): the
+/// armed lines and the PASS lines, pinned as prefixes.
+const MARKERS_L: [&str; 6] = [
+    "[api] gpio-claim: the line space stated;",
+    "[api] PASS gpio-claim (the line space stated, a claim taken, the same program's second claim a re-configuration,",
+    "[api] gpio-refuse: the board's line, a line past the space,",
+    "[api] PASS gpio-refuse (the board's line EBUSY, the space's end and a far line EINVAL,",
+    "[api] gpio-edge: an armed input counted eight spaced edges once each,",
+    "[api] PASS gpio-edge (eight spaced edges counted once each, a parked waiter woken by one edge through the futex,",
+];
+
+/// The band-interrupt control (the double-precision emulation's fault at the
+/// floor): the armed line, the binary group's digest under preemption (the
+/// hardware row's value, pinned in full) and the hardware class's PASS line,
+/// pinned as prefixes.
+const MARKERS_M: [&str; 3] = [
+    "[api] fp-band: a band-priority exception firing every tick",
+    "[api] fp-band: binary 43008 vectors digest 41ec5e6b under preemption",
+    "[api] PASS fp-band (the band exception fired every tick through the hardware block",
+];
+
+const API_SYMS: [&str; 40] = [
     "rhu_now_ns",
     "rhu_sleep_ns",
     "rhu_futex_wait",
@@ -199,6 +220,13 @@ const API_SYMS: [&str; 33] = [
     "rhu_entropy_secure",
     "rhu_calendar_get",
     "rhu_calendar_set",
+    "rhu_gpio_count",
+    "rhu_gpio_claim",
+    "rhu_gpio_release",
+    "rhu_gpio_write",
+    "rhu_gpio_read",
+    "rhu_gpio_edge",
+    "rhu_gpio_event_word",
 ];
 
 struct API {
@@ -278,6 +306,8 @@ impl API {
         markers.extend(MARKERS_I);
         markers.extend(MARKERS_J);
         markers.extend(MARKERS_K);
+        markers.extend(MARKERS_L);
+        markers.extend(MARKERS_M);
         markers.push(MARKER_OBSERVED_NULL);
         markers.push(MARKER_OBS_ROW);
         self.common_asserts("api", &run, 0, &markers, &["KERNEL PANIC", "EXCEPTION:"]);
@@ -323,7 +353,7 @@ impl API {
         };
         self.emit_case("api", "pass", code, 0, &sha, &path_rel);
         println!(
-            "== case api: PASS (exit 0, 43 hosting-API checks + the null-read observation (address 0 readable, no fault: the observation of record, not a check), contract + API symbols (the lazy floating-point witness among them) + zero-length module-root brackets in-artifact, no payload-entry seam in this family, the image header at {:#x} stating load address {:#010x} and generation {} and the layout record at {:#x} at version {} for {} threads with {} tls slots of {} bytes at offset {} in a {}-byte TCB, read off the artifact and tied) ==",
+            "== case api: PASS (exit 0, 46 hosting-API checks + the null-read observation (address 0 readable, no fault: the observation of record, not a check), contract + API symbols (the lazy floating-point witness among them) + zero-length module-root brackets in-artifact, no payload-entry seam in this family, the image header at {:#x} stating load address {:#010x} and generation {} and the layout record at {:#x} at version {} for {} threads with {} tls slots of {} bytes at offset {} in a {}-byte TCB, read off the artifact and tied) ==",
             rec.header_at, rec.load_addr, rec.abi, rec.layout_at, rec.layout_version, rec.max_threads, rec.tls_slots, rec.tls_slot_bytes, rec.tcb_off_tls, rec.tcb_stride
         );
     }
@@ -350,7 +380,7 @@ impl API {
             let first = hw.iter().zip(em.iter()).position(|(a, b)| a != b).unwrap_or(hw.len().min(em.len()));
             self.fail_case("fp-parity", 0, 0, &sha, &path_rel, &format!("the fp-double block differs between the classes at line {} of {} (hardware: {:?}; emulated: {:?})", first + 1, hw.len(), hw.get(first), em.get(first)));
         }
-        for want in ["[api] PASS fp-double (", "every form emulated through the fault funnel, none refused, no frame promoted", "[api] PASS fp-frames (the basic frame promoted once"] {
+        for want in ["[api] PASS fp-double (", "every form emulated through the fault funnel, none refused, no frame promoted", "[api] PASS fp-frames (the basic frame promoted once", "[api] PASS fp-band (the band exception fired every tick and preempted emulated forms"] {
             if !contains_fixed(&run, want) {
                 self.fail_case("fp-parity", 0, 0, &sha, &path_rel, &format!("the emulated row lacks '{want}'"));
             }
@@ -366,6 +396,25 @@ impl API {
         }
         self.emit_control("fp-doctored-control", "pass", FP_DOCTORED_BROKE, &sha2, &path_rel2);
         println!("== control fp-doctored-control: PASS (the decoder with add and subtract swapped prints a different fp-double block: the parity case would refuse it) ==");
+    }
+
+
+    /// The emulator rows' GPIO control: a
+    /// virtual backend whose loopback latch fires the input's event twice
+    /// per change; the api flavor's edge check must refuse it -- two counted
+    /// for one edge, no PASS line -- so the control shows the check reads
+    /// the mechanism. The silicon control (the removed pending-mask clear)
+    /// is a flight-side control.
+    fn run_gpio_latch_control(&mut self) {
+        let run = self.ctx.build_and_run("gpio-latch-control", &["--features", "api-smoke,test-gpio-doctored-latch"]);
+        let (sha, path_rel) = (run.sha.clone(), run.path_rel.clone());
+        let refused = !contains_fixed(&run.raw, "[api] PASS gpio-edge (") && contains_fixed(&run.raw, "gpio-edge: edge 0 counted 2 times");
+        if !refused {
+            self.emit_control("gpio-latch-control", "fail", GPIO_LATCH_BROKE, &sha, &path_rel);
+            self.ctx.gate_fail("gpio-latch-control: the doctored latch's edge check passed, or died elsewhere than the count (the control did not bite)");
+        }
+        self.emit_control("gpio-latch-control", "pass", GPIO_LATCH_BROKE, &sha, &path_rel);
+        println!("== control gpio-latch-control: PASS (the virtual latch firing twice per change is refused by the edge check: two counted for one edge, no PASS line)");
     }
 
     /// A case record for a negative control of this gate, naming what the control broke.
@@ -444,6 +493,7 @@ impl API {
 /// What the api gate's negative control breaks, for its case record: the
 /// emulation's decoder with the add and subtract operations swapped (the
 /// feature `test-fpemul-doctored`).
+const GPIO_LATCH_BROKE: &str = "the virtual backend's loopback latch fires the input's event twice per change (test-gpio-doctored-latch)";
 const FP_DOCTORED_BROKE: &str = "the emulation decoder with the add and subtract operations swapped (the feature test-fpemul-doctored)";
 
 /// The fp-double block of a transcript: every line that starts with the
@@ -502,12 +552,13 @@ pub fn run(repo: &Path) -> ! {
     api.run_api();
     api.run_kheap_loud();
     api.run_fp_parity();
+    api.run_gpio_latch_control();
     api.ctx.results.emit_summary(GATE, "pass", 0);
     if !validate_results(repo, api.ctx.results.path()) {
         println!("{DISPLAY}: FAIL -- results file failed schema validation");
         exit(1);
     }
-    println!("{DISPLAY}: PASS (4/4)  [{qemu_v} | {rustc_v}]");
+    println!("{DISPLAY}: PASS (5/5)  [{qemu_v} | {rustc_v}]");
     exit(0);
 }
 
@@ -980,6 +1031,21 @@ pub fn selfcheck(repo: &Path) -> ! {
         "i-marker-present",
         "genuine act-lazy-fp PASS marker accepted by the I sweep",
         MARKERS_I.iter().all(|m| contains_fixed(&std::fs::read(&igreen).unwrap_or_default(), m)),
+    );
+
+    let mgone = tmp.join("m-marker-gone.raw");
+    write_fixture(&mgone, format!("{}\r\n{}\r\n", MARKERS_M[0], MARKERS_M[1]).as_bytes());
+    sc.probe(
+        "m-marker-gone",
+        "transcript with the fp-band armed and digest lines and no PASS line",
+        MARKERS_M.iter().all(|m| contains_fixed(&std::fs::read(&mgone).unwrap_or_default(), m)),
+    );
+    let mgreen = tmp.join("m-marker-present.raw");
+    write_fixture(&mgreen, format!("{}\r\n{}\r\n{}\r\n", MARKERS_M[0], MARKERS_M[1], MARKERS_M[2]).as_bytes());
+    sc.accept_probe(
+        "m-marker-present",
+        "genuine fp-band armed, digest and PASS lines accepted by the M sweep",
+        MARKERS_M.iter().all(|m| contains_fixed(&std::fs::read(&mgreen).unwrap_or_default(), m)),
     );
 
     let jgone = tmp.join("j-marker-gone.raw");

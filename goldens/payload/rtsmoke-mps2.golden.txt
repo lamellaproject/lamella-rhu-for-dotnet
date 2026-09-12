@@ -1,0 +1,19 @@
+=== rtsmoke: minirt v2 (alloc/div/casts) ===
+PASS div32
+PASS div32neg
+PASS divu32
+PASS div64
+PASS div64neg
+PASS divu64
+PASS lrsz
+PASS llsh
+PASS lrsh
+PASS alloc-virt
+PASS int[]
+PASS long[]
+PASS obj[]
+PASS is-cast
+PASS as-cast
+PASS generics
+PASS string
+rtsmoke: 17 pass, 0 fail  ALL GOOD

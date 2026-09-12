@@ -6,7 +6,7 @@
 
 use crate::gate::{class_flag_sets_tie, write_fixture, Class, Selfcheck};
 use crate::gates::gc::{parse_undefined, parse_vendored_manifest, resolve_clang, resolve_ld, run_tool_bounded, ToolCmd};
-use crate::image::header_abi;
+use crate::image::{header_abi, header_abi_compat};
 use crate::objfile::{distinct_stamps, producer_stamp_of, section_span, section_span_prefixed, sha256_without_stamp, symbol_word};
 use crate::results::{chain_json_from_env, validate_results, Results};
 use crate::sha256::{sha256_file, sha256_hex};
@@ -93,7 +93,7 @@ fn cc_flags(class: Class) -> &'static [&'static str] {
 /// goldens/shim/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates objects + goldens + manifest + this pin
 /// together in one reviewed commit.
-const SHA_FROZEN_MANIFEST: &str = "fec5029357ef8bfb4d8514b59982022af64ea0cd5a2ab53b7122a27e5b560f53";
+const SHA_FROZEN_MANIFEST: &str = "ff352b6225db86e593eece3ac4c97023f31375db49537dbf62ff4805cf8a7acd";
 
 /// The frozen-object plan of record: file name under goldens/shim/,
 /// source TU, extra defines beyond the class's flag set, and the class
@@ -102,7 +102,7 @@ const SHA_FROZEN_MANIFEST: &str = "fec5029357ef8bfb4d8514b59982022af64ea0cd5a2ab
 /// name both directions; 'rhu-gate shim rederive' recompiles every row
 /// under its class's flag set and byte-asserts the output against the
 /// frozen bytes.
-const FROZEN_PLAN: [(&str, &str, &[&str], Class); 34] = [
+const FROZEN_PLAN: [(&str, &str, &[&str], Class); 36] = [
     ("shim-core.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
     ("shim-core-break-sipid.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SIPID"], Class::CortexM7),
     ("shim-core-break-ctxpc.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_CTXPC"], Class::CortexM7),
@@ -137,7 +137,15 @@ const FROZEN_PLAN: [(&str, &str, &[&str], Class); 34] = [
     ("shim-libc-glue-an505.o", "src/shim/rhu_libc_glue.c", &[], Class::CortexM33),
     ("shim-host-an505.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
     ("shim-stdio-sym-an505.o", "src/shim/rhu_stdio_sym.c", &[], Class::CortexM33),
+    ("shim-pal-surface.o", "src/shim/rhu_pal_surface_net11_rc1.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
+    ("shim-pal-surface-an505.o", "src/shim/rhu_pal_surface_net11_rc1.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
 ];
+
+/// The tier's text records beside the objects and goldens: the surface
+/// expectation the shim.pal-surface case reads (GENERATED from the pinned
+/// pack's export tables; regenerated at a re-pin, never edited). Recorded
+/// in the manifest like a golden, verified like one.
+const FROZEN_RECORDS: [&str; 1] = ["pal-surface.txt"];
 
 /// The frozen goldens: the payload stream of each positive image, class
 /// bytes. Recorded in the manifest beside the objects.
@@ -156,7 +164,7 @@ const GOLDENS: [&str; 5] = [
 /// helper the compiler of record emits among them) and the 64-bit
 /// division helper (the loader-seam hooks are weak references, not
 /// imports, and stay outside the pin).
-const IMPORTS_CORE: [&str; 36] = [
+const IMPORTS_CORE: [&str; 35] = [
     "__aeabi_ldivmod",
     "__aeabi_memclr4",
     "__aeabi_uldivmod",
@@ -164,7 +172,6 @@ const IMPORTS_CORE: [&str; 36] = [
     "__rhu_arena_lo",
     "__rhu_image_header",
     "memcmp",
-    "memcpy",
     "memset",
     "rhu_activation_register",
     "rhu_activation_send",
@@ -196,13 +203,15 @@ const IMPORTS_CORE: [&str; 36] = [
 ];
 
 /// The PAL object's EXACT import closure: the kernel verbs, the glue's
-/// allocator, the core's errno, environment table, diagnostics, thread and
-/// mmap paths, the mutex recipe, the string functions, the division
-/// helpers.
-const IMPORTS_SYSNATIVE: [&str; 37] = [
+/// allocator, the core's errno, environment table, diagnostics, formatter
+/// core, library-load path, thread and mmap paths, the mutex recipe, the
+/// string functions, the division helpers.
+const IMPORTS_SYSNATIVE: [&str; 41] = [
     "__aeabi_ldivmod",
     "__aeabi_uldivmod",
     "__errno_location",
+    "dlopen",
+    "dlsym",
     "free",
     "getenv",
     "malloc",
@@ -227,8 +236,10 @@ const IMPORTS_SYSNATIVE: [&str; 37] = [
     "rhu_now_ns",
     "rhu_shim_calendar_unix_ticks",
     "rhu_shim_create_thread",
+    "rhu_shim_environ",
     "rhu_shim_exit",
     "rhu_shim_log",
+    "rhu_shim_vformat",
     "rhu_sleep_ns",
     "rhu_thread_self",
     "strchr",
@@ -238,6 +249,10 @@ const IMPORTS_SYSNATIVE: [&str; 37] = [
     "strncmp",
     "strrchr",
 ];
+
+/// The surface object's EXACT import closure: a refusal sets errno and
+/// returns, and reaches nothing else.
+const IMPORTS_PAL_SURFACE: [&str; 1] = ["__errno_location"];
 
 /// The glue object's EXACT import closure: the kernel heap and console
 /// doors, the exit door, the core's errno and diagnostics, the builtins.
@@ -519,7 +534,7 @@ const PENDING: [&str; 0] = [];
 /// no instruction outside the Cortex-M7 decoder's reach, so one decoder
 /// censuses the whole tier. A moved count means the source, a flag or the
 /// compiler changed.
-const FP_CENSUS: [(&str, u32); 34] = [
+const FP_CENSUS: [(&str, u32); 36] = [
     ("shim-core.o", 0),
     ("shim-core-break-sipid.o", 0),
     ("shim-core-break-ctxpc.o", 0),
@@ -554,6 +569,8 @@ const FP_CENSUS: [(&str, u32); 34] = [
     ("shim-libc-glue-an505.o", 0),
     ("shim-host-an505.o", 0),
     ("shim-stdio-sym-an505.o", 0),
+    ("shim-pal-surface.o", 0),
+    ("shim-pal-surface-an505.o", 0),
 ];
 
 /// Count the floating-point instructions in a decoded listing: every line whose
@@ -610,13 +627,14 @@ pub(crate) fn generation_fault(name: &str, frozen: &[u8], header_abi: u32) -> Op
     ))
 }
 
-const INTERNAL_CASES: [&str; 7] = [
+const INTERNAL_CASES: [&str; 8] = [
     "shim.foreign-errno-refused -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record",
     "shim.newlib-header-ties-kit -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the generated C-library layout header against the kit's own headers",
     "shim.classlib-order-ties-pin -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the host's copy tying the frozen host object apart from the producer stamp, then the same compile against a copy of the generated runtime-entry header with one class-library slot shifted, refused at the assertion that names the slot",
     "shim.newlib-retarget -- link-tier; runs under 'rhu-gate shim rederive' when the kit's C library is resolved",
     "shim.f769-shared-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the sysnative and host objects under the F769 selector tie the frozen an500 objects apart from the producer stamp, the F769 core differs from the an500 core",
     "shim.fp-census-instrument -- compile-tier; runs under 'rhu-gate shim rederive': a compiled double multiply-add must be counted by the census the shim.fp-census case runs over the frozen tier",
+    "shim.pal-surface-survey -- survey-tier; runs under 'rhu-gate shim rederive' when the pinned runtime pack's native directory is resolved (RHU_NET_PACK or tools/toolchains/netpack.local): the pack's five class-library archives re-read for their sha256s and exported family names against the frozen expectation goldens/shim/pal-surface.txt",
     "shim.an505-row-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the core, sysnative and host sources under the an505 selector with the Cortex-M7 flag set tie the frozen an500 objects apart from the producer stamp, so the class flag set is the one variable behind the row's Cortex-M33 objects",
 ];
 
@@ -700,6 +718,197 @@ pub(crate) fn resolve_newlib_dir(repo: &Path) -> Option<String> {
         Some(line.trim().to_string())
     }
 }
+
+/// The pinned runtime pack's native directory (runtimes/linux-arm/native),
+/// the survey control's input: RHU_NET_PACK, else the first line of the
+/// untracked pointer tools/toolchains/netpack.local; None when neither
+/// names it (the control is then declared, not run).
+pub(crate) fn resolve_netpack_dir(repo: &Path) -> Option<String> {
+    if let Ok(v) = std::env::var("RHU_NET_PACK") {
+        if !v.trim().is_empty() {
+            return Some(v.trim().to_string());
+        }
+    }
+    let local = repo.join("tools").join("toolchains").join("netpack.local");
+    let line = std::fs::read_to_string(&local)
+        .ok()
+        .and_then(|t| t.lines().next().map(str::to_string))
+        .unwrap_or_default();
+    if line.trim().is_empty() {
+        None
+    } else {
+        Some(line.trim().to_string())
+    }
+}
+
+/// The five P/Invoke-facing families of the runtime pack's class-library
+/// native libraries: a defined name belongs to the surface when it carries
+/// one of these prefixes.
+const SURFACE_FAMILIES: [&str; 5] = ["SystemNative_", "GlobalizationNative_", "CompressionNative_", "NetSecurityNative_", "CryptoNative_"];
+
+/// The frozen surface expectation, parsed: the pin, the tag, the archives
+/// (name, sha256, family count) and the sorted family names.
+struct SurfaceExpectation {
+    pin: String,
+    tag: String,
+    archives: Vec<(String, String, u32)>,
+    names: Vec<String>,
+}
+
+/// goldens/shim/pal-surface.txt, or the first line of no known shape.
+fn parse_surface_expectation(text: &str) -> Result<SurfaceExpectation, String> {
+    let mut pin = None;
+    let mut tag = None;
+    let mut archives = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') || l.starts_with("commit: ") || l.starts_with("family: ") || l.starts_with("outside: ") {
+            continue;
+        }
+        if let Some(v) = l.strip_prefix("pin: ") {
+            pin = Some(v.trim().to_string());
+            continue;
+        }
+        if let Some(v) = l.strip_prefix("tag: ") {
+            tag = Some(v.trim().to_string());
+            continue;
+        }
+        if let Some(v) = l.strip_prefix("archive: ") {
+            let p: Vec<&str> = v.split_whitespace().collect();
+            let count = if p.len() == 3 { p[2].parse::<u32>().ok() } else { None };
+            let Some(count) = count else {
+                return Err(format!("an archive line of no known shape: {l}"));
+            };
+            archives.push((p[0].to_string(), p[1].to_string(), count));
+            continue;
+        }
+        let p: Vec<&str> = l.split_whitespace().collect();
+        if p.len() == 3 && SURFACE_FAMILIES.contains(&p[1]) && p[0].starts_with(p[1]) && ["defined", "served", "refused"].contains(&p[2]) {
+            names.push(p[0].to_string());
+            continue;
+        }
+        return Err(format!("an expectation line of no known shape: {l}"));
+    }
+    let pin = pin.ok_or_else(|| "the expectation names no pin".to_string())?;
+    let tag = tag.ok_or_else(|| "the expectation names no tag".to_string())?;
+    if archives.len() != SURFACE_FAMILIES.len() {
+        return Err(format!("the expectation names {} archives, not {}", archives.len(), SURFACE_FAMILIES.len()));
+    }
+    if names.is_empty() {
+        return Err("the expectation names no surface name".to_string());
+    }
+    names.sort();
+    if names.windows(2).any(|w| w[0] == w[1]) {
+        return Err("the expectation names a surface name twice".to_string());
+    }
+    Ok(SurfaceExpectation { pin, tag, archives, names })
+}
+
+/// The shim's defined names against the expectation's sorted set: the
+/// first expected name the shim does not define, else the first defined
+/// family name the pack's tables do not export; None when the family
+/// names are exactly the expectation's (names outside the families are
+/// the shim's own and stay out of the comparison).
+fn surface_fault(defined: &[String], expected: &[String]) -> Option<String> {
+    let mut have: Vec<&String> = defined.iter().filter(|n| SURFACE_FAMILIES.iter().any(|f| n.starts_with(f))).collect();
+    have.sort();
+    have.dedup();
+    for e in expected {
+        if have.binary_search(&e).is_err() {
+            return Some(format!(
+                "the pinned pack exports {e} and the shim does not define it: regenerate the surface at the pin (tools/extract-pal/gen_pal_surface.py) and answer it"
+            ));
+        }
+    }
+    for h in have {
+        if expected.binary_search(h).is_err() {
+            return Some(format!("the shim defines {h}, a family name the pinned pack's tables do not export: the surface is not the pack's"));
+        }
+    }
+    None
+}
+
+/// The EXTERNAL definitions of an nm dump by the generator's rule (the
+/// text, data, read-only, zero-fill and weak definitions: T, D, R, B, W).
+/// A local symbol -- a lowercase type; a function's static variable, which
+/// the compiler names function.variable -- is not an export and stays out
+/// (the survey's first run counted one: the terminal initializer's
+/// `initialized` flag in the pack's libSystem.Native.a).
+fn external_names(dump: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in dump.lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(_), Some(t), Some(name)) = (it.next(), it.next(), it.next()) {
+            if ["T", "D", "R", "B", "W"].contains(&t) && it.next().is_none() {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The pin tie: the expectation was generated at the SDK's pin and the
+/// surface header states the same tag, or the survey is stale.
+fn surface_pin_fault(expectation_pin: &str, sdk_pin: &str, header_tag: &str) -> Option<String> {
+    if expectation_pin != sdk_pin {
+        return Some(format!(
+            "the surface expectation was generated at pin {expectation_pin}; the SDK pins {sdk_pin} (RhuRuntimeVersion): regenerate the survey at the new pin and answer what it adds"
+        ));
+    }
+    let want = format!("v{expectation_pin}");
+    if header_tag != want {
+        return Some(format!("the generated surface header states tag {header_tag}, the expectation's pin wants {want}: the header and the expectation were not generated together"));
+    }
+    None
+}
+
+/// The SDK's runtime pin, read off Sdk.props (the one RhuRuntimeVersion default).
+fn read_sdk_runtime_pin(repo: &Path) -> Result<String, String> {
+    let p = repo.join("src").join("sdk").join("Lamella.Rhu.Sdk").join("Sdk").join("Sdk.props");
+    let text = std::fs::read_to_string(&p).map_err(|e| format!("src/sdk/Lamella.Rhu.Sdk/Sdk/Sdk.props unreadable: {e}"))?;
+    for line in text.lines() {
+        let l = line.trim();
+        if l.starts_with("<RhuRuntimeVersion") {
+            if let (Some(a), Some(b)) = (l.find('>'), l.find("</RhuRuntimeVersion>")) {
+                if a < b {
+                    return Ok(l[a + 1..b].trim().to_string());
+                }
+            }
+        }
+    }
+    Err("Sdk.props carries no RhuRuntimeVersion default".to_string())
+}
+
+/// The tag the generated surface header states in its provenance comment.
+fn read_surface_header_tag(repo: &Path) -> Result<String, String> {
+    let p = repo.join("src").join("shim").join("rhu_pal_surface_net11_rc1.h");
+    let text = std::fs::read_to_string(&p).map_err(|e| format!("src/shim/rhu_pal_surface_net11_rc1.h unreadable: {e}"))?;
+    let Some(i) = text.find("at tag ") else {
+        return Err("the surface header states no tag".to_string());
+    };
+    let rest = &text[i + 7..];
+    let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+    Ok(rest[..end].to_string())
+}
+
+/// The six link objects of a row: the five the images link and the surface object.
+const ROW_AN500_LINK: [&str; 6] = [
+    "goldens/shim/shim-core.o",
+    "goldens/shim/shim-sysnative.o",
+    "goldens/shim/shim-libc-glue.o",
+    "goldens/shim/shim-stdio-sym.o",
+    "goldens/shim/shim-host.o",
+    "goldens/shim/shim-pal-surface.o",
+];
+const ROW_AN505_LINK: [&str; 6] = [
+    "goldens/shim/shim-core-an505.o",
+    "goldens/shim/shim-sysnative-an505.o",
+    "goldens/shim/shim-libc-glue-an505.o",
+    "goldens/shim/shim-stdio-sym-an505.o",
+    "goldens/shim/shim-host-an505.o",
+    "goldens/shim/shim-pal-surface-an505.o",
+];
 
 /// True when the sorted import list equals the pinned set exactly.
 fn imports_match(got: &[String], want: &[&str]) -> bool {
@@ -808,7 +1017,7 @@ fn duplicate_definitions(dumps: &[&str]) -> Vec<String> {
 /// record; every record names a plan object or a golden under
 /// goldens/shim/; every `.o` on disk is in the plan.
 fn frozen_consistency(records: &[(String, String)], on_disk: &[String]) -> Result<(), String> {
-    let expected = FROZEN_PLAN.len() + GOLDENS.len();
+    let expected = FROZEN_PLAN.len() + GOLDENS.len() + FROZEN_RECORDS.len();
     if records.len() != expected {
         return Err(format!(
             "manifest parsed to {} records, the frozen plan and goldens hold {} -- a record set that drifted",
@@ -826,11 +1035,16 @@ fn frozen_consistency(records: &[(String, String)], on_disk: &[String]) -> Resul
             return Err(format!("golden {g} has no manifest record"));
         }
     }
+    for r in FROZEN_RECORDS {
+        if !records.iter().any(|(p, _)| p == &format!("goldens/shim/{r}")) {
+            return Err(format!("record {r} has no manifest record"));
+        }
+    }
     for (path, _) in records {
         let Some(name) = path.strip_prefix("goldens/shim/") else {
             return Err(format!("manifest record '{path}' is outside goldens/shim/"));
         };
-        if !FROZEN_PLAN.iter().any(|(n, _, _, _)| n == &name) && !GOLDENS.contains(&name) {
+        if !FROZEN_PLAN.iter().any(|(n, _, _, _)| n == &name) && !GOLDENS.contains(&name) && !FROZEN_RECORDS.contains(&name) {
             return Err(format!("manifest record '{path}' has no frozen-plan or golden entry"));
         }
     }
@@ -953,6 +1167,12 @@ impl Shim {
 
     /// nm dump of an object (all symbols) or its undefined set.
     fn nm_dump(&mut self, facts: &RustcFacts, case: &str, obj_rel: &str, undefined_only: bool) -> String {
+        let obj_abs = self.repo.join(obj_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        self.nm_dump_path(facts, case, &obj_abs, obj_rel, undefined_only)
+    }
+
+    /// nm dump of a file named by its own path (the survey's archives).
+    fn nm_dump_path(&mut self, facts: &RustcFacts, case: &str, obj_abs: &Path, obj_rel: &str, undefined_only: bool) -> String {
         let nm = match llvm_tool(facts, "llvm-nm") {
             Ok(p) => p,
             Err(e) => self.fail(case, &e),
@@ -960,7 +1180,6 @@ impl Shim {
         let stem = Path::new(obj_rel).file_stem().unwrap().to_string_lossy().into_owned();
         let dump_p = self.out.join(format!("{stem}.{}", if undefined_only { "nm-u" } else { "nm" }));
         let scratch = self.out.join("nm.stderr");
-        let obj_abs = self.repo.join(obj_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
         let obj_arg = obj_abs.to_string_lossy().into_owned();
         let args: Vec<&str> = if undefined_only { vec!["-u", &obj_arg] } else { vec!["--defined-only", &obj_arg] };
         let run = run_captured(&nm, &args, &dump_p, &scratch, Duration::from_secs(60));
@@ -1213,9 +1432,15 @@ impl Shim {
             IMPORTS_GLUE.len(),
             tenant.len()
         );
+        let surface = self.pin_closure(facts, "shim.core", "shim-pal-surface.o", &IMPORTS_PAL_SURFACE);
+        println!("   shim-pal-surface.o: import closure pinned exactly ({} names: {})", IMPORTS_PAL_SURFACE.len(), surface.join(" "));
         let core_an505 = self.pin_closure(facts, "shim.core", "shim-core-an505.o", &IMPORTS_CORE);
         let sysn_an505 = self.pin_closure(facts, "shim.core", "shim-sysnative-an505.o", &IMPORTS_SYSNATIVE);
         let glue_an505 = self.pin_closure(facts, "shim.core", "shim-libc-glue-an505.o", &IMPORTS_GLUE);
+        let surface_an505 = self.pin_closure(facts, "shim.core", "shim-pal-surface-an505.o", &IMPORTS_PAL_SURFACE);
+        if surface_an505 != surface {
+            self.fail("shim.core", "shim-pal-surface-an505.o's closure differs from shim-pal-surface.o's: the class moved an import");
+        }
         println!(
             "   the mps2-an505 row's Cortex-M33 objects: core {}/{}, PAL {}/{}, glue {}/{} pinned against the same closures",
             core_an505.len(),
@@ -1606,6 +1831,110 @@ impl Shim {
         println!("== case {CASE}: PASS (the activation costume's object carries no floating-point instruction; the tier's counts at their pins) ==");
     }
 
+    /// The shim's P/Invoke-facing surface against the pinned pack's export
+    /// tables (F135): the frozen expectation's pin ties the SDK's pin and
+    /// the generated header's tag, then each row's six link objects define
+    /// the expectation's family names exactly.
+    fn run_pal_surface(&mut self, facts: &RustcFacts) {
+        const CASE: &str = "shim.pal-surface";
+        println!("== case {CASE} (the shim's P/Invoke-facing surface against the pinned runtime pack's export tables, the expectation goldens/shim/pal-surface.txt) ==");
+        let text = match std::fs::read_to_string(self.repo.join("goldens").join("shim").join("pal-surface.txt")) {
+            Ok(t) => t,
+            Err(e) => self.fail(CASE, &format!("goldens/shim/pal-surface.txt unreadable: {e}")),
+        };
+        let exp = match parse_surface_expectation(&text) {
+            Ok(x) => x,
+            Err(e) => self.fail(CASE, &format!("goldens/shim/pal-surface.txt: {e}")),
+        };
+        let sdk_pin = match read_sdk_runtime_pin(&self.repo) {
+            Ok(p) => p,
+            Err(e) => self.fail(CASE, &e),
+        };
+        let tag = match read_surface_header_tag(&self.repo) {
+            Ok(t) => t,
+            Err(e) => self.fail(CASE, &e),
+        };
+        if let Some(f) = surface_pin_fault(&exp.pin, &sdk_pin, &tag) {
+            self.fail(CASE, &f);
+        }
+        if exp.tag != format!("v{}", exp.pin) {
+            self.fail(CASE, &format!("the expectation states tag {} for pin {}: the survey's tag and pin were not written together", exp.tag, exp.pin));
+        }
+        println!("   the expectation's pin {} (its tag {}) is the SDK's RhuRuntimeVersion and the surface header's tag {}; {} archives, {} family names", exp.pin, exp.tag, tag, exp.archives.len(), exp.names.len());
+        for (row, objs) in [("an500", &ROW_AN500_LINK), ("an505", &ROW_AN505_LINK)] {
+            let mut defined: Vec<String> = Vec::new();
+            for o in objs.iter() {
+                defined.extend(external_names(&self.nm_dump(facts, CASE, o, false)));
+            }
+            if let Some(f) = surface_fault(&defined, &exp.names) {
+                self.fail(CASE, &format!("the {row} row: {f}"));
+            }
+            println!("   the {row} row's six link objects define the expectation's {} family names exactly", exp.names.len());
+        }
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"names\":{},\"archives\":{},\"pin\":\"{}\"}}}}",
+            self.gate_id,
+            exp.names.len(),
+            exp.archives.len(),
+            exp.pin
+        ));
+        self.results.tally("pass", "positive");
+        println!("== case {CASE}: PASS (the shim answers the pinned pack's whole P/Invoke-facing surface, {} names over the five families, on both rows; the pin tied) ==", exp.names.len());
+    }
+
+    /// The survey control (the rederive leg): the pack's five archives
+    /// re-read for their sha256s and exported family names against the
+    /// frozen expectation -- a moved pack or a moved set refuses naming the
+    /// first difference, so the expectation is proven to be what the pack
+    /// says at every run of the leg.
+    fn run_pal_surface_survey(&mut self, facts: &RustcFacts, pack: &str) {
+        const CASE: &str = "shim.pal-surface-survey";
+        println!("== case {CASE} (survey-tier control: the pinned pack's archives at {pack} against goldens/shim/pal-surface.txt) ==");
+        let text = match std::fs::read_to_string(self.repo.join("goldens").join("shim").join("pal-surface.txt")) {
+            Ok(t) => t,
+            Err(e) => self.fail(CASE, &format!("goldens/shim/pal-surface.txt unreadable: {e}")),
+        };
+        let exp = match parse_surface_expectation(&text) {
+            Ok(x) => x,
+            Err(e) => self.fail(CASE, &format!("goldens/shim/pal-surface.txt: {e}")),
+        };
+        let mut names: Vec<String> = Vec::new();
+        for (archive, sha, count) in &exp.archives {
+            let path = Path::new(pack).join(archive);
+            let got = match sha256_file(&path) {
+                Ok(s) => s,
+                Err(e) => self.fail(CASE, &format!("the pack at {pack} carries no readable {archive}: {e}")),
+            };
+            if &got != sha {
+                self.fail(CASE, &format!("{archive}: sha256 {got} != the expectation's {sha} -- the pack moved (a re-pin?): regenerate the survey"));
+            }
+            let dump = self.nm_dump_path(facts, CASE, &path, archive, false);
+            let fam: Vec<String> = external_names(&dump).into_iter().filter(|n| SURFACE_FAMILIES.iter().any(|f| n.starts_with(f))).collect();
+            let mut distinct = fam.clone();
+            distinct.sort();
+            distinct.dedup();
+            if distinct.len() as u32 != *count {
+                self.fail(CASE, &format!("{archive}: {} family names exported, the expectation records {count}", distinct.len()));
+            }
+            println!("   {archive}: sha256 ties the expectation; {} family names", distinct.len());
+            names.extend(distinct);
+        }
+        names.sort();
+        names.dedup();
+        if names != exp.names {
+            let first = names.iter().zip(exp.names.iter()).find(|(a, b)| a != b).map(|(a, b)| format!("{a} in the pack, {b} in the expectation")).unwrap_or_else(|| format!("{} names in the pack, {} in the expectation", names.len(), exp.names.len()));
+            self.fail(CASE, &format!("the pack's family names differ from the expectation's at the first difference: {first} -- regenerate the survey"));
+        }
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"names\":{},\"archives\":{}}}}}",
+            self.gate_id,
+            names.len(),
+            exp.archives.len()
+        ));
+        self.results.tally("pass", "positive");
+        println!("== case {CASE}: PASS (the pack's five archives tie the expectation's sha256s and its {} family names exactly) ==", names.len());
+    }
+
     /// The census instrument's control (compile-tier): a compiled double
     /// multiply-add must be counted, or the census's zeros mean nothing.
     fn run_fp_census_instrument_control(&mut self, gxx: &ToolCmd, facts: &RustcFacts) {
@@ -1753,7 +2082,11 @@ impl Shim {
             Err(e) => self.fail(CASE, &e),
         };
         let stripped = self.out.join("obj").join("stripped");
-        for (src, frozen, tag) in [("src/shim/rhu_sysnative.c", "shim-sysnative.o", "sysnative"), ("src/shim/rhu_host.c", "shim-host.o", "host")] {
+        for (src, frozen, tag) in [
+            ("src/shim/rhu_sysnative.c", "shim-sysnative.o", "sysnative"),
+            ("src/shim/rhu_host.c", "shim-host.o", "host"),
+            ("src/shim/rhu_pal_surface_net11_rc1.c", "shim-pal-surface.o", "pal-surface"),
+        ] {
             let out_rel = format!("src/kernel/target/shim-gate/obj/{tag}-f769-control.o");
             let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
             let _ = std::fs::remove_file(&out_abs);
@@ -1808,7 +2141,12 @@ impl Shim {
             Err(e) => self.fail(CASE, &e),
         };
         let stripped = self.out.join("obj").join("stripped");
-        for (src, frozen, tag) in [("src/shim/rhu_shim.c", "shim-core.o", "core"), ("src/shim/rhu_sysnative.c", "shim-sysnative.o", "sysnative"), ("src/shim/rhu_host.c", "shim-host.o", "host")] {
+        for (src, frozen, tag) in [
+            ("src/shim/rhu_shim.c", "shim-core.o", "core"),
+            ("src/shim/rhu_sysnative.c", "shim-sysnative.o", "sysnative"),
+            ("src/shim/rhu_host.c", "shim-host.o", "host"),
+            ("src/shim/rhu_pal_surface_net11_rc1.c", "shim-pal-surface.o", "pal-surface"),
+        ] {
             let out_rel = format!("src/kernel/target/shim-gate/obj/{tag}-an505-row-control.o");
             let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
             let _ = std::fs::remove_file(&out_abs);
@@ -2033,6 +2371,7 @@ pub fn run(repo: &Path) -> ! {
     shim.run_tls(&facts, &ld, &qemu);
     shim.run_host(&facts, &ld, &qemu);
     shim.run_fp_census(&facts);
+    shim.run_pal_surface(&facts);
     for p in PENDING {
         println!("   pending (unarmed, not counted): {p}");
     }
@@ -2045,7 +2384,7 @@ pub fn run(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "{DISPLAY}: PASS (24/24 cases incl. 17 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        "{DISPLAY}: PASS (25/25 cases incl. 17 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
         PENDING.len(),
         INTERNAL_CASES.len(),
         qemu_v,
@@ -2129,16 +2468,31 @@ pub fn rederive(repo: &Path) -> ! {
             "declared"
         }
     };
+    let survey = match (resolve_netpack_dir(repo), rustc_facts()) {
+        (Some(dir), Ok(facts)) => {
+            shim.run_pal_surface_survey(&facts, &dir);
+            "run"
+        }
+        (None, _) => {
+            println!("   declared (not run): shim.pal-surface-survey -- the pinned runtime pack's native directory is not resolved (set RHU_NET_PACK or write tools/toolchains/netpack.local)");
+            "declared"
+        }
+        (_, Err(e)) => {
+            println!("   declared (not run): shim.pal-surface-survey -- {e}");
+            "declared"
+        }
+    };
     shim.results.emit_summary("shim-rederive", "pass", 0);
     if !validate_results(repo, shim.results.path()) {
         println!("SHIM REDERIVE: FAIL -- results file failed schema validation");
         exit(1);
     }
     println!(
-        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; foreign-errno control refused at compile; C-library layout header ties the kit; class-library order ties the pin; the F769 row's shared objects tie the an500 bytes; the an505 row's objects tie the an500 bytes under the Cortex-M7 flag set apart from the producer stamp; the floating-point census instrument counts a compiled double multiply-add; C-library retarget {})  [{}]",
+        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; foreign-errno control refused at compile; C-library layout header ties the kit; class-library order ties the pin; the F769 row's shared objects tie the an500 bytes; the an505 row's objects tie the an500 bytes under the Cortex-M7 flag set apart from the producer stamp; the floating-point census instrument counts a compiled double multiply-add; C-library retarget {}); the surface survey {})  [{}]",
         FROZEN_PLAN.len(),
         FROZEN_PLAN.len(),
         retarget,
+        survey,
         gxx.version
     );
     exit(0);
@@ -2340,13 +2694,15 @@ pub fn selfcheck(repo: &Path) -> ! {
 
     let header_text = std::fs::read_to_string(repo.join("src").join("kernel").join("include").join("rhu.h")).unwrap_or_default();
     let abi = header_abi(&header_text).unwrap_or(0);
+    let compat = header_abi_compat(&header_text).unwrap_or(0);
     let host_path = repo.join("goldens").join("shim").join("shim-host.o");
     let host_obj = selfcheck_frozen(repo, "shim-host.o");
     let stated = stated_generation(&host_obj);
     sc.accept_probe(
         "generation-genuine",
-        "the frozen host object states the contract generation include/rhu.h states",
-        abi != 0 && stated.map(|(g, _)| g) == Some(abi) && generation_fault("shim-host.o", &host_obj, abi).is_none(),
+        "the frozen host object states a contract generation inside include/rhu.h's window (RHU_ABI_COMPAT through RHU_ABI); the leg's line fires exactly when it is not the header's own",
+        stated.map(|(g, _)| compat != 0 && abi != 0 && compat <= g && g <= abi) == Some(true)
+            && generation_fault("shim-host.o", &host_obj, abi).is_none() == (stated.map(|(g, _)| g) == Some(abi)),
     );
     let mut moved = host_obj.clone();
     if let Some((_, at)) = stated {
@@ -2366,10 +2722,13 @@ pub fn selfcheck(repo: &Path) -> ! {
     );
 
     let host_an505 = selfcheck_frozen(repo, "shim-host-an505.o");
+    let stated_an505 = stated_generation(&host_an505).map(|(g, _)| g);
     sc.accept_probe(
         "generation-genuine-an505",
-        "the frozen an505 host object states the contract generation include/rhu.h states",
-        abi != 0 && stated_generation(&host_an505).map(|(g, _)| g) == Some(abi) && generation_fault("shim-host-an505.o", &host_an505, abi).is_none(),
+        "the frozen an505 host object states a contract generation inside include/rhu.h's window, the one the an500 host object states; the leg's line fires exactly when it is not the header's own",
+        stated_an505.map(|g| compat != 0 && abi != 0 && compat <= g && g <= abi) == Some(true)
+            && stated_an505 == stated.map(|(g, _)| g)
+            && generation_fault("shim-host-an505.o", &host_an505, abi).is_none() == (stated_an505 == Some(abi)),
     );
     sc.accept_probe(
         "class-flags-two-words",
@@ -2414,6 +2773,28 @@ pub fn selfcheck(repo: &Path) -> ! {
         "a copy of the frozen host object whose producer stamp alone is changed ties apart from the stamp while the files differ",
         stamp_at.is_some() && !stamp_base.is_empty() && stamp_sha == stamp_base && sha256_hex(&stamp_moved) != sha256_hex(&host_obj),
     );
+
+    let surface_text = String::from_utf8_lossy(&selfcheck_frozen(repo, "pal-surface.txt")).into_owned();
+    let surface = parse_surface_expectation(&surface_text);
+    sc.accept_probe("surface-expectation-genuine", "goldens/shim/pal-surface.txt parses: a pin, five archives, the family names", surface.is_ok());
+    let names: Vec<String> = surface.as_ref().map(|s| s.names.clone()).unwrap_or_default();
+    let pin: String = surface.as_ref().map(|s| s.pin.clone()).unwrap_or_default();
+    let mut with_own: Vec<String> = names.clone();
+    with_own.push("rhu_shim_init".to_string());
+    sc.accept_probe("surface-tie-genuine", "the expectation's names plus the shim's own names accepted as the surface exactly", surface_fault(&with_own, &names).is_none());
+    let missing: Vec<String> = names.iter().skip(1).cloned().collect();
+    sc.probe("surface-tie-missing", "a defined set lacking one expected name", surface_fault(&missing, &names).is_none());
+    let mut foreign: Vec<String> = names.clone();
+    foreign.push("SystemNative_NotInThePack".to_string());
+    sc.probe("surface-tie-foreign", "a defined family name the pack's tables do not export", surface_fault(&foreign, &names).is_none());
+    sc.accept_probe("surface-pin-genuine", "the expectation's pin as the SDK's, the header's tag as v + the pin", surface_pin_fault(&pin, &pin, &format!("v{pin}")).is_none());
+    sc.probe("surface-pin-moved", "the SDK re-pinned to another version", surface_pin_fault(&pin, "11.0.0-rc.2.00000.0", &format!("v{pin}")).is_none());
+    sc.probe("surface-header-tag-apart", "a surface header generated at another tag", surface_pin_fault(&pin, &pin, "v11.0.0-rc.2.00000.0").is_none());
+    let doctored_text = surface_text.replacen("\npin: ", "\npin-was: ", 1);
+    sc.probe("surface-expectation-doctored", "an expectation file whose pin line is renamed", parse_surface_expectation(&doctored_text).is_ok());
+    let dump = "00000000 T SystemNative_Probe\n0000000c b SystemNative_Probe.initialized\n         U __errno_location\n";
+    sc.accept_probe("surface-external-names", "an external text definition read as an export, its local static and an undefined name not", external_names(dump) == vec!["SystemNative_Probe".to_string()]);
+    sc.probe("surface-local-symbol-excluded", "a function's static variable, a local symbol with a family prefix, counted as an export", external_names(dump).len() == 2);
 
     sc.finish("genuine inputs accepted");
 }

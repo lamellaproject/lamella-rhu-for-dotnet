@@ -151,13 +151,13 @@ pub fn distinct_stamps(stamps: &[String]) -> String {
     seen.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join("; ")
 }
 
-/// The sha256 of an object with its comment section removed by the
-/// toolchain's object copier: the copy is written to `scratch` (a fresh
-/// path; the input is never touched) and hashed. The copier lays the copy
-/// out itself, so this identity is the copy's rather than the file's --
-/// on both sides of a comparison alike. A refusal names the copier's own
-/// reason (a section that a relocation targets cannot be removed).
-pub fn sha256_without_stamp(facts: &RustcFacts, obj: &Path, scratch: &Path) -> Result<String, String> {
+/// The sha256 of a copy of an object made by the toolchain's object copier
+/// with the given options: the copy is written to `scratch` (a fresh path;
+/// the input is never touched) and hashed. The copier lays the copy out
+/// itself, so the identity is the copy's rather than the file's -- on both
+/// sides of a comparison alike. A refusal names the copier's own reason (a
+/// section that a relocation targets cannot be removed).
+fn sha256_copied(facts: &RustcFacts, obj: &Path, scratch: &Path, options: &[&str]) -> Result<String, String> {
     let objcopy = llvm_tool(facts, "llvm-objcopy")?;
     if let Some(dir) = scratch.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -167,11 +167,28 @@ pub fn sha256_without_stamp(facts: &RustcFacts, obj: &Path, scratch: &Path) -> R
     let out_s = scratch.to_string_lossy().into_owned();
     let stdout = scratch.with_extension("objcopy.stdout");
     let stderr = scratch.with_extension("objcopy.stderr");
-    let run = run_captured(&objcopy, &["--remove-section", ".comment", &obj_s, &out_s], &stdout, &stderr, Duration::from_secs(60))?;
+    let mut args: Vec<&str> = options.to_vec();
+    args.push(&obj_s);
+    args.push(&out_s);
+    let run = run_captured(&objcopy, &args, &stdout, &stderr, Duration::from_secs(60))?;
     if run.exit != 0 {
         let reason = std::fs::read_to_string(&stderr).unwrap_or_default();
         let reason = reason.lines().next().unwrap_or("").trim();
         return Err(format!("llvm-objcopy failed on {} (exit {}): {reason}", obj.display(), run.exit));
     }
     sha256_file(scratch).map_err(|e| format!("{}: {e}", scratch.display()))
+}
+
+/// The sha256 of an object with its comment section removed: the identity
+/// apart from the producer stamp, the re-derivation legs' comparison.
+pub fn sha256_without_stamp(facts: &RustcFacts, obj: &Path, scratch: &Path) -> Result<String, String> {
+    sha256_copied(facts, obj, scratch, &["--remove-section", ".comment"])
+}
+
+/// The sha256 of an object with its debug sections and its comment section
+/// removed: the loadable identity (code, data, relocations, symbols, the
+/// attributes), which says whether two objects that differ differ in their
+/// code or in their debug strings alone.
+pub fn sha256_loadable(facts: &RustcFacts, obj: &Path, scratch: &Path) -> Result<String, String> {
+    sha256_copied(facts, obj, scratch, &["--strip-debug", "--remove-section", ".comment"])
 }

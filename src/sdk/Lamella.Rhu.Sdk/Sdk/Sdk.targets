@@ -1,0 +1,132 @@
+<Project>
+
+  <!-- Lamella RHU for .NET: the SDK's targets, evaluated after the
+       project's own body. The .NET SDK's targets come first and bring the
+       ILCompiler pack's targets with them; the definitions below then
+       replace the pack's native link (its LinkNative target) by RHU's
+       merge and link, which turn the compiled object into the image for
+       the named board. -->
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+  <Import Project="boards.props" />
+  <Import Project="frozen.props" Condition="Exists('$(MSBuildThisFileDirectory)frozen.props')" />
+
+  <PropertyGroup>
+    <RhuLld>$(RhuToolsDir)ld.lld</RhuLld>
+    <RhuObjcopy>$(RhuToolsDir)llvm-objcopy</RhuObjcopy>
+    <RhuTasksAssembly>$(RhuSdkRoot)tasks/net11.0/Lamella.Rhu.Build.Tasks.dll</RhuTasksAssembly>
+    <!-- The image is the ELF the publish directory carries. -->
+    <NativeBinaryExt>.elf</NativeBinaryExt>
+    <NativeBinary>$(NativeOutputPath)$(TargetName).elf</NativeBinary>
+    <_LinkNativeOutputs>$(NativeBinary)</_LinkNativeOutputs>
+    <_RhuDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(NativeIntermediateOutputPath)', 'rhu'))</_RhuDir>
+    <_RhuObject>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(NativeObject)'))</_RhuObject>
+    <_RhuElf>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(NativeBinary)'))</_RhuElf>
+  </PropertyGroup>
+
+  <!-- Every frozen byte and both tools are inputs of the link, so a
+       package or tool that moved re-links the image. -->
+  <ItemGroup>
+    <_RhuLinkInput Include="@(RhuFrozen->'$(RhuSdkRoot)%(Identity)')" />
+    <_RhuLinkInput Include="$(RhuLld);$(RhuObjcopy)" Condition="'$(RhuToolsDir)' != ''" />
+  </ItemGroup>
+
+  <UsingTask TaskName="Lamella.Rhu.Build.ArchiveMember" AssemblyFile="$(RhuTasksAssembly)" />
+  <UsingTask TaskName="Lamella.Rhu.Build.AttrsUpdate" AssemblyFile="$(RhuTasksAssembly)" />
+
+  <!-- The refusals a project meets before anything is compiled: a knob
+       outside its set, no board named, a posture the contract fixes moved. -->
+  <Target Name="RhuValidate" BeforeTargets="Build">
+    <Error Condition="'$(RhuDiag)' != 'min' and '$(RhuDiag)' != 'rich'" Text="REFUSE: RhuDiag='$(RhuDiag)' is not one of: min, rich" />
+    <Error Condition="'$(RhuReflection)' != 'on' and '$(RhuReflection)' != 'off'" Text="REFUSE: RhuReflection='$(RhuReflection)' is not one of: on, off" />
+    <Error Condition="'$(RhuBoard)' == ''" Text="REFUSE: RhuBoard is not set (a board is named, never inferred); the table: @(RhuBoardRow, ' ')" />
+    <Error Condition="'$(TargetFramework)' != 'net11.0'" Text="REFUSE: TargetFramework '$(TargetFramework)' is not net11.0" />
+    <Error Condition="'$(PublishAot)' != 'true'" Text="REFUSE: PublishAot is '$(PublishAot)', not true" />
+    <Error Condition="'$(RuntimeIdentifier)' != 'linux-arm'" Text="REFUSE: RuntimeIdentifier '$(RuntimeIdentifier)' is not linux-arm" />
+    <Error Condition="'$(SelfContained)' != 'true'" Text="REFUSE: SelfContained is '$(SelfContained)', not true" />
+    <Error Condition="'$(InvariantGlobalization)' != 'true'" Text="REFUSE: InvariantGlobalization is '$(InvariantGlobalization)', not true" />
+    <Error Condition="'$(EventSourceSupport)' != 'false'" Text="REFUSE: EventSourceSupport is '$(EventSourceSupport)', not false" />
+    <Error Condition="'$(MetricsSupport)' != 'false'" Text="REFUSE: MetricsSupport is '$(MetricsSupport)', not false" />
+    <Error Condition="'$(DebuggerSupport)' != 'false'" Text="REFUSE: DebuggerSupport is '$(DebuggerSupport)', not false" />
+    <Error Condition="'$(OptimizationPreference)' != 'Size'" Text="REFUSE: OptimizationPreference is '$(OptimizationPreference)', not Size" />
+    <Error Condition="'$(Deterministic)' != 'true'" Text="REFUSE: Deterministic is '$(Deterministic)', not true (a program's image is byte-identical across desks)" />
+    <Error Condition="'$(PathMap)' == ''" Text="REFUSE: PathMap is empty (the project directory is mapped to one fixed string; set another map, never none)" />
+  </Target>
+
+  <!-- The board's row: its class, its payload map, its prebuilt kernel,
+       its archive set, its attributes donor and the tier objects its
+       image links, in the link's order. -->
+  <Target Name="RhuResolveBoard" DependsOnTargets="RhuValidate">
+    <ItemGroup>
+      <_RhuRow Include="@(RhuBoardRow)" Condition="'%(Identity)' == '$(RhuBoard)'" />
+    </ItemGroup>
+    <Error Condition="'@(_RhuRow)' == ''" Text="REFUSE: RhuBoard '$(RhuBoard)' is not in the table: @(RhuBoardRow, ' ')" />
+    <PropertyGroup>
+      <RhuClass>@(_RhuRow->'%(Class)')</RhuClass>
+      <RhuMap>@(_RhuRow->'%(Map)')</RhuMap>
+      <RhuKernel>@(_RhuRow->'%(Kernel)')</RhuKernel>
+      <RhuArchives>@(_RhuRow->'%(Archives)')</RhuArchives>
+      <RhuDonor>@(_RhuRow->'%(Donor)')</RhuDonor>
+      <RhuObjects>@(_RhuRow->'%(Objects)')</RhuObjects>
+      <RhuMachine>@(_RhuRow->'%(Machine)')</RhuMachine>
+      <RhuBase>@(_RhuRow->'%(Base)')</RhuBase>
+    </PropertyGroup>
+    <Message Importance="high" Text="Lamella RHU: board $(RhuBoard) (class $(RhuClass); map $(RhuMap); kernel $(RhuKernel); base $(RhuBase))" />
+  </Target>
+
+  <!-- Every frozen byte the package carries is verified against the
+       package's own records before any link, and the two tools against
+       the tools package's; a moved byte is a refusal, never a rebuild. -->
+  <Target Name="RhuVerifyFrozen" DependsOnTargets="RhuResolveBoard">
+    <Error Condition="'@(RhuFrozen)' == ''" Text="REFUSE: the package carries no frozen-bytes record (Sdk/frozen.props)" />
+    <Error Condition="'$(RhuToolsDir)' == ''" Text="REFUSE: the tools package $(RhuToolsPackageId) is not restored (its build properties name the tools)" />
+    <ItemGroup>
+      <_RhuFrozenFile Include="@(RhuFrozen->'$(RhuSdkRoot)%(Identity)')" Sha256="%(RhuFrozen.Sha256)" Rel="%(RhuFrozen.Identity)" />
+      <_RhuFrozenFile Include="$(RhuLld)" Sha256="$(RhuLldSha256)" Rel="bin/ld.lld" />
+      <_RhuFrozenFile Include="$(RhuObjcopy)" Sha256="$(RhuObjcopySha256)" Rel="bin/llvm-objcopy" />
+    </ItemGroup>
+    <GetFileHash Files="@(_RhuFrozenFile)" Algorithm="SHA256" HashEncoding="hex">
+      <Output TaskParameter="Items" ItemName="_RhuHashed" />
+    </GetFileHash>
+    <ItemGroup>
+      <_RhuHashedLower Include="@(_RhuHashed)" Lower="$([System.String]::Copy('%(FileHash)').ToLowerInvariant())" />
+      <_RhuMismatch Include="@(_RhuHashedLower)" Condition="'%(_RhuHashedLower.Lower)' != '%(_RhuHashedLower.Sha256)'" />
+    </ItemGroup>
+    <Error Condition="'@(_RhuMismatch)' != ''" Text="REFUSE: the package's frozen file does not tie its record: @(_RhuMismatch->'%(Rel)', ', ')" />
+    <Message Importance="high" Text="Lamella RHU: frozen bytes verified: @(_RhuHashed->Count()) files tie the package's records" />
+    <Exec Command="chmod +x &quot;$(RhuLld)&quot; &quot;$(RhuObjcopy)&quot;" Condition="!$([MSBuild]::IsOSPlatform('Windows'))" />
+  </Target>
+
+  <!-- The link, in place of the ILCompiler pack's: the runtime archive's
+       startup member with its stack-cookie section renamed into copied
+       data, the compiled object merged with that member and the runtime
+       archives into one relocatable whose build attributes are the class's
+       donor, and the image linked under the board's payload map with the
+       tier objects and the board's kernel. The linker of record prints
+       nothing: any diagnostic is a refusal. -->
+  <Target Name="LinkNative"
+          Inputs="$(NativeObject);@(NativeLibrary);@(_RhuLinkInput)"
+          Outputs="$(_LinkNativeOutputs)"
+          DependsOnTargets="$(LinkNativeDependsOn);RhuVerifyFrozen">
+    <PropertyGroup>
+      <_RhuMember>$(_RhuDir)startup.cpp.o</_RhuMember>
+      <_RhuSurgery>$(_RhuDir)startup-cookie-copied.o</_RhuSurgery>
+      <_RhuMergePre>$(_RhuDir)$(TargetName)-merged-pre.o</_RhuMergePre>
+      <_RhuMerged>$(_RhuDir)$(TargetName)-merged.o</_RhuMerged>
+      <_RhuMapFile>$(_RhuDir)$(TargetName).map</_RhuMapFile>
+    </PropertyGroup>
+    <MakeDir Directories="$(_RhuDir);$([System.IO.Path]::GetDirectoryName('$(_RhuElf)'))" />
+    <Delete Files="$(_RhuMember);$(_RhuSurgery);$(_RhuMergePre);$(_RhuMerged);$(_RhuMapFile);$(_RhuElf)" />
+    <ArchiveMember Archive="$(RhuSdkRoot)$(RhuArchives)/libRuntime.WorkstationGC.a" Member="startup.cpp.o" Output="$(_RhuMember)" />
+    <Exec Command="&quot;$(RhuObjcopy)&quot; --rename-section .rodata=.data.__security_cookie,alloc,load,data,contents &quot;$(_RhuMember)&quot; &quot;$(_RhuSurgery)&quot;" />
+    <Exec Command="&quot;$(RhuLld)&quot; -r -u RhRegisterOSModule -u DotNetRuntimeContractDescriptor &quot;$(_RhuObject)&quot; &quot;$(_RhuSurgery)&quot; --start-group libRuntime.WorkstationGC.a libeventpipe-disabled.a libstandalonegc-enabled.a libaotminipal.a libstdc++compat.a --end-group -o &quot;$(_RhuMergePre)&quot;" WorkingDirectory="$(RhuSdkRoot)$(RhuArchives)" />
+    <AttrsUpdate Input="$(_RhuMergePre)" Donor="$(RhuSdkRoot)$(RhuDonor)" Output="$(_RhuMerged)" />
+    <Exec Command="&quot;$(RhuLld)&quot; -T $(RhuMap) --gc-sections -Map=&quot;$(_RhuMapFile)&quot; -u RhInitialize -u RhRegisterOSModule -u DotNetRuntimeContractDescriptor &quot;$(_RhuMerged)&quot; $(RhuObjects) $(RhuKernel) -o &quot;$(_RhuElf)&quot;"
+          WorkingDirectory="$(RhuSdkRoot)" ConsoleToMSBuild="true" IgnoreExitCode="true" IgnoreStandardErrorWarningFormat="true">
+      <Output TaskParameter="ExitCode" PropertyName="_RhuLdRc" />
+      <Output TaskParameter="ConsoleOutput" ItemName="_RhuLdOut" />
+    </Exec>
+    <Error Condition="'$(_RhuLdRc)' != '0' or '@(_RhuLdOut)' != ''" Text="REFUSE: the link printed a diagnostic or failed (rc $(_RhuLdRc)): @(_RhuLdOut, ' | ')" />
+    <Message Importance="high" Text="Lamella RHU: $(NativeBinary) linked for $(RhuBoard) under $(RhuMap)" />
+  </Target>
+
+</Project>

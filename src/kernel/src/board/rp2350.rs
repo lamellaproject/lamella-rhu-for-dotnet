@@ -45,6 +45,12 @@ pub const KMAIN_STACK_BYTES: usize = 16 * 1024;
 /// flash), so every position the datasheet names has a funnel entry.
 pub const NIRQ: usize = 52;
 
+/// The vector line a test image may claim: the last of the spare lines
+/// wired to nothing, implemented by the controller (a software pend takes
+/// it) and claimed by no kernel handler.
+#[allow(dead_code)]
+pub const SPARE_IRQ: usize = NIRQ - 1;
+
 /// FPU shape: FPv5 SINGLE precision (the Cortex-M33 FPU) -- kernel f64
 /// stays on the soft-float path. Consumed by records and gates, never by
 /// context-switch code (lazy stacking is FP-shape-agnostic).
@@ -204,6 +210,10 @@ const UART0_IRQ_PRIO: u8 = 0xE0;
 /// folded into the vector table by the boot module: UART0's transmit
 /// interrupt.
 pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[(UART0_IRQ, __rhu_rp2350_uart0_irq)];
+
+/// The family GPIO driver's handler on the bank's one interrupt line (the
+/// device seam: the driver owns the line; a hook is a tenant of it).
+pub const GPIO_IRQS: &[(usize, unsafe extern "C" fn())] = &[(gpio_backend::IO_IRQ_BANK0, gpio_backend::__rhu_rp2350_io_bank0_irq)];
 
 #[cfg(any(feature = "pico-2-pll150", feature = "pico-plus-2-pll150"))]
 mod pll150 {
@@ -555,13 +565,609 @@ pub fn console_getb() -> Option<u8> {
 #[allow(dead_code)]
 pub const ADDRESS_ZERO_READABLE: bool = true;
 
-/// The entropy posture of this row: the chip carries a TRNG block that no driver
-/// serves on this row, so no source serves.
-pub const ENTROPY: super::EntropyPosture = super::EntropyPosture::None;
+/// The entropy posture of this row: the chip's true random number generator
+/// (the datasheet's TRNG chapter) served on both clock postures -- its ring
+/// oscillator is free-running and sampled every 24 system clocks, its three
+/// entropy checks are on and read at every draw. The driver sits after the
+/// GPIO backend below.
+pub const ENTROPY: super::EntropyPosture = super::EntropyPosture::Source {
+    id: 3,
+    name: "RP2350 TRNG",
+    line: "hardware source RP2350 TRNG enabled on clk_sys; its self-tests gate every draw",
+};
 /// Whether this row carries a real-time clock the kernel reads at boot and
 /// writes at an explicit set.
 #[allow(dead_code)]
 pub const RTC_PRESENT: bool = false;
 /// The calendar banner's text for this row, constant per image.
 pub const RTC_LINE: &str = "no calendar RTC on this chip (the always-on timer counts milliseconds); the base is the epoch until the tooling or the application sets it";
-pub use super::absent::{entropy_draw, entropy_init, rtc_read_at_boot, rtc_write};
+pub use super::absent::{rtc_read_at_boot, rtc_write};
+
+/// The RP2350's GPIO half and THE FAMILY HANDLER that owns the bank's one
+/// interrupt line (the device seam). The
+/// blocks (the RP2350 datasheet): IO_BANK0 at 0x4002_8000 -- per line the
+/// control register at 8n + 4 whose FUNCSEL (bits 4:0) selects the
+/// function (5 the SIO for a program's line; 0x1F none); PADS_BANK0 at
+/// 0x4003_8000 -- per line at 0x04 + 4n: ISO bit 8 (the isolation latch,
+/// set out of reset and cleared by a claim), OD bit 7, IE bit 6 (set by a
+/// claim), PUE bit 3, PDE bit 2 (set out of reset; the claim's pull
+/// overrides both); the SIO at 0xD000_0000 -- GPIO_IN 0x004, GPIO_OUT_SET
+/// 0x018, GPIO_OUT_CLR 0x020, GPIO_OE_SET 0x038, GPIO_OE_CLR 0x040 (the
+/// atomic paths), each with its twin at +4 for lines 32 to 47 of the
+/// RP2350B; the interrupt arrays in IO_BANK0, eight lines per word and four
+/// bits per line (LEVEL_LOW, LEVEL_HIGH, EDGE_LOW, EDGE_HIGH; the edge bits
+/// latched and cleared by writing 1 to INTR0..5 at 0x230; PROC0_INTE0..5 at
+/// 0x248, PROC0_INTF0..5 at 0x260, PROC0_INTS0..5 at 0x278), on the
+/// IO_IRQ_BANK0 vector, position 21. The reset controller's IO_BANK0 and
+/// PADS_BANK0 bits are released here as the console's init releases them
+/// (idempotent).
+///
+/// THE OWNERSHIP: this module owns the one handler; a hook is a tenant
+/// that claims its enable bit by register and bit and names its wake word
+/// in the claims table; the handler reads the status words and dispatches
+/// every set bit by ownership -- a tenant's bit to the tenant's word (an
+/// edge or a force acknowledged; a LEVEL bit masked before the wake, since
+/// a level is not latched and would re-enter this handler until the
+/// tenant's thread silenced the source, and re-armed by the tenant after
+/// its service pass), a program's armed edge to the line's event word with
+/// the edge bit cleared.
+pub mod gpio_backend {
+    use core::ptr::{addr_of, read_volatile, write_volatile};
+
+    use super::{
+        IO_BANK0, PADS_BANK0, PAD_IE, PAD_ISO, PAD_OD, PAD_PDE, PAD_PUE, RESETS_RESET, RESETS_RESET_DONE, RESET_IO_BANK0,
+        RESET_PADS_BANK0,
+    };
+    use crate::claims;
+    use crate::critical::with_cs;
+    use crate::gpio;
+    use crate::gpio_math as m;
+    use crate::sched;
+
+    pub const HAS_EVENTS: bool = true;
+
+    const FUNCSEL_SIO: u32 = 5;
+    const FUNCSEL_NULL: u32 = 0x1F;
+    const SIO: usize = 0xD000_0000;
+    const GPIO_IN: usize = 0x004;
+    const GPIO_OUT_SET: usize = 0x018;
+    const GPIO_OUT_CLR: usize = 0x020;
+    const GPIO_OE_SET: usize = 0x038;
+    const GPIO_OE_CLR: usize = 0x040;
+    /// The twin registers for lines 32 to 47 sit four bytes above each.
+    const HI: usize = 0x004;
+    const INTR0: usize = 0x230;
+    const PROC0_INTE0: usize = 0x248;
+    const PROC0_INTF0: usize = 0x260;
+    const PROC0_INTS0: usize = 0x278;
+    const WORDS: usize = 6;
+    pub const IO_IRQ_BANK0: usize = 21;
+    const NVIC_ISER0: *mut u32 = 0xE000_E100 as *mut u32;
+    const NVIC_IPR: *mut u8 = 0xE000_E400 as *mut u8;
+    const IRQ_PRIO: u8 = 0xE0;
+
+    fn ctrl(line: u32) -> *mut u32 {
+        (IO_BANK0 + 8 * line as usize + 4) as *mut u32
+    }
+
+    fn pad(line: u32) -> *mut u32 {
+        (PADS_BANK0 + 4 + 4 * line as usize) as *mut u32
+    }
+
+    fn sio(off: usize, line: u32) -> (*mut u32, u32) {
+        let twin = if line >= 32 { HI } else { 0 };
+        ((SIO + off + twin) as *mut u32, 1 << (line % 32))
+    }
+
+    fn intr(k: usize) -> *mut u32 {
+        (IO_BANK0 + INTR0 + 4 * k) as *mut u32
+    }
+
+    pub(super) fn inte(k: usize) -> *mut u32 {
+        (IO_BANK0 + PROC0_INTE0 + 4 * k) as *mut u32
+    }
+
+    fn intf(k: usize) -> *mut u32 {
+        (IO_BANK0 + PROC0_INTF0 + 4 * k) as *mut u32
+    }
+
+    fn ints(k: usize) -> *mut u32 {
+        (IO_BANK0 + PROC0_INTS0 + 4 * k) as *mut u32
+    }
+
+    fn release_banks() {
+        unsafe {
+            let mask = RESET_IO_BANK0 | RESET_PADS_BANK0;
+            write_volatile(RESETS_RESET, read_volatile(RESETS_RESET) & !mask);
+            while read_volatile(RESETS_RESET_DONE) & mask != mask {}
+        }
+    }
+
+    /// The pad's pull and input enable, the function select, then the
+    /// output's initial LEVEL (SIO OUT) before its direction (SIO OE), so
+    /// the pad never shows the wrong level at open. An open-drain output
+    /// at a high initial level is the pad released.
+    pub fn configure(line: u32, mode: u32, pull: u32, initial: bool) {
+        release_banks();
+        with_cs(|| unsafe {
+            let p = pad(line);
+            let mut v = read_volatile(p) & !(PAD_PUE | PAD_PDE | PAD_OD | PAD_ISO);
+            v |= PAD_IE;
+            if pull == m::PULL_UP {
+                v |= PAD_PUE;
+            } else if pull == m::PULL_DOWN {
+                v |= PAD_PDE;
+            }
+            write_volatile(p, v);
+            write_volatile(ctrl(line), FUNCSEL_SIO);
+            let (oe_set, mask) = sio(GPIO_OE_SET, line);
+            let (oe_clr, _) = sio(GPIO_OE_CLR, line);
+            let (out_set, _) = sio(GPIO_OUT_SET, line);
+            let (out_clr, _) = sio(GPIO_OUT_CLR, line);
+            write_volatile(if initial { out_set } else { out_clr }, mask);
+            let drive = mode == m::MODE_OUTPUT || (mode == m::MODE_OUTPUT_OPEN_DRAIN && !initial);
+            write_volatile(if drive { oe_set } else { oe_clr }, mask);
+        });
+    }
+
+    /// Back to a released, function-less pad with its input enabled.
+    pub fn release(line: u32) {
+        with_cs(|| unsafe {
+            let (oe_clr, mask) = sio(GPIO_OE_CLR, line);
+            write_volatile(oe_clr, mask);
+            write_volatile(ctrl(line), FUNCSEL_NULL);
+            let p = pad(line);
+            write_volatile(p, read_volatile(p) & !(PAD_PUE | PAD_PDE));
+        });
+    }
+
+    /// The atomic paths. An open-drain output has no native form on this
+    /// block: "high" releases the pad (the output disabled), "low" drives
+    /// it low (the output enabled).
+    pub fn write(line: u32, mode: u32, high: bool) {
+        unsafe {
+            if mode == m::MODE_OUTPUT_OPEN_DRAIN {
+                if high {
+                    let (oe_clr, mask) = sio(GPIO_OE_CLR, line);
+                    write_volatile(oe_clr, mask);
+                } else {
+                    let (out_clr, mask) = sio(GPIO_OUT_CLR, line);
+                    write_volatile(out_clr, mask);
+                    let (oe_set, _) = sio(GPIO_OE_SET, line);
+                    write_volatile(oe_set, mask);
+                }
+            } else {
+                let (r, mask) = sio(if high { GPIO_OUT_SET } else { GPIO_OUT_CLR }, line);
+                write_volatile(r, mask);
+            }
+        }
+    }
+
+    pub fn read(line: u32) -> bool {
+        let (r, mask) = sio(GPIO_IN, line);
+        unsafe { read_volatile(r) & mask != 0 }
+    }
+
+    pub(super) fn nvic_enable_once() {
+        unsafe {
+            write_volatile(NVIC_IPR.add(IO_IRQ_BANK0), IRQ_PRIO);
+            write_volatile(NVIC_ISER0, 1 << IO_IRQ_BANK0);
+        }
+    }
+
+    pub fn arm(line: u32, rising: bool, falling: bool) -> i32 {
+        let (k, s) = m::rp_word(line);
+        let bits = ((rising as u32) << (s + m::RP_EDGE_HIGH)) | ((falling as u32) << (s + m::RP_EDGE_LOW));
+        with_cs(|| unsafe {
+            write_volatile(intr(k), 0b1100 << s);
+            write_volatile(inte(k), (read_volatile(inte(k)) & !(0b1111 << s)) | bits);
+        });
+        nvic_enable_once();
+        0
+    }
+
+    pub fn disarm(line: u32) {
+        let (k, s) = m::rp_word(line);
+        with_cs(|| unsafe {
+            write_volatile(inte(k), read_volatile(inte(k)) & !(0b1111 << s));
+            write_volatile(intr(k), 0b1100 << s);
+        });
+    }
+
+    /// The software trigger: the force register asserts the line's
+    /// rising-edge bit in the status word; the handler clears the force
+    /// after the wake, so one force is one event.
+    pub fn software_edge(line: u32) -> bool {
+        let (k, s) = m::rp_word(line);
+        with_cs(|| unsafe {
+            write_volatile(intf(k), read_volatile(intf(k)) | (1 << (s + m::RP_EDGE_HIGH)));
+        });
+        true
+    }
+
+    /// The family handler on IO_IRQ_BANK0: bounded work in the board band.
+    pub unsafe extern "C" fn __rhu_rp2350_io_bank0_irq() {
+        unsafe {
+            for k in 0..WORDS {
+                let status = read_volatile(ints(k));
+                if status == 0 {
+                    continue;
+                }
+                let forced = read_volatile(intf(k));
+                let mut p = status;
+                while p != 0 {
+                    let b = p.trailing_zeros();
+                    p &= p - 1;
+                    let line = (k as u32) * 8 + b / 4;
+                    let kind = b % 4;
+                    let acknowledge = |k: usize, b: u32| {
+                        if cfg!(feature = "test-gpio-doctored-mask") {
+                            return;
+                        }
+                        if forced & (1 << b) != 0 {
+                            write_volatile(intf(k), read_volatile(intf(k)) & !(1 << b));
+                        } else if kind >= m::RP_EDGE_LOW {
+                            write_volatile(intr(k), 1 << b);
+                        }
+                    };
+                    if let Some(t) = claims::tenant_for(&*addr_of!(gpio::CLAIMS), inte(k) as u32, b) {
+                        if forced & (1 << b) == 0 && kind < m::RP_EDGE_LOW {
+                            write_volatile(inte(k), read_volatile(inte(k)) & !(1 << b));
+                        } else {
+                            acknowledge(k, b);
+                        }
+                        sched::futex_wake(t.wake as *const u32, u32::MAX);
+                        continue;
+                    }
+                    if forced & (1 << b) == 0 && kind < m::RP_EDGE_LOW {
+                        write_volatile(inte(k), read_volatile(inte(k)) & !(1 << b));
+                        continue;
+                    }
+                    acknowledge(k, b);
+                    gpio::fire(line, kind == m::RP_EDGE_HIGH || kind == m::RP_LEVEL_HIGH);
+                }
+            }
+        }
+    }
+}
+
+/// THE HARDWARE ENTROPY SOURCE: the chip's true random number generator (the
+/// datasheet's TRNG chapter; the registers from its list, at 0x400F_0000 +
+/// 0x100 on). RNG_IMR masks the four interrupts (all masked: this driver
+/// polls). RNG_ISR reports EHR_VALID bit 0 (192 bits collected), AUTOCORR_ERR
+/// bit 1 (the autocorrelation test failed four times in a row -- the block
+/// ceases functioning until its reset, and the bit clears only by that
+/// reset), CRNGT_ERR bit 2 (two consecutive blocks of 16 collected bits
+/// equal), VN_ERR bit 3 (32 consecutive collected bits identical). RNG_ICR
+/// clears a status bit by a 1 written. TRNG_CONFIG selects the oscillator's
+/// inverter-chain length (bits 1:0). The six EHR_DATA words hold the
+/// collected bits, the read of the last clearing all six. RND_SOURCE_ENABLE
+/// bit 0 starts and stops the source. SAMPLE_CNT1 counts the system clocks
+/// between two oscillator samples. TRNG_DEBUG_CONTROL's three bypass bits
+/// switch the checks off (written 0 here: the checks are the health flags
+/// the policy asks for). TRNG_SW_RESET resets the block by a 1 written.
+/// RST_BITS_COUNTER resets the bits counter and the valid registers by any
+/// write while the source is disabled.
+const TRNG: usize = 0x400F_0000;
+const RNG_IMR: *mut u32 = (TRNG + 0x100) as *mut u32;
+const RNG_ISR: *mut u32 = (TRNG + 0x104) as *mut u32;
+const RNG_ICR: *mut u32 = (TRNG + 0x108) as *mut u32;
+const TRNG_CONFIG: *mut u32 = (TRNG + 0x10C) as *mut u32;
+const EHR_DATA0: *mut u32 = (TRNG + 0x114) as *mut u32;
+const RND_SOURCE_ENABLE: *mut u32 = (TRNG + 0x12C) as *mut u32;
+const SAMPLE_CNT1: *mut u32 = (TRNG + 0x130) as *mut u32;
+const TRNG_DEBUG_CONTROL: *mut u32 = (TRNG + 0x138) as *mut u32;
+const TRNG_SW_RESET: *mut u32 = (TRNG + 0x140) as *mut u32;
+const RST_BITS_COUNTER: *mut u32 = (TRNG + 0x1BC) as *mut u32;
+const ISR_EHR_VALID: u32 = 1 << 0;
+const ISR_AUTOCORR_ERR: u32 = 1 << 1;
+const ISR_CRNGT_ERR: u32 = 1 << 2;
+const ISR_VN_ERR: u32 = 1 << 3;
+const ISR_FAILED: u32 = ISR_AUTOCORR_ERR | ISR_CRNGT_ERR | ISR_VN_ERR;
+const ISR_ALL: u32 = ISR_EHR_VALID | ISR_FAILED;
+const RND_SRC_EN: u32 = 1 << 0;
+/// The configuration: the shortest inverter chain, the three checks on, and
+/// two microseconds of the posture's clock between samples (the clock over
+/// 500 kHz: 300 at 150 MHz, 24 at 12 MHz). The datasheet's guidance for an
+/// average generation time of about two milliseconds, a chain of 0 or 1 and
+/// a count of 20 to 25, is given at its example's clock of about 12 MHz; the
+/// same count at a faster clock fails the autocorrelation test at once.
+const TRNG_CONFIG_VALUE: u32 = 0;
+const SAMPLE_CNT1_VALUE: u32 = SYSCLK_HZ / 500_000;
+/// The reset controller's TRNG bit (the RESET register's bit 25) and the
+/// block's clock gate (CLOCKS.WAKE_EN0 bit 21, set at reset and never
+/// written here).
+const RESET_TRNG: u32 = 1 << 25;
+const CLOCKS_WAKE_EN0: *mut u32 = (CLOCKS + 0xAC) as *mut u32;
+const WAKE_EN0_CLK_SYS_TRNG: u32 = 1 << 21;
+/// One block = 192 collected bits = six words = 24 bytes.
+const EHR_WORDS: usize = 6;
+const BLOCK_BYTES: usize = EHR_WORDS * 4;
+/// The bound per block, in loop iterations: the cycles of one second over
+/// four (the loop body is at least four cycles; with its bus read it is
+/// more, so the bound is at least one second at either posture, never less).
+/// With the sampling period the same wall time on either posture, the
+/// average block is the datasheet's two milliseconds on both, so the bound
+/// is about five hundred averages and the datasheet's occasional long
+/// generation ("in excess of 100 times the average") completes inside it
+/// at either posture. A miss is the door's "try again", counted, never a
+/// retirement on its own; three in a row retire the source. The spin runs
+/// in the caller's thread outside any critical section: the tick and every
+/// interrupt run as always, and only the calling thread waits for the block
+/// it asked for.
+const BLOCK_BOUND: u32 = SYSCLK_HZ / 4;
+/// A short bound for the two reset handshakes (at least a hundred
+/// microseconds; each completes within a few clocks).
+const SPIN_SHORT: u32 = SYSCLK_HZ / 10_000 / 4;
+/// Runs the block discards by its own checks inside ONE block before the
+/// source is called faulty: the datasheet documents a discarded run as
+/// normal operation ("occasionally"); nine in a row is a fault.
+const DISCARDS_PER_BLOCK_MAX: u32 = 8;
+
+/// The chip's own record of the block's behaviour, exported by symbol for a
+/// debug probe (five words; never a gated line): the blocks generated; the
+/// runs discarded by the von Neumann check and by the continuous check --
+/// the block's documented normal operation, counted HERE and never as the
+/// entropy witness's health flags (which count this source's faults: nine
+/// discards in one block, a second autocorrelation failure in one draw);
+/// the block resets after an autocorrelation failure (the witness's resets
+/// too); the longest wait for one block in loop iterations (the tail's
+/// measurement).
+#[repr(C)]
+pub struct TrngRecord {
+    pub blocks: u32,
+    pub discards_vn: u32,
+    pub discards_crngt: u32,
+    pub resets: u32,
+    pub longest: u32,
+}
+
+#[unsafe(export_name = "__rhu_rp2350_trng")]
+pub static mut TRNG_RECORD: TrngRecord = TrngRecord { blocks: 0, discards_vn: 0, discards_crngt: 0, resets: 0, longest: 0 };
+
+unsafe fn trng_bump(p: *mut u32, by: u32) {
+    unsafe { write_volatile(p, read_volatile(p).wrapping_add(by)) }
+}
+
+/// The source started for one generation.
+unsafe fn trng_start() {
+    unsafe { write_volatile(RND_SOURCE_ENABLE, RND_SRC_EN) }
+}
+
+/// The source stopped, every status bit cleared, the bits counter and the
+/// valid registers reset (the reset takes only with the source disabled).
+unsafe fn trng_stop() {
+    unsafe {
+        write_volatile(RND_SOURCE_ENABLE, 0);
+        write_volatile(RNG_ICR, ISR_ALL);
+        write_volatile(RST_BITS_COUNTER, 1);
+    }
+}
+
+/// The block's configuration written whole (after the reset at the init and
+/// after a block reset): the source off, the checks on, the chain and the
+/// sample count, the interrupts masked, every status bit cleared, the
+/// counter reset.
+unsafe fn trng_configure() {
+    unsafe {
+        write_volatile(RND_SOURCE_ENABLE, 0);
+        write_volatile(TRNG_DEBUG_CONTROL, 0);
+        write_volatile(TRNG_CONFIG, TRNG_CONFIG_VALUE);
+        write_volatile(SAMPLE_CNT1, SAMPLE_CNT1_VALUE);
+        write_volatile(RNG_IMR, ISR_ALL);
+        write_volatile(RNG_ICR, ISR_ALL);
+        write_volatile(RST_BITS_COUNTER, 1);
+    }
+}
+
+/// The configuration read back: the three words as written and no status
+/// bit set (the reachability proof; no noise is involved).
+unsafe fn trng_configured() -> bool {
+    unsafe {
+        read_volatile(TRNG_CONFIG) == TRNG_CONFIG_VALUE
+            && read_volatile(SAMPLE_CNT1) == SAMPLE_CNT1_VALUE
+            && read_volatile(TRNG_DEBUG_CONTROL) == 0
+            && read_volatile(RNG_ISR) & ISR_ALL == 0
+    }
+}
+
+/// The block's own reset after an autocorrelation failure (the one status
+/// bit software cannot clear): the reset written, the bit waited for to
+/// clear under the short bound, the configuration rewritten and read back.
+unsafe fn trng_reset_block() -> bool {
+    unsafe {
+        write_volatile(TRNG_SW_RESET, 1);
+        let mut n = 0u32;
+        while read_volatile(RNG_ISR) & ISR_AUTOCORR_ERR != 0 {
+            n += 1;
+            if n > SPIN_SHORT {
+                return false;
+            }
+        }
+        trng_configure();
+        trng_configured()
+    }
+}
+
+/// The block started: its clock gate read (set at reset; a resident image
+/// that gated it leaves the source absent), the block put INTO reset and
+/// released (the boot ROM uses the block for its per-boot random with the
+/// checks bypassed and leaves it as it was, so the reset is the known state;
+/// the module's own release polls the done bit), configured whole and read
+/// back. Nothing is drawn at the boot: the block has no startup self-test
+/// the datasheet names -- its three checks run on every generation, so the
+/// first draw is the first test, and a boot-time generation would wait
+/// milliseconds with a documented tail for no verdict the draw does not
+/// give. Nothing here masks an interrupt: the boot path runs before the
+/// scheduler.
+pub fn entropy_init() -> bool {
+    unsafe {
+        if read_volatile(CLOCKS_WAKE_EN0) & WAKE_EN0_CLK_SYS_TRNG == 0 {
+            return false;
+        }
+        write_volatile(RESETS_RESET, read_volatile(RESETS_RESET) | RESET_TRNG);
+        let mut n = 0u32;
+        while read_volatile(RESETS_RESET_DONE) & RESET_TRNG != 0 {
+            n += 1;
+            if n > SPIN_SHORT {
+                return false;
+            }
+        }
+        release_reset(RESET_TRNG);
+        trng_configure();
+        trng_configured()
+    }
+}
+
+/// One draw, per block of 24 bytes: the source enabled; THE WAIT OUTSIDE ANY
+/// SECTION -- the status polled until the block reports a complete number,
+/// a failed check or the bound; then the outcome:
+///   * a complete number: under the kernel critical section the status is
+///     read again (a check that failed meanwhile is handled as below) and
+///     the six words are read, the last read clearing the result registers;
+///     outside it the source is stopped and the status cleared;
+///   * a run the von Neumann or the continuous check discarded: the block's
+///     documented normal operation -- counted in the chip's record, the run
+///     restarted within the same bound; past eight discards in one block
+///     the source is faulty (the health flag: counted, the policy retires);
+///   * the autocorrelation test failed four times in a row: the block has
+///     ceased functioning and only its reset revives it -- the block reset,
+///     the configuration rewritten, a block reset counted (the witness's
+///     resets), the run restarted once; a second in one draw is the health
+///     flag, and so is a reset that does not take;
+///   * the bound met: the draw refuses "try again" (the witness's timeouts;
+///     three in a row retire).
+/// The source is stopped on every exit ("when not in use"). The section
+/// covers seven register reads and never a wait: an interrupt at or above
+/// the ceiling is delayed by those reads alone, the zero-latency band below
+/// it never. The bytes land in the caller's buffer word by word; the policy
+/// layer copies out only when the whole draw succeeded.
+pub fn entropy_draw(buf: &mut [u8], counters: &mut super::DrawCounters) -> Result<(), super::EntropyErr> {
+    for chunk in buf.chunks_mut(BLOCK_BYTES) {
+        let mut words = [0u32; EHR_WORDS];
+        let mut n = 0u32;
+        let mut vn = 0u32;
+        let mut crngt = 0u32;
+        let mut resets = 0u32;
+        unsafe { trng_start() };
+        let outcome = loop {
+            let isr = unsafe { read_volatile(RNG_ISR) } & ISR_ALL;
+            if isr != 0 {
+                let seen = crate::critical::with_cs(|| unsafe {
+                    let isr = read_volatile(RNG_ISR) & ISR_ALL;
+                    if isr & ISR_FAILED != 0 {
+                        return isr;
+                    }
+                    for (i, w) in words.iter_mut().enumerate() {
+                        *w = read_volatile(EHR_DATA0.add(i));
+                    }
+                    ISR_EHR_VALID
+                });
+                if seen & ISR_AUTOCORR_ERR != 0 {
+                    resets += 1;
+                    if resets > 1 || !unsafe { trng_reset_block() } {
+                        break Err(super::EntropyErr::Health);
+                    }
+                    unsafe { trng_start() };
+                } else if seen & ISR_FAILED != 0 {
+                    if seen & ISR_VN_ERR != 0 {
+                        vn += 1;
+                    }
+                    if seen & ISR_CRNGT_ERR != 0 {
+                        crngt += 1;
+                    }
+                    if vn + crngt > DISCARDS_PER_BLOCK_MAX {
+                        break Err(super::EntropyErr::Health);
+                    }
+                    unsafe {
+                        trng_stop();
+                        trng_start();
+                    }
+                } else {
+                    break Ok(());
+                }
+            }
+            n += 1;
+            if n > BLOCK_BOUND {
+                break Err(super::EntropyErr::Timeout);
+            }
+        };
+        unsafe { trng_stop() };
+        crate::critical::with_cs(|| unsafe {
+            let r = core::ptr::addr_of_mut!(TRNG_RECORD);
+            if outcome.is_ok() {
+                trng_bump(core::ptr::addr_of_mut!((*r).blocks), 1);
+            }
+            trng_bump(core::ptr::addr_of_mut!((*r).discards_vn), vn);
+            trng_bump(core::ptr::addr_of_mut!((*r).discards_crngt), crngt);
+            trng_bump(core::ptr::addr_of_mut!((*r).resets), resets);
+            if n > read_volatile(core::ptr::addr_of!((*r).longest)) {
+                write_volatile(core::ptr::addr_of_mut!((*r).longest), n);
+            }
+        });
+        counters.resets += resets;
+        match outcome {
+            Ok(()) => {
+                let mut bytes = [0u8; BLOCK_BYTES];
+                for (i, w) in words.iter().enumerate() {
+                    bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+                }
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+            Err(e) => {
+                if matches!(&e, super::EntropyErr::Health) {
+                    counters.errors += 1;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// THE WIRELESS MODULE'S TENANCY on the bank's one interrupt line, for the
+/// unhosted program (the claims table's tenant interface). The module's data
+/// line is GPIO 24 as the board wires it, and its level-high enable is bit 1
+/// of PROC0_INTE3, the word that covers lines 24 to 31 at four bits per
+/// line. The program arms that bit at the IO bank across each wait for a
+/// frame and disarms it after; the family handler masks the bit before it
+/// wakes the word (a level is not latched); the vector line is enabled here
+/// once, at the registration, and nothing fires until the program arms the
+/// bit, so an image that never arms it carries the enabled line harmlessly.
+/// The wake word is the kernel's, so its address is mapped and aligned for
+/// the life of every wait; the program reads it by symbol, as the kernel
+/// reaches the program's entry. What is masked: one enable bit of one line
+/// at the IO bank, by the handler and by the program; nothing at the
+/// controller's global level, nothing in the zero-latency band, and the
+/// handler itself runs in the lowest kernel band.
+#[cfg(feature = "unhosted-main")]
+pub mod wireless_tenant {
+    use core::ptr::addr_of_mut;
+    use core::sync::atomic::AtomicU32;
+
+    use super::gpio_backend::{inte, nvic_enable_once};
+    use crate::critical::with_cs;
+    use crate::gpio_math as m;
+    use crate::{claims, gpio};
+
+    /// The module's data line.
+    const DATA_LINE: u32 = 24;
+
+    /// The wake word the family handler wakes for the data line's bit.
+    #[unsafe(export_name = "__rhu_wireless_wake")]
+    pub static WIRELESS_WAKE: AtomicU32 = AtomicU32::new(0);
+
+    /// The tenancy registered and the vector line enabled; the table's code
+    /// (0 taken; the busy code when the bit is held or the table is full).
+    pub fn init() -> i32 {
+        let (k, s) = m::rp_word(DATA_LINE);
+        let wake = WIRELESS_WAKE.as_ptr() as u32;
+        let r = with_cs(|| unsafe {
+            claims::tenant_add(&mut *addr_of_mut!(gpio::CLAIMS), inte(k) as u32, s + m::RP_LEVEL_HIGH, wake)
+        });
+        if r == 0 {
+            nvic_enable_once();
+        }
+        r
+    }
+}
