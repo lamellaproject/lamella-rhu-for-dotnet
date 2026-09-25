@@ -3,7 +3,7 @@
 //! init re-carves, so the cases are independent in any order); the wake
 //! cases are pure arithmetic.
 
-use crate::{abi_window, arena, board, calendar_math, claims, gpio_math, kheap, wake};
+use crate::{abi_window, arena, board, bus_math, calendar_math, claims, gpio_math, kheap, wake};
 
 fn boot() {
     arena::init();
@@ -625,4 +625,85 @@ fn gpio_math_partition_wrap_and_families() {
     assert_eq!(gpio_math::rp_word(24), (3, 0), "GPIO 24: the fourth word, the lowest nibble");
     assert_eq!(gpio_math::rp_word(31), (3, 28));
     assert_eq!(gpio_math::rp_word(47), (5, 28));
+}
+
+#[test]
+fn claims_board_claim_at_open() {
+    let mut c = claims::EMPTY;
+    claims::init(&mut c, 48, claims::fold_board(&[4]));
+    assert_eq!(claims::claim(&mut c, 5), 0, "a program holds line 5");
+    assert_eq!(claims::claim_board(&mut c, 5), claims::REFUSED_BUSY, "the board's claim on a program's line");
+    assert_eq!(claims::claim_board(&mut c, 6), 0, "the board takes a free line");
+    assert!(claims::is_board(&c, 6) && !claims::is_program(&c, 6));
+    assert_eq!(claims::claim_board(&mut c, 6), 0, "the board's second claim is idempotent");
+    assert_eq!(claims::claim_board(&mut c, 4), 0, "a line the board held at boot");
+    assert_eq!(claims::claim(&mut c, 6), claims::REFUSED_BUSY, "a program's claim on the board's line after");
+    assert_eq!(claims::claim_board(&mut c, 48), claims::REFUSED_INVAL, "past the count");
+    assert_eq!((c.claims_taken, c.refused_busy, c.refused_inval, c.last_refused_line), (2, 2, 1, 48));
+}
+
+#[test]
+fn bus_math_budget_divisor_and_messages() {
+    assert_eq!(bus_math::i2c_timing(16_000_000, 100_000), Some(0x3042_0F13));
+    assert_eq!(bus_math::i2c_timing(16_000_000, 400_000), None);
+    assert_eq!(bus_math::i2c_timing(54_000_000, 100_000), None);
+    assert_eq!(bus_math::spi_divisor(16_000_000, 1_000_000), Some((3, 1_000_000)), "16 MHz over 16");
+    assert_eq!(bus_math::spi_divisor(54_000_000, 1_000_000), Some((5, 843_750)), "54 MHz over 64: the largest divisor at or below the request");
+    assert_eq!(bus_math::spi_divisor(16_000_000, 8_000_000), Some((0, 8_000_000)));
+    assert_eq!(bus_math::spi_divisor(16_000_000, 62_500), Some((7, 62_500)), "the ladder's floor");
+    assert_eq!(bus_math::spi_divisor(16_000_000, 62_499), None, "below the floor");
+    assert_eq!(bus_math::spi_divisor(16_000_000, 0), None);
+    assert_eq!(bus_math::budget_ticks(4096, 8, 1_000_000, 1000), 68, "32.768 ms of wire: 33 ticks, twice plus two");
+    assert_eq!(bus_math::budget_ticks(1, 9, 100_000, 1000), 4, "90 us of wire: one tick, twice plus two");
+    assert_eq!(bus_math::budget_ticks(0, 9, 100_000, 1000), 3, "never fewer than three");
+    assert_eq!(bus_math::budget_ticks(65535, 8, 62_500, 1000), 2 * 8389 + 2, "the longest exchange at the slowest rate");
+    assert_eq!(bus_math::budget_ticks(1, 8, 62_500, 1000), 4, "one byte at the slowest SPI rate: one tick, twice plus two");
+    const TI: &[bus_math::I2cBus] = &[
+        bus_math::I2cBus { number: 1, base: 0, enable_reg: 0, enable_bit: 0, mux_reg: 0, mux_shift: 0, mux_value: 0, kernel_hz: 16_000_000, pads: &[] },
+        bus_math::I2cBus { number: 3, base: 0, enable_reg: 0, enable_bit: 0, mux_reg: 0, mux_shift: 0, mux_value: 0, kernel_hz: 16_000_000, pads: &[] },
+    ];
+    assert_eq!(bus_math::i2c_index(TI, 1), Some(0), "the bus named 1 is the first entry");
+    assert_eq!(bus_math::i2c_index(TI, 3), Some(1), "the bus named 3 is the second entry");
+    assert_eq!(bus_math::i2c_index(TI, 2), None, "no bus named 2: the door answers ENODEV");
+    assert_eq!(bus_math::i2c_index(&[], 1), None, "an empty table names no bus");
+    const TS: &[bus_math::SpiBus] = &[bus_math::SpiBus { number: 2, base: 0, file: bus_math::SpiFile::F7, enable_reg: 0, enable_bit: 0, mux_reg: 0, mux_shift: 0, mux_value: 0, kernel_hz: 16_000_000, pads: &[], selects: &[], select_count: 2, ahead: 2 }];
+    assert_eq!(bus_math::spi_index(TS, 2), Some(0), "the bus named 2 is the entry");
+    assert_eq!(bus_math::spi_index(TS, 0), None, "no bus named 0");
+    assert!(bus_math::i2c_numbers_unique(TI) && bus_math::spi_numbers_unique(TS), "distinct numbers are sound");
+    const TI_TWICE: &[bus_math::I2cBus] = &[TI[0], TI[0]];
+    assert!(!bus_math::i2c_numbers_unique(TI_TWICE), "one number on two buses is refused");
+    const TS_TWICE: &[bus_math::SpiBus] = &[TS[0], TS[0]];
+    assert!(!bus_math::spi_numbers_unique(TS_TWICE), "one number on two buses is refused");
+    assert!(bus_math::spi_selects_sound(TS), "a model's empty select list beside a count is sound");
+    const TS_MANY: &[bus_math::SpiBus] = &[bus_math::SpiBus { select_count: 9, ..TS[0] }];
+    assert!(!bus_math::spi_selects_sound(TS_MANY), "more than eight selects is refused");
+    const TS_SHORT: &[bus_math::SpiBus] = &[bus_math::SpiBus { selects: &[5], ..TS[0] }];
+    assert!(!bus_math::spi_selects_sound(TS_SHORT), "a select list shorter than its count is refused");
+    let mut b = [0u8; 4];
+    let ok = [bus_math::I2cMsg { addr: 0x76, flags: 0, len: 1, reserved: 0, buf: b.as_mut_ptr() }];
+    assert_eq!(bus_math::i2c_msgs_check(&ok), 0);
+    assert_eq!(bus_math::i2c_wire_bytes(&ok), 2, "one data byte and one address byte");
+    let probe = [bus_math::I2cMsg { addr: 0x77, flags: 0, len: 0, reserved: 0, buf: core::ptr::null_mut() }];
+    assert_eq!(bus_math::i2c_msgs_check(&probe), 0, "a NULL buffer with no length is a probe");
+    for bad in [
+        bus_math::I2cMsg { addr: 0x76, flags: 2, len: 1, reserved: 0, buf: b.as_mut_ptr() },
+        bus_math::I2cMsg { addr: 0x76, flags: 0, len: 1, reserved: 1, buf: b.as_mut_ptr() },
+        bus_math::I2cMsg { addr: 0x76, flags: 0, len: 256, reserved: 0, buf: b.as_mut_ptr() },
+        bus_math::I2cMsg { addr: 0x80, flags: 0, len: 1, reserved: 0, buf: b.as_mut_ptr() },
+        bus_math::I2cMsg { addr: 0x76, flags: 0, len: 1, reserved: 0, buf: core::ptr::null_mut() },
+    ] {
+        assert_eq!(bus_math::i2c_msgs_check(&[bad]), -22, "a bad record refused EINVAL");
+    }
+    assert_eq!(bus_math::i2c_msgs_check(&[]), -22, "no message");
+    assert_eq!(bus_math::i2c_msgs_check(&[ok[0]; 9]), -22, "nine messages");
+    assert_eq!(bus_math::i2c_msgs_check(&[ok[0]; 8]), 0, "eight messages");
+    assert_eq!(bus_math::select_class(0, 2), bus_math::SelectClass::Index(0));
+    assert_eq!(bus_math::select_class(1, 2), bus_math::SelectClass::Index(1));
+    assert_eq!(bus_math::select_class(2, 2), bus_math::SelectClass::Invalid);
+    assert_eq!(bus_math::select_class(bus_math::SELECT_NONE, 2), bus_math::SelectClass::None);
+    assert_eq!(bus_math::mode_bits(0), Some((false, false)));
+    assert_eq!(bus_math::mode_bits(1), Some((false, true)));
+    assert_eq!(bus_math::mode_bits(2), Some((true, false)));
+    assert_eq!(bus_math::mode_bits(3), Some((true, true)));
+    assert_eq!(bus_math::mode_bits(4), None);
 }

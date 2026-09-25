@@ -161,10 +161,6 @@ const BRACKET_PAIRS: [(&str, &str); 3] = [
     ("__exidx_start", "__exidx_end"),
     ("__rhu_tdata_lo", "__rhu_tdata_hi"),
 ];
-/// The futex + nanosecond-time + arena + kheap/TLS/thread/registry +
-/// suspension/activation + module-query + console/exit/entropy C-ABI
-/// surface, pinned in the artifact (the waistline exists and survives
-/// every build of this flavor). 33 exports.
 /// The GPIO doors' three checks (the device seam's first peripheral): the
 /// armed lines and the PASS lines, pinned as prefixes.
 const MARKERS_L: [&str; 6] = [
@@ -186,7 +182,31 @@ const MARKERS_M: [&str; 3] = [
     "[api] PASS fp-band (the band exception fired every tick through the hardware block",
 ];
 
-const API_SYMS: [&str; 40] = [
+/// The module-code check (a double-precision form executed from a registered
+/// module's range outside the primary code range): the armed line and the
+/// PASS line, whole -- the same text on both emulator rows.
+const MARKERS_N: [&str; 2] = [
+    "[api] module-code: a form executed from a registered module's range outside the primary code range armed",
+    "[api] PASS module-code (the range predicate true inside the registered range and false before it and past its end; the form from that range computed 3.0 -- through the fault funnel on the single-precision row, by the hardware on the double-precision row)",
+];
+
+/// The bus doors' three checks (the device seam's second peripheral, on the
+/// rows whose facts carry a bus): the armed lines and the PASS lines, pinned
+/// as prefixes.
+const MARKERS_O: [&str; 6] = [
+    "[api] bus-i2c: the bus count stated; a bus claimed at 100 kHz and claimed again;",
+    "[api] PASS bus-i2c (one bus, claimed once and again, the identity 0x60 and the eight-byte burst read,",
+    "[api] bus-spi: the bus count stated; a bus claimed and claimed again;",
+    "[api] PASS bus-spi (one bus, claimed once and again, the identity EF 40 18 at 1000000 Hz,",
+    "[api] bus-tenancy: a worker's long transfer on the bus,",
+    "[api] PASS bus-tenancy (the worker's transfer of 4096 bytes intact,",
+];
+
+/// The futex + nanosecond-time + arena + kheap/TLS/thread/registry +
+/// suspension/activation + module-query + console/exit/entropy + GPIO
+/// C-ABI surface, pinned in the artifact (the waistline exists and
+/// survives every build of this flavor); the table names every export.
+const API_SYMS: [&str; 48] = [
     "rhu_now_ns",
     "rhu_sleep_ns",
     "rhu_futex_wait",
@@ -227,6 +247,14 @@ const API_SYMS: [&str; 40] = [
     "rhu_gpio_read",
     "rhu_gpio_edge",
     "rhu_gpio_event_word",
+    "rhu_i2c_count",
+    "rhu_i2c_bus",
+    "rhu_i2c_claim",
+    "rhu_i2c_transfer",
+    "rhu_spi_count",
+    "rhu_spi_bus",
+    "rhu_spi_claim",
+    "rhu_spi_transfer",
 ];
 
 struct API {
@@ -308,6 +336,8 @@ impl API {
         markers.extend(MARKERS_K);
         markers.extend(MARKERS_L);
         markers.extend(MARKERS_M);
+        markers.extend(MARKERS_N);
+        markers.extend(MARKERS_O);
         markers.push(MARKER_OBSERVED_NULL);
         markers.push(MARKER_OBS_ROW);
         self.common_asserts("api", &run, 0, &markers, &["KERNEL PANIC", "EXCEPTION:"]);
@@ -353,7 +383,7 @@ impl API {
         };
         self.emit_case("api", "pass", code, 0, &sha, &path_rel);
         println!(
-            "== case api: PASS (exit 0, 46 hosting-API checks + the null-read observation (address 0 readable, no fault: the observation of record, not a check), contract + API symbols (the lazy floating-point witness among them) + zero-length module-root brackets in-artifact, no payload-entry seam in this family, the image header at {:#x} stating load address {:#010x} and generation {} and the layout record at {:#x} at version {} for {} threads with {} tls slots of {} bytes at offset {} in a {}-byte TCB, read off the artifact and tied) ==",
+            "== case api: PASS (exit 0, 49 hosting-API checks + the null-read observation (address 0 readable, no fault: the observation of record, not a check), contract + API symbols (the lazy floating-point witness among them) + zero-length module-root brackets in-artifact, no payload-entry seam in this family, the image header at {:#x} stating load address {:#010x} and generation {} and the layout record at {:#x} at version {} for {} threads with {} tls slots of {} bytes at offset {} in a {}-byte TCB, read off the artifact and tied) ==",
             rec.header_at, rec.load_addr, rec.abi, rec.layout_at, rec.layout_version, rec.max_threads, rec.tls_slots, rec.tls_slot_bytes, rec.tcb_off_tls, rec.tcb_stride
         );
     }
@@ -394,8 +424,15 @@ impl API {
             self.emit_control("fp-doctored-control", "fail", FP_DOCTORED_BROKE, &sha2, &path_rel2);
             self.ctx.gate_fail("fp-doctored-control: the doctored decoder's fp-double block equals the hardware row's (the control did not bite)");
         }
+        let refused = contains_fixed(&run2, "[api] module-code-control: a form from an unregistered range follows")
+            && contains_fixed(&run2, "not emulated -- the stacked pc outside every registered code range")
+            && !contains_fixed(&run2, "[api] exit-door:");
+        if !refused {
+            self.emit_control("fp-doctored-control", "fail", FP_DOCTORED_BROKE, &sha2, &path_rel2);
+            self.ctx.gate_fail("fp-doctored-control: the form from an unregistered range was not refused by the funnel, or the image reached the exit door (the control did not bite)");
+        }
         self.emit_control("fp-doctored-control", "pass", FP_DOCTORED_BROKE, &sha2, &path_rel2);
-        println!("== control fp-doctored-control: PASS (the decoder with add and subtract swapped prints a different fp-double block: the parity case would refuse it) ==");
+        println!("== control fp-doctored-control: PASS (the decoder with add and subtract swapped prints a different fp-double block: the parity case would refuse it; the form from an unregistered range refused by the funnel, the exit door never reached) ==");
     }
 
 
@@ -415,6 +452,33 @@ impl API {
         }
         self.emit_control("gpio-latch-control", "pass", GPIO_LATCH_BROKE, &sha, &path_rel);
         println!("== control gpio-latch-control: PASS (the virtual latch firing twice per change is refused by the edge check: two counted for one edge, no PASS line)");
+    }
+
+    /// The emulator rows' bus control: the api flavor's doctored image on the
+    /// Cortex-M33 twin, where the sensor model refuses the second data byte of
+    /// a write (the door must answer EIO and name the byte), the block model
+    /// never completes a non-last message (the door must answer ETIMEDOUT
+    /// inside its budget and reset the block once) and the drivers' pumps run
+    /// unbounded (the receive queue's honest overflow then loses bytes and the
+    /// exchange times out), and the SPI driver's first transfer after the claim
+    /// takes the write order as it once stood (the block model must fall out of
+    /// master mode and the call must answer EIO at once with its own line): the five
+    /// lines present, no bus check's PASS line.
+    fn run_bus_doctored_control(&mut self) {
+        let (raw, sha, path_rel) = self.build_and_run_an505("bus-doctored-control", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke,test-bus-doctored");
+        let bit = contains_fixed(&raw, "[api] bus-doctored: the data byte not acknowledged answered -5 at message 0 byte 1")
+            && contains_fixed(&raw, "[api] bus-doctored: the clock that never completed answered -110 inside the budget; the block reset once")
+            && contains_fixed(&raw, "[bus] spi 1: the block fell out of master mode at its configuration; the fault cleared, nothing clocked")
+            && contains_fixed(&raw, "[api] bus-doctored: the old write order answered -5 at once; the block fell out of master mode and the fault was cleared")
+            && contains_fixed(&raw, "[api] bus-doctored: the unbounded pump lost ")
+            && contains_fixed(&raw, " of 64 bytes to the receive queue's overflow; the transfer answered -110")
+            && !contains_fixed(&raw, "[api] PASS bus-");
+        if !bit {
+            self.emit_control("bus-doctored-control", "fail", BUS_DOCTORED_BROKE, &sha, &path_rel);
+            self.ctx.gate_fail("bus-doctored-control: the doctored models' and the old write order's four refusals were not all read, or a bus check passed (the control did not bite)");
+        }
+        self.emit_control("bus-doctored-control", "pass", BUS_DOCTORED_BROKE, &sha, &path_rel);
+        println!("== control bus-doctored-control: PASS (the data byte refused answered EIO at message 0 byte 1, the clock that never completed answered ETIMEDOUT inside the budget with the block reset once, the old write order answered EIO at once with the block out of master mode, the unbounded pump lost bytes to the receive queue's overflow and timed out; no bus check's PASS line)");
     }
 
     /// A case record for a negative control of this gate, naming what the control broke.
@@ -494,7 +558,8 @@ impl API {
 /// emulation's decoder with the add and subtract operations swapped (the
 /// feature `test-fpemul-doctored`).
 const GPIO_LATCH_BROKE: &str = "the virtual backend's loopback latch fires the input's event twice per change (test-gpio-doctored-latch)";
-const FP_DOCTORED_BROKE: &str = "the emulation decoder with the add and subtract operations swapped (the feature test-fpemul-doctored)";
+const BUS_DOCTORED_BROKE: &str = "the sensor model refusing the second data byte of a write, the I2C block model never completing a non-last message, the drivers' pumps unbounded against the receive queue's honest overflow, and the SPI driver's first transfer after the claim taking the write order as it once stood (test-bus-doctored)";
+const FP_DOCTORED_BROKE: &str = "the emulation decoder with the add and subtract operations swapped, and a form executed from an unregistered code range as the image's last act (the feature test-fpemul-doctored)";
 
 /// The fp-double block of a transcript: every line that starts with the
 /// check's tag, in order, without the line ending (the PASS line is not in
@@ -553,12 +618,13 @@ pub fn run(repo: &Path) -> ! {
     api.run_kheap_loud();
     api.run_fp_parity();
     api.run_gpio_latch_control();
+    api.run_bus_doctored_control();
     api.ctx.results.emit_summary(GATE, "pass", 0);
     if !validate_results(repo, api.ctx.results.path()) {
         println!("{DISPLAY}: FAIL -- results file failed schema validation");
         exit(1);
     }
-    println!("{DISPLAY}: PASS (5/5)  [{qemu_v} | {rustc_v}]");
+    println!("{DISPLAY}: PASS (6/6)  [{qemu_v} | {rustc_v}]");
     exit(0);
 }
 

@@ -183,12 +183,12 @@ namespace System
             return q;
         }
 
-        internal static int ConvertToInt32Checked(double v) { while (true) ; }
-        internal static uint ConvertToUInt32Checked(double v) { while (true) ; }
-        internal static long ConvertToInt64Checked(double v) { while (true) ; }
-        internal static ulong ConvertToUInt64Checked(double v) { while (true) ; }
+        internal static int ConvertToInt32Checked(double v) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("a checked floating-point conversion", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltConvert); return 0; }
+        internal static uint ConvertToUInt32Checked(double v) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("a checked floating-point conversion", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltConvert); return 0; }
+        internal static long ConvertToInt64Checked(double v) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("a checked floating-point conversion", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltConvert); return 0; }
+        internal static ulong ConvertToUInt64Checked(double v) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("a checked floating-point conversion", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltConvert); return 0; }
 
-        static void FailLoop() { while (true) ; }
+        static void FailLoop() => Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("a zero divisor or an overflowing division", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltDivide);
     }
 
     public sealed class AttributeUsageAttribute : Attribute
@@ -238,7 +238,7 @@ namespace System
             {
                 if (obj == null) return null;
                 object? r = IsInstanceOfClass(pTargetMT, obj);
-                if (r == null) while (true) ;
+                if (r == null) Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("a failed cast", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltCast);
                 return r;
             }
 
@@ -248,9 +248,9 @@ namespace System
             public static object? CheckCastAny(MethodTable* pTargetMT, object obj)
                 => CheckCastClass(pTargetMT, obj);
 
-            public static object CheckCastInterface(MethodTable* pMT, object obj) { while (true) ; }
-            public static object? IsInstanceOfInterface(MethodTable* pMT, object obj) { while (true) ; }
-            public static bool IsInstanceOfException(MethodTable* pMT, object obj) { while (true) ; }
+            public static object CheckCastInterface(MethodTable* pMT, object obj) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("an interface cast", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper); return obj; }
+            public static object? IsInstanceOfInterface(MethodTable* pMT, object obj) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("an interface test", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper); return null; }
+            public static bool IsInstanceOfException(MethodTable* pMT, object obj) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("an exception test", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper); return false; }
 
             internal struct ArrayElement
             {
@@ -263,7 +263,7 @@ namespace System
                 element = obj;
             }
 
-            public static ref object LdelemaRef(Array array, nint index, MethodTable* pMT) { while (true) ; }
+            public static ref object LdelemaRef(Array array, nint index, MethodTable* pMT) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("an array element address by type", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper); return ref CompilerServices.Unsafe.As<ArrayElement[]>(array)[0].Value; }
         }
     }
 
@@ -287,19 +287,19 @@ namespace System
         public static unsafe class Unsafe
         {
             [Intrinsic]
-            public static T As<T>(object? value) where T : class? { while (true) ; }
+            public static T As<T>(object? value) where T : class? { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("an intrinsic called as a method", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper); return null!; }
 
             [Intrinsic]
-            public static ref TTo As<TFrom, TTo>(ref TFrom source) { while (true) ; }
+            public static ref TTo As<TFrom, TTo>(ref TFrom source) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("an intrinsic called as a method", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper); return ref As<TFrom, TTo>(ref source); }
 
             [Intrinsic]
-            public static ref T AsRef<T>(void* source) { while (true) ; }
+            public static ref T AsRef<T>(void* source) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("an intrinsic called as a method", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper); return ref AsRef<T>(source); }
 
             [Intrinsic]
-            public static void* AsPointer<T>(ref T value) { while (true) ; }
+            public static void* AsPointer<T>(ref T value) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("an intrinsic called as a method", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper); return null; }
 
             [Intrinsic]
-            public static ref T Add<T>(ref T source, int elementOffset) { while (true) ; }
+            public static ref T Add<T>(ref T source, int elementOffset) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("an intrinsic called as a method", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper); return ref source; }
         }
 
         public enum MethodImplOptions
@@ -371,14 +371,14 @@ namespace Internal.Runtime.CompilerHelpers
 
     static class ThrowHelpers
     {
-        static void ThrowIndexOutOfRangeException() { while (true) ; }
-        static void ThrowNullReferenceException() { while (true) ; }
-        static void ThrowOverflowException() { while (true) ; }
-        static void ThrowDivideByZeroException() { while (true) ; }
-        static void ThrowNotSupportedException() { while (true) ; }
-        static void ThrowPlatformNotSupportedException() { while (true) ; }
-        static void ThrowInvalidProgramException() { while (true) ; }
-        static void ThrowTypeLoadException() { while (true) ; }
+        static void ThrowIndexOutOfRangeException() => StartupCodeHelpers.Halt("the compiler's IndexOutOfRange helper", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper);
+        static void ThrowNullReferenceException() => StartupCodeHelpers.Halt("the compiler's NullReference helper", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper);
+        static void ThrowOverflowException() => StartupCodeHelpers.Halt("the compiler's Overflow helper", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper);
+        static void ThrowDivideByZeroException() => StartupCodeHelpers.Halt("the compiler's DivideByZero helper", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper);
+        static void ThrowNotSupportedException() => StartupCodeHelpers.Halt("the compiler's NotSupported helper", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper);
+        static void ThrowPlatformNotSupportedException() => StartupCodeHelpers.Halt("the compiler's PlatformNotSupported helper", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper);
+        static void ThrowInvalidProgramException() => StartupCodeHelpers.Halt("the compiler's InvalidProgram helper", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper);
+        static void ThrowTypeLoadException() => StartupCodeHelpers.Halt("the compiler's TypeLoad helper", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper);
     }
 
     unsafe class StartupCodeHelpers
@@ -408,7 +408,7 @@ namespace Internal.Runtime.CompilerHelpers
         static void RhpByRefAssignRef(void** dst, void** src) => *dst = *src;
 
         [RuntimeExport("RhpFallbackFailFast")]
-        static void RhpFallbackFailFast() { while (true) ; }
+        static void RhpFallbackFailFast() => Halt("the fallback fail-fast", HaltFailFast);
 
 
         static void* NewObject(System.Runtime.MethodTable* pMT, uint mod8)
@@ -420,12 +420,38 @@ namespace Internal.Runtime.CompilerHelpers
 
         static void* NewArrayLike(System.Runtime.MethodTable* pMT, nint n, uint mod8)
         {
-            if (n < 0) while (true) ;
-            uint total = pMT->BaseSize + (uint)n * pMT->ComponentSize;
+            if (n < 0) Halt("a negative array length", HaltArrayLength);
+            uint comp = pMT->ComponentSize;
+            if (comp != 0 && (uint)n > (0xFFFF_FFFFu - pMT->BaseSize) / comp)
+                Halt("an array length past the arena's addressing", HaltArrayLength);
+            uint total = pMT->BaseSize + (uint)n * comp;
             void* mem = MiniGC.Alloc(total, mod8);
             *(System.Runtime.MethodTable**)mem = pMT;
             *((int*)mem + 1) = (int)n;
             return mem;
+        }
+
+        internal const int HaltThrow = 101;
+        internal const int HaltHwFault = 102;
+        internal const int HaltRethrow = 103;
+        internal const int HaltFailFast = 104;
+        internal const int HaltHelper = 105;
+        internal const int HaltCast = 106;
+        internal const int HaltDivide = 107;
+        internal const int HaltConvert = 108;
+        internal const int HaltOutOfMemory = 109;
+        internal const int HaltArrayLength = 110;
+
+        [System.Runtime.InteropServices.DllImport("shim")]
+        static extern void rhu_exit(int code);
+
+        internal static void Halt(string what, int code)
+        {
+            PrintLit("\n[minirt halt] ");
+            PrintLit(what);
+            PrintLit("\n");
+            rhu_exit(code);
+            while (true) ;
         }
 
 
@@ -461,8 +487,7 @@ namespace Internal.Runtime.CompilerHelpers
         {
             PrintLit("\n[unhandled C# throw] MT=0x");
             PrintHexWord(ex != null ? *(uint*)ex : 0u);
-            PrintLit("\n");
-            while (true) ;
+            Halt("an unhandled throw", HaltThrow);
         }
 
         [RuntimeExport("RhpThrowHwEx")]
@@ -470,15 +495,14 @@ namespace Internal.Runtime.CompilerHelpers
         {
             PrintLit("\n[hardware exception] code=0x");
             PrintHexWord(code);
-            PrintLit("\n");
-            while (true) ;
+            Halt("a hardware exception", HaltHwFault);
         }
 
         [RuntimeExport("RhpRethrow")]
         static void RhpRethrow(void* ex)
         {
-            PrintLit("\n[unhandled C# rethrow]\n");
-            while (true) ;
+            PrintLit("\n[unhandled C# rethrow]");
+            Halt("a rethrow", HaltRethrow);
         }
 
         [RuntimeExport("RhpNewFast")]
@@ -638,10 +662,7 @@ namespace Internal.Runtime.CompilerHelpers
             return obj;
         }
 
-        static void OutOfMemory()
-        {
-            while (true) ;
-        }
+        static void OutOfMemory() => Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("the arena exhausted", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltOutOfMemory);
 
         static byte* FindFit(uint need)
         {

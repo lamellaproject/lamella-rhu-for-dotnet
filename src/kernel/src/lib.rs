@@ -13,6 +13,8 @@ mod api;
 mod arena;
 mod board;
 mod boot;
+mod bus;
+mod bus_math;
 mod calendar;
 mod calendar_math;
 mod claims;
@@ -106,7 +108,7 @@ pub extern "C" fn kmain() -> ! {
 
     if let Some(ck) = board::clock_readback() {
         kprintln!(
-            "[boot] clock: {} | SYSCLK {} Hz (SWS={}, {}/{} x{} /{}) | flash WS {} | over-drive {}",
+            "[boot] clock: {} | SYSCLK {} Hz (SWS={}, {}/{} x{} /{}) | flash WS {} | {}",
             ck.posture,
             ck.sysclk_hz,
             ck.sws,
@@ -115,7 +117,7 @@ pub extern "C" fn kmain() -> ! {
             ck.plln,
             ck.pllp,
             ck.flash_ws,
-            if ck.overdrive { "on" } else { "off" }
+            ck.boost
         );
         assert!(
             ck.sysclk_hz == board::SYSCLK_HZ,
@@ -131,6 +133,7 @@ pub extern "C" fn kmain() -> ! {
     kprintln!("[boot] calendar: {}", board::RTC_LINE);
     kprintln!("[boot] fpu: {}", FPU_LINE);
     gpio::init();
+    bus::init();
     kprintln!("[boot] gpio: {}", gpio::banner());
 
     arena::init();
@@ -232,6 +235,11 @@ extern "C" fn kthread_main(_: usize) {
     kprintln!("[sched] ALL GOOD (threads + timers + preemption online)");
     #[cfg(feature = "api-smoke")]
     {
+        #[cfg(feature = "test-fpemul-doctored")]
+        {
+            kprintln!("[api] module-code-control: a form from an unregistered range follows; the funnel must refuse it and this image must not reach the exit door");
+            let _ = api_smoke::module_code::run_unregistered();
+        }
         kprintln!("[api] exit-door: handing the machine exit to rhu_exit(0)");
         api::rhu_exit(0);
     }
@@ -549,12 +557,23 @@ mod api_smoke {
         check_gpio_edge();
         #[cfg(not(any(feature = "board-mps2-an500", feature = "board-mps2-an505")))]
         check_gpio_edge_one_kind();
+        #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
+        check_bus_i2c();
+        #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
+        check_bus_spi();
+        #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
+        check_bus_tenancy();
+        #[cfg(all(rhu_bus_models, feature = "test-bus-doctored"))]
+        check_bus_doctored();
+        #[cfg(all(rhu_bus_rows, not(rhu_bus_models)))]
+        check_bus_pads();
         check_fp_double();
         check_fp_band();
         #[cfg(feature = "fpemul")]
         check_fp_frames();
         #[cfg(feature = "fp-cost")]
         check_fp_cost();
+        check_module_code();
         check_tid_wrap();
         check_null_read();
     }
@@ -1645,9 +1664,12 @@ mod api_smoke {
         assert!(api::rhu_gpio_claim(l, 7, gpio_math::PULL_NONE, 0) == sched::ERR_INVAL, "gpio-refuse: a bad mode not refused EINVAL");
         assert!(api::rhu_gpio_claim(l, gpio_math::MODE_INPUT, 5, 0) == sched::ERR_INVAL, "gpio-refuse: a bad pull not refused EINVAL");
         assert!(api::rhu_gpio_claim(l, gpio_math::MODE_OUTPUT, gpio_math::PULL_NONE, 2) == sched::ERR_INVAL, "gpio-refuse: a bad initial level not refused EINVAL");
-        let w = unsafe { &*addr_of!(gpio::WITNESS) };
-        assert!(w.refused_busy >= 1 && w.refused_inval >= 8 && w.refused_acces >= 1, "gpio-refuse: the witness counts busy {} inval {} acces {}", w.refused_busy, w.refused_inval, w.refused_acces);
-        assert!(w.last_refused_code == sched::ERR_INVAL, "gpio-refuse: the last refusal's code reads {}", w.last_refused_code);
+        let (busy, inval, acces, last) = unsafe {
+            let p = addr_of!(gpio::WITNESS);
+            (read_volatile(addr_of!((*p).refused_busy)), read_volatile(addr_of!((*p).refused_inval)), read_volatile(addr_of!((*p).refused_acces)), read_volatile(addr_of!((*p).last_refused_code)))
+        };
+        assert!(busy >= 1 && inval >= 8 && acces >= 1, "gpio-refuse: the witness counts busy {} inval {} acces {}", busy, inval, acces);
+        assert!(last == sched::ERR_INVAL, "gpio-refuse: the last refusal's code reads {}", last);
         kprintln!("[api] PASS gpio-refuse (the board's line EBUSY, the space's end and a far line EINVAL, an unpopulated line EINVAL and an input-only output claim EACCES where the row has them, a write on an input EACCES, an unclaimed read, write, release and edge EINVAL with a NULL event word, three bad selectors EINVAL, the witness's counts and last code as expected)");
     }
 
@@ -1664,12 +1686,12 @@ mod api_smoke {
         api::rhu_thread_exit();
     }
 
-    /// One edge on the armed input: the loop's output toggled where the row
-    /// has one, the software-triggered edge otherwise.
     /// The one-kind arm on the boards' software trigger (a wire-only check:
     /// the virtual backend has no trigger): RISING armed alone, the trigger
-    /// fired, the word moves by exactly one -- the family's handler reports
-    /// the armed kind, never a later look at the pad.
+    /// fired, the word moves by exactly one. The trigger sets the rising
+    /// pending bit on the STM32U5 and the RP2350, and the STM32F7's one
+    /// pending bit is reported as the armed kind, never as a later look at
+    /// the pad: a rising-only arm is the kind the trigger satisfies on each.
     #[cfg(not(any(feature = "board-mps2-an500", feature = "board-mps2-an505")))]
     fn check_gpio_edge_one_kind() {
         kprintln!("[api] gpio-edge-one-kind: a rising-only arm on the software trigger, the word moved by one");
@@ -1695,7 +1717,7 @@ mod api_smoke {
     /// and both edges armed, and a ten-second wait on its event word lights
     /// the LED on the first event; the outcome is printed either way -- an
     /// interactive step that says "no press" honestly.
-    #[cfg(all(feature = "test-gpio-button", any(feature = "board-stm32f769i-disco", feature = "board-nucleo-u5a5zj-q", feature = "board-pico-2")))]
+    #[cfg(all(feature = "test-gpio-button", any(feature = "board-pimoroni-pico-plus-2", feature = "board-rpi-pico2", feature = "board-st-nucleo-l4r5zi", feature = "board-st-nucleo-u5a5zj-q", feature = "board-st-stm32f746g-disco", feature = "board-st-stm32f769i-disco")))]
     pub fn button_flight() {
         let led = board::facts::LED0_LINE;
         let off = board::facts::LED0_ACTIVE_LOW as u32;
@@ -1824,6 +1846,304 @@ mod api_smoke {
         kprintln!("[api] PASS gpio-edge (eight spaced edges counted once each, a parked waiter woken by one edge through the futex, an edge between the snapshot and the wait returned EAGAIN at once, a burst of two coalesced into one count of two, the witness's count equal to the word's, a disarmed line counting nothing, the level and wakeup kinds refused)");
     }
 
+    /// An I2C message record for the checks.
+    #[cfg(rhu_bus_rows)]
+    fn imsg(addr: u16, flags: u16, buf: &mut [u8]) -> bus_math::I2cMsg {
+        bus_math::I2cMsg { addr, flags, len: buf.len() as u16, reserved: 0, buf: buf.as_mut_ptr() }
+    }
+
+    #[cfg(rhu_bus_rows)]
+    fn bus_witness() -> bus::BusWitness {
+        unsafe { core::ptr::read_volatile(addr_of!(bus::WITNESS)) }
+    }
+
+    /// The I2C doors against the emulator row's model of the ST block and
+    /// the sensor behind it.
+    #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
+    fn check_bus_i2c() {
+        kprintln!("[api] bus-i2c: the bus count stated; a bus claimed at 100 kHz and claimed again; its number read through the enumeration door (the chip's own block number, as a Linux node is named); the sensor model's identity and burst read through combined transactions and its reset written; an unanswered address, nine bad arguments, an unserved rate and a bus the board has none of each refused with its code");
+        assert!(api::rhu_i2c_count() == 1, "bus-i2c: the count reads {}", api::rhu_i2c_count());
+        let n = api::rhu_i2c_bus(0) as u32;
+        assert!(api::rhu_i2c_bus(1) == sched::ERR_INVAL, "bus-i2c: an index past the count not refused EINVAL at the enumeration door");
+        assert!(api::rhu_i2c_claim(n, 400_000) == bus::ERR_NOTSUP, "bus-i2c: an unserved rate not refused ENOTSUP");
+        assert!(api::rhu_i2c_claim(99, 100_000) == sched::ERR_NODEV, "bus-i2c: a bus the board has none of not refused ENODEV at the claim");
+        let mut reg = [0xD0u8];
+        let mut id = [0u8; 1];
+        let early = [imsg(0x76, 0, &mut reg), imsg(0x76, bus_math::MSG_READ, &mut id)];
+        assert!(api::rhu_i2c_transfer(n, early.as_ptr(), 2, u64::MAX) == sched::ERR_INVAL, "bus-i2c: a transfer before the claim not refused EINVAL");
+        assert!(api::rhu_i2c_claim(n, 100_000) == 0, "bus-i2c: the claim refused");
+        assert!(api::rhu_i2c_claim(n, 100_000) == 0, "bus-i2c: the second claim did not answer 0");
+        let msgs = [imsg(0x76, 0, &mut reg), imsg(0x76, bus_math::MSG_READ, &mut id)];
+        let r = api::rhu_i2c_transfer(n, msgs.as_ptr(), 2, u64::MAX);
+        assert!(r == 0, "bus-i2c: the identity read answered {}", r);
+        assert!(id[0] == 0x60, "bus-i2c: the identity register read {:#04x}", id[0]);
+        let mut reg2 = [0xF7u8];
+        let mut burst = [0u8; 8];
+        let msgs = [imsg(0x76, 0, &mut reg2), imsg(0x76, bus_math::MSG_READ, &mut burst)];
+        let r = api::rhu_i2c_transfer(n, msgs.as_ptr(), 2, api::rhu_now_ns() + 100_000_000);
+        assert!(r == 0, "bus-i2c: the burst read answered {}", r);
+        assert!(burst == [0x80, 0x00, 0x00, 0x80, 0x00, 0x00, 0x80, 0x00], "bus-i2c: the burst read {:?}", burst);
+        let mut reset = [0xE0u8, 0xB6];
+        let msgs = [imsg(0x76, 0, &mut reset)];
+        let r = api::rhu_i2c_transfer(n, msgs.as_ptr(), 1, u64::MAX);
+        assert!(r == 0, "bus-i2c: the reset write answered {}", r);
+        let mut probe = [0u8; 0];
+        let msgs = [imsg(0x77, 0, &mut probe)];
+        let r = api::rhu_i2c_transfer(n, msgs.as_ptr(), 1, u64::MAX);
+        assert!(r == bus::ERR_NXIO, "bus-i2c: an unanswered address answered {}, want ENXIO", r);
+        let mut one = [0u8; 1];
+        let mut big = [0u8; 256];
+        let bad_flag = [imsg(0x76, 2, &mut one)];
+        assert!(api::rhu_i2c_transfer(n, bad_flag.as_ptr(), 1, u64::MAX) == sched::ERR_INVAL, "bus-i2c: a bad flag not refused EINVAL");
+        let mut reserved = imsg(0x76, 0, &mut one);
+        reserved.reserved = 1;
+        assert!(api::rhu_i2c_transfer(n, [reserved].as_ptr(), 1, u64::MAX) == sched::ERR_INVAL, "bus-i2c: a reserved word not refused EINVAL");
+        let long = [imsg(0x76, 0, &mut big)];
+        assert!(api::rhu_i2c_transfer(n, long.as_ptr(), 1, u64::MAX) == sched::ERR_INVAL, "bus-i2c: a 256-byte message not refused EINVAL");
+        let ok = [imsg(0x76, 0, &mut one)];
+        assert!(api::rhu_i2c_transfer(n, ok.as_ptr(), 0, u64::MAX) == sched::ERR_INVAL, "bus-i2c: a count of 0 not refused EINVAL");
+        assert!(api::rhu_i2c_transfer(n, ok.as_ptr(), 9, u64::MAX) == sched::ERR_INVAL, "bus-i2c: a count of 9 not refused EINVAL");
+        let null = bus_math::I2cMsg { addr: 0x76, flags: 0, len: 1, reserved: 0, buf: core::ptr::null_mut() };
+        assert!(api::rhu_i2c_transfer(n, [null].as_ptr(), 1, u64::MAX) == sched::ERR_INVAL, "bus-i2c: a NULL buffer with a length not refused EINVAL");
+        let far = [imsg(0x80, 0, &mut one)];
+        assert!(api::rhu_i2c_transfer(n, far.as_ptr(), 1, u64::MAX) == sched::ERR_INVAL, "bus-i2c: an address over 0x7F not refused EINVAL");
+        assert!(api::rhu_i2c_transfer(99, ok.as_ptr(), 1, u64::MAX) == sched::ERR_NODEV, "bus-i2c: a bus the board has none of not refused ENODEV at the transfer");
+        assert!(api::rhu_i2c_transfer(n, core::ptr::null(), 1, u64::MAX) == sched::ERR_INVAL, "bus-i2c: a NULL message list not refused EINVAL");
+        let w = bus_witness();
+        assert!(w.i2c_buses == 1 && w.i2c_claims == 1 && w.i2c_transfers == 3 && w.i2c_bytes == 13, "bus-i2c: the witness counts {} buses, {} claims, {} transfers, {} bytes", w.i2c_buses, w.i2c_claims, w.i2c_transfers, w.i2c_bytes);
+        assert!(w.recoveries == 0 && w.resets == 0 && w.last_refused_code == sched::ERR_INVAL, "bus-i2c: the witness counts {} recoveries, {} resets, the last code {}", w.recoveries, w.resets, w.last_refused_code);
+        kprintln!("[api] PASS bus-i2c (one bus, claimed once and again, the identity 0x60 and the eight-byte burst read, the reset acknowledged, an unanswered address ENXIO, nine bad arguments EINVAL, a bus the board has none of ENODEV, the rate ENOTSUP, the witness's counts as expected)");
+    }
+
+    /// The SPI doors against the emulator row's model of the ST block and
+    /// the memory behind it: the settings ride each transfer, the select is
+    /// the device's.
+    #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
+    fn check_bus_spi() {
+        kprintln!("[api] bus-spi: the bus count stated; a bus claimed and claimed again; its number read through the enumeration door; the memory model's identity read under the first select at the achieved rate, echoes of four and five hundred and twelve bytes through the pump, a NULL transmit buffer sending ones, another mode and rate on a later transfer, a transfer with no select; seven bad arguments and a bus the board has none of refused with their codes");
+        assert!(api::rhu_spi_count() == 1, "bus-spi: the count reads {}", api::rhu_spi_count());
+        let n = api::rhu_spi_bus(0) as u32;
+        assert!(api::rhu_spi_bus(1) == sched::ERR_INVAL, "bus-spi: an index past the count not refused EINVAL at the enumeration door");
+        assert!(api::rhu_spi_claim(99) == sched::ERR_NODEV, "bus-spi: a bus the board has none of not refused ENODEV at the claim");
+        let tx = [0x9Fu8, 0, 0, 0];
+        let mut rx = [0u8; 4];
+        assert!(api::rhu_spi_transfer(n, 0, 0, 1_000_000, tx.as_ptr(), rx.as_mut_ptr(), 4) == sched::ERR_INVAL, "bus-spi: a transfer before the claim not refused EINVAL");
+        assert!(api::rhu_spi_claim(n) == 0, "bus-spi: the claim refused");
+        assert!(api::rhu_spi_claim(n) == 0, "bus-spi: the second claim did not answer 0");
+        let r = api::rhu_spi_transfer(n, 0, 0, 1_000_000, tx.as_ptr(), rx.as_mut_ptr(), 4);
+        assert!(r == 1_000_000, "bus-spi: the identity transfer answered {}, want the achieved rate 1000000", r);
+        assert!(rx[1..4] == [0xEF, 0x40, 0x18], "bus-spi: the identity read {:?}", rx);
+        let tx = [0x03u8, 1, 2, 3, 4];
+        let mut rx = [0u8; 5];
+        assert!(api::rhu_spi_transfer(n, 0, 0, 1_000_000, tx.as_ptr(), rx.as_mut_ptr(), 5) == 1_000_000, "bus-spi: the four-byte echo refused");
+        assert!(rx[1..5] == [1, 2, 3, 4], "bus-spi: the four-byte echo read {:?}", rx);
+        let mut big_tx = [0u8; 512];
+        let mut big_rx = [0u8; 512];
+        big_tx[0] = 0x03;
+        for (i, b) in big_tx.iter_mut().enumerate().skip(1) {
+            *b = i as u8;
+        }
+        assert!(api::rhu_spi_transfer(n, 0, 0, 1_000_000, big_tx.as_ptr(), big_rx.as_mut_ptr(), 512) == 1_000_000, "bus-spi: the 512-byte echo refused");
+        assert!(big_rx[1..] == big_tx[1..], "bus-spi: the 512-byte echo differs from what was sent");
+        let mut ones = [0u8; 4];
+        assert!(api::rhu_spi_transfer(n, 0, 0, 1_000_000, core::ptr::null(), ones.as_mut_ptr(), 4) == 1_000_000, "bus-spi: the NULL transmit transfer refused");
+        assert!(ones == [0xFF; 4], "bus-spi: a NULL transmit buffer did not send ones ({:?})", ones);
+        let tx = [0x03u8, 9, 8];
+        let mut rx = [0u8; 3];
+        let r = api::rhu_spi_transfer(n, 0, 3, 500_000, tx.as_ptr(), rx.as_mut_ptr(), 3);
+        assert!(r == 500_000 && rx[1..3] == [9, 8], "bus-spi: mode 3 at 500 kHz answered {} with {:?}", r, rx);
+        let mut none = [0u8; 3];
+        let r = api::rhu_spi_transfer(n, bus_math::SELECT_NONE, 0, 1_000_000, tx.as_ptr(), none.as_mut_ptr(), 3);
+        assert!(r == 1_000_000 && none == [0xFF; 3], "bus-spi: the no-select transfer answered {} with {:?}", r, none);
+        assert!(api::rhu_spi_transfer(n, 2, 0, 1_000_000, tx.as_ptr(), rx.as_mut_ptr(), 3) == sched::ERR_INVAL, "bus-spi: a select past the bus's two not refused EINVAL");
+        assert!(api::rhu_spi_transfer(n, 0, 4, 1_000_000, tx.as_ptr(), rx.as_mut_ptr(), 3) == sched::ERR_INVAL, "bus-spi: a mode over 3 not refused EINVAL");
+        assert!(api::rhu_spi_transfer(n, 0, 0, 1_000_000, tx.as_ptr(), rx.as_mut_ptr(), 0) == sched::ERR_INVAL, "bus-spi: a length of 0 not refused EINVAL");
+        assert!(api::rhu_spi_transfer(n, 0, 0, 1_000_000, tx.as_ptr(), rx.as_mut_ptr(), 65536) == sched::ERR_INVAL, "bus-spi: a length over 65535 not refused EINVAL");
+        assert!(api::rhu_spi_transfer(n, 0, 0, 1_000, tx.as_ptr(), rx.as_mut_ptr(), 3) == sched::ERR_INVAL, "bus-spi: a rate below the ladder's floor not refused EINVAL");
+        assert!(api::rhu_spi_transfer(99, 0, 0, 1_000_000, tx.as_ptr(), rx.as_mut_ptr(), 3) == sched::ERR_NODEV, "bus-spi: a bus the board has none of not refused ENODEV at the transfer");
+        assert!(api::rhu_spi_transfer(n, 0, 0, 1_000_000, core::ptr::null(), core::ptr::null_mut(), 3) == sched::ERR_INVAL, "bus-spi: NULL transmit and receive buffers not refused EINVAL");
+        let w = bus_witness();
+        assert!(w.spi_buses == 1 && w.spi_claims == 1 && w.spi_transfers == 6 && w.spi_bytes == 4 + 5 + 512 + 4 + 3 + 3, "bus-spi: the witness counts {} buses, {} claims, {} transfers, {} bytes", w.spi_buses, w.spi_claims, w.spi_transfers, w.spi_bytes);
+        assert!(w.spi_last_hz == 1_000_000 && w.resets == 0 && w.last_refused_code == sched::ERR_INVAL, "bus-spi: the witness's last rate {}, resets {}, last code {}", w.spi_last_hz, w.resets, w.last_refused_code);
+        kprintln!("[api] PASS bus-spi (one bus, claimed once and again, the identity EF 40 18 at 1000000 Hz, the echoes of four and five hundred and twelve bytes intact, ones sent for a NULL buffer, mode 3 at 500000 Hz, the no-select transfer reading ones, seven bad arguments EINVAL, a bus the board has none of ENODEV, the witness's counts as expected)");
+    }
+
+    #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
+    static TENANCY_DONE: AtomicU32 = AtomicU32::new(0);
+    #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
+    static TENANCY_RESULT: AtomicI32 = AtomicI32::new(0);
+    #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
+    static mut TENANCY_TX: [u8; 4096] = [0; 4096];
+    #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
+    static mut TENANCY_RX: [u8; 4096] = [0; 4096];
+
+    /// The worker's long transfer: an echo of four thousand and ninety-six
+    /// bytes, about thirty-three milliseconds on the paced wire.
+    #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
+    extern "C" fn tenancy_worker(_arg: *mut c_void) {
+        let (tx, rx) = (addr_of_mut!(TENANCY_TX), addr_of_mut!(TENANCY_RX));
+        let r = api::rhu_spi_transfer(api::rhu_spi_bus(0) as u32, 0, 0, 1_000_000, tx as *const u8, rx as *mut u8, 4096);
+        let mut intact = r == 1_000_000;
+        for i in 1..4096usize {
+            if unsafe { (*tx)[i] != (*rx)[i] } {
+                intact = false;
+            }
+        }
+        TENANCY_RESULT.store(if intact { r } else { -1 }, Ordering::Release);
+        TENANCY_DONE.store(1, Ordering::Release);
+        api::rhu_thread_exit();
+    }
+
+    /// The tenancy and the masking consequence: a worker's long transfer,
+    /// this thread's transfer on the same bus waiting on the tenancy word
+    /// until it ends, and a band-priority counter through both.
+    #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
+    fn check_bus_tenancy() {
+        kprintln!("[api] bus-tenancy: a worker's long transfer on the bus, this thread's transfer on the same bus sleeping on the tenancy word until it ends; a band-priority counter through both, counting every tick");
+        unsafe {
+            let tx = addr_of_mut!(TENANCY_TX);
+            (*tx)[0] = 0x03;
+            for i in 1..4096usize {
+                (*tx)[i] = (i * 7) as u8;
+            }
+        }
+        TENANCY_DONE.store(0, Ordering::Release);
+        let waits_before = bus_witness().tenancy_waits;
+        FP_BAND.hits.store(0, Ordering::Release);
+        fp_band_arm(true);
+        let t = api::rhu_thread_spawn(Some(tenancy_worker), core::ptr::null_mut(), 16 * 1024, 0x40, c"busw".as_ptr());
+        assert!(t > 0, "bus-tenancy: the worker's spawn refused {}", t);
+        api::rhu_sleep_ns(2_000_000);
+        let tx = [0x03u8, 5, 6, 7];
+        let mut rx = [0u8; 4];
+        let t0 = api::rhu_now_ns();
+        let r = api::rhu_spi_transfer(api::rhu_spi_bus(0) as u32, 0, 0, 1_000_000, tx.as_ptr(), rx.as_mut_ptr(), 4);
+        let waited_ns = api::rhu_now_ns() - t0;
+        let mut spins = 0u32;
+        while TENANCY_DONE.load(Ordering::Acquire) == 0 {
+            api::rhu_sleep_ns(1_000_000);
+            spins += 1;
+            assert!(spins < 500, "bus-tenancy: the worker never finished");
+        }
+        fp_band_arm(false);
+        let hits = FP_BAND.hits.load(Ordering::Acquire);
+        assert!(r == 1_000_000 && rx[1..4] == [5, 6, 7], "bus-tenancy: this thread's transfer answered {} with {:?}", r, rx);
+        assert!(TENANCY_RESULT.load(Ordering::Acquire) == 1_000_000, "bus-tenancy: the worker's transfer answered {}", TENANCY_RESULT.load(Ordering::Acquire));
+        assert!(waited_ns >= 20_000_000, "bus-tenancy: this thread waited {} ns for the bus, want at least 20 ms", waited_ns);
+        let w = bus_witness();
+        assert!(w.tenancy_waits == waits_before + 1, "bus-tenancy: the witness counts {} waits, want {}", w.tenancy_waits, waits_before + 1);
+        assert!(hits >= 20, "bus-tenancy: the band counter counted {} ticks through the transfers, want at least 20", hits);
+        kprintln!("[api] PASS bus-tenancy (the worker's transfer of 4096 bytes intact, this thread's transfer served after it with a wait of at least 20 ms on the tenancy word, the wait counted by the witness, the band counter counting at least 20 ticks through both: the transactions masked nothing)");
+    }
+
+    /// The bus kernel calls on a board's real blocks, with nothing asked of
+    /// any device: the pads' ownership through the claims table, an address
+    /// nobody answers, transfers of ones. The text is the same on every row
+    /// (no bus number and no rate is printed; the rate is asserted against the
+    /// ladder's arithmetic from the row's facts). The address probed is the
+    /// lowest one the I2C-bus specification does not reserve.
+    #[cfg(all(rhu_bus_rows, not(rhu_bus_models)))]
+    fn check_bus_pads() {
+        kprintln!("[api] bus-pads: the bus counts and numbers stated; each bus's claim refused whole while the program holds one of its pads, taken once the pad is released, its pads the board's from then on; an address nobody answers; a chip select the program holds refused at its first use, taken at the next; transfers of ones under that select and under none");
+        let input = |l: u32| api::rhu_gpio_claim(l, gpio_math::MODE_INPUT, gpio_math::PULL_UP, 0);
+        assert!(api::rhu_i2c_count() == 1 && api::rhu_spi_count() == 1, "bus-pads: the counts read {} and {}", api::rhu_i2c_count(), api::rhu_spi_count());
+        let i2c = &board::facts::I2C_BUSES[0];
+        let spi = &board::facts::SPI_BUSES[0];
+        let (ni, ns) = (api::rhu_i2c_bus(0) as u32, api::rhu_spi_bus(0) as u32);
+        assert!(ni == i2c.number && ns == spi.number, "bus-pads: the enumeration answered {} and {}, the facts state {} and {}", ni, ns, i2c.number, spi.number);
+        let line_of = |pads: &[bus_math::Pad], role: bus_math::PadRole| pads.iter().find(|p| p.role == role).map_or(u32::MAX, |p| p.line as u32);
+        let (scl, sda) = (line_of(i2c.pads, bus_math::PadRole::I2cClock), line_of(i2c.pads, bus_math::PadRole::I2cData));
+        assert!(input(scl) == 0, "bus-pads: the program's claim on the I2C clock pad refused");
+        assert!(api::rhu_i2c_claim(ni, 100_000) == gpio::ERR_BUSY, "bus-pads: the I2C claim not refused EBUSY while the program holds a pad");
+        assert!(input(sda) == 0, "bus-pads: the refused claim took the data pad");
+        assert!(api::rhu_gpio_release(sda) == 0 && api::rhu_gpio_release(scl) == 0, "bus-pads: the I2C pads' release refused");
+        assert!(api::rhu_i2c_claim(ni, 100_000) == 0, "bus-pads: the I2C claim refused");
+        assert!(api::rhu_i2c_claim(ni, 100_000) == 0, "bus-pads: the second I2C claim did not answer 0");
+        assert!(input(sda) == gpio::ERR_BUSY && input(scl) == gpio::ERR_BUSY, "bus-pads: the program's claim on a claimed bus's pad not refused EBUSY");
+        let mut probe = [0u8; 0];
+        let msgs = [imsg(0x08, 0, &mut probe)];
+        let r = api::rhu_i2c_transfer(ni, msgs.as_ptr(), 1, api::rhu_now_ns() + 100_000_000);
+        assert!(r == bus::ERR_NXIO, "bus-pads: an address nobody answers answered {}, want ENXIO", r);
+        let sck = line_of(spi.pads, bus_math::PadRole::SpiClock);
+        assert!(input(sck) == 0, "bus-pads: the program's claim on the SPI clock pad refused");
+        assert!(api::rhu_spi_claim(ns) == gpio::ERR_BUSY, "bus-pads: the SPI claim not refused EBUSY while the program holds a pad");
+        assert!(api::rhu_gpio_release(sck) == 0, "bus-pads: the SPI clock pad's release refused");
+        assert!(api::rhu_spi_claim(ns) == 0, "bus-pads: the SPI claim refused");
+        assert!(api::rhu_spi_claim(ns) == 0, "bus-pads: the second SPI claim did not answer 0");
+        assert!(input(sck) == gpio::ERR_BUSY, "bus-pads: the program's claim on a claimed bus's pad not refused EBUSY");
+        let want = match bus_math::spi_divisor(spi.kernel_hz, 1_000_000) {
+            Some((_, achieved)) => achieved as i32,
+            None => 0,
+        };
+        let sel = spi.selects[0] as u32;
+        let mut under = [0u8; 4];
+        assert!(input(sel) == 0, "bus-pads: the program's claim on the first select refused");
+        assert!(api::rhu_spi_transfer(ns, 0, 0, 1_000_000, core::ptr::null(), under.as_mut_ptr(), 4) == gpio::ERR_BUSY, "bus-pads: a transfer under a select the program holds not refused EBUSY");
+        assert!(api::rhu_gpio_release(sel) == 0, "bus-pads: the select's release refused");
+        let r = api::rhu_spi_transfer(ns, 0, 0, 1_000_000, core::ptr::null(), under.as_mut_ptr(), 4);
+        assert!(r == want && want > 0, "bus-pads: the transfer under the first select answered {}, want the achieved rate {}", r, want);
+        assert!(input(sel) == gpio::ERR_BUSY, "bus-pads: the program's claim on a claimed select not refused EBUSY");
+        let mut none = [0u8; 4];
+        let r = api::rhu_spi_transfer(ns, bus_math::SELECT_NONE, 0, 1_000_000, core::ptr::null(), none.as_mut_ptr(), 4);
+        assert!(r == want && none == [0xFF; 4], "bus-pads: the no-select transfer answered {} with {:?}", r, none);
+        let w = bus_witness();
+        assert!(w.i2c_buses == 1 && w.spi_buses == 1 && w.i2c_claims == 1 && w.spi_claims == 1, "bus-pads: the witness counts {} and {} buses, {} and {} claims", w.i2c_buses, w.spi_buses, w.i2c_claims, w.spi_claims);
+        assert!(w.spi_transfers == 2 && w.spi_bytes == 8 && w.spi_last_hz == want as u32 && w.resets == 0, "bus-pads: the witness counts {} transfers, {} bytes, the last rate {}, {} resets", w.spi_transfers, w.spi_bytes, w.spi_last_hz, w.resets);
+        kprintln!("[api] PASS bus-pads (each bus's claim EBUSY while the program held a pad and nothing taken, 0 once released and 0 again, its pads EBUSY to the program from then on; an address nobody answers ENXIO; the held select EBUSY at its first use, the transfer under it at the achieved rate once released, the select EBUSY to the program from then on; the no-select transfer reading ones; the witness's counts as expected)");
+    }
+
+    /// The doctored image's run in place of the three checks: the sensor
+    /// refuses the second data byte of a write (the door answers EIO and
+    /// names the byte), the block never completes a non-last message (the
+    /// door answers ETIMEDOUT inside its budget and resets the block), the
+    /// unbounded pump loses bytes to the receive queue's honest overflow.
+    /// On the register file that keeps the master bit and the internal
+    /// select in two registers, the first transfer after the claim takes the
+    /// write order as it once stood: the block falls out of master mode and
+    /// the call answers EIO at once, never after a budget.
+    #[cfg(all(rhu_bus_models, feature = "test-bus-doctored"))]
+    fn check_bus_doctored() {
+        kprintln!("[api] bus-doctored: the doctored models and the unbounded pump armed (no bus check passes on this image)");
+        let ni = api::rhu_i2c_bus(0) as u32;
+        assert!(api::rhu_i2c_claim(ni, 100_000) == 0, "bus-doctored: the I2C claim refused");
+        let mut reset = [0xE0u8, 0xB6];
+        let msgs = [imsg(0x76, 0, &mut reset)];
+        let r = api::rhu_i2c_transfer(ni, msgs.as_ptr(), 1, u64::MAX);
+        let w = bus_witness();
+        kprintln!("[api] bus-doctored: the data byte not acknowledged answered {} at message {} byte {}", r, w.last_message, w.last_byte);
+        let mut reg = [0xD0u8];
+        let mut id = [0u8; 1];
+        let msgs = [imsg(0x76, 0, &mut reg), imsg(0x76, bus_math::MSG_READ, &mut id)];
+        let budget = bus_math::budget_ticks(1, bus_math::I2C_BITS_PER_BYTE, 100_000, board::TICK_HZ);
+        let t0 = sched::now_ms();
+        let r = api::rhu_i2c_transfer(ni, msgs.as_ptr(), 2, u64::MAX);
+        let dt = sched::now_ms().wrapping_sub(t0);
+        let resets = board::bus_backend::probe_i2c_resets();
+        assert!(dt <= budget + 2, "bus-doctored: the stuck clock's refusal took {} ticks against a wait budget of {}", dt, budget);
+        assert!(resets == 1 && bus_witness().resets == 1, "bus-doctored: the block reset {} times by the model, {} by the witness", resets, bus_witness().resets);
+        kprintln!("[api] bus-doctored: the clock that never completed answered {} inside the budget; the block reset once", r);
+        let ns = api::rhu_spi_bus(0) as u32;
+        assert!(api::rhu_spi_claim(ns) == 0, "bus-doctored: the SPI claim refused");
+        if board::facts::SPI_BUSES[0].file == bus_math::SpiFile::U5 {
+            let mut four = [0u8; 4];
+            let t0 = sched::now_ms();
+            let r = api::rhu_spi_transfer(ns, 0, 0, 1_000_000, core::ptr::null(), four.as_mut_ptr(), 4);
+            let dt = sched::now_ms().wrapping_sub(t0);
+            assert!(r == sched::ERR_IO && dt <= 1, "bus-doctored: the old write order answered {} after {} ticks (the control did not bite)", r, dt);
+            kprintln!("[api] bus-doctored: the old write order answered {} at once; the block fell out of master mode and the fault was cleared", r);
+        }
+        let mut tx = [0u8; 64];
+        let mut rx = [0u8; 64];
+        tx[0] = 0x03;
+        for (i, b) in tx.iter_mut().enumerate().skip(1) {
+            *b = i as u8;
+        }
+        let r = api::rhu_spi_transfer(ns, 0, 0, 1_000_000, tx.as_ptr(), rx.as_mut_ptr(), 64);
+        let drops = board::bus_backend::probe_spi_drops();
+        assert!(drops >= 1 && r == sched::ERR_TIMEDOUT, "bus-doctored: the unbounded pump lost {} bytes and answered {} (the control did not bite)", drops, r);
+        kprintln!("[api] bus-doctored: the unbounded pump lost {} of 64 bytes to the receive queue's overflow; the transfer answered {}", drops, r);
+    }
+
     fn check_tid_wrap() {
         kprintln!("[api] tid-wrap: the id space's last two ids + the refusal past it armed");
         sched::probe_tid_seek(0x7FFF_FFFE);
@@ -1946,9 +2266,11 @@ mod api_smoke {
         assert!(mod0.tls_bytes == 0, "registry-basic: module 0 grew TLS");
 
         let keep_name = c"x3".as_ptr() as *const u8;
+        let (a_lo, a_hi) = module_code::range_a();
+        assert!(!registry::code_holds(a_lo, 4), "registry-basic: the module-code range held before its registration");
         let mut d3 = registry::ModuleDesc {
-            text_lo: 0x1000,
-            text_hi: 0x2000,
+            text_lo: a_lo,
+            text_hi: a_hi,
             statics_lo: [0x3000, 0, 0, 0],
             statics_hi: [0x3800, 0, 0, 0],
             frozen_lo: 0,
@@ -1968,13 +2290,17 @@ mod api_smoke {
         }
         let stored = registry::probe_module(h3);
         assert!(
-            stored.text_lo == 0x1000
-                && stored.text_hi == 0x2000
+            stored.text_lo == a_lo
+                && stored.text_hi == a_hi
                 && stored.statics_lo[0] == 0x3000
                 && stored.statics_hi[0] == 0x3800
                 && stored.tls_bytes == 0
                 && stored.name == keep_name,
             "registry-basic: the stored desc changed with its caller's struct"
+        );
+        assert!(
+            registry::code_holds(a_lo, 4) && registry::code_holds(a_hi - 4, 4) && !registry::code_holds(a_hi - 2, 4),
+            "registry-basic: the module-code range not held whole after its registration"
         );
         let d4 = registry::ModuleDesc { name: c"x4".as_ptr() as *const u8, ..stored };
         assert!(
@@ -1986,6 +2312,113 @@ mod api_smoke {
             "registry-basic: refusal not stable"
         );
         kprintln!("[api] PASS registry-basic (handles distinct, stored desc survives caller clobber, full table refused honest)");
+    }
+
+    /// The module-code check's form and buffers: an assembled double-precision
+    /// form (a multiply, then the return) copied into two RAM buffers, one
+    /// registered as the third module's text range by registry-basic and one
+    /// never registered; the form is called with its operands in d0 and d1.
+    pub mod module_code {
+        #[repr(C, align(8))]
+        struct Buf([u16; 8]);
+        static mut A: Buf = Buf([0; 8]);
+        static mut B: Buf = Buf([0; 8]);
+
+        core::arch::global_asm!(
+            ".pushsection .text.rhu_api_form_src, \"ax\", %progbits",
+            ".thumb",
+            ".fpu fpv5-d16",
+            ".global __rhu_api_form_src",
+            ".type __rhu_api_form_src, %function",
+            ".thumb_func",
+            "__rhu_api_form_src:",
+            "vmul.f64 d0, d0, d1",
+            "bx lr",
+            ".global __rhu_api_form_src_end",
+            "__rhu_api_form_src_end:",
+            ".popsection",
+        );
+        unsafe extern "C" {
+            static __rhu_api_form_src: u8;
+            static __rhu_api_form_src_end: u8;
+        }
+
+        /// Buffer A's half-open range (registered).
+        pub fn range_a() -> (u32, u32) {
+            let lo = core::ptr::addr_of!(A) as u32;
+            (lo, lo + 16)
+        }
+        /// Buffer B's half-open range (never registered).
+        pub fn range_b() -> (u32, u32) {
+            let lo = core::ptr::addr_of!(B) as u32;
+            (lo, lo + 16)
+        }
+        /// The assembled form copied into both buffers byte for byte, then the
+        /// barriers so the copy is the instruction stream the calls fetch.
+        pub fn plant() {
+            let src = core::ptr::addr_of!(__rhu_api_form_src) as usize & !1;
+            let end = core::ptr::addr_of!(__rhu_api_form_src_end) as usize & !1;
+            let n = end - src;
+            assert!(n == 6, "module-code: the assembled form is {} bytes, not 6", n);
+            unsafe {
+                core::ptr::copy_nonoverlapping(src as *const u8, core::ptr::addr_of_mut!(A) as *mut u8, n);
+                core::ptr::copy_nonoverlapping(src as *const u8, core::ptr::addr_of_mut!(B) as *mut u8, n);
+                core::arch::asm!("dsb sy", "isb sy", options(nostack));
+            }
+        }
+        /// The form at `addr` called with `a` in d0 and `b` in d1; d0 back. The
+        /// form touches d0 and lr alone (the fault's handler restores what it
+        /// stacks), so those are the call's clobbers, the crate's form macros' shape.
+        pub fn run(addr: usize, a: f64, b: f64) -> f64 {
+            let (ab, bb) = (a.to_bits(), b.to_bits());
+            let (lo, hi): (u32, u32);
+            unsafe {
+                core::arch::asm!(
+                    ".fpu fpv5-d16",
+                    "vmov d0, {alo}, {ahi}",
+                    "vmov d1, {blo}, {bhi}",
+                    "blx {f}",
+                    "vmov {lo}, {hi}, d0",
+                    f = in(reg) addr | 1,
+                    alo = in(reg) ab as u32, ahi = in(reg) (ab >> 32) as u32,
+                    blo = in(reg) bb as u32, bhi = in(reg) (bb >> 32) as u32,
+                    lo = out(reg) lo, hi = out(reg) hi,
+                    out("lr") _, out("d0") _, out("d1") _,
+                    options(nostack),
+                );
+            }
+            f64::from_bits(((hi as u64) << 32) | lo as u64)
+        }
+        /// The doctored control's terminal half: the form from the buffer no
+        /// module registers -- the funnel must refuse it.
+        #[cfg(feature = "test-fpemul-doctored")]
+        pub fn run_unregistered() -> f64 {
+            run(range_b().0 as usize, 1.5, 2.0)
+        }
+    }
+
+    fn check_module_code() {
+        kprintln!("[api] module-code: a form executed from a registered module's range outside the primary code range armed");
+        unsafe extern "C" {
+            static __stext: u32;
+        }
+        let (a_lo, a_hi) = module_code::range_a();
+        let (b_lo, _) = module_code::range_b();
+        assert!(registry::code_holds(addr_of!(__stext) as u32, 4), "module-code: the primary range not held by module 0");
+        assert!(registry::code_holds(a_lo, 4) && registry::code_holds(a_hi - 4, 4), "module-code: the registered range not held");
+        assert!(!registry::code_holds(a_hi - 2, 4), "module-code: a read past the registered range held");
+        assert!(!registry::code_holds(b_lo, 4), "module-code: the unregistered range held");
+        module_code::plant();
+        #[cfg(feature = "fpemul")]
+        let (t0, _, r0) = crate::fpemul::counts();
+        let got = module_code::run(a_lo as usize, 1.5, 2.0);
+        assert!(got == 3.0, "module-code: the form from the registered range computed {} not 3.0", got);
+        #[cfg(feature = "fpemul")]
+        {
+            let (t1, _, r1) = crate::fpemul::counts();
+            assert!(t1 == t0 + 1 && r1 == r0, "module-code: the funnel counted {} traps and {} refusals over the form, want 1 and 0", t1 - t0, r1 - r0);
+        }
+        kprintln!("[api] PASS module-code (the range predicate true inside the registered range and false before it and past its end; the form from that range computed 3.0 -- through the fault funnel on the single-precision row, by the hardware on the double-precision row)");
     }
 
 
@@ -3705,6 +4138,9 @@ mod api_smoke {
             kprintln!("[obs] address 0 on this row: a bus fault -- the board states it (measured on the silicon) and the read is not attempted; a hosted null dereference traps into the funnel here");
         }
     }
+
+    #[cfg(rhu_bus_rows)]
+    use crate::{bus, bus_math};
 }
 
 /// The stack-overflow designed death (the v8-M rows' stack limit).

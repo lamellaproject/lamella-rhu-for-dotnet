@@ -1,4 +1,4 @@
-# Lamella RHU for .NET
+# Lamella RHU&trade; for .NET
 
 ![Status](https://img.shields.io/badge/status-in_development-orange)
 
@@ -46,15 +46,40 @@ In the tree today:
   exceptions, GC, time, dispatch, threads contending on a lock, thread
   suspension for collection, and a worker parked on a monitor across
   collections) -- the hosted-runtime gates, one per processor class
+- The application path -- a program of your own, built with standard .NET
+  tooling against the `Lamella.Rhu.Sdk` package and deployed to a board --
+  opens at the launch, when the SDK and tools packages publish; today a
+  checkout builds the kernel and runs the verification chain, and the
+  SDK's board table carries the two emulator rows and the first two
+  physical boards' rows; the other boards' rows follow
+- The standard GPIO package: a program's `new GpioController()` from
+  `System.Device.Gpio` runs unchanged -- the package's own Linux driver
+  binds the libgpiod v1 API, which the hosting layer presents over the
+  kernel's GPIO doors (the claim with its pull, the release, the read, the
+  write, both-edge events to a waiting thread), proven by the hosted-runtime
+  suite's GPIO section on the emulator rows' virtual lines
+- The same package's I2C and SPI classes: a program's `I2cDevice.Create`
+  and `SpiDevice.Create` run unchanged -- the package's own Linux drivers
+  open the device files `/dev/i2c-<bus>` and `/dev/spidev<bus>.<select>`,
+  which the hosting layer presents over the kernel's bus doors (a bus
+  claimed for the program's run and shared by its devices, each SPI device
+  with its own mode and clock under its own chip select), proven by the
+  hosted-runtime suite's I2C and SPI sections on the emulator rows' block
+  models; a bus is numbered by the chip's own block number, as Linux names
+  it, and two things differ from Linux and are stated here once: an I2C
+  message carries at most 255 bytes, and while a program only reads from an
+  SPI device the bytes clocked out are ones
 - An in-image header at a fixed offset stating each image's load address, ABI
   generation and debug-layout version, for flash tooling and debuggers (read
   back from every linked image by the payload and hosted-runtime gates)
 - A calendar and a secure random source: `DateTime.UtcNow` and file times
   count from the .NET epoch until a board clock, the debug channel or the
-  application sets the base; random bytes come from a hardware source or the
-  call is refused, and the emulator images take a software stream by a build
-  option their boot banner names (the hosting-api gate's entropy cases; the
-  shim gate's calendar and secure-door controls)
+  application sets the base, and a native timed wait against the real-time
+  clock follows the calendar, a later set included; random bytes come from a
+  hardware source or the call is refused, and the emulator images take a
+  software stream by a build option their boot banner names (the hosting-api
+  gate's entropy cases; the shim gate's calendar, timed-wait and secure-door
+  controls)
 - Double precision on the Cortex-M33 boards, whose FPU is single-precision:
   the kernel traps and emulates the double-precision instructions, so a
   program's `double` arithmetic gives the same results as on the Cortex-M7
@@ -65,8 +90,17 @@ In the tree today:
   owner at a time, read as an input or driven as an output, with edge events
   delivered to a waiting thread, on the emulator and on every supported board
   (the hosting-api gate's three GPIO cases and a doctored control)
-- Supported boards: NUCLEO-U5A5ZJ-Q, Pimoroni Pico Plus 2 W,
-  Raspberry Pi Pico 2, STM32F769I-DISCO
+- I2C and SPI for a program's `System.Device.I2c` and `System.Device.Spi`
+  drivers: a bus is claimed for the program's run and shared by its devices
+  under one tenancy, an I2C transaction of up to eight messages with
+  repeated starts between them, an SPI exchange with each device's own mode
+  and clock under its own chip select, every wait on the wire a bounded
+  poll and nothing under the kernel's critical section, on the emulator
+  rows' block models (the hosting-api gate's three bus cases and a doctored
+  control) and on the silicon of the ST rows whose facts carry a bus; a row
+  whose facts carry no bus answers a bus count of zero
+- Supported boards: Pimoroni Pico Plus 2, Pimoroni Pico Plus 2 W, Raspberry Pi
+  Pico 2, Raspberry Pi Pico 2 W, ST NUCLEO-U5A5ZJ-Q, ST STM32F769I-DISCO
 
 To be notified when releases are available, click **Watch** at the top of this
 repo, select **Custom**, and check **Releases**.

@@ -94,7 +94,7 @@ unsafe class Program
         PrintDec(s_pass);
         Print(" pass, ");
         PrintDec(s_fail);
-        Print(s_fail == 0 ? " fail \u2014 ALL GOOD\n" : " fail \u2014 BROKEN\n");
+        Print(s_fail == 0 ? " fail - ALL GOOD\n" : " fail - BROKEN\n");
         return s_fail;
     }
 

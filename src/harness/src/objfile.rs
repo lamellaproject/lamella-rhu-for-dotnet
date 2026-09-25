@@ -81,6 +81,12 @@ pub fn section_span_prefixed(obj: &[u8], prefix: &str) -> Option<(usize, usize)>
         .map(|s| (s.offset, s.size))
 }
 
+/// The names of the object's sections in table order; empty for bytes
+/// the reader cannot parse as an ELF object.
+pub fn section_names(obj: &[u8]) -> Vec<String> {
+    sections(obj).map(|v| v.into_iter().map(|s| s.name).collect()).unwrap_or_default()
+}
+
 /// The 32-bit word a defined data symbol names, read at the symbol's
 /// place in its section, with the word's file offset; None when the
 /// object defines no such symbol.

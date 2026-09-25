@@ -1,7 +1,7 @@
 /* The shim gate's tenant: a C program hosted exactly like a managed
  * payload (the payload board map, the kernel's managed entry sequence,
  * the machine's exit code), exercising the shim's C-runtime surface and
- * the PAL from the caller's side. Five ladders, one per build:
+ * the PAL from the caller's side. Seven ladders, one per build:
  *
  *   RHU_SHIMTEST_LADDER_CORE        the glibc personality and the PAL's
  *                                   threading, memory, time and random verbs
@@ -11,6 +11,11 @@
  *                                   the PAL's signal rows
  *   RHU_SHIMTEST_LADDER_TLS         the image's thread-local template: the
  *                                   kernel's per-thread copy of module 0
+ *   RHU_SHIMTEST_LADDER_BUSDEV      the bus device nodes (/dev/i2c-<bus>,
+ *                                   /dev/spidev<bus>.<select>) from a native
+ *                                   caller's side, on the row's bus models
+ *   RHU_SHIMTEST_LADDER_GPIOD       the GPIO library surface from a native
+ *                                   caller's side, on the row's virtual lines
  *   RHU_SHIMTEST_LADDER_HOST        the initialization contract the host runs
  *                                   before managed code, in the host's own
  *                                   entry: its order, the module handle,
@@ -50,8 +55,9 @@
 
 #if !defined(RHU_SHIMTEST_LADDER_CORE) && !defined(RHU_SHIMTEST_LADDER_FDMAP) \
     && !defined(RHU_SHIMTEST_LADDER_ACTIVATION) && !defined(RHU_SHIMTEST_LADDER_TLS) \
-    && !defined(RHU_SHIMTEST_LADDER_HOST)
-#error "a tenant build names its ladder (RHU_SHIMTEST_LADDER_CORE, RHU_SHIMTEST_LADDER_FDMAP, RHU_SHIMTEST_LADDER_ACTIVATION, RHU_SHIMTEST_LADDER_TLS or RHU_SHIMTEST_LADDER_HOST)"
+    && !defined(RHU_SHIMTEST_LADDER_HOST) && !defined(RHU_SHIMTEST_LADDER_BUSDEV) \
+    && !defined(RHU_SHIMTEST_LADDER_GPIOD)
+#error "a tenant build names its ladder (RHU_SHIMTEST_LADDER_CORE, RHU_SHIMTEST_LADDER_FDMAP, RHU_SHIMTEST_LADDER_ACTIVATION, RHU_SHIMTEST_LADDER_TLS, RHU_SHIMTEST_LADDER_HOST, RHU_SHIMTEST_LADDER_BUSDEV or RHU_SHIMTEST_LADDER_GPIOD)"
 #endif
 
 /* --- the C-runtime surface, declared as the caller sees it --- */
@@ -80,6 +86,8 @@ int fork(void);
 int open(const char *path, int flags, ...);
 int close(int fd);
 int dup2(int oldfd, int newfd);
+int ioctl(int fd, unsigned long request, ...);
+int sched_yield(void);
 void *opendir(const char *path);
 
 struct ts64 {
@@ -139,19 +147,37 @@ typedef struct dl_phdr_info {
 } dl_phdr_info;
 int dl_iterate_phdr(int (*cb)(dl_phdr_info *, size_t, void *), void *data);
 
-/* --- output: unprefixed payload lines, one console write each --- */
+/* --- output: unprefixed payload lines, EACH ONE console write: the
+ * kernel's door writes a call whole, and a second thread's log line can
+ * land between two calls of one thread, tearing a verdict line the gate
+ * matches as fixed text. --- */
+#define LINE_MAX 512u
+static uint32_t put(char *line, uint32_t n, const char *s)
+{
+    while (*s != 0 && n + 1u < LINE_MAX)
+        line[n++] = *s++;
+    return n;
+}
+
+static void out_line(const char *a, const char *b, const char *c, const char *d)
+{
+    char line[LINE_MAX];
+    uint32_t n = put(line, 0u, a);
+    n = put(line, n, b);
+    n = put(line, n, c);
+    n = put(line, n, d);
+    line[n++] = '\n';
+    rhu_console_write(line, n);
+}
+
 static void out(const char *s)
 {
-    rhu_console_write(s, (uint32_t)strlen(s));
-    rhu_console_write("\n", 1u);
+    out_line(s, "", "", "");
 }
 
 static void out2(const char *a, const char *b, const char *c)
 {
-    rhu_console_write(a, (uint32_t)strlen(a));
-    rhu_console_write(b, (uint32_t)strlen(b));
-    rhu_console_write(c, (uint32_t)strlen(c));
-    rhu_console_write("\n", 1u);
+    out_line(a, b, c, "");
 }
 
 static void pass(const char *name, const char *note)
@@ -161,10 +187,7 @@ static void pass(const char *name, const char *note)
 
 static int fail(const char *name, const char *detail)
 {
-    rhu_console_write("FAIL ", 5u);
-    rhu_console_write(name, (uint32_t)strlen(name));
-    rhu_console_write(" ", 1u);
-    out(detail);
+    out_line("FAIL ", name, " ", detail);
     return 1;
 }
 
@@ -200,7 +223,7 @@ static uint64_t now_ns(void)
 #endif
 
 #if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_ACTIVATION) || defined(RHU_SHIMTEST_LADDER_FDMAP) \
-    || defined(RHU_SHIMTEST_LADDER_TLS)
+    || defined(RHU_SHIMTEST_LADDER_TLS) || defined(RHU_SHIMTEST_LADDER_BUSDEV) || defined(RHU_SHIMTEST_LADDER_GPIOD)
 
 static void msleep(int ms)
 {
@@ -226,6 +249,9 @@ static void wait_done(volatile int *done, int want)
  * shallow: a lock, a wait, a sleep, a store. */
 #define WORKER_STACK 2048u
 
+/* The ladders whose workers run level with the ladder's thread (the
+ * bus and GPIO ladders' second threads run below it: spawn_below). */
+#if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_ACTIVATION) || defined(RHU_SHIMTEST_LADDER_FDMAP) || defined(RHU_SHIMTEST_LADDER_TLS)
 static int spawn(uint32_t *tid, void *(*fn)(void *), void *arg, uint32_t stack)
 {
     attr_slot at;
@@ -234,6 +260,45 @@ static int spawn(uint32_t *tid, void *(*fn)(void *), void *arg, uint32_t stack)
         pthread_attr_setstacksize(&at, stack);
     return pthread_create(tid, stack != 0 ? (const void *)&at : NULL, fn, arg);
 }
+#endif
+
+#if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_BUSDEV) || defined(RHU_SHIMTEST_LADDER_GPIOD)
+/* A second thread BELOW the ladder's: spawned through the kernel's door one
+ * step less urgent than the flat hosted level every shim thread runs at,
+ * so it runs only while the ladder's thread is blocked and never takes a
+ * step of its own before the ladder's thread has stopped to wait for it --
+ * the order a race control's held-open window relies on. The kernel's
+ * spawn prints no line; the stack is the row's default, as the shim carves
+ * it for an unsized ask; two such threads at most in one ladder. */
+#define BELOW_STACK 16384u
+typedef struct below_start {
+    void *(*fn)(void *);
+    void *arg;
+} below_start;
+static below_start g_below[2];
+static unsigned g_below_used;
+
+static void below_entry(void *p)
+{
+    below_start s = *(below_start *)p;
+    s.fn(s.arg);
+}
+
+static int spawn_below(uint32_t *tid, void *(*fn)(void *), void *arg)
+{
+    if (g_below_used >= 2u)
+        return -1;
+    below_start *s = &g_below[g_below_used++];
+    s->fn = fn;
+    s->arg = arg;
+    int32_t t = rhu_thread_spawn(below_entry, s, BELOW_STACK, (uint32_t)RHU_HOSTED_PRIO_FLAT + 1u, "below");
+    if (t < 0)
+        return -1;
+    if (tid != NULL)
+        *tid = (uint32_t)t;
+    return 0;
+}
+#endif
 
 #endif /* RHU_SHIMTEST_LADDER_CORE || RHU_SHIMTEST_LADDER_ACTIVATION || _TLS */
 
@@ -358,6 +423,80 @@ static void *cond_worker(void *a)
     return NULL;
 }
 
+/* The real-time waits: a worker sleeps or waits against the real-time
+ * clock while the main thread watches it on the boot clock, so a wait
+ * that does not end is observed within a bound, never waited for. */
+static mutex_slot g_rt_m;
+static cond_slot g_rt_cv;
+static struct ts64 g_rt_abs;
+static volatile int g_rt_kind; /* 0 the absolute sleep, 1 the timed wait */
+static volatile int g_rt_done;
+static volatile int g_rt_rc;
+static volatile uint64_t g_rt_end;
+
+static void *realtime_waiter(void *a)
+{
+    (void)a;
+    int rc;
+    if (g_rt_kind == 0) {
+        rc = __clock_nanosleep_time64(0, 1, &g_rt_abs, NULL);
+    } else {
+        pthread_mutex_lock(&g_rt_m);
+        rc = __pthread_cond_timedwait64(&g_rt_cv, &g_rt_m, &g_rt_abs);
+        pthread_mutex_unlock(&g_rt_m);
+    }
+    g_rt_rc = rc;
+    g_rt_end = now_ns();
+    __atomic_fetch_add(&g_rt_done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+/* The bounded watch: 1 once the count reaches `want` within `bound_ms` of
+ * the boot clock (the worker's exit then given its moment, as wait_done
+ * gives it); 0 at the bound with the count still short. */
+static int done_within(volatile int *done, int want, int bound_ms)
+{
+    uint64_t t0 = now_ns();
+    while (__atomic_load_n(done, __ATOMIC_ACQUIRE) < want) {
+        if (now_ns() - t0 > (uint64_t)bound_ms * 1000000ull)
+            return 0;
+        msleep(5);
+    }
+    msleep(20);
+    return 1;
+}
+
+/* The real-time clock now plus `ms` (negative for a past timestamp). */
+static void realtime_after(struct ts64 *t, int ms)
+{
+    __clock_gettime64(0, t);
+    int64_t ns = (int64_t)t->nsec + (int64_t)ms * 1000000ll;
+    t->sec += ns / 1000000000ll;
+    ns %= 1000000000ll;
+    if (ns < 0) {
+        t->sec -= 1;
+        ns += 1000000000ll;
+    }
+    t->nsec = (int32_t)ns;
+}
+
+/* A timestamp's Unix count as calendar ticks since the year 1, for the
+ * calendar door. */
+static uint64_t calendar_ticks_of(const struct ts64 *t)
+{
+    return (uint64_t)((int64_t)t->sec * 10000000ll + (int64_t)(t->nsec / 100) + RHU_SHIM_UNIX_EPOCH_TICKS);
+}
+
+static int start_realtime_waiter(uint32_t *tid, int kind, const struct ts64 *abs)
+{
+    g_rt_kind = kind;
+    g_rt_abs = *abs;
+    g_rt_done = 0;
+    g_rt_rc = -1;
+    g_rt_end = 0;
+    return spawn(tid, realtime_waiter, NULL, WORKER_STACK);
+}
+
 static int32_t g_futex_cell;
 static volatile int g_futex_saw;
 
@@ -405,12 +544,32 @@ static int phdr_cb(dl_phdr_info *info, size_t size, void *data)
     return 0;
 }
 
+/* Two first users of one zero-filled mutex: the second thread's lock,
+ * taken while the first is inside its own first lock. */
+static mutex_slot g_adopt_slot;
+static volatile int g_adopt_go;
+static volatile int g_adopt_rc = -1;
+static volatile int g_adopt_done;
+
+static void *adopt_second(void *arg)
+{
+    (void)arg;
+    while (__atomic_load_n(&g_adopt_go, __ATOMIC_ACQUIRE) == 0)
+        sched_yield();
+    int rc = pthread_mutex_lock(&g_adopt_slot);
+    if (rc == 0)
+        pthread_mutex_unlock(&g_adopt_slot);
+    g_adopt_rc = rc;
+    __atomic_store_n(&g_adopt_done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
 static int core_ladder(void)
 {
     uint32_t t1;
     uint32_t t2;
 
-    out("shimtest: the glibc personality and the PAL on the kernel's hosting doors");
+    out("shimtest: the glibc personality and the PAL on the kernel's hosting API");
 
     /* init: once, then a no-op */
     CHECK(rhu_shim_init() == 0 && rhu_shim_init() == 0, "shim-init", "(initialization refused)");
@@ -430,12 +589,12 @@ static int core_ladder(void)
         CHECK(ok && pairs == 80, "shim-errno-pal", "(a mapped pair does not round-trip)");
         CHECK(SystemNative_ConvertErrorPlatformToPal(9999) == RHU_PAL_ENONSTANDARD, "shim-errno-pal", "(an unknown platform value did not map to the nonstandard code)");
         CHECK(SystemNative_ConvertErrorPalToPlatform(RHU_PAL_ENONSTANDARD) == RHU_GERR_EINVAL, "shim-errno-pal", "(the nonstandard code did not map back to EINVAL)");
-        SystemNative_SetErrNo(RHU_PAL_EAGAIN);
-        CHECK(*__errno_location() == RHU_GERR_EAGAIN && SystemNative_GetErrNo() == RHU_PAL_EAGAIN, "shim-errno-pal", "(SetErrNo/GetErrNo did not round-trip)");
+        SystemNative_SetErrNo(RHU_GERR_EAGAIN);
+        CHECK(*__errno_location() == RHU_GERR_EAGAIN && SystemNative_GetErrNo() == RHU_GERR_EAGAIN, "shim-errno-pal", "(SetErrNo/GetErrNo did not carry the raw platform errno)");
         char msg[32];
         const char *m = SystemNative_StrErrorR(RHU_GERR_EAGAIN, msg, (int32_t)sizeof msg);
         CHECK(m != NULL && strcmp(m, "EAGAIN (11)") == 0, "shim-errno-pal", "(StrErrorR did not name the errno)");
-        pass("shim-errno-pal", " (80 pairs round-trip; unknown values map to the nonstandard code and back to EINVAL)");
+        pass("shim-errno-pal", " (80 pairs round-trip; unknown values map to the nonstandard code and back to EINVAL; the errno calls carry the raw platform errno)");
     }
 
     /* the auxiliary vector: absent on this platform, answered by contract */
@@ -591,7 +750,7 @@ static int core_ladder(void)
                                                      RHU_PAL_MAP_PRIVATE | RHU_PAL_MAP_ANONYMOUS, -1, 0);
         CHECK(base != NULL, "shim-foh", "(the reservation was refused)");
         CHECK(SystemNative_MProtect(base, 64u * 1024u, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE) == 0, "shim-foh", "(a commit inside the pool was refused)");
-        CHECK(SystemNative_MProtect(base + 64u * 1024u, 64u * 1024u, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOMEM, "shim-foh", "(a commit beyond the pool was not refused)");
+        CHECK(SystemNative_MProtect(base + 64u * 1024u, 64u * 1024u, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOMEM, "shim-foh", "(a commit beyond the pool was not refused)");
         CHECK(SystemNative_MMap(NULL, 4u * 1024u * 1024u, RHU_PAL_PROT_NONE, RHU_PAL_MAP_PRIVATE | RHU_PAL_MAP_ANONYMOUS, -1, 0) == NULL, "shim-foh", "(a second reservation was not refused)");
         CHECK(SystemNative_MUnmap(base, 4u * 1024u * 1024u) == 0, "shim-foh", "(the release was refused)");
         pass("shim-foh", " (the reservation served from the row's pool; a commit beyond it refused; a second reservation NULL)");
@@ -620,7 +779,7 @@ static int core_ladder(void)
         uint64_t c1;
         int32_t s0;
         int32_t s1;
-        CHECK(rhu_calendar_get(&c0, &s0) == 0, "shim-calendar", "(the kernel's calendar door refused)");
+        CHECK(rhu_calendar_get(&c0, &s0) == 0, "shim-calendar", "(the kernel's calendar call refused)");
         int64_t pal = SystemNative_GetSystemTimeAsTicks();
         struct ts64 rt;
         CHECK(__clock_gettime64(0, &rt) == 0, "shim-calendar", "(the real-time clock refused)");
@@ -634,6 +793,87 @@ static int core_ladder(void)
         CHECK(secs * 10000000ll <= hi && (secs + 1) * 10000000ll > lo, "shim-calendar", "(time() is not the calendar's whole second)");
         CHECK(s0 >= RHU_CALENDAR_UNSET && s0 <= RHU_CALENDAR_APP && s1 == s0, "shim-calendar", "(the source is not one the kernel names)");
         pass("shim-calendar", " (the system time, the real-time clock and time() read the kernel's calendar; the source named on the wire)");
+    }
+
+    /* the real-time clock's absolute sleep follows the calendar, a set included */
+    {
+        uint32_t w;
+        struct ts64 abs;
+        uint64_t c;
+        int32_t src;
+        CHECK(rhu_calendar_set(639028224000000000ull, RHU_CALENDAR_APP) == 0, "shim-time-realtime", "(the calendar call refused the set)");
+        __clock_gettime64(0, &abs);
+        CHECK(abs.sec >= 1767225600ll && abs.sec < 1767225600ll + 60ll, "shim-time-realtime", "(the real-time clock does not read the set calendar)");
+        realtime_after(&abs, 40);
+        uint64_t t0 = now_ns();
+        CHECK(start_realtime_waiter(&w, 0, &abs) == 0, "shim-time-realtime", "(spawn refused)");
+        CHECK(done_within(&g_rt_done, 1, 2000), "shim-time-realtime", "(the absolute sleep on the real-time clock did not end within its bound)");
+        CHECK(g_rt_rc == 0 && g_rt_end - t0 >= 40000000ull, "shim-time-realtime", "(the absolute sleep on the real-time clock returned early or refused)");
+        realtime_after(&abs, -1000);
+        t0 = now_ns();
+        CHECK(__clock_nanosleep_time64(0, 1, &abs, NULL) == 0 && now_ns() - t0 < 200000000ull, "shim-time-realtime", "(an expired real-time timestamp did not return at once)");
+        abs.sec = -1;
+        abs.nsec = 0;
+        t0 = now_ns();
+        CHECK(__clock_nanosleep_time64(0, 1, &abs, NULL) == 0 && now_ns() - t0 < 200000000ull, "shim-time-realtime", "(a pre-epoch timestamp did not return at once)");
+        realtime_after(&abs, 40);
+        abs.nsec = 1000000000;
+        CHECK(__clock_nanosleep_time64(0, 1, &abs, NULL) == RHU_GERR_EINVAL, "shim-time-realtime", "(a nanosecond field outside its second was not refused)");
+        abs.sec = -1;
+        abs.nsec = 0;
+        CHECK(__clock_nanosleep_time64(0, 0, &abs, NULL) == RHU_GERR_EINVAL, "shim-time-realtime", "(a negative relative request was not refused)");
+        realtime_after(&abs, 60);
+        CHECK(start_realtime_waiter(&w, 0, &abs) == 0, "shim-time-realtime", "(spawn refused)");
+        msleep(20);
+        CHECK(rhu_calendar_get(&c, &src) == 0 && rhu_calendar_set(c - 36000000000ull, RHU_CALENDAR_APP) == 0, "shim-time-realtime", "(the calendar call refused the set back)");
+        CHECK(!done_within(&g_rt_done, 1, 400), "shim-time-realtime", "(a calendar set back an hour did not hold the sleep)");
+        CHECK(rhu_calendar_set(calendar_ticks_of(&abs) + 10000000ull, RHU_CALENDAR_APP) == 0, "shim-time-realtime", "(the calendar call refused the set forward)");
+        t0 = now_ns();
+        CHECK(done_within(&g_rt_done, 1, 2000), "shim-time-realtime", "(the sleep did not end after the calendar was set past its timestamp)");
+        CHECK(g_rt_rc == 0 && g_rt_end - t0 < 500000000ull, "shim-time-realtime", "(the sleep ended later than a slice after the set)");
+        pass("shim-time-realtime", " (an absolute sleep on the real-time clock follows the calendar: a future timestamp waited for and never early, an expired or pre-epoch one returned at once, a nanosecond field outside its second and a negative relative request refused; a set back holds it, a set past its timestamp ends it within a slice)");
+    }
+
+    /* the real-time clock's timed wait: a condition variable with no attribute */
+    {
+        uint32_t w;
+        struct ts64 abs;
+        uint64_t c;
+        int32_t src;
+        pthread_cond_init(&g_rt_cv, NULL);
+        pthread_mutex_init(&g_rt_m, NULL);
+        realtime_after(&abs, 40);
+        uint64_t t0 = now_ns();
+        CHECK(start_realtime_waiter(&w, 1, &abs) == 0, "shim-cond-realtime", "(spawn refused)");
+        CHECK(done_within(&g_rt_done, 1, 2000), "shim-cond-realtime", "(the timed wait on the real-time clock did not end within its bound)");
+        CHECK(g_rt_rc == RHU_GERR_ETIMEDOUT && g_rt_end - t0 >= 40000000ull, "shim-cond-realtime", "(the timed wait on the real-time clock returned early or without ETIMEDOUT)");
+        realtime_after(&abs, -1000);
+        pthread_mutex_lock(&g_rt_m);
+        t0 = now_ns();
+        int rc = __pthread_cond_timedwait64(&g_rt_cv, &g_rt_m, &abs);
+        uint64_t dt = now_ns() - t0;
+        abs.nsec = 1000000000;
+        int rc2 = __pthread_cond_timedwait64(&g_rt_cv, &g_rt_m, &abs);
+        pthread_mutex_unlock(&g_rt_m);
+        CHECK(rc == RHU_GERR_ETIMEDOUT && dt < 200000000ull, "shim-cond-realtime", "(an expired real-time timestamp did not time out at once)");
+        CHECK(rc2 == RHU_GERR_EINVAL, "shim-cond-realtime", "(a nanosecond field outside its second was not refused)");
+        realtime_after(&abs, 5000);
+        CHECK(start_realtime_waiter(&w, 1, &abs) == 0, "shim-cond-realtime", "(spawn refused)");
+        msleep(30);
+        pthread_mutex_lock(&g_rt_m);
+        pthread_cond_signal(&g_rt_cv);
+        pthread_mutex_unlock(&g_rt_m);
+        CHECK(done_within(&g_rt_done, 1, 2000) && g_rt_rc == 0, "shim-cond-realtime", "(a signal did not wake a timed wait on the real-time clock)");
+        realtime_after(&abs, 60);
+        CHECK(start_realtime_waiter(&w, 1, &abs) == 0, "shim-cond-realtime", "(spawn refused)");
+        msleep(20);
+        CHECK(rhu_calendar_get(&c, &src) == 0 && rhu_calendar_set(c - 36000000000ull, RHU_CALENDAR_APP) == 0, "shim-cond-realtime", "(the calendar call refused the set back)");
+        CHECK(!done_within(&g_rt_done, 1, 400), "shim-cond-realtime", "(a calendar set back an hour did not hold the timed wait)");
+        CHECK(rhu_calendar_set(calendar_ticks_of(&abs) + 10000000ull, RHU_CALENDAR_APP) == 0, "shim-cond-realtime", "(the calendar call refused the set forward)");
+        t0 = now_ns();
+        CHECK(done_within(&g_rt_done, 1, 2000), "shim-cond-realtime", "(the timed wait did not end after the calendar was set past its timestamp)");
+        CHECK(g_rt_rc == RHU_GERR_ETIMEDOUT && g_rt_end - t0 < 500000000ull, "shim-cond-realtime", "(the timed wait ended later than a slice after the set, or without ETIMEDOUT)");
+        pass("shim-cond-realtime", " (a condition variable with no attribute times out on the real-time clock and follows the calendar: a future timestamp timed out and never early, an expired one at once, a nanosecond field outside its second refused, a signal woke it; a set back holds it, a set past its timestamp ends it within a slice)");
     }
 
     /* the allocation family */
@@ -670,18 +910,18 @@ static int core_ladder(void)
         CHECK(getrandom(buf, sizeof buf, 0) == (long)sizeof buf, "shim-entropy", "(getrandom short)");
         CHECK(SystemNative_GetCryptographicallySecureRandomBytes(buf, (int32_t)sizeof buf) == 0, "shim-entropy", "(the cryptographic draw refused)");
         CHECK(SystemNative_GetCryptographicallySecureRandomBytes(again, (int32_t)sizeof again) == 0 && memcmp(buf, again, sizeof buf) != 0, "shim-entropy", "(two cryptographic draws equal)");
-        CHECK(SystemNative_GetCryptographicallySecureRandomBytes(big, (int32_t)sizeof big) == 0, "shim-entropy", "(a draw past the door's bound refused)");
+        CHECK(SystemNative_GetCryptographicallySecureRandomBytes(big, (int32_t)sizeof big) == 0, "shim-entropy", "(a draw past the call's bound refused)");
         {
             int nonzero = 0;
             for (size_t i = 0; i < sizeof big; i++)
                 nonzero += big[i] != 0;
-            CHECK(nonzero > 0, "shim-entropy", "(a draw past the door's bound left the buffer zero)");
+            CHECK(nonzero > 0, "shim-entropy", "(a draw past the call's bound left the buffer zero)");
         }
         CHECK(SystemNative_GetCryptographicallySecureRandomBytes(buf, 0) == 0, "shim-entropy", "(a zero-length draw failed)");
         CHECK(SystemNative_GetCryptographicallySecureRandomBytes(NULL, (int32_t)sizeof buf) == -1, "shim-entropy", "(a refused draw reported as served)");
         CHECK(SystemNative_GetCryptographicallySecureRandomBytes(buf, -1) == -1, "shim-entropy", "(a negative length served)");
         SystemNative_GetNonCryptographicallySecureRandomBytes(buf, (int32_t)sizeof buf);
-        pass("shim-entropy", " (cryptographic draws through the secure door in bounded pieces, all or nothing, a refusal honored; the source declared on the wire)");
+        pass("shim-entropy", " (cryptographic draws through the kernel's secure entropy call in bounded pieces, all or nothing, a refusal honored; the source declared on the wire)");
     }
 
     /* the low-level monitor */
@@ -765,11 +1005,25 @@ static int core_ladder(void)
         CHECK(opendir("/nonexistent") == NULL && *__errno_location() == RHU_GERR_ENOENT, "shim-honest", "(opendir)");
         CHECK(close(7) == -1 && *__errno_location() == RHU_GERR_EBADF, "shim-honest", "(close)");
         int32_t fds[2];
-        CHECK(SystemNative_Pipe(fds, 0) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOSYS, "shim-honest", "(pipe)");
+        CHECK(SystemNative_Pipe(fds, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOSYS, "shim-honest", "(pipe)");
         pass("shim-honest", " (fork, an unknown syscall, a path, a foreign descriptor, a pipe: each refused with its errno)");
     }
 
-    out("SHIMTEST: ALL GOOD (glibc personality + PAL on the kernel doors)");
+    {
+        uint32_t adopt_tid = 0;
+        CHECK(spawn_below(&adopt_tid, adopt_second, NULL) == 0, "shim-mutex-adopt", "(the second thread did not spawn)");
+        __atomic_store_n(&g_adopt_go, 1, __ATOMIC_RELEASE);
+        /* Both checks carry ONE message: which of the two first users a
+         * broken adoption refuses is the control's construction, and the
+         * line on the wire must not say. */
+        CHECK(pthread_mutex_lock(&g_adopt_slot) == 0, "shim-mutex-adopt", "(one of two first users of a zero-filled mutex was refused)");
+        pthread_mutex_unlock(&g_adopt_slot);
+        wait_done(&g_adopt_done, 1);
+        CHECK(g_adopt_rc == 0, "shim-mutex-adopt", "(one of two first users of a zero-filled mutex was refused)");
+        pass("shim-mutex-adopt", " (a zero-filled mutex adopted once under two first users)");
+    }
+
+    out("SHIMTEST: ALL GOOD (glibc personality + PAL on the kernel API)");
     return 0;
 }
 
@@ -831,7 +1085,7 @@ static int fdmap_ladder(void)
     for (intptr_t fd = 0; fd < 3; fd++) {
         CHECK(SystemNative_FStat(fd, &st) == 0 && is_type(&st, RHU_PAL_S_IFCHR), "shim-fdmap-console", "(a console descriptor is not a character device)");
     }
-    CHECK(SystemNative_FStat(3, &st) == -1 && SystemNative_GetErrNo() == RHU_PAL_EBADF, "shim-fdmap-console", "(an unopened descriptor answered)");
+    CHECK(SystemNative_FStat(3, &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_EBADF, "shim-fdmap-console", "(an unopened descriptor answered)");
     pass("shim-fdmap-console", " (0, 1, 2 are the console; 3 is not open)");
 
     /* the first file lands in the file band and answers as a file */
@@ -860,14 +1114,14 @@ static int fdmap_ladder(void)
         CHECK(SystemNative_LSeek(fd, 2, RHU_PAL_SEEK_CUR) == 6, "shim-fdmap-reopen", "(relative seek wrong)");
         CHECK(SystemNative_Read(fd, buf, 8) == 4 && memcmp(buf, "6789", 4) == 0, "shim-fdmap-reopen", "(second read wrong)");
         CHECK(SystemNative_Read(fd, buf, 8) == 0, "shim-fdmap-reopen", "(no end of file)");
-        CHECK(SystemNative_Write(fd, "x", 1) == -1 && SystemNative_GetErrNo() == RHU_PAL_EBADF, "shim-fdmap-reopen", "(a write to a read-only descriptor succeeded)");
+        CHECK(SystemNative_Write(fd, "x", 1) == -1 && SystemNative_GetErrNo() == RHU_GERR_EBADF, "shim-fdmap-reopen", "(a write to a read-only descriptor succeeded)");
         CHECK(SystemNative_Close(fd) == 0, "shim-fdmap-reopen", "(close refused)");
         pass("shim-fdmap-reopen", " (the descriptor reused; reads follow the position; end of file 0; read-only refuses writes)");
     }
 
     /* a closed descriptor is invalid, never a console */
-    CHECK(SystemNative_FStat(3, &st) == -1 && SystemNative_GetErrNo() == RHU_PAL_EBADF, "shim-fdmap-closed", "(a closed descriptor answered)");
-    CHECK(SystemNative_Read(3, buf, 4) == -1 && SystemNative_GetErrNo() == RHU_PAL_EBADF, "shim-fdmap-closed", "(a closed descriptor read)");
+    CHECK(SystemNative_FStat(3, &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_EBADF, "shim-fdmap-closed", "(a closed descriptor answered)");
+    CHECK(SystemNative_Read(3, buf, 4) == -1 && SystemNative_GetErrNo() == RHU_GERR_EBADF, "shim-fdmap-closed", "(a closed descriptor read)");
     pass("shim-fdmap-closed", " (a closed descriptor is invalid, never the console shape)");
 
     /* paths: stat, access, rename, unlink */
@@ -888,24 +1142,24 @@ static int fdmap_ladder(void)
             CHECK(realpath("/tmp/nothere.txt", canon) == NULL && *__errno_location() == RHU_GERR_ENOENT, "shim-fdmap-paths", "(an absent path did not answer ENOENT)");
         }
         CHECK(SystemNative_Rename("/tmp/a.txt", "/tmp/b.txt") == 0, "shim-fdmap-paths", "(rename)");
-        CHECK(SystemNative_Stat("/tmp/a.txt", &st) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOENT, "shim-fdmap-paths", "(the old name survives)");
+        CHECK(SystemNative_Stat("/tmp/a.txt", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-paths", "(the old name survives)");
         CHECK(SystemNative_Unlink("/tmp/b.txt") == 0, "shim-fdmap-paths", "(unlink)");
-        CHECK(SystemNative_Stat("/tmp/b.txt", &st) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOENT, "shim-fdmap-paths", "(the file survives its unlink)");
-        CHECK(SystemNative_Unlink("/tmp/b.txt") == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOENT, "shim-fdmap-paths", "(a second unlink succeeded)");
+        CHECK(SystemNative_Stat("/tmp/b.txt", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-paths", "(the file survives its unlink)");
+        CHECK(SystemNative_Unlink("/tmp/b.txt") == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-paths", "(a second unlink succeeded)");
         pass("shim-fdmap-paths", " (stat, access, rename, unlink; a missing path ENOENT)");
     }
 
     /* directories */
     {
         CHECK(SystemNative_MkDir("/tmp/d", 0x1ED) == 0, "shim-fdmap-dirs", "(mkdir)");
-        CHECK(SystemNative_MkDir("/tmp/d", 0x1ED) == -1 && SystemNative_GetErrNo() == RHU_PAL_EEXIST, "shim-fdmap-dirs", "(a second mkdir succeeded)");
+        CHECK(SystemNative_MkDir("/tmp/d", 0x1ED) == -1 && SystemNative_GetErrNo() == RHU_GERR_EEXIST, "shim-fdmap-dirs", "(a second mkdir succeeded)");
         intptr_t fx = SystemNative_Open("/tmp/d/x.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4);
         intptr_t fy = SystemNative_Open("/tmp/d/y.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4);
         CHECK(fx >= 0 && fy >= 0 && fx != fy, "shim-fdmap-dirs", "(files in a directory)");
         SystemNative_Close(fx);
         SystemNative_Close(fy);
         CHECK(SystemNative_MkDir("/tmp/d/sub", 0x1ED) == 0, "shim-fdmap-dirs", "(a nested directory)");
-        CHECK(SystemNative_Open("/tmp/nodir/z.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOENT, "shim-fdmap-dirs", "(a file under a missing directory was made)");
+        CHECK(SystemNative_Open("/tmp/nodir/z.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-dirs", "(a file under a missing directory was made)");
         void *dir = SystemNative_OpenDir("/tmp/d");
         CHECK(dir != NULL, "shim-fdmap-dirs", "(opendir)");
         rhu_pal_directoryentry e;
@@ -924,10 +1178,10 @@ static int fdmap_ladder(void)
         }
         CHECK(n == 3 && seen_x && seen_y && seen_sub, "shim-fdmap-dirs", "(the listing is not the three entries)");
         CHECK(SystemNative_CloseDir(dir) == 0, "shim-fdmap-dirs", "(closedir)");
-        CHECK(SystemNative_RmDir("/tmp/d") == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOTEMPTY, "shim-fdmap-dirs", "(a non-empty directory was removed)");
+        CHECK(SystemNative_RmDir("/tmp/d") == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOTEMPTY, "shim-fdmap-dirs", "(a non-empty directory was removed)");
         CHECK(SystemNative_Unlink("/tmp/d/x.txt") == 0 && SystemNative_Unlink("/tmp/d/y.txt") == 0, "shim-fdmap-dirs", "(unlink)");
         CHECK(SystemNative_RmDir("/tmp/d/sub") == 0 && SystemNative_RmDir("/tmp/d") == 0, "shim-fdmap-dirs", "(rmdir)");
-        CHECK(SystemNative_OpenDir("/tmp/d") == NULL && SystemNative_GetErrNo() == RHU_PAL_ENOENT, "shim-fdmap-dirs", "(a removed directory opens)");
+        CHECK(SystemNative_OpenDir("/tmp/d") == NULL && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-dirs", "(a removed directory opens)");
         pass("shim-fdmap-dirs", " (mkdir, a listing of three entries with their types, rmdir refuses non-empty)");
     }
 
@@ -967,10 +1221,10 @@ static int fdmap_ladder(void)
         uint64_t c0;
         uint64_t c1;
         int32_t s;
-        CHECK(rhu_calendar_get(&c0, &s) == 0, "shim-fdmap-times", "(the calendar door refused)");
+        CHECK(rhu_calendar_get(&c0, &s) == 0, "shim-fdmap-times", "(the calendar call refused)");
         intptr_t fd = SystemNative_Open("/tmp/w.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
         CHECK(fd >= 0 && SystemNative_FStat(fd, &st) == 0 && SystemNative_Close(fd) == 0 && SystemNative_Unlink("/tmp/w.txt") == 0, "shim-fdmap-times", "(a new file)");
-        CHECK(rhu_calendar_get(&c1, &s) == 0, "shim-fdmap-times", "(the calendar door refused)");
+        CHECK(rhu_calendar_get(&c1, &s) == 0, "shim-fdmap-times", "(the calendar call refused)");
         int64_t lo = (int64_t)c0 - RHU_SHIM_UNIX_EPOCH_TICKS;
         int64_t hi = (int64_t)c1 - RHU_SHIM_UNIX_EPOCH_TICKS;
         int64_t mt = st.MTime * 10000000ll + st.MTimeNsec / 100;
@@ -985,16 +1239,16 @@ static int fdmap_ladder(void)
     {
         intptr_t fd = SystemNative_Open("/tmp/v.txt", RHU_PAL_O_RDONLY, 0);
         CHECK(fd >= 0, "shim-fdmap-refusals", "(open)");
-        CHECK(SystemNative_Dup(fd) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOTSUP, "shim-fdmap-refusals", "(dup of a file succeeded)");
+        CHECK(SystemNative_Dup(fd) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOTSUP, "shim-fdmap-refusals", "(dup of a file succeeded)");
         CHECK(SystemNative_Dup(1) == 1, "shim-fdmap-refusals", "(dup of the console)");
         int32_t fds[2];
-        CHECK(SystemNative_Pipe(fds, 0) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOSYS, "shim-fdmap-refusals", "(pipe)");
+        CHECK(SystemNative_Pipe(fds, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOSYS, "shim-fdmap-refusals", "(pipe)");
         CHECK(SystemNative_IsMemfdSupported() == 0, "shim-fdmap-refusals", "(memfd claimed)");
-        CHECK(SystemNative_MemfdCreate("m", 0) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOTSUP, "shim-fdmap-refusals", "(memfd)");
-        CHECK(SystemNative_ShmOpen("/s", 0, 0) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOTSUP, "shim-fdmap-refusals", "(shm open)");
-        CHECK(SystemNative_ShmUnlink("/s") == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOENT, "shim-fdmap-refusals", "(shm unlink)");
+        CHECK(SystemNative_MemfdCreate("m", 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOTSUP, "shim-fdmap-refusals", "(memfd)");
+        CHECK(SystemNative_ShmOpen("/s", 0, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOTSUP, "shim-fdmap-refusals", "(shm open)");
+        CHECK(SystemNative_ShmUnlink("/s") == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-refusals", "(shm unlink)");
         CHECK(SystemNative_Close(fd) == 0, "shim-fdmap-refusals", "(close)");
-        CHECK(SystemNative_Close(fd) == -1 && SystemNative_GetErrNo() == RHU_PAL_EBADF, "shim-fdmap-refusals", "(a second close succeeded)");
+        CHECK(SystemNative_Close(fd) == -1 && SystemNative_GetErrNo() == RHU_GERR_EBADF, "shim-fdmap-refusals", "(a second close succeeded)");
         pass("shim-fdmap-refusals", " (dup of a file, pipe, memfd and shm refused with their errno)");
     }
 
@@ -1026,7 +1280,7 @@ static int fdmap_ladder(void)
         intptr_t fa = SystemNative_Open("/tmp/life-a.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
         SCHECK(fa >= 0 && SystemNative_Write(fa, "AAAA", 4) == 4, "shim-fdmap-lifetime", "(open, write)");
         SCHECK(SystemNative_Unlink("/tmp/life-a.txt") == 0, "shim-fdmap-lifetime", "(unlink of an open file refused)");
-        SCHECK(SystemNative_Stat("/tmp/life-a.txt", &st) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOENT, "shim-fdmap-lifetime", "(the unlinked name still resolves)");
+        SCHECK(SystemNative_Stat("/tmp/life-a.txt", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-lifetime", "(the unlinked name still resolves)");
         intptr_t fb = SystemNative_Open("/tmp/life-b.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
         SCHECK(fb >= 0 && SystemNative_Write(fb, "BBBB", 4) == 4, "shim-fdmap-lifetime", "(a second file)");
         SCHECK(SystemNative_PRead(fa, buf, 4, 0) == 4 && memcmp(buf, "AAAA", 4) == 0, "shim-fdmap-lifetime", "(the unlinked object's descriptor reads another file)");
@@ -1055,10 +1309,10 @@ static int fdmap_ladder(void)
                 break;
         }
         SCHECK(n == RHU_SHIM_FD_FILE_COUNT, "shim-fdmap-open-order", "(the descriptor band did not fill)");
-        SCHECK(SystemNative_Open("/tmp/order.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_TRUNC, 0) == -1 && SystemNative_GetErrNo() == RHU_PAL_EMFILE, "shim-fdmap-open-order", "(an open past the band succeeded)");
+        SCHECK(SystemNative_Open("/tmp/order.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_TRUNC, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_EMFILE, "shim-fdmap-open-order", "(an open past the band succeeded)");
         SCHECK(SystemNative_Stat("/tmp/order.txt", &st) == 0 && st.Size == 4, "shim-fdmap-open-order", "(a refused open truncated the file)");
-        SCHECK(SystemNative_Open("/tmp/order-new.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4) == -1 && SystemNative_GetErrNo() == RHU_PAL_EMFILE, "shim-fdmap-open-order", "(an open with create past the band succeeded)");
-        SCHECK(SystemNative_Stat("/tmp/order-new.txt", &st) == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOENT, "shim-fdmap-open-order", "(a refused open created the file)");
+        SCHECK(SystemNative_Open("/tmp/order-new.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4) == -1 && SystemNative_GetErrNo() == RHU_GERR_EMFILE, "shim-fdmap-open-order", "(an open with create past the band succeeded)");
+        SCHECK(SystemNative_Stat("/tmp/order-new.txt", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-open-order", "(a refused open created the file)");
         for (int i = 0; i < n; i++)
             SystemNative_Close(held[i]);
         SCHECK(SystemNative_Unlink("/tmp/order.txt") == 0, "shim-fdmap-open-order", "(unlink)");
@@ -1069,8 +1323,8 @@ static int fdmap_ladder(void)
     {
         intptr_t fd = SystemNative_Open("/tmp/wo.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
         SCHECK(fd >= 0 && SystemNative_Write(fd, "WO", 2) == 2, "shim-fdmap-access", "(open write-only, write)");
-        SCHECK(SystemNative_Read(fd, buf, 2) == -1 && SystemNative_GetErrNo() == RHU_PAL_EBADF, "shim-fdmap-access", "(a write-only descriptor read)");
-        SCHECK(SystemNative_PRead(fd, buf, 2, 0) == -1 && SystemNative_GetErrNo() == RHU_PAL_EBADF, "shim-fdmap-access", "(a write-only descriptor read positionally)");
+        SCHECK(SystemNative_Read(fd, buf, 2) == -1 && SystemNative_GetErrNo() == RHU_GERR_EBADF, "shim-fdmap-access", "(a write-only descriptor read)");
+        SCHECK(SystemNative_PRead(fd, buf, 2, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_EBADF, "shim-fdmap-access", "(a write-only descriptor read positionally)");
         SCHECK(SystemNative_Close(fd) == 0 && SystemNative_Unlink("/tmp/wo.txt") == 0, "shim-fdmap-access", "(close, unlink)");
         pass("shim-fdmap-access", " (a write-only descriptor refuses reads with EBADF, as a read-only one refuses writes)");
     }
@@ -1081,13 +1335,13 @@ static int fdmap_ladder(void)
         intptr_t f2 = SystemNative_Open("/tmp/lock.txt", RHU_PAL_O_RDWR, 0);
         SCHECK(f1 >= 0 && f2 >= 0, "shim-fdmap-flock", "(two descriptors)");
         SCHECK(SystemNative_FLock(f1, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == 0, "shim-fdmap-flock", "(an exclusive lock refused)");
-        SCHECK(SystemNative_FLock(f2, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == -1 && SystemNative_GetErrNo() == RHU_PAL_EWOULDBLOCK, "shim-fdmap-flock", "(a second exclusive lock succeeded)");
-        SCHECK(SystemNative_FLock(f2, RHU_PAL_LOCK_SH | RHU_PAL_LOCK_NB) == -1 && SystemNative_GetErrNo() == RHU_PAL_EWOULDBLOCK, "shim-fdmap-flock", "(a shared lock under an exclusive one succeeded)");
+        SCHECK(SystemNative_FLock(f2, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == -1 && SystemNative_GetErrNo() == RHU_GERR_EAGAIN, "shim-fdmap-flock", "(a second exclusive lock succeeded)");
+        SCHECK(SystemNative_FLock(f2, RHU_PAL_LOCK_SH | RHU_PAL_LOCK_NB) == -1 && SystemNative_GetErrNo() == RHU_GERR_EAGAIN, "shim-fdmap-flock", "(a shared lock under an exclusive one succeeded)");
         SCHECK(SystemNative_FLock(f1, RHU_PAL_LOCK_UN) == 0, "shim-fdmap-flock", "(unlock refused)");
         SCHECK(SystemNative_FLock(f2, RHU_PAL_LOCK_SH | RHU_PAL_LOCK_NB) == 0 && SystemNative_FLock(f1, RHU_PAL_LOCK_SH | RHU_PAL_LOCK_NB) == 0, "shim-fdmap-flock", "(shared locks do not coexist)");
-        SCHECK(SystemNative_FLock(f1, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == -1 && SystemNative_GetErrNo() == RHU_PAL_EWOULDBLOCK, "shim-fdmap-flock", "(an exclusive lock over another's shared one succeeded)");
+        SCHECK(SystemNative_FLock(f1, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == -1 && SystemNative_GetErrNo() == RHU_GERR_EAGAIN, "shim-fdmap-flock", "(an exclusive lock over another's shared one succeeded)");
         SCHECK(SystemNative_Close(f2) == 0 && SystemNative_FLock(f1, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == 0, "shim-fdmap-flock", "(a close did not release its lock)");
-        SCHECK(SystemNative_FLock(f1, 16) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-flock", "(an unknown operation accepted)");
+        SCHECK(SystemNative_FLock(f1, 16) == -1 && SystemNative_GetErrNo() == RHU_GERR_EINVAL, "shim-fdmap-flock", "(an unknown operation accepted)");
         SCHECK(SystemNative_Close(f1) == 0 && SystemNative_Unlink("/tmp/lock.txt") == 0, "shim-fdmap-flock", "(close, unlink)");
         pass("shim-fdmap-flock", " (exclusive and shared advisory locks per object; a conflicting request is refused with EWOULDBLOCK; a close releases)");
     }
@@ -1120,9 +1374,9 @@ static int fdmap_ladder(void)
         intptr_t fd = SystemNative_Open("/tmp/t.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
         SCHECK(fd >= 0, "shim-fdmap-times-range", "(open)");
         rhu_pal_timespec bad[2] = {{1000, 1000000000}, {2000, 7}};
-        SCHECK(SystemNative_FUTimens(fd, bad) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-times-range", "(a nanosecond field of one second accepted)");
+        SCHECK(SystemNative_FUTimens(fd, bad) == -1 && SystemNative_GetErrNo() == RHU_GERR_EINVAL, "shim-fdmap-times-range", "(a nanosecond field of one second accepted)");
         rhu_pal_timespec neg[2] = {{1000, 5}, {2000, -1}};
-        SCHECK(SystemNative_UTimensat("/tmp/t.txt", neg) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-times-range", "(a negative nanosecond field accepted)");
+        SCHECK(SystemNative_UTimensat("/tmp/t.txt", neg) == -1 && SystemNative_GetErrNo() == RHU_GERR_EINVAL, "shim-fdmap-times-range", "(a negative nanosecond field accepted)");
         rhu_pal_timespec good[2] = {{1000, 999999999}, {2000, 0}};
         SCHECK(SystemNative_FUTimens(fd, good) == 0 && SystemNative_FStat(fd, &st) == 0 && st.ATimeNsec == 999999999 && st.MTime == 2000 && st.MTimeNsec == 0, "shim-fdmap-times-range", "(the edge values did not stick)");
         SCHECK(SystemNative_Close(fd) == 0 && SystemNative_Unlink("/tmp/t.txt") == 0, "shim-fdmap-times-range", "(close, unlink)");
@@ -1147,33 +1401,33 @@ static int fdmap_ladder(void)
         intptr_t fd = SystemNative_Open("/tmp/bounds.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
         SCHECK(fd >= 0 && SystemNative_Write(fd, "0123", 4) == 4, "shim-fdmap-bounds", "(open, write)");
 #if !defined(RHU_SHIMTEST_STORE_PROBE) || defined(RHU_SHIMTEST_STORE_PROBE_GROW)
-        SCHECK(SystemNative_FTruncate(fd, 2147483649ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a truncation past the maximum was accepted)");
+        SCHECK(SystemNative_FTruncate(fd, 2147483649ll) == -1 && SystemNative_GetErrNo() == RHU_GERR_EFBIG, "shim-fdmap-bounds", "(a truncation past the maximum was accepted)");
 #endif
-        SCHECK(SystemNative_PWrite(fd, "XYZW", 4, 4294967296ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a write at 4 GiB was not refused with EFBIG)");
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 4, 4294967296ll) == -1 && SystemNative_GetErrNo() == RHU_GERR_EFBIG, "shim-fdmap-bounds", "(a write at 4 GiB was not refused with EFBIG)");
         SCHECK(SystemNative_PRead(fd, buf, 4, 0) == 4 && memcmp(buf, "0123", 4) == 0, "shim-fdmap-bounds", "(a write at 4 GiB reached byte 0)");
-        SCHECK(SystemNative_PWrite(fd, "XYZW", 4, -4294967296ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-bounds", "(a negative write offset was not refused)");
-        SCHECK(SystemNative_PRead(fd, buf, 4, -1) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-bounds", "(a negative read offset was not refused)");
-        SCHECK(SystemNative_FTruncate(fd, -1) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-bounds", "(a negative truncation was accepted)");
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 4, -4294967296ll) == -1 && SystemNative_GetErrNo() == RHU_GERR_EINVAL, "shim-fdmap-bounds", "(a negative write offset was not refused)");
+        SCHECK(SystemNative_PRead(fd, buf, 4, -1) == -1 && SystemNative_GetErrNo() == RHU_GERR_EINVAL, "shim-fdmap-bounds", "(a negative read offset was not refused)");
+        SCHECK(SystemNative_FTruncate(fd, -1) == -1 && SystemNative_GetErrNo() == RHU_GERR_EINVAL, "shim-fdmap-bounds", "(a negative truncation was accepted)");
         SCHECK(SystemNative_LSeek(fd, 1048576, RHU_PAL_SEEK_SET) == 1048576, "shim-fdmap-bounds", "(a seek to the maximum was refused)");
-        SCHECK(SystemNative_LSeek(fd, 0xFFFFFFFFll, RHU_PAL_SEEK_SET) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-bounds", "(a seek past the maximum was accepted)");
-        SCHECK(SystemNative_Write(fd, "x", 1) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a write past the maximum was accepted)");
+        SCHECK(SystemNative_LSeek(fd, 0xFFFFFFFFll, RHU_PAL_SEEK_SET) == -1 && SystemNative_GetErrNo() == RHU_GERR_EINVAL, "shim-fdmap-bounds", "(a seek past the maximum was accepted)");
+        SCHECK(SystemNative_Write(fd, "x", 1) == -1 && SystemNative_GetErrNo() == RHU_GERR_EFBIG, "shim-fdmap-bounds", "(a write past the maximum was accepted)");
         SCHECK(SystemNative_FStat(fd, &st) == 0 && st.Size == 4, "shim-fdmap-bounds", "(the size moved on a refused write)");
         /* the offset's own bound before any sum: near the top of the range, at the maximum and one past it, whole and empty, direct and vectored */
         int64_t mt0 = st.MTime;
-        SCHECK(SystemNative_PWrite(fd, "XYZW", 4, 9223372036854775805ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a write near the top of the offset range was not refused with EFBIG)");
-        SCHECK(SystemNative_PWrite(fd, "XYZW", 0, 9223372036854775807ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(an empty write at the top of the offset range was accepted)");
-        SCHECK(SystemNative_PWrite(fd, "XYZW", 0, 1048577ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(an empty write one past the maximum was accepted)");
-        SCHECK(SystemNative_PWrite(fd, "XYZW", 1, 1048576ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a one-byte write at the maximum was accepted)");
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 4, 9223372036854775805ll) == -1 && SystemNative_GetErrNo() == RHU_GERR_EFBIG, "shim-fdmap-bounds", "(a write near the top of the offset range was not refused with EFBIG)");
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 0, 9223372036854775807ll) == -1 && SystemNative_GetErrNo() == RHU_GERR_EFBIG, "shim-fdmap-bounds", "(an empty write at the top of the offset range was accepted)");
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 0, 1048577ll) == -1 && SystemNative_GetErrNo() == RHU_GERR_EFBIG, "shim-fdmap-bounds", "(an empty write one past the maximum was accepted)");
+        SCHECK(SystemNative_PWrite(fd, "XYZW", 1, 1048576ll) == -1 && SystemNative_GetErrNo() == RHU_GERR_EFBIG, "shim-fdmap-bounds", "(a one-byte write at the maximum was accepted)");
         SCHECK(SystemNative_PWrite(fd, "XYZW", 0, 1048576ll) == 0, "shim-fdmap-bounds", "(an empty write at the maximum was refused)");
         rhu_pal_iovector top[1] = {{(uint8_t *)"XYZW", 4}};
-        SCHECK(SystemNative_PWriteV(fd, top, 1, 9223372036854775805ll) == -1 && SystemNative_GetErrNo() == RHU_PAL_EFBIG, "shim-fdmap-bounds", "(a vectored write near the top of the offset range was not refused with EFBIG)");
-        SCHECK(SystemNative_PWriteV(fd, top, 1, -1) == -1 && SystemNative_GetErrNo() == RHU_PAL_EINVAL, "shim-fdmap-bounds", "(a vectored write at a negative offset was not refused)");
+        SCHECK(SystemNative_PWriteV(fd, top, 1, 9223372036854775805ll) == -1 && SystemNative_GetErrNo() == RHU_GERR_EFBIG, "shim-fdmap-bounds", "(a vectored write near the top of the offset range was not refused with EFBIG)");
+        SCHECK(SystemNative_PWriteV(fd, top, 1, -1) == -1 && SystemNative_GetErrNo() == RHU_GERR_EINVAL, "shim-fdmap-bounds", "(a vectored write at a negative offset was not refused)");
         SCHECK(SystemNative_PRead(fd, buf, 4, 9223372036854775807ll) == 0, "shim-fdmap-bounds", "(a read at the top of the offset range did not answer end of file)");
         SCHECK(SystemNative_FStat(fd, &st) == 0 && st.Size == 4 && st.MTime == mt0, "shim-fdmap-bounds", "(the size or the modification time moved on a refused write near the top of the range)");
         {
             /* the last valid byte: admitted by the bound; the row's heap decides whether the object can grow to the maximum */
             int32_t last = SystemNative_PWrite(fd, "Z", 1, 1048575ll);
-            SCHECK(last == 1 || (last == -1 && SystemNative_GetErrNo() == RHU_PAL_ENOSPC), "shim-fdmap-bounds", "(the last valid byte was refused by the bound)");
+            SCHECK(last == 1 || (last == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOSPC), "shim-fdmap-bounds", "(the last valid byte was refused by the bound)");
             if (last == 1)
                 SCHECK(SystemNative_FStat(fd, &st) == 0 && st.Size == 1048576 && SystemNative_FTruncate(fd, 4) == 0, "shim-fdmap-bounds", "(the size did not follow the last valid byte, or the truncation back failed)");
             else
@@ -1422,7 +1676,7 @@ static int activation_ladder(void)
     uint32_t spin_lo = (uint32_t)(uintptr_t)rhu_act_spin_lo;
     uint32_t spin_hi = (uint32_t)(uintptr_t)rhu_act_spin_hi;
 
-    out("shimtest-activation: the activation costume on the kernel's delivery, and the signal rows");
+    out("shimtest-activation: the activation compatibility adapter on the kernel's delivery, and the signal rows");
 
     /* init: the realtime floor, the set operations, the mask bookkeeping */
     CHECK(rhu_shim_init() == 0, "shim-act-init", "(initialization refused)");
@@ -1595,7 +1849,7 @@ static int activation_ladder(void)
     SystemNative_SetDelayedSigChildConsoleConfigurationHandler(void_cb);
     pass("shim-act-pal", " (initialization reports success; the posix signal numbers map; enable and disable record; the continue and window signals take no action)");
 
-    out("SHIMTEST-ACTIVATION: ALL GOOD (the activation costume on the kernel's delivery; the signal rows recorded, none deliverable)");
+    out("SHIMTEST-ACTIVATION: ALL GOOD (the activation adapter on the kernel's delivery; the signal rows recorded, none deliverable)");
     return 0;
 }
 
@@ -1898,6 +2152,525 @@ static int32_t host_checks(int argc)
 
 #endif /* RHU_SHIMTEST_LADDER_HOST */
 
+#ifdef RHU_SHIMTEST_LADDER_BUSDEV
+
+/* --- the bus device nodes, from a native caller's side: the two device
+ * files through the C library's open, ioctl and close, on the emulator
+ * row's bus models (a sensor at 0x76 on the I2C bus; a memory behind the
+ * SPI bus's first select, whose identity request answers EF 40 18). The
+ * binding's numbers and record layouts, as the unit states them. --- */
+#define BD_O_RDWR 2
+#define BD_I2C_SLAVE 0x0703ul
+#define BD_I2C_FUNCS 0x0705ul
+#define BD_I2C_RDWR 0x0707ul
+#define BD_SPI_WR_MODE 0x40016b01ul
+#define BD_SPI_RD_MODE 0x80016b01ul
+#define BD_SPI_WR_BITS 0x40016b03ul
+#define BD_SPI_WR_SPEED 0x40046b04ul
+#define BD_SPI_RD_SPEED 0x80046b04ul
+#define BD_SPI_MESSAGE(n) (0x40006b00ul | (((unsigned long)(n) * 32ul) << 16))
+
+struct bd_i2c_msg {
+    uint16_t addr;
+    uint16_t flags;
+    uint16_t len;
+    uint8_t *buf;
+};
+struct bd_i2c_rdwr {
+    struct bd_i2c_msg *msgs;
+    uint32_t nmsgs;
+};
+struct bd_spi {
+    uint32_t tx_lo, tx_hi, rx_lo, rx_hi;
+    uint32_t len;
+    uint32_t speed_hz;
+    uint16_t delay_usecs;
+    uint8_t bits_per_word, cs_change, tx_nbits, rx_nbits;
+    uint16_t pad;
+};
+
+#define BD_ERRNO_IS(e) (*__errno_location() == (e))
+
+static char g_bd_name[40];
+
+/* "/dev/i2c-<bus>" or "/dev/spidev<bus>.<select>", from the row's own bus
+ * numbers. */
+static const char *bd_name(const char *stem, uint32_t bus, int with_select, uint32_t select)
+{
+    char *p = g_bd_name;
+    while (*stem != 0)
+        *p++ = *stem++;
+    for (int part = 0; part < (with_select ? 2 : 1); part++) {
+        uint32_t v = part == 0 ? bus : select;
+        char d[10];
+        int n = 0;
+        if (part == 1)
+            *p++ = '.';
+        do {
+            d[n++] = (char)('0' + v % 10u);
+            v /= 10u;
+        } while (v != 0);
+        while (n > 0)
+            *p++ = d[--n];
+    }
+    *p = 0;
+    return g_bd_name;
+}
+
+/* The request running at a close: one long transfer on a descriptor. */
+static uint8_t g_bd_long_tx[65535];
+static volatile int g_bd_fd;
+static volatile int g_bd_in;
+static volatile int g_bd_rc;
+static volatile int g_bd_done;
+
+static void *bd_long_transfer(void *arg)
+{
+    (void)arg;
+    struct bd_spi t;
+    memset(&t, 0, sizeof t);
+    t.tx_lo = (uint32_t)(uintptr_t)g_bd_long_tx;
+    t.len = sizeof g_bd_long_tx;
+    /* The block's slowest rate over the longest record: 8.4 s of the
+     * kernel's clock on the wire, so the request is still running at the
+     * ladder's close by seconds. */
+    t.speed_hz = 62500u;
+    __atomic_store_n(&g_bd_in, 1, __ATOMIC_RELEASE);
+    g_bd_rc = ioctl(g_bd_fd, BD_SPI_MESSAGE(1), &t);
+    __atomic_store_n(&g_bd_done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static int busdev_ladder(void)
+{
+    out("shimtest-busdev: the bus device nodes from a native caller's side, on the row's bus models");
+    CHECK(rhu_shim_init() == 0, "shim-busdev-init", "(initialization refused)");
+    int32_t i2c_bus = rhu_i2c_bus(0);
+    int32_t spi_bus = rhu_spi_bus(0);
+    CHECK(i2c_bus >= 0 && spi_bus >= 0, "shim-busdev-init", "(the row states no I2C or no SPI bus)");
+    pass("shim-busdev-init", " (the row's buses by their own numbers)");
+
+    /* The names. */
+    CHECK(open("/dev/i2c-", BD_O_RDWR) == -1 && BD_ERRNO_IS(RHU_GERR_ENOENT), "shim-busdev-names", "(a name with no number opened)");
+    CHECK(open("/dev/i2c-01", BD_O_RDWR) == -1 && BD_ERRNO_IS(RHU_GERR_ENOENT), "shim-busdev-names", "(a number with a leading zero opened)");
+    CHECK(open("/dev/spidev2", BD_O_RDWR) == -1 && BD_ERRNO_IS(RHU_GERR_ENOENT), "shim-busdev-names", "(an SPI name with no select opened)");
+    CHECK(open(bd_name("/dev/spidev", (uint32_t)spi_bus, 1, 4294967295u), BD_O_RDWR) == -1 && BD_ERRNO_IS(RHU_GERR_ENOENT), "shim-busdev-names",
+          "(the no-select value opened as a select's name)");
+    CHECK(open("/dev/spidev2.4294967296", BD_O_RDWR) == -1 && BD_ERRNO_IS(RHU_GERR_ENOENT), "shim-busdev-names", "(a select past 32 bits opened)");
+    CHECK(open("/dev/i2c-9", BD_O_RDWR) == -1 && BD_ERRNO_IS(RHU_GERR_ENOENT), "shim-busdev-names", "(a bus the row lacks opened)");
+    pass("shim-busdev-names", " (malformed names, the no-select value as a select's name and a bus the row lacks refused ENOENT)");
+
+    /* The I2C node. */
+    int fi = open(bd_name("/dev/i2c-", (uint32_t)i2c_bus, 0, 0), BD_O_RDWR);
+    CHECK(fi >= RHU_SHIM_FD_DEVICE_LO, "shim-busdev-funcs", "(the I2C node did not open in the device band)");
+    {
+        uint32_t word[2] = { 0xAAAAAAAAu, 0xC0FFEE00u };
+        CHECK(ioctl(fi, BD_I2C_FUNCS, &word[0]) == 0 && word[0] == 1u, "shim-busdev-funcs", "(the functionality word is not plain combined transactions)");
+        CHECK(word[1] == 0xC0FFEE00u, "shim-busdev-funcs", "(the functionality request stored past its four-byte output)");
+        CHECK(ioctl(fi, BD_I2C_FUNCS, NULL) == -1 && BD_ERRNO_IS(RHU_GERR_EFAULT), "shim-busdev-funcs", "(a NULL output was not refused EFAULT)");
+        pass("shim-busdev-funcs", " (one four-byte word, the word after it untouched; NULL refused EFAULT)");
+    }
+    {
+        uint8_t reg = 0xD0;
+        uint8_t id = 0;
+        struct bd_i2c_msg two[2] = { { 0x76, 0, 1, &reg }, { 0x76, 1, 1, &id } };
+        struct bd_i2c_rdwr set = { two, 2 };
+        CHECK(ioctl(fi, BD_I2C_RDWR, &set) == 2 && id == 0x60, "shim-busdev-i2c", "(the sensor's identity did not read 0x60 through one combined transaction)");
+        /* The same header at an odd address: records are copied, so none
+         * need be aligned. */
+        uint8_t odd[1 + sizeof set];
+        memcpy(&odd[1], &set, sizeof set);
+        id = 0;
+        CHECK(ioctl(fi, BD_I2C_RDWR, &odd[1]) == 2 && id == 0x60, "shim-busdev-i2c", "(a transaction header at an odd address was not served)");
+        set.nmsgs = 0;
+        CHECK(ioctl(fi, BD_I2C_RDWR, &set) == -1 && BD_ERRNO_IS(RHU_GERR_EINVAL), "shim-busdev-i2c", "(a transaction of no messages was not refused EINVAL)");
+        set.nmsgs = 9;
+        CHECK(ioctl(fi, BD_I2C_RDWR, &set) == -1 && BD_ERRNO_IS(RHU_GERR_EINVAL), "shim-busdev-i2c", "(nine messages were not refused EINVAL)");
+        set.nmsgs = 2;
+        set.msgs = NULL;
+        CHECK(ioctl(fi, BD_I2C_RDWR, &set) == -1 && BD_ERRNO_IS(RHU_GERR_EINVAL), "shim-busdev-i2c", "(a NULL message list was not refused EINVAL)");
+        set.msgs = two;
+        two[1].buf = NULL;
+        CHECK(ioctl(fi, BD_I2C_RDWR, &set) == -1 && BD_ERRNO_IS(RHU_GERR_EFAULT), "shim-busdev-i2c", "(a NULL buffer with a length was not refused EFAULT)");
+        two[1].buf = &id;
+        two[1].flags = 0x0011;
+        CHECK(ioctl(fi, BD_I2C_RDWR, &set) == -1 && BD_ERRNO_IS(RHU_GERR_EINVAL), "shim-busdev-i2c", "(a flag other than the read flag was not refused EINVAL)");
+        two[1].flags = 1;
+        two[1].len = 256;
+        CHECK(ioctl(fi, BD_I2C_RDWR, &set) == -1 && BD_ERRNO_IS(RHU_GERR_EINVAL), "shim-busdev-i2c", "(a message of 256 bytes was not refused EINVAL)");
+        CHECK(ioctl(fi, BD_I2C_SLAVE, NULL) == -1 && BD_ERRNO_IS(RHU_GERR_ENOTTY), "shim-busdev-i2c", "(a request not served did not answer ENOTTY with a zero argument)");
+        CHECK(ioctl(fi, BD_I2C_RDWR, NULL) == -1 && BD_ERRNO_IS(RHU_GERR_EFAULT), "shim-busdev-i2c", "(a NULL transaction was not refused EFAULT)");
+        pass("shim-busdev-i2c", " (the identity through one combined transaction, a header at an odd address served, the limits and the nested NULLs by their errnos, a request not served ENOTTY whatever its argument)");
+    }
+    CHECK(close(fi) == 0 && close(fi) == -1 && BD_ERRNO_IS(RHU_GERR_EBADF), "shim-busdev-i2c", "(the close, or a second close, answered wrong)");
+
+    /* The SPI node's settings. */
+    int fs = open(bd_name("/dev/spidev", (uint32_t)spi_bus, 1, 0), BD_O_RDWR);
+    CHECK(fs >= RHU_SHIM_FD_DEVICE_LO, "shim-busdev-spi-settings", "(the SPI node did not open in the device band)");
+    {
+        uint8_t m = 0x43, back = 0, bits = 8;
+        uint32_t hz = 1000000u, hz_back = 0, zero = 0;
+        CHECK(ioctl(fs, BD_SPI_WR_MODE, &m) == 0 && ioctl(fs, BD_SPI_RD_MODE, &back) == 0 && back == 0x43, "shim-busdev-spi-settings",
+              "(mode 3 with the no-select bit did not read back as one byte)");
+        m = 0x04;
+        CHECK(ioctl(fs, BD_SPI_WR_MODE, &m) == -1 && BD_ERRNO_IS(RHU_GERR_EINVAL), "shim-busdev-spi-settings", "(an active-high select was not refused EINVAL)");
+        m = 0x08;
+        CHECK(ioctl(fs, BD_SPI_WR_MODE, &m) == -1 && BD_ERRNO_IS(RHU_GERR_EINVAL), "shim-busdev-spi-settings", "(least-significant-bit-first was not refused EINVAL)");
+        CHECK(ioctl(fs, BD_SPI_RD_MODE, &back) == 0 && back == 0x43, "shim-busdev-spi-settings", "(a refused mode changed the node's mode)");
+        CHECK(ioctl(fs, BD_SPI_WR_BITS, &bits) == 0, "shim-busdev-spi-settings", "(eight-bit words refused)");
+        bits = 16;
+        CHECK(ioctl(fs, BD_SPI_WR_BITS, &bits) == -1 && BD_ERRNO_IS(RHU_GERR_EINVAL), "shim-busdev-spi-settings", "(sixteen-bit words were not refused EINVAL)");
+        CHECK(ioctl(fs, BD_SPI_WR_SPEED, &zero) == -1 && BD_ERRNO_IS(RHU_GERR_EINVAL), "shim-busdev-spi-settings", "(a rate of 0 Hz was not refused EINVAL)");
+        CHECK(ioctl(fs, BD_SPI_WR_SPEED, &hz) == 0 && ioctl(fs, BD_SPI_RD_SPEED, &hz_back) == 0 && hz_back == 1000000u, "shim-busdev-spi-settings",
+              "(the rate did not read back)");
+        CHECK(ioctl(fs, BD_SPI_WR_MODE, NULL) == -1 && BD_ERRNO_IS(RHU_GERR_EFAULT), "shim-busdev-spi-settings", "(a NULL setting was not refused EFAULT)");
+        pass("shim-busdev-spi-settings", " (the mode and the no-select bit one byte, the refused bits and sizes EINVAL with the node unchanged, the rate read back, NULL refused EFAULT)");
+    }
+
+    /* The transfers. */
+    {
+        static const uint8_t ask[4] = { 0x9F, 0x00, 0x00, 0x00 };
+        uint8_t got[4] = { 0, 0, 0, 0 };
+        uint8_t m = 0x43;
+        struct bd_spi t;
+        memset(&t, 0, sizeof t);
+        t.tx_lo = (uint32_t)(uintptr_t)ask;
+        t.rx_lo = (uint32_t)(uintptr_t)got;
+        t.len = 4;
+        /* The node is at mode 3 with the no-select bit: no select asserted,
+         * the memory answers ones. */
+        CHECK(ioctl(fs, BD_SPI_MESSAGE(1), &t) == 4 && got[0] == 0xFF && got[1] == 0xFF && got[2] == 0xFF && got[3] == 0xFF, "shim-busdev-spi-transfer",
+              "(a transfer under the no-select mode did not answer ones)");
+        m = 0x00;
+        CHECK(ioctl(fs, BD_SPI_WR_MODE, &m) == 0, "shim-busdev-spi-transfer", "(mode 0 refused)");
+        CHECK(ioctl(fs, BD_SPI_MESSAGE(1), &t) == 4 && got[0] == 0xFF && got[1] == 0xEF && got[2] == 0x40 && got[3] == 0x18, "shim-busdev-spi-transfer",
+              "(the memory's identity did not read FF EF 40 18 under select 0)");
+        CHECK(ioctl(fs, BD_SPI_MESSAGE(0), NULL) == 0, "shim-busdev-spi-transfer", "(an empty message did not answer 0)");
+        CHECK(ioctl(fs, BD_SPI_MESSAGE(2), &t) == -1 && BD_ERRNO_IS(RHU_GERR_EINVAL), "shim-busdev-spi-transfer", "(two records in one request were not refused EINVAL)");
+        CHECK(ioctl(fs, BD_SPI_MESSAGE(1), NULL) == -1 && BD_ERRNO_IS(RHU_GERR_EFAULT), "shim-busdev-spi-transfer", "(a NULL record was not refused EFAULT)");
+        t.tx_hi = 1;
+        CHECK(ioctl(fs, BD_SPI_MESSAGE(1), &t) == -1 && BD_ERRNO_IS(RHU_GERR_EINVAL), "shim-busdev-spi-transfer", "(a buffer address above 32 bits was not refused EINVAL)");
+        pass("shim-busdev-spi-transfer", " (ones with no select asserted, the memory's identity under select 0, an empty message 0, the refusals by their errnos)");
+    }
+    {
+        /* A receive buffer over its own record's length word: the echoed
+         * bytes land on the caller's record, and the answer is still the
+         * count asked. */
+        static const uint8_t echo[4] = { 0x00, 0x11, 0x22, 0x33 };
+        struct bd_spi t;
+        memset(&t, 0, sizeof t);
+        t.tx_lo = (uint32_t)(uintptr_t)echo;
+        t.rx_lo = (uint32_t)(uintptr_t)&t.len;
+        t.len = 4;
+        CHECK(ioctl(fs, BD_SPI_MESSAGE(1), &t) == 4, "shim-busdev-spi-overlay", "(a receive buffer over the record's length word changed the count returned)");
+        CHECK(t.len == 0x332211FFu, "shim-busdev-spi-overlay", "(the echoed bytes did not land on the record: the case proved nothing)");
+        pass("shim-busdev-spi-overlay", " (the record read once: the count asked, whatever the receive buffer overwrote)");
+    }
+
+    /* A close under a running request. */
+    {
+        uint32_t tid = 0;
+        uint8_t m = 0;
+        g_bd_fd = fs;
+        CHECK(spawn_below(&tid, bd_long_transfer, NULL) == 0, "shim-busdev-close-under-request", "(the worker did not spawn)");
+        /* The worker runs below this thread: it enters its request while
+         * this thread sleeps (a thread below is never reached by a yield),
+         * and the verdict on the reopen waits for the worker's end, so the
+         * worker's line on the wire comes before the verdict's on every
+         * run. */
+        while (__atomic_load_n(&g_bd_in, __ATOMIC_ACQUIRE) == 0)
+            msleep(1);
+        msleep(20);
+        CHECK(__atomic_load_n(&g_bd_done, __ATOMIC_ACQUIRE) == 0, "shim-busdev-close-under-request", "(the long transfer ended before the close: the case proved nothing)");
+        CHECK(close(fs) == 0, "shim-busdev-close-under-request", "(the close under a running request did not answer 0)");
+        CHECK(ioctl(fs, BD_SPI_RD_MODE, &m) == -1 && BD_ERRNO_IS(RHU_GERR_EBADF), "shim-busdev-close-under-request", "(a closed descriptor still served a request)");
+        int f1 = open(bd_name("/dev/spidev", (uint32_t)spi_bus, 1, 1), BD_O_RDWR);
+        int reopen_apart = f1 >= RHU_SHIM_FD_DEVICE_LO && f1 != fs;
+        wait_done(&g_bd_done, 1);
+        CHECK(reopen_apart, "shim-busdev-close-under-request", "(the reopen received the entry a request still ran on)");
+        CHECK(g_bd_rc == (int)sizeof g_bd_long_tx, "shim-busdev-close-under-request", "(the request running at the close did not complete with its count)");
+        int f2 = open(bd_name("/dev/spidev", (uint32_t)spi_bus, 1, 0), BD_O_RDWR);
+        CHECK(f2 == fs, "shim-busdev-close-under-request", "(the entry was not given back when its last request ended)");
+        CHECK(close(f1) == 0 && close(f2) == 0, "shim-busdev-close-under-request", "(the closes refused)");
+        pass("shim-busdev-close-under-request", " (the close answers at once and the descriptor is closed; the request completes with its count; the entry goes to no one until then, and back after)");
+    }
+
+    out("SHIMTEST-BUSDEV: ALL GOOD (the bus device nodes from a native caller's side)");
+    return 0;
+}
+
+#endif /* RHU_SHIMTEST_LADDER_BUSDEV */
+
+#ifdef RHU_SHIMTEST_LADDER_GPIOD
+
+/* --- the GPIO unit's library surface, from a native caller's side, on the
+ * emulator row's virtual lines: line 2 an output wired to line 3, line 0
+ * free. The binding's signatures and values, as the unit states them. --- */
+struct gpiod_chip;
+struct gpiod_line;
+struct gpiod_chip_iter;
+struct gd_timespec {
+    int32_t sec;
+    int32_t nsec;
+};
+struct gd_event {
+    struct gd_timespec ts;
+    int32_t event_type;
+};
+struct gpiod_chip *gpiod_chip_open_by_number(int number);
+void gpiod_chip_close(struct gpiod_chip *chip);
+int gpiod_chip_num_lines(struct gpiod_chip *chip);
+struct gpiod_chip_iter *gpiod_chip_iter_new(void);
+struct gpiod_chip *gpiod_chip_iter_next_noclose(struct gpiod_chip_iter *iter);
+void gpiod_chip_iter_free_noclose(struct gpiod_chip_iter *iter);
+struct gpiod_line *gpiod_chip_get_line(struct gpiod_chip *chip, int offset);
+int gpiod_line_request_input(struct gpiod_line *line, const char *consumer);
+int gpiod_line_request_input_flags(struct gpiod_line *line, const char *consumer, int flags);
+int gpiod_line_request_output(struct gpiod_line *line, const char *consumer, int default_val);
+int gpiod_line_request_both_edges_events(struct gpiod_line *line, const char *consumer);
+void gpiod_line_release(struct gpiod_line *line);
+int gpiod_line_set_value(struct gpiod_line *line, int value);
+int gpiod_line_get_value(struct gpiod_line *line);
+int gpiod_line_bias(struct gpiod_line *line);
+int gpiod_line_event_wait(struct gpiod_line *line, const struct gd_timespec *timeout);
+int gpiod_line_event_read(struct gpiod_line *line, struct gd_event *event);
+
+#define GD_FLAG_PULL_DOWN (1 << 4)
+#define GD_FLAG_PULL_UP (1 << 5)
+#define GD_BIAS_AS_IS 1
+#define GD_BIAS_PULL_UP 3
+#define GD_RISING 1
+#define GD_FALLING 2
+#define GD_LOOP_OUT 2
+#define GD_LOOP_IN 3
+#define GD_ERRNO_IS(e) (*__errno_location() == (e))
+
+/* A second thread's acts, each started by a flag and ended by a flag. */
+enum { GD_ACT_NONE = 0, GD_ACT_LATE_EDGE = 1, GD_ACT_SIX_EDGES = 2, GD_ACT_DRIVE_LOW = 3, GD_ACT_OPEN = 4 };
+static volatile int g_gd_act;
+static volatile int g_gd_done;
+static volatile int g_gd_ready;
+static struct gpiod_chip *volatile g_gd_chip;
+
+static void *gd_second(void *arg)
+{
+    (void)arg;
+    /* In the loop from here on: the ladder waits for this before its first
+     * two-thread case, so the second thread is never still unstarted. */
+    __atomic_store_n(&g_gd_ready, 1, __ATOMIC_RELEASE);
+    for (;;) {
+        int act = __atomic_load_n(&g_gd_act, __ATOMIC_ACQUIRE);
+        if (act == GD_ACT_NONE) {
+            sched_yield();
+            continue;
+        }
+        if (act == GD_ACT_LATE_EDGE) {
+            msleep(50);
+            rhu_gpio_write(GD_LOOP_OUT, 1);
+        } else if (act == GD_ACT_SIX_EDGES) {
+            for (uint32_t i = 0; i < 6; i++) {
+                rhu_gpio_write(GD_LOOP_OUT, (i & 1u) == 0 ? 1u : 0u);
+                sched_yield();
+            }
+        } else if (act == GD_ACT_DRIVE_LOW) {
+            rhu_gpio_write(GD_LOOP_OUT, 0);
+        } else {
+            g_gd_chip = gpiod_chip_open_by_number(0);
+        }
+        __atomic_store_n(&g_gd_act, GD_ACT_NONE, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_gd_done, 1, __ATOMIC_RELEASE);
+    }
+    return NULL;
+}
+
+static void gd_start(int act)
+{
+    __atomic_store_n(&g_gd_done, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_gd_act, act, __ATOMIC_RELEASE);
+}
+
+static void gd_join(void)
+{
+    wait_done(&g_gd_done, 1);
+}
+
+/* Poll, then read: the unit's read waits for an edge. */
+static int gd_drain(struct gpiod_line *in)
+{
+    static const struct gd_timespec zero = { 0, 0 };
+    struct gd_event ev;
+    int n = 0;
+    while (gpiod_line_event_wait(in, &zero) == 1 && gpiod_line_event_read(in, &ev) == 0)
+        n++;
+    return n;
+}
+
+static int gpiod_ladder(void)
+{
+    out("shimtest-gpiod: the GPIO library surface from a native caller's side, on the row's virtual lines");
+    CHECK(rhu_shim_init() == 0, "shim-gpiod-init", "(initialization refused)");
+    uint32_t tid = 0;
+    CHECK(spawn_below(&tid, gd_second, NULL) == 0, "shim-gpiod-init", "(the second thread did not spawn)");
+    wait_done(&g_gd_ready, 1);
+    pass("shim-gpiod-init", "");
+
+    /* Two opens in turn, then two opens at once. The opens in turn come
+     * first: a close that gave nothing back would otherwise be met at the
+     * two-thread case before its own check. */
+    {
+        struct gpiod_chip *a = gpiod_chip_open_by_number(0);
+        struct gpiod_chip *b = gpiod_chip_open_by_number(0);
+        struct gpiod_line *la = gpiod_chip_get_line(a, 0);
+        struct gpiod_line *lb = gpiod_chip_get_line(b, 0);
+        CHECK(a != NULL && b != NULL && a != b && la != NULL && lb != NULL && la != lb, "shim-gpiod-opens", "(two opens share one chip or one line object)");
+        CHECK(gpiod_line_request_output(la, "first", 0) == 0, "shim-gpiod-opens", "(the request through the first chip refused)");
+        CHECK(gpiod_line_request_output(lb, "second", 0) == -1 && GD_ERRNO_IS(RHU_GERR_EBUSY), "shim-gpiod-opens", "(a line held through one chip was granted through another)");
+        gpiod_chip_close(a);
+        CHECK(gpiod_line_request_output(lb, "second", 0) == 0, "shim-gpiod-opens", "(a closed chip's line is still held)");
+        gpiod_line_release(lb);
+        gpiod_chip_close(b);
+        pass("shim-gpiod-opens", " (each open its own chip and lines; one holder per line across them; a close gives back its own chip's lines)");
+    }
+    {
+        /* One pair of opens, one on each thread. Whether the two overlap is
+         * the scheduler's business here; the control built with the list
+         * unlocked holds its window open until they do. */
+        gd_start(GD_ACT_OPEN);
+        struct gpiod_chip *mine = gpiod_chip_open_by_number(0);
+        gd_join();
+        struct gpiod_chip *theirs = g_gd_chip;
+        CHECK(mine != NULL && theirs != NULL && mine != theirs, "shim-gpiod-open-race", "(two opens at once did not answer two chip objects)");
+        CHECK(gpiod_chip_num_lines(mine) == rhu_gpio_count() && gpiod_chip_num_lines(theirs) == rhu_gpio_count(), "shim-gpiod-open-race",
+              "(a chip opened while another thread opened is not a live chip)");
+        gpiod_chip_close(theirs);
+        gpiod_chip_close(mine);
+        CHECK(gpiod_chip_num_lines(mine) == 0 && gpiod_chip_get_line(mine, 0) == NULL && GD_ERRNO_IS(RHU_GERR_EINVAL), "shim-gpiod-open-race",
+              "(a closed chip's handle was followed)");
+        pass("shim-gpiod-open-race", " (two opens at once are two live chips; a closed chip's handle is refused, never followed)");
+    }
+    {
+        struct gpiod_chip_iter *i1 = gpiod_chip_iter_new();
+        struct gpiod_chip *c1 = i1 != NULL ? gpiod_chip_iter_next_noclose(i1) : NULL;
+        struct gpiod_chip_iter *i2 = gpiod_chip_iter_new();
+        CHECK(c1 != NULL && i2 != NULL && i1 != i2, "shim-gpiod-iterators", "(two iterators are one object, or yielded no chip)");
+        CHECK(gpiod_chip_iter_next_noclose(i1) == NULL, "shim-gpiod-iterators", "(an iterator at its end yielded again after another was made)");
+        struct gpiod_chip *c2 = gpiod_chip_iter_next_noclose(i2);
+        CHECK(c2 != NULL && c2 != c1 && gpiod_chip_iter_next_noclose(i2) == NULL, "shim-gpiod-iterators", "(the second iterator did not yield its own chip once)");
+        gpiod_chip_iter_free_noclose(i1);
+        gpiod_chip_iter_free_noclose(i2);
+        CHECK(gpiod_chip_num_lines(c1) == rhu_gpio_count(), "shim-gpiod-iterators", "(a yielded chip did not outlive its iterator)");
+        gpiod_chip_close(c1);
+        gpiod_chip_close(c2);
+        pass("shim-gpiod-iterators", " (each iterator its own progress and chip; a yielded chip is the caller's)");
+    }
+
+    struct gpiod_chip *chip = gpiod_chip_open_by_number(0);
+    struct gpiod_line *l0 = gpiod_chip_get_line(chip, 0);
+    struct gpiod_line *lo = gpiod_chip_get_line(chip, GD_LOOP_OUT);
+    struct gpiod_line *li = gpiod_chip_get_line(chip, GD_LOOP_IN);
+    CHECK(chip != NULL && l0 != NULL && lo != NULL && li != NULL, "shim-gpiod-bias", "(the chip or its lines did not open)");
+
+    /* The bias: the flag's reading, "as is" otherwise, the pad as it is. */
+    CHECK(gpiod_line_request_input_flags(l0, "t", GD_FLAG_PULL_UP | GD_FLAG_PULL_DOWN) == -1 && GD_ERRNO_IS(RHU_GERR_EINVAL), "shim-gpiod-bias",
+          "(pull-up and pull-down together were accepted)");
+    CHECK(gpiod_line_request_input_flags(l0, "t", GD_FLAG_PULL_UP) == 0 && gpiod_line_bias(l0) == GD_BIAS_PULL_UP && gpiod_line_get_value(l0) == 1, "shim-gpiod-bias",
+          "(a pull-up input does not read pull-up with the pad high)");
+    gpiod_line_release(l0);
+    CHECK(gpiod_line_request_input(l0, "t") == 0 && gpiod_line_bias(l0) == GD_BIAS_AS_IS && gpiod_line_get_value(l0) == 1, "shim-gpiod-bias",
+          "(a flagless input does not read \"as is\" with the pad's pull left as it was)");
+    gpiod_line_release(l0);
+    CHECK(gpiod_line_request_output(l0, "t", 0) == 0 && gpiod_line_bias(l0) == GD_BIAS_AS_IS, "shim-gpiod-bias", "(a plain output reads an earlier request's bias)");
+    gpiod_line_release(l0);
+    CHECK(gpiod_line_request_input(l0, "t") == 0 && gpiod_line_bias(l0) == GD_BIAS_AS_IS && gpiod_line_get_value(l0) == 0, "shim-gpiod-bias",
+          "(a flagless input after an output does not find the pad without a pull)");
+    gpiod_line_release(l0);
+    pass("shim-gpiod-bias", " (two bias flags refused EINVAL; the reading the living request's flag, \"as is\" otherwise; a flagless request leaves the pad's pull as it is)");
+
+    /* The values. */
+    CHECK(gpiod_line_set_value(lo, 1) == -1 && GD_ERRNO_IS(RHU_GERR_EPERM) && gpiod_line_get_value(lo) == -1 && GD_ERRNO_IS(RHU_GERR_EPERM), "shim-gpiod-values",
+          "(a line not held was written or read)");
+    CHECK(gpiod_line_request_output(lo, "t", 0) == 0 && gpiod_line_request_input(li, "t") == 0, "shim-gpiod-values", "(the loop's two lines refused)");
+    CHECK(gpiod_line_set_value(li, 1) == -1 && GD_ERRNO_IS(RHU_GERR_EPERM), "shim-gpiod-values", "(a write on an input was not refused EPERM)");
+    CHECK(gpiod_line_set_value(lo, 1) == 0 && gpiod_line_get_value(li) == 1 && gpiod_line_set_value(lo, 0) == 0 && gpiod_line_get_value(li) == 0, "shim-gpiod-values",
+          "(the loop's input does not follow its output)");
+    gpiod_line_release(li);
+    pass("shim-gpiod-values", " (EPERM on a line not held and on an input's write; the loop's input follows its output)");
+
+    /* The events. */
+    {
+        static const struct gd_timespec second = { 1, 0 };
+        static const struct gd_timespec zero = { 0, 0 };
+        struct gd_event ev;
+        CHECK(gpiod_line_event_wait(li, &zero) == -1 && GD_ERRNO_IS(RHU_GERR_EPERM), "shim-gpiod-events", "(an event wait on a line with no event request was not refused EPERM)");
+        CHECK(gpiod_line_request_both_edges_events(li, "t") == 0, "shim-gpiod-events", "(the both-edges request refused)");
+        CHECK(gpiod_line_event_wait(li, &zero) == 0, "shim-gpiod-events", "(a wait with nothing counted did not time out)");
+        gpiod_line_set_value(lo, 1);
+        CHECK(gpiod_line_event_wait(li, &second) == 1 && gpiod_line_event_read(li, &ev) == 0 && ev.event_type == GD_RISING, "shim-gpiod-events", "(a rising edge was not delivered as rising)");
+        gpiod_line_set_value(lo, 0);
+        CHECK(gpiod_line_event_wait(li, &second) == 1 && gpiod_line_event_read(li, &ev) == 0 && ev.event_type == GD_FALLING, "shim-gpiod-events", "(a falling edge was not delivered as falling)");
+        gpiod_line_set_value(lo, 1);
+        gpiod_line_set_value(lo, 0);
+        CHECK(gpiod_line_event_read(li, &ev) == 0 && ev.event_type == GD_RISING && gpiod_line_event_read(li, &ev) == 0 && ev.event_type == GD_FALLING && gd_drain(li) == 0,
+              "shim-gpiod-events", "(a burst of two edges was not delivered as rising then falling, once each)");
+        pass("shim-gpiod-events", " (EPERM without an event request; each edge delivered once with its kind; a burst alternates backwards from the last)");
+    }
+    {
+        static const struct gd_timespec neg_ns = { 0, -1 };
+        static const struct gd_timespec neg_s = { -1, 0 };
+        static const struct gd_timespec big_ns = { 0, 1000000000 };
+        CHECK(gpiod_line_event_wait(li, &neg_ns) == -1 && GD_ERRNO_IS(RHU_GERR_EINVAL) && gpiod_line_event_wait(li, &neg_s) == -1 && GD_ERRNO_IS(RHU_GERR_EINVAL)
+                  && gpiod_line_event_wait(li, &big_ns) == -1 && GD_ERRNO_IS(RHU_GERR_EINVAL),
+              "shim-gpiod-timeouts", "(a timespec field outside its range became a deadline)");
+        gd_start(GD_ACT_LATE_EDGE);
+        CHECK(gpiod_line_event_wait(li, NULL) == 1, "shim-gpiod-timeouts", "(a wait with no timespec did not wait for the edge)");
+        gd_join();
+        CHECK(gd_drain(li) == 1, "shim-gpiod-timeouts", "(the late edge was not delivered once)");
+        rhu_gpio_write(GD_LOOP_OUT, 0);
+        CHECK(gd_drain(li) == 1, "shim-gpiod-timeouts", "(the edge back was not delivered once)");
+        pass("shim-gpiod-timeouts", " (a field outside its range refused EINVAL; no timespec waits without limit)");
+    }
+
+    /* The arm: every edge the kernel counts from the arm's first instant
+     * is delivered. The kernel's word for the line outlives a release, so
+     * its count is read here across one. */
+    {
+        const volatile uint32_t *w = (const volatile uint32_t *)rhu_gpio_event_word(GD_LOOP_IN);
+        CHECK(w != NULL, "shim-gpiod-arm", "(the kernel states no event word for the claimed line)");
+        gpiod_line_release(li);
+        uint32_t before = *w;
+        gd_start(GD_ACT_SIX_EDGES);
+        CHECK(gpiod_line_request_both_edges_events(li, "t") == 0, "shim-gpiod-arm", "(the both-edges request refused)");
+        gd_join();
+        uint32_t counted = *w - before;
+        uint32_t delivered = (uint32_t)gd_drain(li);
+        CHECK(counted >= 1u, "shim-gpiod-arm", "(no edge landed after the arm: the case proved nothing)");
+        CHECK(delivered == counted, "shim-gpiod-arm", "(an edge the kernel counted after the arm was never delivered)");
+        pass("shim-gpiod-arm", " (every edge counted from the arm on is delivered)");
+    }
+
+    /* The kind: the first event after a known rising edge is rising,
+     * whatever a second thread does to the line meanwhile. */
+    {
+        struct gd_event ev;
+        rhu_gpio_write(GD_LOOP_OUT, 0);
+        gd_drain(li);
+        rhu_gpio_write(GD_LOOP_OUT, 1);
+        gd_start(GD_ACT_DRIVE_LOW);
+        CHECK(gpiod_line_event_read(li, &ev) == 0 && ev.event_type == GD_RISING, "shim-gpiod-kind", "(the first event after a rising edge was labelled falling)");
+        gd_join();
+        gd_drain(li);
+        pass("shim-gpiod-kind", " (the count and the level read together)");
+    }
+
+    gpiod_line_release(li);
+    gpiod_line_release(lo);
+    gpiod_chip_close(chip);
+    out("SHIMTEST-GPIOD: ALL GOOD (the GPIO library surface from a native caller's side)");
+    return 0;
+}
+
+#endif /* RHU_SHIMTEST_LADDER_GPIOD */
+
 /* The managed entry, spelled as the runtime's own bootstrapper declares
  * it: the kernel's default entry calls it in every ladder but the host's,
  * where the host does. */
@@ -1916,6 +2689,12 @@ int __managed__Main(int argc, char *argv[])
 #elif defined(RHU_SHIMTEST_LADDER_TLS)
     (void)argc;
     return tls_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_BUSDEV)
+    (void)argc;
+    return busdev_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_GPIOD)
+    (void)argc;
+    return gpiod_ladder();
 #else
     return host_checks(argc);
 #endif

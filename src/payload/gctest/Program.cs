@@ -93,7 +93,7 @@ unsafe class Program
         PrintDec(GC.CollectionCount());
         Print(" free=");
         PrintDec(GC.FreeBytes());
-        Print(failures == 0 ? " \u2014 ALL GOOD\n" : " \u2014 BROKEN\n");
+        Print(failures == 0 ? " - ALL GOOD\n" : " - BROKEN\n");
         return failures;
     }
 

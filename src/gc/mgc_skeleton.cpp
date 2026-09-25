@@ -903,18 +903,32 @@ public:
 #endif
     }
 
+    /* No region is provided: the collector keeps no allocation budget and
+     * no suppression state, so an entry is refused with the status the
+     * managed side reads as "could not enter" (TryStartNoGCRegion answers
+     * false), never claimed; an end answers that no region is in progress,
+     * the truth at every moment. */
     int StartNoGCRegion(uint64_t totalSize, bool lohSizeKnown, uint64_t lohSize,
                         bool disallowFullBlockingGC) override
     {
         (void)lohSizeKnown; (void)lohSize; (void)disallowFullBlockingGC;
-        SKCALL("IGCHeap::StartNoGCRegion(size=%lu) -> success (vacuous: no GC exists)",
+#ifdef MGC_BREAK_NOGC_CLAIM
+        /* The negative control's knob: the entry claims success with
+         * nothing entered, and says so. */
+        SKLOG("BREAK_NOGC_CLAIM: the entry claims success with nothing entered (the negative control's knob)");
+        SKCALL("IGCHeap::StartNoGCRegion(size=%lu) -> success (claimed; nothing entered)",
                (unsigned long)totalSize);
         return (int)start_no_gc_success;
+#else
+        SKCALL("IGCHeap::StartNoGCRegion(size=%lu) -> no_memory (no region is provided; refused, nothing entered)",
+               (unsigned long)totalSize);
+        return (int)start_no_gc_no_memory;
+#endif
     }
 
     int EndNoGCRegion() override
     {
-        SKCALL("IGCHeap::EndNoGCRegion -> not_in_progress");
+        SKCALL("IGCHeap::EndNoGCRegion -> not_in_progress (no region is ever entered)");
         return (int)end_no_gc_not_in_progress;
     }
 

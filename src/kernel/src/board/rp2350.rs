@@ -16,13 +16,13 @@ const XOSC_HZ: u32 = 12_000_000;
 
 /// Clock posture 1 (default): SYSCLK = the crystal, 12 MHz. `clock_init`
 /// enforces exactly this posture.
-#[cfg(not(any(feature = "pico-2-pll150", feature = "pico-plus-2-pll150")))]
+#[cfg(not(rp2350_pll150))]
 pub const SYSCLK_HZ: u32 = 12_000_000;
 /// Clock posture 2 (`<board>-pll150`): the system PLL at 150 MHz off the
 /// crystal -- 12 MHz / 1 into the VCO, x125 = 1500 MHz (inside the
 /// 400-1600 MHz window the PLL's control register states), / 5 / 2 lands
 /// SYSCLK at 150 MHz, the chip's rated system clock.
-#[cfg(any(feature = "pico-2-pll150", feature = "pico-plus-2-pll150"))]
+#[cfg(rp2350_pll150)]
 pub const SYSCLK_HZ: u32 = 150_000_000;
 
 /// The peripheral clock: the crystal, in both postures (stated by
@@ -33,9 +33,11 @@ const PERI_HZ: u32 = XOSC_HZ;
 /// the chip's tick-generator block is not needed.
 pub const TICK_HZ: u32 = 1_000;
 
-/// Thread stack pool (lives in .kstacks) -- the same budgets as the other
-/// 512 K-class board.
-pub const STACK_POOL_BYTES: usize = 64 * 1024;
+/// Thread stack pool (lives in .kstacks): 96 KiB on these rows' 520 K of
+/// SRAM -- the idle thread's 1 KiB, the hosting thread's and the finalizer's
+/// 16 KiB each, and three default 16 KiB workers; the link asserts the arena
+/// window that remains above the row's floor.
+pub const STACK_POOL_BYTES: usize = 96 * 1024;
 
 /// Stack for the kmain thread (the boot thread's continuation).
 pub const KMAIN_STACK_BYTES: usize = 16 * 1024;
@@ -54,6 +56,10 @@ pub const SPARE_IRQ: usize = NIRQ - 1;
 /// FPU shape: FPv5 SINGLE precision (the Cortex-M33 FPU) -- kernel f64
 /// stays on the soft-float path. Consumed by records and gates, never by
 /// context-switch code (lazy stacking is FP-shape-agnostic).
+/// The part: the RP2350's Cortex-M33 cores with the standard Arm
+/// single-precision FPU (the RP2350 datasheet, the Cortex-M33 section; its
+/// double-precision coprocessor is a separate coprocessor reached by
+/// coprocessor instructions, not the VFP double forms).
 #[allow(dead_code)]
 pub const FPU_DP: bool = false;
 /// The cycle counter the lost-tick witness reads: the core's data
@@ -127,7 +133,7 @@ const RESETS_RESET: *mut u32 = RESETS as *mut u32;
 const RESETS_RESET_DONE: *mut u32 = (RESETS + 0x08) as *mut u32;
 const RESET_IO_BANK0: u32 = 1 << 6;
 const RESET_PADS_BANK0: u32 = 1 << 9;
-#[cfg(any(feature = "pico-2-pll150", feature = "pico-plus-2-pll150"))]
+#[cfg(rp2350_pll150)]
 const RESET_PLL_SYS: u32 = 1 << 14;
 const RESET_SYSINFO: u32 = 1 << 21;
 const RESET_UART0: u32 = 1 << 26;
@@ -215,7 +221,7 @@ pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[(UART0_IRQ, __rhu_r
 /// device seam: the driver owns the line; a hook is a tenant of it).
 pub const GPIO_IRQS: &[(usize, unsafe extern "C" fn())] = &[(gpio_backend::IO_IRQ_BANK0, gpio_backend::__rhu_rp2350_io_bank0_irq)];
 
-#[cfg(any(feature = "pico-2-pll150", feature = "pico-plus-2-pll150"))]
+#[cfg(rp2350_pll150)]
 mod pll150 {
     /// CLK_SYS_CTRL's auxiliary path: SRC bit 0 = 1 selects it; AUXSRC
     /// [7:5] names its source (000 the system PLL, 011 the crystal); the
@@ -318,7 +324,7 @@ fn clock_init_tail() {
 }
 
 /// Enforce the crystal posture, then the shared tail.
-#[cfg(not(any(feature = "pico-2-pll150", feature = "pico-plus-2-pll150")))]
+#[cfg(not(rp2350_pll150))]
 pub fn clock_init() {
     unsafe {
         clocks_to_xosc();
@@ -328,7 +334,7 @@ pub fn clock_init() {
 
 /// Boring posture: no clock line in the banner (the banked transcript
 /// surface stands byte-identical).
-#[cfg(not(any(feature = "pico-2-pll150", feature = "pico-plus-2-pll150")))]
+#[cfg(not(rp2350_pll150))]
 pub fn clock_readback() -> Option<crate::board::ClockReadback> {
     None
 }
@@ -346,7 +352,7 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
 /// PLL while the glitchless mux still sits on the reference clock (the
 /// auxiliary mux glitches, the glitchless one does not), and the mux
 /// switched and polled. The peripheral clock stays on the crystal.
-#[cfg(any(feature = "pico-2-pll150", feature = "pico-plus-2-pll150"))]
+#[cfg(rp2350_pll150)]
 pub fn clock_init() {
     use pll150::*;
     unsafe {
@@ -386,9 +392,9 @@ pub fn clock_init() {
 /// `plln` FBDIV, `pllp` the product of the two post-dividers (the divider
 /// that lands SYSCLK on this chip), `src` the crystal (the PLL's reference
 /// by construction), `flash_ws` the flash interface's clock divisor (this
-/// chip's flash-speed knob: it has no flash wait states), and `overdrive`
-/// reads off (no voltage lever is pulled for 150 MHz).
-#[cfg(any(feature = "pico-2-pll150", feature = "pico-plus-2-pll150"))]
+/// chip's flash-speed knob: it has no flash wait states), and `boost` reads
+/// "over-drive off" (no voltage lever is pulled for 150 MHz).
+#[cfg(rp2350_pll150)]
 pub fn clock_readback() -> Option<crate::board::ClockReadback> {
     use pll150::*;
     unsafe {
@@ -429,7 +435,7 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
             plln: fbdiv,
             pllp: postdiv,
             flash_ws: if clkdiv == 0 { 256 } else { clkdiv },
-            overdrive: false,
+            boost: "over-drive off",
         })
     }
 }
@@ -613,6 +619,7 @@ pub use super::absent::{rtc_read_at_boot, rtc_write};
 /// the edge bit cleared.
 pub mod gpio_backend {
     use core::ptr::{addr_of, read_volatile, write_volatile};
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use super::{
         IO_BANK0, PADS_BANK0, PAD_IE, PAD_ISO, PAD_OD, PAD_PDE, PAD_PUE, RESETS_RESET, RESETS_RESET_DONE, RESET_IO_BANK0,
@@ -748,7 +755,14 @@ pub mod gpio_backend {
         unsafe { read_volatile(r) & mask != 0 }
     }
 
+    /// The bank's vector line enabled at its priority ONCE per boot: the
+    /// first arm or tenancy writes, every later call sees the flag and
+    /// writes nothing; nothing disables the line afterwards.
+    static NVIC_ENABLED: AtomicBool = AtomicBool::new(false);
     pub(super) fn nvic_enable_once() {
+        if NVIC_ENABLED.swap(true, Ordering::AcqRel) {
+            return;
+        }
         unsafe {
             write_volatile(NVIC_IPR.add(IO_IRQ_BANK0), IRQ_PRIO);
             write_volatile(NVIC_ISER0, 1 << IO_IRQ_BANK0);
@@ -816,6 +830,7 @@ pub mod gpio_backend {
                         } else {
                             acknowledge(k, b);
                         }
+                        AtomicU32::from_ptr(t.wake as *mut u32).fetch_add(1, Ordering::AcqRel);
                         sched::futex_wake(t.wake as *const u32, u32::MAX);
                         continue;
                     }

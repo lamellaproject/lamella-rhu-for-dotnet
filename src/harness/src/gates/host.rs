@@ -24,14 +24,16 @@ const TIMEOUT_S: u64 = 900;
 /// The cases pinned, in the order cargo's single-threaded runner reports
 /// them (alphabetical by name). A case added to the host crate joins this
 /// list in the same change, or the gate refuses the run.
-pub const CASES: [&str; 23] = [
+pub const CASES: [&str; 25] = [
     "tests::abi_window_judges_the_window",
     "tests::arena_overflow_refused_headroom_intact",
+    "tests::bus_math_budget_divisor_and_messages",
     "tests::calendar_bcd_packs_both_ways",
     "tests::calendar_century_bound_refuses_1999_and_2100",
     "tests::calendar_civil_from_days_at_the_maximum",
     "tests::calendar_days_from_civil_round_trips_the_constants",
     "tests::calendar_set_saturates_at_the_epoch",
+    "tests::claims_board_claim_at_open",
     "tests::claims_board_fold_and_program_claims",
     "tests::claims_irq_slots_and_tenants",
     "tests::fpemul_arithmetic_matches_the_host_in_round_to_nearest",

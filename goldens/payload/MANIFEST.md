@@ -18,15 +18,17 @@ Rust + QEMU only; nothing here is compiled at gate time.
 Derivation is the leg `rhu-gate payload rederive` (the verifying document's
 re-derivation section names the prerequisites): each program is published
 from src/payload through the pinned .NET SDK, in a Linux environment where
-that SDK is installed, with the compiler's deterministic option and a path
-map over the whole src/payload tree (`src/payload` -> `/rhu/src/payload`),
-so the object carries no checkout path and is byte-identical at any
-directory; the leg compares each object whole against the file below,
-diagnoses a difference by the loadable identity (the debug sections and the
-comment removed), links and boots the rebuilt objects by the gate's own
-method against the goldens, and runs three controls through the real tool
-(a source with one line moved, the path map absent, a project with its
-system-module property renamed). A compiler that refuses the programs'
+that SDK is installed, with its project as committed -- the debug type
+none, so the object carries no debug information and no path and is the
+same bytes from any directory and whatever the sources' comment lines; the
+leg refuses an object carrying debug information, compares each object
+whole against the file below, diagnoses a difference by the loadable
+identity (the debug sections and the comment removed), links and boots the
+rebuilt objects by the gate's own method against the goldens, and runs four
+controls through the real tool (a source with one code literal changed, a
+source with one comment line added, which must rebuild the same bytes, a
+build with the debug type overridden, a project with its system-module
+property renamed). A compiler that refuses the programs'
 system module at the pin is the leg's loud FAIL; a passing build whose
 bytes differ reads MOVED until the tier is re-frozen under the leg's boot
 read -- the objects replaced by the leg's own rebuild, this manifest's rows
@@ -41,9 +43,9 @@ reference; each object's producer string names that compiler build. Each
 program is published for linux-arm with PublishAot, NoStdLib,
 IlcSystemModule naming the program itself (the minimal runtime compiles
 INTO each program), OptimizationPreference Size, IlcDehydrate false,
-Deterministic true and the path map above; the compiler's response files
-are not part of the tier (they name the publish environment's package
-cache and toolchain directories). The payload gate links each object by
+DebugType none and the SDK's default deterministic option; the compiler's
+response files are not part of the tier (they name the publish
+environment's package cache and toolchain directories). The payload gate links each object by
 the runner's linker of record (rust-lld from the pinned toolchain's
 sysroot, `-flavor gnu`) under the board's payload map, and reads the
 collector test's final line for the collection count and the free byte
@@ -60,11 +62,11 @@ covers them.
 
 | file | sha256 | bytes | class |
 |---|---|---|---|
-| `rtsmoke.o` | `8f0e4e4caaccf0dc23133df72b15ce1a4dd3c79c1f5a567d0e0ec919397c6b92` | 52,206 | frozen ILC object, RHU-built from `src/payload/rtsmoke` at the pin |
-| `gctest.o` | `1d15b7f19bc9c0606ed50056875e07a3064dd30cdc866f46153c67965f87c61f` | 50,056 | frozen ILC object, RHU-built from `src/payload/gctest` at the pin |
-| `rtsmoke-mps2.golden.txt` | `d6c040565d4346117cac8d750244ec62a9cffbb228fdd6088d5dfc8336df1dc5` | 306 | golden, DETERMINISTIC (byte class): payload stream byte-identical after LF normalization both sides |
-| `gctest-mps2.golden.txt` | `5900b85b44294d57e75e9160feed525a8f0465b481d6992e716d6331b5d49fa1` | 621 | golden, STATISTICAL (pins class): pin the five `PASS <name>` markers (`list-survives`, `boxes-survive`, `explicit-collect`, `post-churn-alloc`, `did-collect`) + `ALL GOOD` + final `collections=N free=M` with **M exact = 89016** and **N >= 10**; mid-run `free=` riders are conservative-retention layout noise, REPORT-ONLY |
+| `rtsmoke.o` | `e72d824a26cc516190aee0db37b39e7520aa0c4c353fd8ee3837e788b0370a81` | 35,360 | frozen ILC object, RHU-built from `src/payload/rtsmoke` at the pin |
+| `gctest.o` | `c0a91cd86216595f1a52a0d6088bd26ea1bac656ae33cd639660cdcb3fcb05e4` | 33,781 | frozen ILC object, RHU-built from `src/payload/gctest` at the pin |
+| `rtsmoke-mps2.golden.txt` | `230e32ad303a37564fdc2093fde03730592113aa3718f533e70adfe547c90eb5` | 306 | golden, DETERMINISTIC (byte class): payload stream byte-identical after LF normalization both sides |
+| `gctest-mps2.golden.txt` | `0eb3d1ba8a9f0fc4be43ee4fe5d626626147d98a9a5605da6d1c8ae2887d8b2c` | 621 | golden, STATISTICAL (pins class): pin the five `PASS <name>` markers (`list-survives`, `boxes-survive`, `explicit-collect`, `post-churn-alloc`, `did-collect`) + `ALL GOOD` + final `collections=N free=M` with **M exact = 89016** and **N >= 10**; mid-run `free=` riders are conservative-retention layout noise, REPORT-ONLY |
 
-Both `.golden.txt` files are AUTHENTIC WIRE CAPTURES: CRLF line endings and a raw
-0x14 byte in each final verdict line. They are stored `-text` (.gitattributes) so
-git never normalizes them; a golden that churns under checkout is not a golden.
+Both `.golden.txt` files are AUTHENTIC WIRE CAPTURES with CRLF line endings.
+They are stored `-text` (.gitattributes) so git never normalizes them; a
+golden that churns under checkout is not a golden.

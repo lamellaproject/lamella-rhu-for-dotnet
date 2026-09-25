@@ -12,7 +12,7 @@
 //! read, so an edge between its read and its wait returns at once and
 //! nothing is lost. No blocking verb, no callback into the program.
 
-use core::ptr::{addr_of, addr_of_mut};
+use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use crate::board::{facts, gpio_backend as backend};
@@ -72,21 +72,31 @@ pub static mut WITNESS: GpioWitness = GpioWitness {
     last_refused_code: 0,
 };
 
-fn witness() -> &'static mut GpioWitness {
-    unsafe { &mut *addr_of_mut!(WITNESS) }
+/// The witness's fields are written through raw pointers, one field at a
+/// time, under the critical section by the doors and by the handlers; no
+/// reference to the static is ever formed, so a reader's snapshot by value
+/// (the api flavor's checks; the probe over the debug port) aliases nothing.
+fn witness() -> *mut GpioWitness {
+    addr_of_mut!(WITNESS)
+}
+
+/// One field bumped by `by` through its raw pointer: a volatile read and
+/// write, under the caller's section.
+unsafe fn bump(field: *mut u32, by: u32) {
+    unsafe { write_volatile(field, read_volatile(field).wrapping_add(by)) }
 }
 
 fn refused(line: u32, code: i32) -> i32 {
-    with_cs(|| {
+    with_cs(|| unsafe {
         let w = witness();
         match code {
-            ERR_BUSY => w.refused_busy += 1,
-            ERR_ACCES => w.refused_acces += 1,
-            ERR_NOTSUP => w.refused_notsup += 1,
-            _ => w.refused_inval += 1,
+            ERR_BUSY => bump(addr_of_mut!((*w).refused_busy), 1),
+            ERR_ACCES => bump(addr_of_mut!((*w).refused_acces), 1),
+            ERR_NOTSUP => bump(addr_of_mut!((*w).refused_notsup), 1),
+            _ => bump(addr_of_mut!((*w).refused_inval), 1),
         }
-        w.last_refused_line = line;
-        w.last_refused_code = code;
+        write_volatile(addr_of_mut!((*w).last_refused_line), line);
+        write_volatile(addr_of_mut!((*w).last_refused_code), code);
     });
     code
 }
@@ -95,7 +105,7 @@ fn refused(line: u32, code: i32) -> i32 {
 pub fn init() {
     with_cs(|| unsafe {
         claims::init(&mut *addr_of_mut!(CLAIMS), N as u32, facts::BOARD_CLAIM_BITS);
-        witness().lines = N as u32;
+        write_volatile(addr_of_mut!((*witness()).lines), N as u32);
     });
 }
 
@@ -141,12 +151,12 @@ pub fn claim(line: u32, mode: u32, pull: u32, initial: u32) -> i32 {
     }
     backend::configure(line, mode, pull, initial != 0);
     MODE[line as usize].store(mode as u8 + 1, Ordering::Release);
-    with_cs(|| {
+    with_cs(|| unsafe {
         let w = witness();
         if held {
-            w.reconfigured += 1;
+            bump(addr_of_mut!((*w).reconfigured), 1);
         } else {
-            w.claims_taken += 1;
+            bump(addr_of_mut!((*w).claims_taken), 1);
         }
     });
     0
@@ -210,7 +220,7 @@ pub fn edge(line: u32, kind: u32) -> i32 {
                 EDGE[line as usize].store(0, Ordering::Release);
                 return refused(line, r);
             }
-            with_cs(|| witness().edges_armed += 1);
+            with_cs(|| unsafe { bump(addr_of_mut!((*witness()).edges_armed), 1) });
             0
         }
     }
@@ -241,11 +251,11 @@ pub fn fire(line: u32, rising: bool) {
     }
     EVENTS[line as usize].fetch_add(1, Ordering::AcqRel);
     let woken = sched::futex_wake(EVENTS[line as usize].as_ptr(), u32::MAX);
-    with_cs(|| {
+    with_cs(|| unsafe {
         let w = witness();
-        w.edges_counted += 1;
+        bump(addr_of_mut!((*w).edges_counted), 1);
         if woken > 0 {
-            w.wakes_sent += woken as u32;
+            bump(addr_of_mut!((*w).wakes_sent), woken as u32);
         }
     });
 }

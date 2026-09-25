@@ -87,17 +87,22 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 /// The exception entry: the double-precision emulation's gate first (a
-/// UsageFault on an undefined instruction that decodes as a double-precision
-/// form is computed and the program resumes past it -- the value returned is
-/// the EXC_RETURN the trampoline branches through), then the terminal report.
+/// UsageFault whose status names one of the two classes a core without the
+/// double-precision extension raises for such a form -- an undefined
+/// instruction on the Cortex-M33 and on a Cortex-M7 with a single-precision
+/// FPU, a coprocessor access denied on the Cortex-M4F (the ARMv7-M
+/// Architecture Reference Manual, B1.5 and B3.2.15) -- and whose instruction
+/// decodes as such a form is computed and the program resumes past it; the
+/// value returned is the trampoline's EXC_RETURN), then the terminal report.
 #[unsafe(no_mangle)]
 extern "C" fn __rhu_exception(frame: *mut ExcFrame, exc_return: u32) -> u32 {
     #[cfg(feature = "fpemul")]
     {
         let raw_ipsr: u32;
         unsafe { asm!("mrs {}, IPSR", out(reg) raw_ipsr, options(nomem, nostack)) };
-        if raw_ipsr & 0x1FF == 6 && unsafe { SCB_CFSR.read_volatile() } & (1 << 16) != 0 {
-            match crate::fpemul::trap(frame, exc_return) {
+        let class = unsafe { SCB_CFSR.read_volatile() } & crate::fpemul::CFSR_FORM_CLASSES;
+        if raw_ipsr & 0x1FF == 6 && class != 0 {
+            match crate::fpemul::trap(frame, exc_return, class) {
                 crate::fpemul::Trap::Emulated(out) => return out,
                 crate::fpemul::Trap::NotOurs => {}
                 crate::fpemul::Trap::Refused(reason) => {

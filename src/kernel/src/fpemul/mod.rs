@@ -1,11 +1,27 @@
 //! The double-precision emulation for the single-precision FPU class: a
-//! double-precision floating-point form is an undefined instruction on
-//! these cores, and the fault funnel hands its UsageFault here. This module
-//! decides whether the fault is such a form, computes it in software by the
-//! architecture's rules (`soft`), puts the result where the instruction
-//! would have, and returns so the funnel resumes the program at the next
-//! instruction. The Cortex-M7 class computes the same forms in hardware; the api
-//! flavor's check compares the two, bit for bit and flag for flag.
+//! double-precision form faults on these cores -- as an undefined instruction
+//! on the Cortex-M33 and on a Cortex-M7 with a single-precision FPU, as a
+//! coprocessor access denied on the Cortex-M4F (the double-precision
+//! encodings name coprocessor 11, which that FPU does not implement); both
+//! measured on the bench, both UsageFaults with the same frame -- and the
+//! fault funnel hands the UsageFault here. This module decides whether
+//! the fault is such a form, computes it by the architecture's rules
+//! (`soft`), puts the result where the instruction would have, and returns
+//! so the funnel resumes the program at the next instruction. The Cortex-M7
+//! class computes the same forms in hardware; the api flavor's check
+//! compares the two, bit for bit and flag for flag. The fault runs at the
+//! lowest priority, so every interrupt preempts an emulated form; the rule
+//! that implies: no double-precision instruction in a handler or under a
+//! raised priority (a critical section) on these cores -- such a form
+//! escalates to the hard fault. Each emulated instruction costs one fault;
+//! the measured costs are on `trap`. The frame: the hardware pushes a basic
+//! frame (8 words) or an extended one (then S0-S15, FPSCR and a reserved
+//! word), saying which in EXC_RETURN bit 4; with lazy stacking on, an
+//! extended frame's floating-point area is unwritten until a floating-point
+//! instruction executes, so this handler executes one first, then reads and
+//! writes S0-S15 and FPSCR in the frame and S16-S31 live; a basic frame (no
+//! floating-point context yet) is computed into a fresh context and promoted
+//! to an extended one, the context its first such instruction would create.
 
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
@@ -25,6 +41,11 @@ const FPCAR: *const u32 = 0xE000_EF38 as *const u32;
 const FPDSCR: *const u32 = 0xE000_EF3C as *const u32;
 const CFSR: *mut u32 = 0xE000_ED28 as *mut u32;
 const CFSR_UNDEFINSTR: u32 = 1 << 16;
+const CFSR_NOCP: u32 = 1 << 19;
+/// The two UsageFault classes a double-precision form raises on a core without
+/// the double-precision extension: the funnel's gate condition, and the bits
+/// the trap clears -- exactly the ones it found set.
+pub const CFSR_FORM_CLASSES: u32 = CFSR_UNDEFINSTR | CFSR_NOCP;
 /// The frame's floating-point area: S0 at this offset, FPSCR sixteen words later.
 const FRAME_S0: usize = 0x20;
 const FRAME_FPSCR: usize = 0x60;
@@ -149,10 +170,18 @@ unsafe extern "C" {
     static __etext: u8;
 }
 
-/// The gate: the funnel calls it at a UsageFault whose CFSR says UNDEFINSTR,
-/// with the frame the trampoline found and the EXC_RETURN it arrived with.
-/// The caller has checked nothing else.
-pub fn trap(frame: *mut ExcFrame, exc_return: u32) -> Trap {
+/// The gate: the funnel calls it at a UsageFault whose CFSR carries one of
+/// the form classes (`class`: the UNDEFINSTR or NOCP bit found set, cleared
+/// here when the form is emulated), with the frame the trampoline found and
+/// the EXC_RETURN it arrived with. The caller has checked nothing else. The
+/// cost per emulated instruction,
+/// measured by the api flavor's cost check on the Cortex-M33 silicon at
+/// 160 MHz (the cycle counter around one instruction, the bracket's own 7
+/// cycles included): about 1,900 cycles for an add, 2,100 for a subtract,
+/// 1,700 for a multiply, 2,400 to 2,600 for a multiply-accumulate, 9,400
+/// for a divide, 46,000 for a square root, and 900 to 1,500 for a move, a
+/// negation, a compare, a rounding or a conversion.
+pub fn trap(frame: *mut ExcFrame, exc_return: u32, class: u32) -> Trap {
     if exc_return & 0xC != 0xC {
         return refuse("outside thread mode or on the main stack");
     }
@@ -166,8 +195,8 @@ pub fn trap(frame: *mut ExcFrame, exc_return: u32) -> Trap {
         return refuse("an odd stacked pc");
     }
     let (text_lo, text_hi) = (core::ptr::addr_of!(__stext) as usize, core::ptr::addr_of!(__etext) as usize);
-    if (pc as usize) < text_lo || (pc as usize) + 4 > text_hi {
-        return refuse("the stacked pc outside the code range");
+    if ((pc as usize) < text_lo || (pc as usize) + 4 > text_hi) && !crate::registry::code_holds(pc, 4) {
+        return refuse("the stacked pc outside every registered code range");
     }
     let hw1 = unsafe { read_volatile(pc as *const u16) };
     let hw2 = unsafe { read_volatile((pc + 2) as *const u16) };
@@ -185,7 +214,7 @@ pub fn trap(frame: *mut ExcFrame, exc_return: u32) -> Trap {
         unsafe {
             write_volatile(&mut (*frame).pc, pc + 4);
             write_volatile(&mut (*frame).xpsr, it_advance(xpsr));
-            write_volatile(CFSR, CFSR_UNDEFINSTR);
+            write_volatile(CFSR, class);
         }
         WITNESS.skipped.fetch_add(1, Ordering::AcqRel);
         WITNESS.traps.fetch_add(1, Ordering::AcqRel);
@@ -226,7 +255,7 @@ pub fn trap(frame: *mut ExcFrame, exc_return: u32) -> Trap {
         let fr = frame::current(frame, out);
         write_volatile(&mut (*fr).pc, pc + 4);
         write_volatile(&mut (*fr).xpsr, it_advance(read_volatile(&(*fr).xpsr)));
-        write_volatile(CFSR, CFSR_UNDEFINSTR);
+        write_volatile(CFSR, class);
     }
     WITNESS.traps.fetch_add(1, Ordering::AcqRel);
     WITNESS.last.store(form_code(dec.form), Ordering::Release);

@@ -30,15 +30,26 @@
     <RuntimeFrameworkVersion Condition="'$(RuntimeFrameworkVersion)' == ''">$(RhuRuntimeVersion)</RuntimeFrameworkVersion>
   </PropertyGroup>
 
-  <!-- The two knobs of an RHU image and their mapping to the runtime's own
-       build properties, so a value in a build log says what it means:
+  <!-- The three knobs of an RHU image and their mapping to the runtime's
+       own build properties, so a value in a build log says what it means:
 
-         knob            values       default   underlying
-         RhuDiag         min | rich   min       StackTraceSupport, UseSystemResourceKeys
-         RhuReflection   on  | off    on        the compiler argument reflectiondata:none
+         knob            values       default        underlying
+         RhuDiag         min | rich   min            StackTraceSupport, UseSystemResourceKeys
+         RhuReflection   on  | off    on             the compiler argument reflectiondata:none
+         RhuThreadStack  bytes        the row's      the absolute symbol __rhu_thread_stack_default
+                                      default        the link defines for the hosting layer
 
-       The fixed posture of every image follows: invariant culture, no
-       event source, no metrics, no debugger support, size over speed. -->
+       RhuThreadStack is the stack size of every managed thread that sets
+       none of its own, the runtime's own threads among them; the board's
+       row fixes its default and its clamp (boards.props), and the targets
+       refuse a value that is not a whole number, is below the kernel's
+       minimum, is above the clamp, or leaves fewer than three such stacks
+       in the row's pool beside the idle thread's kilobyte. The value
+       reaches the image at the link, so the compiled object is the same
+       with or without it; the runtime's own default-stack knob is never
+       set, because it cannot express a size inside a row's range. The
+       fixed posture of every image follows: invariant culture, no event
+       source, no metrics, no debugger support, size over speed. -->
   <PropertyGroup>
     <RhuDiag Condition="'$(RhuDiag)' == ''">min</RhuDiag>
     <RhuReflection Condition="'$(RhuReflection)' == ''">on</RhuReflection>
@@ -56,10 +67,24 @@
   <!-- The build is deterministic and the project's directory is mapped to
        one fixed string, the same on every host, so a program's assembly,
        its compiled object and its image are byte-identical across desks
-       and directories; a project's own PathMap value wins. -->
+       and directories; a project's own PathMap value wins. The checkout's
+       revision and every other source-control fact stay out as well: the
+       source-control queries are OFF, so no git revision is read into the
+       informational version, no source-link record is written, and no
+       generated source is embedded into the symbol file as an untracked
+       file (at a checkout whose ignore rules cover the build directory
+       the generated attribute sources would be, and the symbol file's id,
+       the assembly's module version id and the compiled object would move
+       with the ignore file), so a program's object is the same at any
+       checkout and any commit. The .NET SDK's git tasks set the queries on
+       before this file's body is read, so the line is not conditioned on
+       an empty value; a project that wants the revision in its version
+       sets the two properties in its own file, read after this one. -->
   <PropertyGroup>
     <Deterministic>true</Deterministic>
     <PathMap Condition="'$(PathMap)' == ''">$(MSBuildProjectDirectory)=/rhu/src/$(MSBuildProjectName)</PathMap>
+    <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
+    <IncludeSourceRevisionInInformationalVersion Condition="'$(IncludeSourceRevisionInInformationalVersion)' == ''">false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(RhuReflection)' == 'off'">
@@ -70,6 +95,25 @@
        package for this host (the linker and the object copier the link
        step runs); the tools package contributes its build properties and
        nothing else. -->
+  <!-- The standard GPIO package's Linux driver binds the libgpiod v1 C
+       API by this library name; on RHU the shim's frozen GPIO API object
+       defines those entry points over the kernel's GPIO doors, so the name
+       is a direct P/Invoke: the compiler binds the calls at link time and
+       the runtime's loader is never asked. A program that never touches
+       the package carries no such call, and the item then binds nothing. -->
+  <ItemGroup>
+    <DirectPInvoke Include="libgpiod.so.2" />
+    <!-- The same package's I2C and SPI drivers open Linux device files and
+         drive them through three C-library calls; the shim's core answers
+         those three for the bus device nodes it presents over the kernel's
+         bus doors, so each is a direct P/Invoke by entry point. The
+         package's other C-library names stay unbound: no served path
+         reaches them, and the loader refuses them if one ever does. -->
+    <DirectPInvoke Include="libc!open" />
+    <DirectPInvoke Include="libc!ioctl" />
+    <DirectPInvoke Include="libc!close" />
+  </ItemGroup>
+
   <ItemGroup>
     <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler" ILCompilerPackVersion="$(RhuRuntimeVersion)" />
     <PackageReference Include="$(RhuToolsPackageId)" Version="$(RhuSdkVersion)" PrivateAssets="all" ExcludeAssets="compile;runtime;native;contentFiles;analyzers" />

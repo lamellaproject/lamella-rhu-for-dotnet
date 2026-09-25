@@ -80,7 +80,9 @@ pub(crate) struct RtWorld {
     /// the kernel's own target directory; Some((target dir, target,
     /// features)) builds under a directory of the gate's own.
     pub(crate) lib_build: Option<(&'static str, &'static str, &'static str)>,
-    pub(crate) shim_objects: [&'static str; 6],
+    pub(crate) shim_objects: [&'static str; 8],
+    /// The suite's markers in the one order the contract allows for this world.
+    pub(crate) suite_markers: &'static [&'static str],
     pub(crate) gc_objects: [&'static str; 3],
     pub(crate) archives_env: &'static str,
     pub(crate) archives_local: &'static str,
@@ -126,12 +128,13 @@ pub(crate) const WORLD_M7: RtWorld = RtWorld {
     lib_build: None,
     shim_objects: SHIM_OBJECTS,
     gc_objects: GC_OBJECTS,
+    suite_markers: &SUITE_MARKERS_M7,
     archives_env: "RHU_RT_ARCHIVES_M7",
     archives_local: "rtarchives-m7.local",
     newlib_env: "RHU_NEWLIB_M7",
     newlib_local: "newlib-m7.local",
     rider: true,
-    cases: "17/17 cases incl. 9 negative controls",
+    cases: "22/22 cases incl. 14 negative controls",
     sdk_board: "arm-mps2-an500",
     sdk_gate: "rt-m7-sdk-parity",
     sdk_display: "RT-M7 SDK PARITY",
@@ -177,14 +180,17 @@ pub(crate) const WORLD_M33: RtWorld = RtWorld {
         "goldens/shim/shim-stdio-sym-an505.o",
         "goldens/shim/shim-host-an505.o",
         "goldens/shim/shim-pal-surface-an505.o",
+        "goldens/shim/shim-gpiod-an505.o",
+        "goldens/shim/shim-busdev-an505.o",
     ],
     gc_objects: ["goldens/gc/skel-row-an505.o", "goldens/gc/heap-row-an505.o", "goldens/gc/collect-row-an505.o"],
+    suite_markers: &SUITE_MARKERS_M33,
     archives_env: "RHU_RT_ARCHIVES_M33",
     archives_local: "rtarchives-m33.local",
     newlib_env: "RHU_NEWLIB_M33",
     newlib_local: "newlib-m33.local",
     rider: false,
-    cases: "16/16 cases incl. 9 negative controls",
+    cases: "21/21 cases incl. 14 negative controls",
     sdk_board: "arm-mps2-an505",
     sdk_gate: "rt-m33-sdk-parity",
     sdk_display: "RT-M33 SDK PARITY",
@@ -203,7 +209,7 @@ fn tier_of(w: &RtWorld, name: &str) -> &'static str {
 
 /// The frozen tier's file list for a world: the names of record with the
 /// world's own donor and set file.
-fn frozen_files(w: &RtWorld) -> [(&'static str, &'static str); 15] {
+fn frozen_files(w: &RtWorld) -> [(&'static str, &'static str); 16] {
     let mut files = FROZEN_FILES;
     for f in files.iter_mut() {
         if f.0 == DONOR {
@@ -239,12 +245,12 @@ fn resolve_kit_dir(repo: &Path, w: &RtWorld) -> Option<String> {
 /// goldens/rt-m7/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates the objects, the lists, the manifest
 /// and this pin together in one reviewed commit.
-pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "39b26b589e0072d860367b23b19619cc1502f80e5e333187a41f42be35c76558";
+pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "056aa8ec4908a3b0a5ef98071e778d725adf4e127ddb9db7c17e9dcc2a6f2abb";
 
 /// goldens/rt-m33/MANIFEST.md's own sha256: the Cortex-M33 world's pin,
 /// beside its manifest the way the Cortex-M7 world's is; a re-freeze of
 /// that tier moves this line and nothing of the other world's.
-pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "a09c0adf78b9de2cbb9128fc7b7c0b0f68b63645e16208f762b25abe6033c998";
+pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "f7549fd256857dd144fd2ba78236862ae280087ba90520e28afc0586d7c4e083";
 
 /// The archive set the frozen merge consumed. The manifest's `archives:`
 /// line and the frozen set file must both name it; a merge recorded under
@@ -252,7 +258,7 @@ pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "a09c0adf78b9de2cbb9128fc7b7c0b
 const ARCHIVE_SET: &str = "net11-rc1-rhu-cortex-m7-sgc-enabled";
 
 /// The frozen tier: the file names under goldens/rt-m7/ and what each is.
-const FROZEN_FILES: [(&str, &str); 15] = [
+const FROZEN_FILES: [(&str, &str); 16] = [
     ("rthello.o", "the program object the merge consumed (the compiler's output of record)"),
     ("startup-cookie-copied.o", "the runtime archive's startup member with its stack-cookie section renamed into copied data"),
     ("rthello-merged.o", "the merged object: the program object, the surgery object and the runtime archives, the descriptor rooted, attributes neutralized"),
@@ -268,6 +274,7 @@ const FROZEN_FILES: [(&str, &str); 15] = [
     ("rtsuite-merged.undef.txt", "the suite's merged object's undefined names, sorted: its demand surface pinned exactly"),
     ("rtsuite.golden.txt", "the payload stream of the suite's boot: the rt.suite golden"),
     ("control-d32-site.o", "one function naming double registers above d15 (the application profile's 32-double register file): the census control's input"),
+    ("control-ldrexd-site.o", "one 64-bit compare-and-swap compiled for the application profile, carrying the 64-bit exclusive-access forms: the census control's input"),
 ];
 const PAYLOAD: &str = "rthello.o";
 const SURGERY: &str = "startup-cookie-copied.o";
@@ -284,6 +291,10 @@ const SUITE_MERGED: &str = "rtsuite-merged.o";
 const SUITE_UNDEF_FILE: &str = "rtsuite-merged.undef.txt";
 const SUITE_GOLDEN: &str = "rtsuite.golden.txt";
 const CONTROL_D32: &str = "control-d32-site.o";
+/// The exclusive-double census control: one 64-bit compare-and-swap
+/// compiled for an application-profile core, which carries the two
+/// 64-bit exclusive-access forms by construction.
+const CONTROL_LDREXD: &str = "control-ldrexd-site.o";
 /// The ARM-state code the Cortex-M7 class archive set still carries: libunwind's
 /// context save (`unw_getcontext`, its private alias beside it) and its
 /// resume jump, hand-written assembly that takes its instruction set from
@@ -427,13 +438,15 @@ const AN500_MAP: &str = "src/kernel/payload-mps2-an500.x";
 const AN500_LIB: &str = "src/kernel/target/thumbv7em-none-eabihf/release/librhu_kernel.a";
 /// The frozen shim objects and collector row objects the image links,
 /// in the order the line takes them.
-const SHIM_OBJECTS: [&str; 6] = [
+const SHIM_OBJECTS: [&str; 8] = [
     "goldens/shim/shim-core.o",
     "goldens/shim/shim-sysnative.o",
     "goldens/shim/shim-libc-glue.o",
     "goldens/shim/shim-stdio-sym.o",
     "goldens/shim/shim-host.o",
     "goldens/shim/shim-pal-surface.o",
+    "goldens/shim/shim-gpiod.o",
+    "goldens/shim/shim-busdev.o",
 ];
 const GC_OBJECTS: [&str; 3] = ["goldens/gc/skel-row.o", "goldens/gc/heap-row.o", "goldens/gc/collect-row.o"];
 
@@ -448,7 +461,7 @@ const FLAVOUR_MARK: &str = "Object reference not set to an instance";
 /// entry, the program's start, one collection, the verdict, the host's
 /// exit line, the kernel's return.
 const BOOT_MARKERS: [&str; 24] = [
-    "[payload] entry: payload-provided, built for hosting-API contract generation 33 (this kernel: 33)",
+    "[payload] entry: payload-provided, built for hosting-API contract generation 34 (this kernel: 34)",
     "[shim] init: per-thread block registered as module 1 (48 bytes)",
     "[host] stdio: standard error bound to the C library's stream",
     "[host] stdio: standard output line buffered",
@@ -484,8 +497,8 @@ const PENDING: [&str; 0] = [];
 /// runtime's own thread spawned at its 16 KB ask, the threading section's
 /// worker and the activation section's worker at the row's default),
 /// every section's verdict line, the summary last.
-const SUITE_MARKERS: [&str; 19] = [
-    "[payload] entry: payload-provided, built for hosting-API contract generation 33 (this kernel: 33)",
+const SUITE_MARKERS_M7: [&str; 42] = [
+    "[payload] entry: payload-provided, built for hosting-API contract generation 34 (this kernel: 34)",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
     "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
     "[host] entering managed entry",
@@ -503,6 +516,73 @@ const SUITE_MARKERS: [&str; 19] = [
     "PASS rt-activation (a running worker suspended and resumed across three collections)",
     "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 6)",
     "PASS rt-parked (a worker parked on a held monitor across two collections, released and joined)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 7)",
+    "PASS rt-interlocked (a long compared, exchanged, added and read above 32 bits; two threads, 10000 increments)",
+    "PASS rt-math (truncate and round away from zero through the C library; pow, log2, cbrt, remainder)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 8)",
+    "[shim] pthread_create: stack 256 KB clamped to 24 KB (the row's clamp)",
+    "[shim] pthread_create: stack 262144 B asked, 24576 B spawned (tid 9)",
+    "[shim] gpiod: line 4 claim refused (EBUSY: the board or another claim holds it)",
+    "[shim] gpiod: line 5 claim refused (EINVAL: past the space, unpopulated, unclaimed or a bad selector)",
+    "PASS rt-gpio (the standard class over the doors: six lines, an output looped to an input read back, one edge to a callback and one to a waiter, two collections during the wait, the board's and an unpopulated line refused)",
+    "[shim] /dev/i2c-1: a message of 256 bytes refused (EINVAL: the limit is 255)",
+    "[shim] /dev/i2c-9: no such bus on this board (ENOENT)",
+    "PASS rt-i2c (the standard class over the doors: the sensor model's identity and burst read through combined transactions, its reset written, a second descriptor on the shared bus, an unanswered address ENXIO, a message over the limit EINVAL, a missing bus ENOENT)",
+    "[shim] /dev/spidev2.0: mode 0, 8 bits, 1000000 Hz asked, 1000000 Hz achieved",
+    "[shim] /dev/spidev2.1: mode 3, 8 bits, 500000 Hz asked, 500000 Hz achieved",
+    "[shim] /dev/spidev2.0: mode 0, 8 bits, 1000000 Hz asked, 1000000 Hz achieved",
+    "[shim] /dev/spidev2.0: least-significant-bit-first refused (EINVAL: the block sends the most significant bit first)",
+    "[shim] /dev/spidev2.0: mode 0, 8 bits, 1000000 Hz asked, 1000000 Hz achieved",
+    "[shim] /dev/spidev2.2: the transfer refused by the kernel (EINVAL: a select the bus does not have, or a rate below the block's slowest)",
+    "[shim] /dev/spidev2.0: a word of 16 bits refused (EINVAL: the kernel clocks eight-bit frames)",
+    "[shim] /dev/spidev2.0: an active-high select refused (EINVAL: the kernel drives the select low)",
+    "[shim] /dev/spidev2.0: an active-high select refused (EINVAL: the kernel drives the select low)",
+    "[shim] /dev/spidev9.0: no such bus on this board (ENOENT)",
+    "PASS rt-spi (the standard class over the doors: the memory model's identity at the achieved rate, echoes of four and five hundred and twelve bytes, a read shifting out ones, a second device with its own mode and rate on the shared bus, a device driving its own select, a select the bus lacks, a word size, an active-high select and a missing bus refused, least-significant-bit-first served by the class's own reversal)",
+    "RTSUITE: ALL GOOD",
+];
+const SUITE_MARKERS_M33: [&str; 42] = [
+    "[payload] entry: payload-provided, built for hosting-API contract generation 34 (this kernel: 34)",
+    "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
+    "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
+    "[host] entering managed entry",
+    "RTSUITE: start",
+    "PASS rt-smoke (array sort and string join)",
+    "PASS rt-collections (hash map of 64, list of 128 filtered to 64)",
+    "PASS rt-text (builder of 86, formats, parse, trim, compare)",
+    "PASS rt-exceptions (nested finally, divide by zero, invalid cast, array bound)",
+    "PASS rt-gc (4000 dead objects, two collections, weak nulled, strong kept)",
+    "PASS rt-time (tick count monotonic across a spin, processor count)",
+    "PASS rt-dispatch (interface dispatch, delegate, generic comparison)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 4)",
+    "PASS rt-threads (one worker thread, 10000 locked increments)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 5)",
+    "PASS rt-activation (a running worker suspended and resumed across three collections)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 6)",
+    "PASS rt-parked (a worker parked on a held monitor across two collections, released and joined)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 7)",
+    "PASS rt-interlocked (a long compared, exchanged, added and read above 32 bits; two threads, 10000 increments)",
+    "PASS rt-math (truncate and round away from zero through the C library; pow, log2, cbrt, remainder)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 8)",
+    "[shim] pthread_create: stack 256 KB clamped to 24 KB (the row's clamp)",
+    "[shim] pthread_create: stack 262144 B asked, 24576 B spawned (tid 9)",
+    "[shim] gpiod: line 4 claim refused (EBUSY: the board or another claim holds it)",
+    "[shim] gpiod: line 5 claim refused (EINVAL: past the space, unpopulated, unclaimed or a bad selector)",
+    "PASS rt-gpio (the standard class over the doors: six lines, an output looped to an input read back, one edge to a callback and one to a waiter, two collections during the wait, the board's and an unpopulated line refused)",
+    "[shim] /dev/i2c-1: a message of 256 bytes refused (EINVAL: the limit is 255)",
+    "[shim] /dev/i2c-9: no such bus on this board (ENOENT)",
+    "PASS rt-i2c (the standard class over the doors: the sensor model's identity and burst read through combined transactions, its reset written, a second descriptor on the shared bus, an unanswered address ENXIO, a message over the limit EINVAL, a missing bus ENOENT)",
+    "[shim] /dev/spidev1.0: mode 0, 8 bits, 1000000 Hz asked, 1000000 Hz achieved",
+    "[shim] /dev/spidev1.1: mode 3, 8 bits, 500000 Hz asked, 500000 Hz achieved",
+    "[shim] /dev/spidev1.0: mode 0, 8 bits, 1000000 Hz asked, 1000000 Hz achieved",
+    "[shim] /dev/spidev1.0: least-significant-bit-first refused (EINVAL: the block sends the most significant bit first)",
+    "[shim] /dev/spidev1.0: mode 0, 8 bits, 1000000 Hz asked, 1000000 Hz achieved",
+    "[shim] /dev/spidev1.2: the transfer refused by the kernel (EINVAL: a select the bus does not have, or a rate below the block's slowest)",
+    "[shim] /dev/spidev1.0: a word of 16 bits refused (EINVAL: the kernel clocks eight-bit frames)",
+    "[shim] /dev/spidev1.0: an active-high select refused (EINVAL: the kernel drives the select low)",
+    "[shim] /dev/spidev1.0: an active-high select refused (EINVAL: the kernel drives the select low)",
+    "[shim] /dev/spidev9.0: no such bus on this board (ENOENT)",
+    "PASS rt-spi (the standard class over the doors: the memory model's identity at the achieved rate, echoes of four and five hundred and twelve bytes, a read shifting out ones, a second device with its own mode and rate on the shared bus, a device driving its own select, a select the bus lacks, a word size, an active-high select and a missing bus refused, least-significant-bit-first served by the class's own reversal)",
     "RTSUITE: ALL GOOD",
 ];
 const SUITE_ALL_GOOD: &str = "RTSUITE: ALL GOOD";
@@ -526,30 +606,32 @@ const ACTIVATIONS_FLOOR: u32 = 3;
 /// shim's core object under the F769 selector, the collector's heap and
 /// collect objects under the row's defines; the rest shared with the
 /// an500 line.
-const F769_BOARD: &str = "stm32f769i-disco";
+const F769_BOARD: &str = "st-stm32f769i-disco";
 const F769_TARGET: &str = "thumbv7em-none-eabihf";
-const F769_FEATURES: &str = "board-stm32f769i-disco,payload";
-const F769_MAP: &str = "src/kernel/payload-stm32f769i-disco.x";
-const F769_LIB: &str = "src/kernel/target/payload-gate/rt/stm32f769i-disco/thumbv7em-none-eabihf/release/librhu_kernel.a";
-const F769_SHIM_OBJECTS: [&str; 6] = [
+const F769_FEATURES: &str = "board-st-stm32f769i-disco,payload";
+const F769_MAP: &str = "src/kernel/payload-st-stm32f769i-disco.x";
+const F769_LIB: &str = "src/kernel/target/payload-gate/rt/st-stm32f769i-disco/thumbv7em-none-eabihf/release/librhu_kernel.a";
+const F769_SHIM_OBJECTS: [&str; 8] = [
     "goldens/shim/shim-core-f769.o",
     "goldens/shim/shim-sysnative.o",
     "goldens/shim/shim-libc-glue.o",
     "goldens/shim/shim-stdio-sym.o",
     "goldens/shim/shim-host.o",
     "goldens/shim/shim-pal-surface.o",
+    "goldens/shim/shim-gpiod.o",
+    "goldens/shim/shim-busdev.o",
 ];
 const F769_GC_OBJECTS: [&str; 3] = ["goldens/gc/skel-row.o", "goldens/gc/heap-row-f769.o", "goldens/gc/collect-row-f769.o"];
 
 /// The section classes the suite's frozen merged object carries at the
 /// merge (read off its linked image's brackets at the freeze; the maps'
 /// brackets read them exactly).
-const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 427_378, unbox: 998, hydrated: 93_152, tdata: 152, init_array: 24, modules: 4 };
+const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 1169130, unbox: 2022, hydrated: 295388, tdata: 152, init_array: 24, modules: 4 };
 /// The internal cases a world's rederive leg runs, named for its gate.
 fn internal_cases(w: &RtWorld) -> [String; 2] {
     [
         format!("rt.rederive-selector-control -- link-tier; runs under 'rhu-gate {} rederive' when the archive set is resolved: the same merge with the standalone-GC-disabled selector must not tie the frozen object", w.gate),
-        format!("rt.rederive-census -- link-tier; runs under 'rhu-gate {} rederive' when the archive set is resolved: every member of the five archives decoded, no compiled function naming a double register above d15 (the pinned assembly pair the only ones), the ARM-state code exactly the pinned pair", w.gate),
+        format!("rt.rederive-census -- link-tier; runs under 'rhu-gate {} rederive' when the archive set is resolved: every member of the five archives decoded, no compiled function naming a double register above d15 (the pinned assembly pair the only ones), the ARM-state code exactly the pinned pair, no 64-bit exclusive-access instruction in any member", w.gate),
     ]
 }
 
@@ -868,6 +950,94 @@ fn f64_census_regions(dis: &str, regions: &[(String, u64, u64)]) -> usize {
         }
     }
     n
+}
+
+/// One decode line's bytes as two Thumb halfwords: the reader prints a
+/// 32-bit Thumb instruction as `<hw1> <hw2>` under a Thumb triple and as
+/// four little-endian bytes under an ARM one; a 16-bit instruction has
+/// one halfword and is never a 64-bit exclusive form.
+fn thumb_halfwords(addr_bytes: &str) -> Option<(u32, u32)> {
+    let bytes = addr_bytes.split(':').nth(1)?.trim();
+    let toks: Vec<&str> = bytes.split_whitespace().collect();
+    if toks.len() >= 2 && toks[0].len() == 4 && toks[1].len() == 4 {
+        return Some((u32::from_str_radix(toks[0], 16).ok()?, u32::from_str_radix(toks[1], 16).ok()?));
+    }
+    if toks.len() >= 4 && toks.iter().take(4).all(|x| x.len() == 2) {
+        let b: Vec<u32> = toks.iter().take(4).map(|x| u32::from_str_radix(x, 16).unwrap_or(0)).collect();
+        return Some(((b[1] << 8) | b[0], (b[3] << 8) | b[2]));
+    }
+    None
+}
+
+/// Whether two Thumb halfwords encode a 64-bit exclusive-access
+/// instruction: LDREXD (the first halfword's top twelve bits e8d, the
+/// second's low byte 7f) or STREXD (e8c, the second's bits 4-7 the value
+/// 7). The class's own decoder prints the forms as unknown with their
+/// bytes, so the bytes are the instrument.
+fn is_exclusive_double(hw1: u32, hw2: u32) -> bool {
+    ((hw1 & 0xfff0) == 0xe8d0 && (hw2 & 0x00ff) == 0x007f) || ((hw1 & 0xfff0) == 0xe8c0 && (hw2 & 0x00f0) == 0x0070)
+}
+
+/// The 64-bit exclusive-access census over a disassembly restricted by
+/// the ARM-state regions, by enclosing function: outside them (the Thumb
+/// decode) by the instruction's bytes; inside them (the ARM decode) by
+/// the mnemonic, since the ARM encodings differ.
+fn xdouble_census_regions(dis: &str, regions: &[(String, u64, u64)], inside: bool) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    let mut cur = String::from("<?>");
+    let mut section = String::new();
+    for line in dis.lines() {
+        let t = line.trim_end_matches('\r');
+        if t.starts_with("Disassembly") && t.contains(" of section ") {
+            section = t.rsplit(' ').next().unwrap_or("").trim_end_matches(':').to_string();
+            continue;
+        }
+        if t.ends_with(">:") && t.starts_with(|c: char| c.is_ascii_hexdigit()) {
+            if let Some(p) = t.find(" <") {
+                cur = t[p + 1..].to_string();
+                continue;
+            }
+        }
+        let mut fields = t.split('\t');
+        let addr_bytes = fields.next().unwrap_or("");
+        let mnemonic = fields.next().unwrap_or("").trim();
+        let Some(in_arm) = in_arm_region(&section, addr_bytes, regions) else {
+            continue;
+        };
+        if in_arm != inside {
+            continue;
+        }
+        let hit = if inside { mnemonic == "ldrexd" || mnemonic == "strexd" } else { thumb_halfwords(addr_bytes).map_or(false, |(a, b)| is_exclusive_double(a, b)) };
+        if hit {
+            match out.iter_mut().find(|(f, _)| f == &cur) {
+                Some(e) => e.1 += 1,
+                None => out.push((cur.clone(), 1)),
+            }
+        }
+    }
+    out
+}
+
+/// The 64-bit exclusive-access census of an object: the Thumb decode
+/// outside the ARM-state regions and the ARM decode inside them, merged
+/// by function.
+fn xdouble_total(dis_t: &str, dis_a: &str, regions: &[(String, u64, u64)]) -> Vec<(String, usize)> {
+    let mut out = xdouble_census_regions(dis_t, regions, false);
+    if !regions.is_empty() {
+        for (f, n) in xdouble_census_regions(dis_a, regions, true) {
+            match out.iter_mut().find(|(g, _)| g == &f) {
+                Some(e) => e.1 += n,
+                None => out.push((f, n)),
+            }
+        }
+    }
+    out
+}
+
+/// The 64-bit exclusive-access census of a decode with no ARM-state
+/// region (the control object, the probes).
+fn xdouble_census(dis: &str) -> Vec<(String, usize)> {
+    xdouble_census_regions(dis, &[], false)
 }
 
 /// The d32 census against its pin: every function counted must be one of
@@ -1452,6 +1622,8 @@ impl Rt {
             self.fail(case, &f);
         }
         println!("  demand surface: {} undefined names, equal to the frozen list both directions", got_undef.len());
+        let atomics: Vec<&str> = got_undef.iter().map(String::as_str).filter(|n| n.starts_with("__sync_") && n.ends_with("_8")).collect();
+        println!("  the demand's 64-bit atomic library calls: {} ({}), the compiler's lowering for the core, answered by the shim's core object", atomics.len(), atomics.join(" "));
         let def_dump = self.tool_text(&nm, case, &["--defined-only", "--extern-only", &obj_arg], "merged.nm-def.txt");
         let defined = parse_defined(&def_dump);
         if let Some(f) = spot_fault(&defined) {
@@ -1870,7 +2042,7 @@ impl Rt {
     /// legs prove row-independent). Link-only here: the board's boot is the
     /// kernel's flight, and this artifact is what it flies.
     fn case_link_board(&mut self, facts: &RustcFacts, ld: &ToolCmd, abi: u32) {
-        let case = "rt.link-stm32f769i-disco";
+        let case = "rt.link-st-stm32f769i-disco";
         println!("== case {case} ==");
         let dir = self.repo.join("src/kernel/target/payload-gate/rt").join(F769_BOARD);
         let _ = std::fs::create_dir_all(&dir);
@@ -2123,7 +2295,7 @@ impl Rt {
         if !eq_lf_normalized(&stream, &golden) {
             self.fail(case, &format!("payload stream differs from {}/{SUITE_GOLDEN} (byte class)", self.w.tier));
         }
-        if let Some(fault) = markers_out_of_order(&raw, &SUITE_MARKERS) {
+        if let Some(fault) = markers_out_of_order(&raw, self.w.suite_markers) {
             self.fail(case, &format!("the suite's order: {fault}"));
         }
         if !contains_fixed(&raw, BOOT_RETURN_LINE) {
@@ -2146,11 +2318,11 @@ impl Rt {
             self.fail(case, &format!("exit {code_exit}, wanted 0"));
         }
         let lines = String::from_utf8_lossy(&stream).lines().count();
-        let stats = format!("{{\"stream_lines\":{lines},\"markers\":{},\"activations\":{activations},\"activations_floor\":{ACTIVATIONS_FLOOR}}}", SUITE_MARKERS.len());
+        let stats = format!("{{\"stream_lines\":{lines},\"markers\":{},\"activations\":{activations},\"activations_floor\":{ACTIVATIONS_FLOOR}}}", self.w.suite_markers.len());
         self.pass_image(case, 0, &path_rel, &sha, Some(SUITE_GOLDEN), &stats);
         println!(
-            "== case {case}: PASS (exit 0; the payload stream equals its golden, {lines} lines with the verdict last; {} markers IN ORDER incl. ten section verdicts; the host reports {activations} activations delivered (at least {ACTIVATIONS_FLOOR}: one per collection of the activation section); then the kernel's return line) ==",
-            SUITE_MARKERS.len()
+            "== case {case}: PASS (exit 0; the payload stream equals its golden, {lines} lines with the verdict last; {} markers IN ORDER incl. the fifteen section verdicts; the host reports {activations} activations delivered (at least {ACTIVATIONS_FLOOR}: one per collection of the activation section); then the kernel's return line) ==",
+            self.w.suite_markers.len()
         );
         raw
     }
@@ -2159,7 +2331,7 @@ impl Rt {
     /// closure and the linked images (the module doc's paragraph).
     fn case_census(&mut self, facts: &RustcFacts) {
         let case = "rt.census";
-        println!("== case {case}: no compiled function naming a double register above d15 in the merged objects and the closure (the pinned assembly pair the only ones); the ARM-state code exactly the pinned pair; the double-precision sites counted ==");
+        println!("== case {case}: no compiled function naming a double register above d15 in the merged objects and the closure (the pinned assembly pair the only ones); the ARM-state code exactly the pinned pair; the double-precision sites counted; no 64-bit exclusive-access instruction in the merged objects, the closure, the shim and collector objects or the linked images ==");
         let objdump = match llvm_tool(facts, "llvm-objdump") {
             Ok(p) => p,
             Err(e) => self.fail(case, &e),
@@ -2184,14 +2356,15 @@ impl Rt {
                     &format!("{name}: {} compiled function(s) name a double register above d15 ({sites} sites; the first: {} with {}) -- the Cortex-M7's FPU has sixteen", thumb.len(), thumb[0].0, thumb[0].1),
                 );
             }
-            let asm = if regions.is_empty() {
-                Vec::new()
-            } else {
-                let dis_a = self.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE_ARM, CENSUS_MATTR, &path], &format!("census-{name}.dis-arm.txt"));
-                d32_census_regions(&dis_a, &regions, true)
-            };
+            let dis_a = if regions.is_empty() { String::new() } else { self.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE_ARM, CENSUS_MATTR, &path], &format!("census-{name}.dis-arm.txt")) };
+            let asm = if regions.is_empty() { Vec::new() } else { d32_census_regions(&dis_a, &regions, true) };
             if let Some(f) = d32_fault(&asm, name != LIBC) {
                 self.fail(case, &format!("{name}: {f}"));
+            }
+            let xd = xdouble_total(&dis_t, &dis_a, &regions);
+            if let Some((f, n)) = xd.first() {
+                let sites: usize = xd.iter().map(|(_, n)| n).sum();
+                self.fail(case, &format!("{name}: {} function(s) carry a 64-bit exclusive-access instruction ({sites} sites; the first: {f} with {n}) -- no Cortex-M executes the form", xd.len()));
             }
             let f64 = f64_census_regions(&dis_t, &regions);
             f64_total += f64;
@@ -2200,14 +2373,30 @@ impl Rt {
                 self.fail(case, &format!("{name}: {f}"));
             }
             println!(
-                "  {name}: compiled functions naming d16-d31: 0; the ARM-state assembly naming them: {} (the pinned pair, one site each); double-precision sites: {f64}; ARM-state regions: {}; ARM-state mapping symbols: {} ({})",
+                "  {name}: compiled functions naming d16-d31: 0; the ARM-state assembly naming them: {} (the pinned pair, one site each); double-precision sites: {f64}; ARM-state regions: {}; ARM-state mapping symbols: {} ({}); 64-bit exclusive-access forms: 0",
                 asm.len(),
                 regions.len(),
                 arm.len(),
                 if arm.is_empty() { "none" } else { "the pinned libunwind pair" }
             );
-            parts.push(format!("\"{name}\":{{\"d32_compiled\":0,\"d32_pinned_asm\":{},\"f64_sites\":{f64},\"arm_mode\":{}}}", asm.len(), arm.len()));
+            parts.push(format!("\"{name}\":{{\"d32_compiled\":0,\"d32_pinned_asm\":{},\"f64_sites\":{f64},\"arm_mode\":{},\"xdouble\":0}}", asm.len(), arm.len()));
         }
+        let mut linked = 0usize;
+        for obj in self.w.shim_objects.iter().chain(self.w.gc_objects.iter()) {
+            let path = self.repo.join(obj.replace('/', std::path::MAIN_SEPARATOR_STR)).to_string_lossy().into_owned();
+            let short = obj.rsplit('/').next().unwrap_or(obj).to_string();
+            let syms = self.tool_text(&readobj, case, &["--elf-output-style=GNU", "--symbols", &path], &format!("census-{short}.syms.txt"));
+            let sections = self.tool_text(&readobj, case, &["--elf-output-style=GNU", "--sections", &path], &format!("census-{short}.sections.txt"));
+            let regions = arm_regions(&syms, &sections);
+            let dis_t = self.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE, CENSUS_MATTR, &path], &format!("census-{short}.dis.txt"));
+            let dis_a = if regions.is_empty() { String::new() } else { self.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE_ARM, CENSUS_MATTR, &path], &format!("census-{short}.dis-arm.txt")) };
+            let xd = xdouble_total(&dis_t, &dis_a, &regions);
+            if let Some((f, n)) = xd.first() {
+                self.fail(case, &format!("{obj}: {f} carries a 64-bit exclusive-access instruction ({n} site(s)) -- no Cortex-M executes the form"));
+            }
+            linked += 1;
+        }
+        println!("  the {linked} shim and collector objects the images link: 64-bit exclusive-access forms: 0");
         for img in ["rt-link.elf", "rt-suite.elf"] {
             let p = self.out.join(img);
             if !p.is_file() {
@@ -2219,12 +2408,21 @@ impl Rt {
             if let Some(f) = arm_mode_fault(&arm, &syms, ARM_MODE_PINNED_COUNT) {
                 self.fail(case, &format!("{img}: {f}"));
             }
-            println!("  {img}: ARM-state mapping symbols: {} (the pinned libunwind pair, linked in, reached by nothing the images run)", arm.len());
-            parts.push(format!("\"{img}\":{{\"arm_mode\":{}}}", arm.len()));
+            let sections = self.tool_text(&readobj, case, &["--elf-output-style=GNU", "--sections", &ps], &format!("census-{img}.sections.txt"));
+            let regions = arm_regions(&syms, &sections);
+            let dis_t = self.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE, CENSUS_MATTR, &ps], &format!("census-{img}.dis.txt"));
+            let dis_a = if regions.is_empty() { String::new() } else { self.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE_ARM, CENSUS_MATTR, &ps], &format!("census-{img}.dis-arm.txt")) };
+            let xd = xdouble_total(&dis_t, &dis_a, &regions);
+            if let Some((f, n)) = xd.first() {
+                let sites: usize = xd.iter().map(|(_, n)| n).sum();
+                self.fail(case, &format!("{img}: {} function(s) carry a 64-bit exclusive-access instruction ({sites} sites; the first: {f} with {n}) -- no Cortex-M executes the form", xd.len()));
+            }
+            println!("  {img}: ARM-state mapping symbols: {} (the pinned libunwind pair, linked in, reached by nothing the images run); 64-bit exclusive-access forms: 0", arm.len());
+            parts.push(format!("\"{img}\":{{\"arm_mode\":{},\"xdouble\":0}}", arm.len()));
         }
         let stats = format!("{{{}}}", parts.join(","));
         self.pass(case, "positive", "", &stats);
-        println!("== case {case}: PASS (no compiled function naming d16-d31 in the merged objects or the closure, the two pinned assembly functions the only ones; {f64_total} double-precision sites over the three; the ARM-state code exactly the pinned pair in the merged objects and both images) ==");
+        println!("== case {case}: PASS (no compiled function naming d16-d31 in the merged objects or the closure, the two pinned assembly functions the only ones; {f64_total} double-precision sites over the three; the ARM-state code exactly the pinned pair in the merged objects and both images; no 64-bit exclusive-access instruction in the merged objects, the closure, the {linked} linked shim and collector objects or the images) ==");
     }
 
     /// The census control: the frozen object carrying one function that
@@ -2248,6 +2446,177 @@ impl Rt {
         println!("  refused as designed: {} function(s), {sites} sites naming d16-d31 -- {fault}", d32.len());
         self.pass(case, "negative", broke, "");
         println!("  PASS (control)");
+    }
+
+    /// The exclusive-double census control: the frozen object carrying
+    /// one 64-bit compare-and-swap compiled for the application profile
+    /// must be refused by the census.
+    fn control_census_ldrexd(&mut self, facts: &RustcFacts) {
+        let case = "rt.census-ldrexd-control";
+        println!("== case {case} (negative control): the frozen object with one 64-bit compare-and-swap compiled for the application profile offered to the census ==");
+        let objdump = match llvm_tool(facts, "llvm-objdump") {
+            Ok(p) => p,
+            Err(e) => self.fail(case, &e),
+        };
+        let path = self.frozen(CONTROL_LDREXD).to_string_lossy().into_owned();
+        let dis = self.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE, CENSUS_MATTR, &path], "census-ldrexd-control.dis.txt");
+        let xd = xdouble_census(&dis);
+        let broke = "a 64-bit compare-and-swap compiled for the application profile, carrying the 64-bit exclusive-access forms";
+        let Some((f, n)) = xd.first() else {
+            self.fail_control(case, broke, "the census read NO 64-bit exclusive-access instruction in the control object");
+        };
+        let sites: usize = xd.iter().map(|(_, n)| n).sum();
+        if xd.len() != 1 || sites < 2 {
+            self.fail_control(case, broke, &format!("the census read {} function(s) and {sites} sites, one function with at least two sites expected", xd.len()));
+        }
+        println!("  refused as designed: {f} carries {n} 64-bit exclusive-access instruction(s) -- no Cortex-M executes the form");
+        self.pass(case, "negative", broke, "");
+        println!("  PASS (control)");
+    }
+
+    /// The suite image linked with one input substituted and booted once: a
+    /// control's doctored input must be refused by the section's own checks
+    /// (the section's FAIL lines the control names on the wire, and no ALL GOOD).
+    fn control_suite_variant(&mut self, case: &str, broke: &str, ld: &ToolCmd, qemu: &Path, shim_objects: &[String], lib: &str, tag: &str, fail_lines: &[&str]) {
+        println!("== case {case} (negative control): {broke} ==");
+        let path_rel = format!("src/kernel/target/{}/rt-suite-{tag}.elf", self.w.out_dir);
+        let map_rel = format!("src/kernel/target/{}/rt-suite-{tag}.map", self.w.out_dir);
+        let mut args: Vec<String> = vec!["-T".to_string(), self.w.map.to_string(), "--gc-sections".to_string(), format!("-Map={map_rel}")];
+        args.extend(RT_LINK_WORDS.iter().map(|s| s.to_string()));
+        args.push(format!("{}/{SUITE_MERGED}", self.w.tier));
+        args.extend(shim_objects.iter().cloned());
+        args.extend(self.w.gc_objects.iter().map(|s| s.to_string()));
+        args.push(format!("{}/{LIBC}", self.w.tier));
+        args.push(lib.to_string());
+        args.push("-o".to_string());
+        args.push(path_rel.clone());
+        let ld_out = self.out.join(format!("rt-suite-{tag}.ld.stdout"));
+        let ld_log = self.out.join(format!("rt-suite-{tag}.ld.stderr"));
+        match run_tool_bounded(&self.repo, ld, &args, &ld_out, &ld_log) {
+            Ok(true) => {}
+            Ok(false) => {
+                echo_file(&ld_log, "  | ");
+                self.fail(case, "the control's image did not link (see its linker stderr log)");
+            }
+            Err(e) => self.fail(case, &e),
+        }
+        let elf = self.repo.join(path_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let elf_arg = elf.to_string_lossy().into_owned();
+        let raw_path = self.out.join(format!("rt-suite-{tag}.raw"));
+        let stderr_path = self.out.join(format!("rt-suite-{tag}.stderr"));
+        let mut qargs: Vec<&str> = vec!["-M", self.w.machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+        qargs.extend_from_slice(ExecProfile::Parity.qemu_args());
+        qargs.push("-kernel");
+        qargs.push(&elf_arg);
+        if let Err(e) = run_captured(qemu, &qargs, &raw_path, &stderr_path, Duration::from_secs(RUN_TIMEOUT_S)) {
+            self.fail(case, &e);
+        }
+        let raw = std::fs::read(&raw_path).unwrap_or_default();
+        let failed = fail_lines.iter().all(|l| contains_fixed(&raw, l));
+        let all_good = contains_fixed(&raw, SUITE_ALL_GOOD);
+        if !failed || all_good {
+            self.fail_control(case, broke, &format!("the doctored input was ACCEPTED: the section's FAIL line ({}) is not on the wire, or the suite reports ALL GOOD", fail_lines.join(", ")));
+        }
+        println!("  refused as designed: the section fails on the wire ({}) and the suite reports no ALL GOOD", fail_lines.join(", "));
+        self.pass(case, "negative", broke, "");
+        println!("  PASS (control)");
+    }
+
+    /// The GPIO section's controls: the version control substitutes the
+    /// class's variant of the shim's GPIO API object (its version string an
+    /// API generation below the bias flags) in every world; the latch control
+    /// links the suite against the row's kernel built with the doors'
+    /// doctored latch (the virtual loop fires twice per change), in every
+    /// world.
+    fn control_suite_gpio(&mut self, ld: &ToolCmd, qemu: &Path) {
+        let base: Vec<String> = self.w.shim_objects.iter().map(|s| s.to_string()).collect();
+        let lib = self.w.lib;
+        let version = substitute_object(&base, "goldens/shim/shim-gpiod.o", "goldens/shim/shim-gpiod-break-version.o", "goldens/shim/shim-gpiod-an505.o", "goldens/shim/shim-gpiod-break-version-an505.o");
+        self.control_suite_variant(
+            "rt.suite-gpiod-version-control",
+            "the suite image linked with the GPIO API object whose version string states an API generation below the bias flags (the driver reads no pull modes)",
+            ld, qemu, &version, lib, "gpiod-version", &["FAIL rt-gpio"],
+        );
+        let case = "rt.suite-gpio-latch-control";
+        let dir = self.repo.join("src").join("kernel").join("target").join(self.w.out_dir).join("kernel-latch");
+        let _ = std::fs::create_dir_all(&dir);
+        let log = self.out.join("rt-suite-gpio-latch-staticlib.log");
+        let (target, feats): (Option<&str>, String) = match self.w.lib_build {
+            None => (None, "payload,entropy-accept-software,test-gpio-doctored-latch".to_string()),
+            Some((_, target, feats)) => (Some(target), format!("{feats},test-gpio-doctored-latch")),
+        };
+        let mut bargs: Vec<&str> = vec!["--lib"];
+        if let Some(tg) = target {
+            bargs.extend_from_slice(&["--target", tg, "--no-default-features"]);
+        }
+        bargs.extend_from_slice(&["--features", &feats]);
+        let ok = match cargo_build_kernel_at(&self.repo, &dir, &bargs, &log) {
+            Ok(ok) => ok,
+            Err(e) => {
+                println!("rhu-gate: {e}");
+                false
+            }
+        };
+        if !ok {
+            echo_file(&log, "");
+            self.fail(case, "the doctored kernel's staticlib build error");
+        }
+        let triple = target.unwrap_or("thumbv7em-none-eabihf");
+        let latch_lib = format!("src/kernel/target/{}/kernel-latch/{triple}/release/librhu_kernel.a", self.w.out_dir);
+        self.control_suite_variant(
+            case,
+            "the suite image linked against the row's kernel built with the doors' doctored latch (the virtual loop fires twice per change; the section counts two events for one edge)",
+            ld, qemu, &base, &latch_lib, "gpio-latch", &["FAIL rt-gpio"],
+        );
+    }
+
+    /// The bus sections' controls: the functionality control substitutes the
+    /// class's variant of the shim's bus device unit whose functionality
+    /// answer names no combined transfer, so the driver takes its
+    /// file-transfer path, which is not presented; the doctored control
+    /// links the suite against the row's kernel built with the bus doors'
+    /// doctored models (a data byte not acknowledged, a clock that never
+    /// completes, the pumps' bound removed). Both in every world.
+    fn control_suite_bus(&mut self, ld: &ToolCmd, qemu: &Path) {
+        let base: Vec<String> = self.w.shim_objects.iter().map(|s| s.to_string()).collect();
+        let lib = self.w.lib;
+        let funcs = substitute_object(&base, "goldens/shim/shim-busdev.o", "goldens/shim/shim-busdev-break-funcs.o", "goldens/shim/shim-busdev-an505.o", "goldens/shim/shim-busdev-break-funcs-an505.o");
+        self.control_suite_variant(
+            "rt.suite-busdev-funcs-control",
+            "the suite image linked with the bus device unit whose functionality answer names no combined transfer (the driver takes its file-transfer path, which is not presented)",
+            ld, qemu, &funcs, lib, "busdev-funcs", &["FAIL rt-i2c"],
+        );
+        let case = "rt.suite-bus-doctored-control";
+        let dir = self.repo.join("src").join("kernel").join("target").join(self.w.out_dir).join("kernel-bus-doctored");
+        let _ = std::fs::create_dir_all(&dir);
+        let log = self.out.join("rt-suite-bus-doctored-staticlib.log");
+        let (target, feats): (Option<&str>, String) = match self.w.lib_build {
+            None => (None, "payload,entropy-accept-software,test-bus-doctored".to_string()),
+            Some((_, target, feats)) => (Some(target), format!("{feats},test-bus-doctored")),
+        };
+        let mut bargs: Vec<&str> = vec!["--lib"];
+        if let Some(tg) = target {
+            bargs.extend_from_slice(&["--target", tg, "--no-default-features"]);
+        }
+        bargs.extend_from_slice(&["--features", &feats]);
+        let ok = match cargo_build_kernel_at(&self.repo, &dir, &bargs, &log) {
+            Ok(ok) => ok,
+            Err(e) => {
+                println!("rhu-gate: {e}");
+                false
+            }
+        };
+        if !ok {
+            echo_file(&log, "");
+            self.fail(case, "the doctored kernel's staticlib build error");
+        }
+        let triple = target.unwrap_or("thumbv7em-none-eabihf");
+        let doctored_lib = format!("src/kernel/target/{}/kernel-bus-doctored/{triple}/release/librhu_kernel.a", self.w.out_dir);
+        self.control_suite_variant(
+            case,
+            "the suite image linked against the row's kernel built with the bus doors' doctored models (a data byte not acknowledged, a clock that never completes, the pumps' bound removed; the I2C and SPI sections fail)",
+            ld, qemu, &base, &doctored_lib, "bus-doctored", &["FAIL rt-i2c", "FAIL rt-spi"],
+        );
     }
 
     /// The delivery control: the suite's capture with its activation count
@@ -2307,13 +2676,26 @@ impl Rt {
         if !SUITE_FORBIDDEN.iter().any(|m| contains_fixed(&doctored, m)) {
             self.fail_control(case, broke, "the doctored capture passed the forbidden sweep");
         }
-        if markers_out_of_order(&doctored, &SUITE_MARKERS).is_none() {
+        if markers_out_of_order(&doctored, self.w.suite_markers).is_none() {
             self.fail_control(case, broke, "the doctored capture carried every marker in order");
         }
         println!("  refused as designed: the golden compare, the forbidden sweep and the marker order each reject one failed section");
         self.pass(case, "negative", broke, "");
         println!("  PASS (control)");
     }
+}
+
+/// The world's link list with one frozen object replaced by its control
+/// variant: the Cortex-M7 object or its Cortex-M33 twin, whichever the world
+/// links (a world linking neither is a fault of the tables).
+fn substitute_object(base: &[String], cortex_m7: &str, cortex_m7_variant: &str, cortex_m33: &str, cortex_m33_variant: &str) -> Vec<String> {
+    if !base.iter().any(|s| s == cortex_m7 || s == cortex_m33) {
+        println!("rhu-gate: the world links neither {cortex_m7} nor {cortex_m33}");
+        exit(1);
+    }
+    base.iter()
+        .map(|s| if s == cortex_m7 { cortex_m7_variant.to_string() } else if s == cortex_m33 { cortex_m33_variant.to_string() } else { s.clone() })
+        .collect()
 }
 
 fn open(repo: &Path, w: &'static RtWorld, gate_id: &'static str, display: &'static str, file: &str) -> Rt {
@@ -2397,8 +2779,11 @@ pub fn run(repo: &Path, w: &'static RtWorld) -> ! {
     rt.control_suite_golden();
     rt.control_suite_break(&suite_raw);
     rt.control_suite_delivery(&suite_raw);
+    rt.control_suite_gpio(&ld, &qemu);
+    rt.control_suite_bus(&ld, &qemu);
     rt.case_census(&facts);
     rt.control_census(&facts);
+    rt.control_census_ldrexd(&facts);
     for p in PENDING {
         println!("   pending (unarmed, not counted): {p}");
     }
@@ -2706,7 +3091,7 @@ pub fn rederive(repo: &Path, w: &'static RtWorld) -> ! {
     println!("  PASS");
 
     let case = "rt.rederive-census";
-    println!("== case {case}: every member of the five archives at {dir} decoded -- no compiled function naming a double register above d15 (the pinned assembly pair the only ones); the ARM-state code exactly the pinned pair ==");
+    println!("== case {case}: every member of the five archives at {dir} decoded -- no compiled function naming a double register above d15 (the pinned assembly pair the only ones); the ARM-state code exactly the pinned pair; no 64-bit exclusive-access instruction in any member ==");
     let objdump = match llvm_tool(&facts, "llvm-objdump") {
         Ok(p) => p,
         Err(e) => rt.fail(case, &e),
@@ -2736,8 +3121,12 @@ pub fn rederive(repo: &Path, w: &'static RtWorld) -> ! {
                 let sites: usize = thumb.iter().map(|(_, n)| n).sum();
                 rt.fail(case, &format!("{a}({m}): {} compiled function(s) name a double register above d15 ({sites} sites; the first: {} with {}) -- the Cortex-M7 class set carries none", thumb.len(), thumb[0].0, thumb[0].1));
             }
+            let dis_a = if regions.is_empty() { String::new() } else { rt.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE_ARM, CENSUS_MATTR, &ps], &format!("census-{a}-{i:03}.dis-arm.txt")) };
+            let xd = xdouble_total(&dis_t, &dis_a, &regions);
+            if let Some((f, n)) = xd.first() {
+                rt.fail(case, &format!("{a}({m}): {f} carries a 64-bit exclusive-access instruction ({n} site(s)) -- no Cortex-M executes the form; the set is built for the core"));
+            }
             if !regions.is_empty() {
-                let dis_a = rt.tool_text(&objdump, case, &["-d", CENSUS_TRIPLE_ARM, CENSUS_MATTR, &ps], &format!("census-{a}-{i:03}.dis-arm.txt"));
                 for (f, n) in d32_census_regions(&dis_a, &regions, true) {
                     let name = f.trim_start_matches('<').trim_end_matches(':').trim_end_matches('>').to_string();
                     if !D32_PINNED.contains(&name.as_str()) || n != 1 {
@@ -2756,7 +3145,7 @@ pub fn rederive(repo: &Path, w: &'static RtWorld) -> ! {
             }
         }
         println!(
-            "  {a}: {} members; compiled functions naming d16-d31: 0; double-precision sites: {f64_here}; ARM-state mapping symbols: {} [{}]",
+            "  {a}: {} members; compiled functions naming d16-d31: 0; double-precision sites: {f64_here}; ARM-state mapping symbols: {} [{}]; 64-bit exclusive-access forms: 0",
             members.len(),
             arm_here.len(),
             arm_here.join("; ")
@@ -2771,7 +3160,7 @@ pub fn rederive(repo: &Path, w: &'static RtWorld) -> ! {
         rt.fail(case, &format!("functions naming d16-d31 over the set: {} [{}], the pin is the assembly pair", d32_all.len(), d32_all.join("; ")));
     }
     println!("  the pinned assembly pair naming d16-d31: [{}]", d32_all.join("; "));
-    rt.pass(case, "positive", "", &format!("{{\"archives\":{},\"d32_compiled\":0,\"d32_pinned_asm\":{},\"f64_sites\":{f64_total},\"arm_mode\":{}}}", MERGE_ARCHIVES.len(), d32_all.len(), arm_all.len()));
+    rt.pass(case, "positive", "", &format!("{{\"archives\":{},\"d32_compiled\":0,\"d32_pinned_asm\":{},\"f64_sites\":{f64_total},\"arm_mode\":{},\"xdouble\":0}}", MERGE_ARCHIVES.len(), d32_all.len(), arm_all.len()));
     println!("  PASS");
 
     let ccase = "rt.rederive-selector-control";
@@ -2799,7 +3188,7 @@ pub fn rederive(repo: &Path, w: &'static RtWorld) -> ! {
         exit(1);
     }
     println!(
-        "{}: PASS (4/4 frozen objects re-derived byte-identical -- the surgery object {how_surgery}; the merged object {how_merged}; the suite merge {how_suite}; the closure whole, its producer stamp {closure_stamp}; the archive set and the kit's libraries tie the frozen identities; the set censused: no compiled function naming d16-d31, the ARM-state code the pinned pair; selector control refused)  [{}]",
+        "{}: PASS (4/4 frozen objects re-derived byte-identical -- the surgery object {how_surgery}; the merged object {how_merged}; the suite merge {how_suite}; the closure whole, its producer stamp {closure_stamp}; the archive set and the kit's libraries tie the frozen identities; the set censused: no compiled function naming d16-d31, the ARM-state code the pinned pair, no 64-bit exclusive-access instruction in any member; selector control refused)  [{}]",
         w.rederive_display,
         ld.version
     );
@@ -2987,18 +3376,18 @@ pub fn selfcheck(repo: &Path, w: &'static RtWorld) -> ! {
     let swapped_capture: Vec<u8> = swapped.join("\r\n").into_bytes();
     sc.probe("boot-order-swapped", "every marker present, the runtime initialized after managed entry", markers_out_of_order(&swapped_capture, &BOOT_MARKERS).is_none());
 
-    let suite_ordered: Vec<u8> = SUITE_MARKERS.join("\r\n").into_bytes();
-    sc.accept_probe("suite-order-genuine", "a capture carrying the suite's markers in order", markers_out_of_order(&suite_ordered, &SUITE_MARKERS).is_none());
-    let mut suite_swapped: Vec<&str> = SUITE_MARKERS.to_vec();
+    let suite_ordered: Vec<u8> = SUITE_MARKERS_M7.join("\r\n").into_bytes();
+    sc.accept_probe("suite-order-genuine", "a capture carrying the suite's markers in order", markers_out_of_order(&suite_ordered, &SUITE_MARKERS_M7).is_none());
+    let mut suite_swapped: Vec<&str> = SUITE_MARKERS_M7.to_vec();
     suite_swapped.swap(5, 13);
     let suite_swapped_capture: Vec<u8> = suite_swapped.join("\r\n").into_bytes();
-    sc.probe("suite-order-swapped", "the threading section's verdict before the first section's", markers_out_of_order(&suite_swapped_capture, &SUITE_MARKERS).is_none());
+    sc.probe("suite-order-swapped", "the threading section's verdict before the first section's", markers_out_of_order(&suite_swapped_capture, &SUITE_MARKERS_M7).is_none());
     sc.accept_probe("activations-genuine", "an activation line at the floor accepted", activation_count(b"[host] activations delivered: 3\r\n", ACTIVATIONS_FLOOR).is_ok());
     sc.probe("activations-below-floor", "an activation line below the floor of three must be refused", activation_count(b"[host] activations delivered: 0\r\n", 3).is_ok());
     sc.probe("activations-absent", "a capture without the activation line must be refused", activation_count(b"[host] exit: 0\r\n", ACTIVATIONS_FLOOR).is_ok());
     let suite_broken: Vec<u8> = String::from_utf8_lossy(&suite_ordered).replace("PASS rt-threads", "FAIL rt-threads").into_bytes();
     sc.probe("suite-break-forbidden", "a capture with one section's verdict turned FAIL must trip the forbidden sweep", !SUITE_FORBIDDEN.iter().any(|m| contains_fixed(&suite_broken, m)));
-    sc.probe("suite-break-order", "a capture with one section's verdict turned FAIL must lose that marker", markers_out_of_order(&suite_broken, &SUITE_MARKERS).is_none());
+    sc.probe("suite-break-order", "a capture with one section's verdict turned FAIL must lose that marker", markers_out_of_order(&suite_broken, &SUITE_MARKERS_M7).is_none());
 
     let manifest_short = manifest.replace("0000000000000000000000000000000000000000000000000000000000000000", "000000000000000000000000000000000000000000000000000000000000000");
     sc.probe("manifest-sha-malformed", "a manifest record whose sha is 63 hex digits must parse to fewer records (a drifted record set)", parse_vendored_manifest(&manifest_short).len() == parse_vendored_manifest(&manifest).len());
@@ -3024,6 +3413,17 @@ pub fn selfcheck(repo: &Path, w: &'static RtWorld) -> ! {
     sc.accept_probe("census-regions-inside", "the ARM walk counts the function inside the ARM-state region only", d32_census_regions(&dis_sec, &regions, true) == vec![("<g>:".to_string(), 1)]);
     let dis_f64 = "00000000 <f>:\n       0: ee 21 0b 01\tvmul.f64\td0, d1, d1\n       4: ee 20 0a 01\tvmul.f32\ts0, s0, s2\n";
     sc.accept_probe("census-counts-f64", "a decode with one double-precision multiply counts one", f64_census(dis_f64) == 1);
+    let dis_xd = "00000000 <f>:\n       0: e8d0 017f    \t<unknown>\n       4: e8cc 2375    \t<unknown>\n       8: e8dc 017f    \t<unknown>\n";
+    sc.accept_probe("census-sees-exclusive-double", "a decode with the two 64-bit exclusive-access forms as unknown lines counts three sites in one function", xdouble_census(dis_xd) == vec![("<f>:".to_string(), 3)]);
+    let dis_xd_bytes = "00000000 <f>:\n       0: d0 e8 7f 01\tldrexd\tr0, r1, [r0]\n";
+    sc.accept_probe("census-exclusive-double-bytes", "the same form printed as four bytes by name is counted", xdouble_census(dis_xd_bytes) == vec![("<f>:".to_string(), 1)]);
+    let dis_x32 = "00000000 <f>:\n       0: e850 0f00    \tldrex\tr0, [r0]\n       4: e840 1200    \tstrex\tr2, r1, [r0]\n       8: e8d0 0f4f    \tldrexb\tr0, [r0]\n       c: e8d0 0f5f    \tldrexh\tr0, [r0]\n      10: e8c0 1f42    \tstrexb\tr2, r1, [r0]\n      14: f3bf 8f2f    \tclrex\n";
+    sc.accept_probe("census-passes-32-bit-exclusives", "the word, byte and halfword exclusives and clrex are not counted", xdouble_census(dis_x32).is_empty());
+    let dis_half = "00000000 <f>:\n       0: e8d0 f000    \ttbb\t[r0, r0]\n       4: b5f0         \tpush\t{r4, r5, r6, r7, lr}\n";
+    sc.accept_probe("census-second-halfword-checked", "a line whose first halfword matches the form and whose second does not, and a 16-bit instruction, are not counted", xdouble_census(dis_half).is_empty());
+    sc.probe("census-exclusive-double-as-clean", "a decode carrying the forms offered as clean", xdouble_census(dis_xd).is_empty());
+    let dis_xd_sec = format!("{} of section .text:\n\n00000000 <f>:\n       0: e8d0 017f    \t<unknown>\n00000010 <g>:\n      10: 9f 0f b0 e1\tldrexd\tr0, r1, [r0]\n", "Disassembly");
+    sc.accept_probe("census-exclusive-double-regions", "the Thumb walk counts the function outside the ARM-state region and the ARM walk the one inside, merged by function", xdouble_total(&dis_xd_sec, &dis_xd_sec, &regions) == vec![("<f>:".to_string(), 1), ("<g>:".to_string(), 1)]);
     let syms_arm = "   Num:    Value  Size Type    Bind   Vis       Ndx Name\n     1: 00000000     0 NOTYPE  LOCAL  DEFAULT     1 $a\n     2: 00000000     0 FUNC    LOCAL  DEFAULT     1 __unw_getcontext\n";
     sc.accept_probe("arm-mode-seen", "a symbol table with one ARM-state mapping symbol at a pinned function reads one and passes the pin of one", arm_mode_fault(&arm_mode_symbols(syms_arm), syms_arm, 1).is_none());
     let syms_thumb = syms_arm.replace("$a", "$t");
@@ -3077,7 +3477,7 @@ pub fn selfcheck(repo: &Path, w: &'static RtWorld) -> ! {
     sc.finish("genuine inputs accepted");
 }
 
-/// The publish world the parity leg runs the SDK in: `RHU_PUBLISH` (the
+/// The Linux environment for the publish that the parity leg runs the SDK in: `RHU_PUBLISH` (the
 /// command prefix that runs a script there; a double-quoted word keeps
 /// its spaces) with `RHU_PUBLISH_ROOT` (this checkout's root in that
 /// world), else the two lines of the untracked machine-local
@@ -3129,17 +3529,184 @@ fn control_field<'a>(line: &'a str, key: &str) -> &'a str {
     line.split(' ').find_map(|w| w.strip_prefix(key_eq.as_str())).unwrap_or("")
 }
 
+/// The SDK's half of the stack-size tie: the board table's thread stack facts (bytes) per row as
+/// the SDK ships them, beside the tree's constants they copy -- the kernel's
+/// pool for the row, the hosting layer's default and clamp.
+#[derive(Clone)]
+struct StackRow {
+    board: String,
+    pool: u64,
+    default: u64,
+    clamp: u64,
+    kernel_pool: u64,
+    host_default: u64,
+    host_clamp: u64,
+}
+
+#[derive(Clone)]
+struct StackFacts {
+    rows: Vec<StackRow>,
+    /// The targets' copy of the kernel's minimum stack, and the header's.
+    sdk_min: u64,
+    kernel_min: u64,
+}
+
+/// The stack knob's value for the positive case: above the row's default,
+/// so the moved spawn line proves the knob without shrinking the third
+/// thread's stack under the program's own needs; below every row's clamp.
+const STACK_KNOB: u64 = 20480;
+/// The boot marker the knob moves: the hosting layer's third thread asks the
+/// row's default through the shim's own thread attributes.
+const STACK_KNOB_MARKER_DEFAULT: &str = "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)";
+/// The portable symbol file's embedded-source record kind by its GUID as the
+/// file stores it (0E8A571B-6926-466E-B4AD-8AB04611F5FE): in the file's GUID
+/// heap exactly when a source is embedded.
+const EMBEDDED_SOURCE_KIND: [u8; 16] = [0x1B, 0x57, 0x8A, 0x0E, 0x26, 0x69, 0x6E, 0x46, 0xB4, 0xAD, 0x8A, 0xB0, 0x46, 0x11, 0xF5, 0xFE];
+
+fn embeds_source(pdb: &[u8]) -> bool {
+    pdb.windows(EMBEDDED_SOURCE_KIND.len()).any(|w| w == EMBEDDED_SOURCE_KIND)
+}
+
+/// The boot markers with the third thread's spawn line at the knob's value.
+fn knob_boot_markers(value: u64) -> Vec<String> {
+    BOOT_MARKERS
+        .iter()
+        .map(|m| if *m == STACK_KNOB_MARKER_DEFAULT { format!("[shim] pthread_create: stack {value} B asked, {value} B spawned (tid 3)") } else { m.to_string() })
+        .collect()
+}
+
+/// The text of `<name>="..."` in one row of the board table.
+fn row_attr_text(row: &str, name: &str) -> Option<String> {
+    let key = format!("{name}=\"");
+    let start = row.find(&key)? + key.len();
+    let end = row[start..].find('"')? + start;
+    Some(row[start..end].to_string())
+}
+
+fn row_attr(row: &str, name: &str) -> Option<u64> {
+    row_attr_text(row, name)?.parse().ok()
+}
+
+/// `pub const STACK_POOL_BYTES: usize = <n> * 1024;` (or a plain number) in
+/// a kernel board file.
+fn kernel_pool_bytes(text: &str) -> Option<u64> {
+    let key = "pub const STACK_POOL_BYTES: usize = ";
+    let start = text.find(key)? + key.len();
+    let end = text[start..].find(';')? + start;
+    let expr: String = text[start..end].chars().filter(|c| !c.is_whitespace()).collect();
+    let mut product = 1u64;
+    for factor in expr.split('*') {
+        product = product.checked_mul(factor.parse::<u64>().ok()?)?;
+    }
+    Some(product)
+}
+
+/// `#define <name> <digits>` (a `u` suffix allowed) in a C header's text.
+fn c_define(text: &str, name: &str) -> Option<u64> {
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        if words.next() == Some("#define") && words.next() == Some(name) {
+            return words.next()?.trim_end_matches('u').parse().ok();
+        }
+    }
+    None
+}
+
+/// The hosting layer's row block whose MGC_ROW_BOARD names the board: the
+/// text from its `#if`/`#elif` line to the next preprocessor branch.
+fn host_row_block<'a>(text: &'a str, board: &str) -> Option<&'a str> {
+    let quoted = format!("\"{board}\"");
+    let mut bounds: Vec<usize> = Vec::new();
+    for key in ["#if defined(", "#elif defined(", "#else", "#endif"] {
+        bounds.extend(text.match_indices(key).map(|(i, _)| i));
+    }
+    bounds.push(text.len());
+    bounds.sort_unstable();
+    bounds.dedup();
+    bounds.windows(2).map(|p| &text[p[0]..p[1]]).find(|block| block.lines().any(|l| l.contains("MGC_ROW_BOARD") && l.contains(&quoted)))
+}
+
+/// `<name>value</name>` in the targets' text.
+fn xml_value(text: &str, name: &str) -> Option<String> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(text[start..end].trim().to_string())
+}
+
+/// The board table's stack facts beside the tree's constants: a row's
+/// kernel file is its name without the `arm-` prefix, hyphens as
+/// underscores, under src/kernel/src/board; its hosting-layer block names
+/// the same name in MGC_ROW_BOARD.
+fn read_stack_facts(repo: &Path) -> Result<StackFacts, String> {
+    let sdk = repo.join("src").join("sdk").join("Lamella.Rhu.Sdk").join("Sdk");
+    let boards = std::fs::read_to_string(sdk.join("boards.props")).map_err(|e| format!("boards.props: {e}"))?;
+    let targets = std::fs::read_to_string(sdk.join("Sdk.targets")).map_err(|e| format!("Sdk.targets: {e}"))?;
+    let host = std::fs::read_to_string(repo.join("src").join("gc").join("host").join("mgc_board_rows.h")).map_err(|e| format!("mgc_board_rows.h: {e}"))?;
+    let header = std::fs::read_to_string(repo.join("src").join("kernel").join("include").join("rhu.h")).map_err(|e| format!("rhu.h: {e}"))?;
+    let mut rows = Vec::new();
+    for (i, _) in boards.match_indices("<RhuBoardRow Include=\"") {
+        let end = boards[i..].find("/>").ok_or("a board row without its end")? + i;
+        let row = &boards[i..end];
+        let board = row_attr_text(row, "Include").ok_or("a board row without a name")?;
+        let pool = row_attr(row, "StackPool").ok_or(format!("{board}: no StackPool"))?;
+        let default = row_attr(row, "StackDefault").ok_or(format!("{board}: no StackDefault"))?;
+        let clamp = row_attr(row, "StackClamp").ok_or(format!("{board}: no StackClamp"))?;
+        let name = board.strip_prefix("arm-").unwrap_or(&board).to_string();
+        let file = repo.join("src").join("kernel").join("src").join("board").join(format!("{}.rs", name.replace('-', "_")));
+        let ktext = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let kernel_pool = kernel_pool_bytes(&ktext).ok_or(format!("{}: no STACK_POOL_BYTES", file.display()))?;
+        let block = host_row_block(&host, &name).ok_or(format!("mgc_board_rows.h: no row block names {name}"))?;
+        let host_default = c_define(block, "MGC_ROW_STACK_DEFAULT").ok_or(format!("mgc_board_rows.h: the {name} block has no MGC_ROW_STACK_DEFAULT"))?;
+        let host_clamp = c_define(block, "MGC_ROW_STACK_CLAMP").ok_or(format!("mgc_board_rows.h: the {name} block has no MGC_ROW_STACK_CLAMP"))?;
+        rows.push(StackRow { board, pool, default, clamp, kernel_pool, host_default, host_clamp });
+    }
+    let sdk_min = xml_value(&targets, "RhuThreadStackMin").and_then(|v| v.parse().ok()).ok_or("Sdk.targets: no RhuThreadStackMin")?;
+    let kernel_min = c_define(&header, "RHU_THREAD_STACK_MIN").ok_or("rhu.h: no RHU_THREAD_STACK_MIN")?;
+    Ok(StackFacts { rows, sdk_min, kernel_min })
+}
+
+/// The tie: every row's three facts equal the tree's, the default fits the
+/// budget the targets enforce, the minimum equal to the header's.
+fn stack_facts_fault(f: &StackFacts) -> Option<String> {
+    if f.rows.is_empty() {
+        return Some("the board table has no rows".to_string());
+    }
+    for r in &f.rows {
+        if r.pool != r.kernel_pool {
+            return Some(format!("{}: StackPool {} != the kernel's STACK_POOL_BYTES {}", r.board, r.pool, r.kernel_pool));
+        }
+        if r.default != r.host_default {
+            return Some(format!("{}: StackDefault {} != the hosting layer's MGC_ROW_STACK_DEFAULT {}", r.board, r.default, r.host_default));
+        }
+        if r.clamp != r.host_clamp {
+            return Some(format!("{}: StackClamp {} != the hosting layer's MGC_ROW_STACK_CLAMP {}", r.board, r.clamp, r.host_clamp));
+        }
+        if r.default > r.clamp || 3 * r.default + 1024 > r.pool {
+            return Some(format!("{}: the default {} does not fit the budget (the clamp {}, the pool {})", r.board, r.default, r.clamp, r.pool));
+        }
+    }
+    if f.sdk_min != f.kernel_min {
+        return Some(format!("the targets' RhuThreadStackMin {} != RHU_THREAD_STACK_MIN {}", f.sdk_min, f.kernel_min));
+    }
+    None
+}
+
 /// THE PARITY LEG: the gate's own program published through the SDK
-/// package from the local feed in the publish world, and its object, its
+/// package from the local feed in the Linux environment for the publish, and its object, its
 /// surgery object, its merged object and its image tied byte for byte to
 /// the frozen tier and to this runner's own link of the tier's merged
-/// object; then the SDK's refusals exercised through the real tool on
-/// doctored inputs. A maintainer's leg beside `rederive`: it needs the
-/// publish world (the pinned .NET SDK, the archive sets and the LLVM
+/// object; the board table's stack facts tied to the tree; the stack
+/// knob's image booted with the row's default moved; a real git checkout
+/// at another path tying the record; then the SDK's refusals exercised
+/// through the real tool on doctored inputs. A maintainer's leg beside
+/// `rederive`: it needs the
+/// Linux environment for the publish (the pinned .NET SDK, the archive sets and the LLVM
 /// release on the Linux side), NOT RUN and exit 1 without it -- never a
 /// pass. The exact tie of the object needs the SDK's path map (the same
 /// project maps to the same string at any directory), so the leg refuses
-/// a publish world whose object does not carry the frozen object's mapped
+/// a Linux environment whose published object does not carry the frozen object's mapped
 /// path.
 pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     let facts = match rustc_facts() {
@@ -3158,11 +3725,18 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     };
     let Some((prefix, root)) = resolve_publish(repo) else {
         println!(
-            "{}: NOT RUN (no publish world resolved: set RHU_PUBLISH to the command prefix that runs a script in the publish world and RHU_PUBLISH_ROOT to this checkout's root there, or write tools/toolchains/publish.local with those two lines)",
+            "{}: NOT RUN (no Linux environment for the publish resolved: set RHU_PUBLISH to the command prefix that runs a script in the Linux environment for the publish and RHU_PUBLISH_ROOT to this checkout's root there, or write tools/toolchains/publish.local with those two lines)",
             w.sdk_display
         );
         exit(1);
     };
+    if !repo.join("tools").join("rt-publish").join("sdk-parity.sh").is_file() {
+        println!(
+            "{}: NOT RUN (the Linux environment for the publish is named but this checkout carries no tools/rt-publish/sdk-parity.sh, the maintainers' script that drives the parity leg there)",
+            w.sdk_display
+        );
+        exit(1);
+    }
     let words = match command_words(&prefix) {
         Ok(v) if !v.is_empty() => v,
         Ok(_) => {
@@ -3209,7 +3783,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     args.push(w.sdk_board);
     args.push(&lib_there);
     args.push(&out_there);
-    println!("== the publish world: {} {} {} {} {} ==", words.join(" "), script, w.sdk_board, lib_there, out_there);
+    println!("== the Linux environment for the publish: {} {} {} {} {} ==", words.join(" "), script, w.sdk_board, lib_there, out_there);
     let script_out = out.join("script.stdout");
     let script_err = out.join("script.stderr");
     let outcome = run_captured(Path::new(&words[0]), &args, &script_out, &script_err, Duration::from_secs(2400));
@@ -3239,7 +3813,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     let carries_record_path = |obj: &[u8]| obj.windows(frozen_path.len()).any(|w| w == frozen_path.as_bytes());
     if !carries_record_path(&fresh_obj) {
         println!(
-            "{}: REFUSED -- the object published in the publish world does not carry the record's project path '{frozen_path}'; the exact tie needs the same project at the same path, and the tie apart from the embedded path strings is a separate instrument",
+            "{}: REFUSED -- the object published in the Linux environment for the publish does not carry the record's project path '{frozen_path}'; the exact tie needs the same project at the same path, and the tie apart from the embedded path strings is a separate instrument",
             w.sdk_display
         );
         exit(1);
@@ -3321,6 +3895,10 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         ("board-unknown", "board-unknown", "is not in the table", "a board not in the table"),
         ("tool", "tool-byte", "does not tie its record", "one byte of the object copier changed"),
         ("posture", "posture", "InvariantGlobalization", "the fixed posture moved"),
+        ("stack-clamp", "stack-clamp", "above the row's clamp", "a thread stack above the row's clamp"),
+        ("stack-min", "stack-min", "below the kernel's minimum", "a thread stack below the kernel's minimum"),
+        ("stack-nan", "stack-nan", "not a whole number", "a thread stack that is not a whole number"),
+        ("stack-budget", "stack-budget", "fewer than three stacks", "a thread stack the row's pool cannot hold three of (the package's table in the cache doctored to a 64 KiB pool)"),
     ] {
         let case = format!("rt.sdk-parity-control-{name}");
         println!("== case {case}: {what} -- the publish must refuse, nothing linked ==");
@@ -3365,8 +3943,158 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         rt.fail_control(case, "project-path", "the unmapped copy's object is the record's byte for byte -- the control does not distinguish");
     }
     let unmapped_run = control_line(&controls, "path-unmapped").and_then(|l| l.split_once("embedded=")).map(|(_, r)| r.trim().to_string()).unwrap_or_default();
-    println!("  the unmapped copy's object does not carry the record's path '{frozen_path}' (the publish world read '{unmapped_run}' in it) and differs from the record: the guard refuses");
+    println!("  the unmapped copy's object does not carry the record's path '{frozen_path}' (the Linux environment for the publish read '{unmapped_run}' in it) and differs from the record: the guard refuses");
     rt.pass(case, "negative", "project-path", "");
+    println!("  PASS");
+
+    let case = "rt.sdk-parity-row-facts";
+    println!("== case {case}: the board table's stack facts (the pool, the default, the clamp per row) and the targets' minimum against the kernel's and the hosting layer's constants ==");
+    let stack_facts = match read_stack_facts(repo) {
+        Ok(f) => f,
+        Err(e) => rt.fail(case, &e),
+    };
+    if let Some(f) = stack_facts_fault(&stack_facts) {
+        rt.fail(case, &f);
+    }
+    for r in &stack_facts.rows {
+        println!("  {}: pool {} B, default {} B, clamp {} B -- the kernel's pool {}, the hosting layer's default {} and clamp {}", r.board, r.pool, r.default, r.clamp, r.kernel_pool, r.host_default, r.host_clamp);
+    }
+    println!("  the targets' minimum {} B = the header's RHU_THREAD_STACK_MIN {}", stack_facts.sdk_min, stack_facts.kernel_min);
+    rt.pass(case, "positive", "", &format!("{{\"rows\":{}}}", stack_facts.rows.len()));
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-row-facts";
+    println!("== case {case}: the same facts with the first row's pool moved by one byte -- the tie must refuse ==");
+    let mut doctored = stack_facts.clone();
+    doctored.rows[0].pool += 1;
+    match stack_facts_fault(&doctored) {
+        Some(f) => println!("  refused: {f}"),
+        None => rt.fail_control(case, "row-facts", "a doctored pool was accepted by the tie"),
+    }
+    rt.pass(case, "negative", "row-facts", "");
+    println!("  PASS");
+
+    let case = "rt.sdk-parity-stack-knob";
+    println!("== case {case}: the gate's project published with RhuThreadStack={STACK_KNOB} -- the object the record's, the response file free of the runtime's knob, the image defining __rhu_thread_stack_default={STACK_KNOB}, its boot with the third thread at that size ==");
+    let Some(line) = control_line(&controls, "stack-knob") else {
+        rt.fail(case, "the publish-side script left no summary line for the knob publish");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" {
+        rt.fail(case, &format!("the publish with the knob did not produce the image: {line}"));
+    }
+    let knob_obj = std::fs::read(out.join("control-stack-knob").join("rthello.o")).unwrap_or_default();
+    if knob_obj != frozen_obj {
+        rt.fail(case, &format!("the object published with the knob is not the record's ({} bytes against {}): the knob reached the compile, which it must not", knob_obj.len(), frozen_obj.len()));
+    }
+    if control_field(line, "runtime-knob-in-rsp") != "0" {
+        rt.fail(case, &format!("the response file carries the runtime's own default-stack knob: {line}"));
+    }
+    let budget = line.split_once("budget=").map(|(_, b)| b.trim()).unwrap_or("");
+    let budget_want = format!("the default managed stack {STACK_KNOB} B");
+    if !budget.contains(&budget_want) {
+        rt.fail(case, &format!("the build did not print the budget line with the knob's value: '{budget}'"));
+    }
+    let knob_elf = out.join("control-stack-knob").join("rthello.elf");
+    let knob_elf_arg = knob_elf.to_string_lossy().into_owned();
+    let nm = match llvm_tool(&facts, "llvm-nm") {
+        Ok(p) => p,
+        Err(e) => rt.fail(case, &e),
+    };
+    let dump = rt.tool_text(&nm, case, &[&knob_elf_arg], "sdk-parity-stack-knob.nm.txt");
+    match word_sym_value(dump.as_bytes(), "__rhu_thread_stack_default") {
+        Some(v) if v == STACK_KNOB => println!("  the image defines __rhu_thread_stack_default = {v}; the object the record's; the response file free of the runtime's knob; the build's line: {budget}"),
+        Some(v) => rt.fail(case, &format!("the image defines __rhu_thread_stack_default = {v}, not {STACK_KNOB}")),
+        None => rt.fail(case, "the image does not define __rhu_thread_stack_default"),
+    }
+    let (qemu, qemu_version) = match resolve_qemu(repo) {
+        Ok(q) => q,
+        Err(e) => rt.fail(case, &e),
+    };
+    let raw_path = out.join("stack-knob-boot.raw");
+    let stderr_path = out.join("stack-knob-boot.stderr");
+    let mut qargs: Vec<&str> = vec!["-M", w.machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+    qargs.extend_from_slice(ExecProfile::Parity.qemu_args());
+    qargs.push("-kernel");
+    qargs.push(&knob_elf_arg);
+    let outcome = match run_captured(&qemu, &qargs, &raw_path, &stderr_path, Duration::from_secs(RUN_TIMEOUT_S)) {
+        Ok(o) => o,
+        Err(e) => rt.fail(case, &e),
+    };
+    let raw = std::fs::read(&raw_path).unwrap_or_default();
+    echo_file(&raw_path, "  | ");
+    if outcome.timed_out {
+        rt.fail(case, "the boot with the knob hung (killed at its timeout)");
+    }
+    if cr_count(&raw) == 0 {
+        rt.fail(case, "no CR bytes in raw capture (wire discipline lost)");
+    }
+    let golden = match std::fs::read(rt.frozen(GOLDEN)) {
+        Ok(b) => b,
+        Err(e) => rt.fail(case, &format!("golden unreadable: {e}")),
+    };
+    if !eq_lf_normalized(&payload_stream(&raw), &golden) {
+        rt.fail(case, &format!("the payload stream differs from {}/{GOLDEN} under the knob", w.tier));
+    }
+    let knob_markers = knob_boot_markers(STACK_KNOB);
+    let knob_marker_refs: Vec<&str> = knob_markers.iter().map(String::as_str).collect();
+    if let Some(fault) = markers_out_of_order(&raw, &knob_marker_refs) {
+        rt.fail(case, &format!("the contract's order under the knob: {fault}"));
+    }
+    if !contains_fixed(&raw, BOOT_RETURN_LINE) {
+        rt.fail(case, &format!("the kernel's return line '{BOOT_RETURN_LINE}' not found"));
+    }
+    for m in FORBIDDEN_PATTERNS {
+        if contains_fixed(&raw, m) {
+            rt.fail(case, &format!("forbidden pattern '{m}' present"));
+        }
+    }
+    if outcome.exit != 0 {
+        rt.fail(case, &format!("exit {}, wanted 0", outcome.exit));
+    }
+    let knob_sha = sha256_file(&knob_elf).unwrap_or_default();
+    let knob_rel = format!("{out_rel}/control-stack-knob/rthello.elf");
+    rt.pass_image(case, 0, &knob_rel, &knob_sha, Some(GOLDEN), &format!("{{\"knob\":{STACK_KNOB},\"markers\":{}}}", knob_markers.len()));
+    println!("  PASS (the third thread's spawn line at {STACK_KNOB} B; the payload stream equals its golden; {} markers in order; {qemu_version})", knob_markers.len());
+
+    let case = "rt.sdk-parity-control-git-checkout";
+    println!("== case {case}: the same project published from a real git checkout at another path, its ignore rules covering the build directory -- its object must be the record's byte for byte and its symbol file must embed no source ==");
+    let Some(line) = control_line(&controls, "git-checkout") else {
+        rt.fail(case, "the publish-side script left no summary line for the checkout's publish");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "object") != "present" || control_field(line, "ignore") != "present" || control_field(line, "git").is_empty() {
+        rt.fail(case, &format!("the checkout's publish did not run as registered: {line}"));
+    }
+    let checkout_obj = std::fs::read(out.join("control-git-checkout").join("rthello.o")).unwrap_or_default();
+    let checkout_pdb = std::fs::read(out.join("control-git-checkout").join("rthello.pdb")).unwrap_or_default();
+    if checkout_pdb.is_empty() {
+        rt.fail(case, "the checkout's publish left no symbol file");
+    }
+    if embeds_source(&checkout_pdb) {
+        rt.fail(case, "the checkout's symbol file embeds a source: the source-control queries ran");
+    }
+    if checkout_obj != frozen_obj {
+        rt.fail(case, &format!("the checkout's object ({} bytes) is not the record's ({} bytes): a source-control fact reached the build", checkout_obj.len(), frozen_obj.len()));
+    }
+    println!("  the checkout at {} ties the record byte for byte ({} bytes); its symbol file embeds no source", control_field(line, "git"), checkout_obj.len());
+    rt.pass(case, "positive", "", &format!("{{\"bytes\":{}}}", checkout_obj.len()));
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-git-embed";
+    println!("== case {case}: the same checkout published with the source-control queries turned back on -- its symbol file embeds the generated sources and its object moves: the control bites ==");
+    let Some(line) = control_line(&controls, "git-embed") else {
+        rt.fail_control(case, "source-control-queries", "the publish-side script left no summary line for the publish with the queries on");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "object") != "present" {
+        rt.fail_control(case, "source-control-queries", &format!("the publish with the queries on did not produce an object: {line}"));
+    }
+    let embed_obj = std::fs::read(out.join("control-git-embed").join("rthello.o")).unwrap_or_default();
+    let embed_pdb = std::fs::read(out.join("control-git-embed").join("rthello.pdb")).unwrap_or_default();
+    if !embeds_source(&embed_pdb) {
+        rt.fail_control(case, "source-control-queries", "the symbol file embeds no source with the queries on -- the control would not bite");
+    }
+    if embed_obj == frozen_obj {
+        rt.fail_control(case, "source-control-queries", "the object is the record's with the queries on -- the control does not distinguish");
+    }
+    println!("  with the queries on the symbol file embeds sources and the object moves ({}...): the control bites", control_field(line, "sha256"));
+    rt.pass(case, "negative", "source-control-queries", "");
     println!("  PASS");
 
     rt.results.emit_summary(w.sdk_gate, "pass", 0);
@@ -3374,6 +4102,6 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         println!("{}: FAIL -- results file failed schema validation", w.sdk_display);
         exit(1);
     }
-    println!("{}: PASS (5 ties byte for byte, the fifth the same project at another directory under the SDK's path map, + 6 negative controls through the real tool; the publish world's transcript under {out_rel})  [{} | {}]", w.sdk_display, facts.version, ld.version);
+    println!("{}: PASS (8 positive cases -- 5 ties byte for byte, the fifth the same project at another directory under the SDK's path map; the board table's stack facts tied to the tree; the stack knob's image booted with the row's default moved; a real git checkout at another path tying the record -- + 12 negative controls through the real tool; the Linux environment's transcript under {out_rel})  [{} | {}]", w.sdk_display, facts.version, ld.version);
     exit(0);
 }

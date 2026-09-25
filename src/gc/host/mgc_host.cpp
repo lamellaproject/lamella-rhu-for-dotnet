@@ -126,6 +126,11 @@
 #error "MGC_HOST_DRIVE_FREEPAD is a sweep-world drive (needs MGC_HOST_DRIVE_SWEEP)"
 #endif
 #endif
+#ifdef MGC_HOST_DRIVE_NOGC
+#ifndef MGC_HOST_DRIVE_TUNE
+#error "MGC_HOST_DRIVE_NOGC is a windows-world drive (needs MGC_HOST_DRIVE_TUNE)"
+#endif
+#endif
 #ifdef MGC_HOST_DRIVE_HANDLES
 #ifndef MGC_HOST_DRIVE_TUNE
 #error "MGC_HOST_DRIVE_HANDLES is a windows-world drive (needs MGC_HOST_DRIVE_TUNE)"
@@ -1393,6 +1398,32 @@ static int32_t drive_handles(IGCHeap* heap)
 }
 #endif /* MGC_HOST_DRIVE_HANDLES */
 
+#ifdef MGC_HOST_DRIVE_NOGC
+/* ------------------------------------------------------------------ */
+/* the no-GC region drive (gate case gc.no-gc-region): the entry and   */
+/* the end through the interface, each status read against the pinned */
+/* enums -- an entry is refused with no_memory, never claimed, since   */
+/* no budget exists to admit; an end answers not_in_progress.          */
+/* ------------------------------------------------------------------ */
+
+static int32_t drive_no_gc_region(IGCHeap* heap)
+{
+    printf("[gc-host] gc.no-gc-region drive: the no-GC region's entry and end through the interface, the statuses read against the pinned enums (a byte, a kilobyte, the heap)\n");
+    static const uint64_t sizes[3] = { 1u, 1024u, 2097152u };
+    for (int i = 0; i < 3; i++) {
+        int s = heap->StartNoGCRegion(sizes[i], false, 0, i == 1);
+        drive_check(s != (int)start_no_gc_success, "StartNoGCRegion claimed success with nothing entered");
+        drive_check(s == (int)start_no_gc_no_memory, "StartNoGCRegion refused with a status other than no_memory");
+        int e = heap->EndNoGCRegion();
+        drive_check(e == (int)end_no_gc_not_in_progress, "EndNoGCRegion did not answer not_in_progress after a refused entry");
+    }
+    int e0 = heap->EndNoGCRegion();
+    drive_check(e0 == (int)end_no_gc_not_in_progress, "a bare EndNoGCRegion did not answer not_in_progress");
+    printf("[gc-host] GC NO-GC REGION EXERCISE OK (three entries refused with no_memory -- a byte, a kilobyte, the heap -- each end and a bare end answering not_in_progress; nothing claimed)\n");
+    return 0;
+}
+#endif /* MGC_HOST_DRIVE_NOGC */
+
 static int32_t drive_allocator(IGCHeap* heap)
 {
 #ifdef MGC_HOST_DRIVE_FREEPAD
@@ -1400,6 +1431,9 @@ static int32_t drive_allocator(IGCHeap* heap)
 #endif
 #ifdef MGC_HOST_DRIVE_HANDLES
     return drive_handles(heap);
+#endif
+#ifdef MGC_HOST_DRIVE_NOGC
+    return drive_no_gc_region(heap);
 #endif
 #if defined(MGC_HOST_DRIVE_TUNE)
     printf("[gc-host] gc.D windows+event drive: the same payload under window posture, the GC-done futex, and the activation break-out\n");

@@ -71,9 +71,9 @@ pub const fn st_split(line: u32) -> (u32, u32) {
     (line / 16, line % 16)
 }
 
-/// The F7's EXTI positions in the vector table: lines 0 to 4 at 6 to 10,
-/// lines 5 to 9 together at 23, lines 10 to 15 together at 40 (the CMSIS
-/// numbering; RM0410's Table 46).
+/// The classic EXTI positions in the vector table (the F7 and the L4+):
+/// lines 0 to 4 at 6 to 10, lines 5 to 9 together at 23, lines 10 to 15
+/// together at 40 (RM0410's and RM0432's vector tables).
 #[allow(dead_code)]
 pub const fn st_f7_nvic(bit: u32) -> usize {
     match bit {

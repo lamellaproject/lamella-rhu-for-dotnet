@@ -20,6 +20,8 @@
     <IlcSystemModule>rtsmoke</IlcSystemModule>
     <OptimizationPreference>Size</OptimizationPreference>
     <IlcDehydrate>false</IlcDehydrate>
+    <!-- No debug information: the object depends on the code alone, the same bytes from any directory and whatever the sources' comment lines. -->
+    <DebugType>none</DebugType>
   </PropertyGroup>
 
   <ItemGroup>

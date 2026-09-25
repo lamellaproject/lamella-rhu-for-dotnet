@@ -1891,3 +1891,13 @@ pub fn probe_lazy_fp_witness() -> (u32, u32, u32) {
         LAZY_FP_WITNESS.psp.load(Ordering::Acquire),
     )
 }
+
+/// The stack pool's state for a refusal's line: the pool's size, the
+/// bytes never carved (the bump's remainder) and the retired stacks a
+/// later exact-fit request could reuse. CS-bounded; never blocks.
+pub fn pool_remainder() -> (usize, usize, usize) {
+    with_cs(|| unsafe {
+        let s = sched();
+        (board::STACK_POOL_BYTES, board::STACK_POOL_BYTES - s.pool_used, s.retired_n as usize)
+    })
+}

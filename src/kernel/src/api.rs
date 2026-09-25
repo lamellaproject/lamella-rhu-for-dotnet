@@ -1,5 +1,5 @@
 //! The RHU hosting API -- the C-ABI waistline between the kernel and
-//! hosted payloads. Forty-one functions, `rhu_`-prefixed, mirrored
+//! hosted payloads. Forty-nine functions, `rhu_`-prefixed, mirrored
 //! exactly by `include/rhu.h` (contract generation `ABI`, at the end
 //! of this file); the shim backend is the intended consumer. One rule
 //! binds this surface: no second blocking primitive ever joins it, and
@@ -9,7 +9,7 @@
 use core::ffi::{c_char, c_void};
 
 use crate::registry::ModuleDesc;
-use crate::{arena, calendar, console, entropy, gpio, kheap, registry, sched, semihost};
+use crate::{arena, bus, calendar, console, entropy, gpio, kheap, registry, sched, semihost};
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.rhu_api")]
@@ -134,7 +134,21 @@ pub extern "C" fn rhu_thread_spawn(
     };
     match sched::try_spawn(name, entry, arg as usize, prio, stack_bytes as usize) {
         Ok((_, tid)) => tid,
-        Err(_) => sched::ERR_AGAIN,
+        Err(why) => {
+            match why {
+                sched::SpawnErr::PoolExhausted => {
+                    let (pool, free, retired) = sched::pool_remainder();
+                    kprintln!(
+                        "[sched] spawn refused: a stack of {} bytes asked; the pool of {} bytes has {} never carved and {} retired stacks",
+                        stack_bytes, pool, free, retired
+                    );
+                }
+                sched::SpawnErr::NoSlot => kprintln!("[sched] spawn refused: every thread slot taken ({} slots)", sched::MAX_THREADS),
+                sched::SpawnErr::TlsExhausted => kprintln!("[sched] spawn refused: a module's thread-local block for the new thread was refused"),
+                sched::SpawnErr::TidExhausted => kprintln!("[sched] spawn refused: the thread-id space is spent"),
+            }
+            sched::ERR_AGAIN
+        }
     }
 }
 
@@ -402,13 +416,69 @@ pub extern "C" fn rhu_gpio_event_word(line: u32) -> *const u32 {
     gpio::event_word(line)
 }
 
+/// The bus doors (the device seam's second peripheral; the eight verbs the
+/// header states): for each family the bus count, the enumeration (the
+/// number of the index-th bus: the chip's own block number, the name every
+/// other door takes), a claim for the program's whole run, and a transfer
+/// -- one combined I2C transaction over message records, one full-duplex
+/// SPI exchange under the device's own select, mode and rate with the
+/// achieved rate answered. The codes are the header's; a refusal moves no
+/// byte.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_i2c_count() -> i32 {
+    bus::i2c_count()
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_i2c_bus(index: u32) -> i32 {
+    bus::i2c_bus(index)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_i2c_claim(bus_index: u32, hz: u32) -> i32 {
+    bus::i2c_claim(bus_index, hz)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_i2c_transfer(bus_index: u32, msgs: *const crate::bus_math::I2cMsg, count: u32, deadline_ns: u64) -> i32 {
+    bus::i2c_transfer(bus_index, msgs, count, deadline_ns)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_spi_count() -> i32 {
+    bus::spi_count()
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_spi_bus(index: u32) -> i32 {
+    bus::spi_bus(index)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_spi_claim(bus_index: u32) -> i32 {
+    bus::spi_claim(bus_index)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_spi_transfer(bus_index: u32, select: u32, mode: u32, hz: u32, tx: *const u8, rx: *mut u8, len: u32) -> i32 {
+    bus::spi_transfer(bus_index, select, mode, hz, tx, rx, len)
+}
+
 /// The hosting-API contract generation this kernel serves: `RHU_ABI`
 /// in `include/rhu.h`, the two moving together or not at all. A
 /// payload that provides its own `rhu_payload_entry` states the
 /// generation it was built against in `rhu_payload_abi`, and the
 /// payload flavor refuses a mismatch before that entry runs
 /// (payload.rs).
-pub const ABI: u32 = 33;
+pub const ABI: u32 = 34;
 /// The window's floor: `RHU_ABI_COMPAT` in `include/rhu.h`, the two
 /// moving together or not at all. A payload built against any
 /// generation from this one through `ABI` runs; only a breaking change

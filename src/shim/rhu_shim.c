@@ -4,7 +4,9 @@
  * collide with, so nothing is renamed. errno lives in a per-thread block
  * held by the kernel's module registry; memory mapping is the kernel
  * arena; time is the kernel clock; locks are futex recipes held inline in
- * the glibc-sized slots; threads are kernel threads at one flat hosted
+ * the glibc-sized slots; the 64-bit atomic operations the runtime's
+ * compiler names as library calls hold one such lock; threads are kernel
+ * threads at one flat hosted
  * priority; thread-local storage is the kernel's per-module block; and
  * everything this platform does not have answers with the errno a caller
  * can act on and a diagnostic line, never a silent success.
@@ -259,7 +261,7 @@ void __stack_chk_fail(void)
  * seam below, and the name row is stated beside it because the runtime
  * reads both. */
 static char g_env_hard_limit[48];
-static const char *g_env[] = {
+static char *g_env[] = {
     g_env_hard_limit,
     "DOTNET_gcServer=0",
     "DOTNET_gcConcurrent=0",
@@ -282,7 +284,7 @@ static void env_build(void)
 
 char **rhu_shim_environ(void)
 {
-    return (char **)g_env;
+    return g_env;
 }
 
 char *getenv(const char *name)
@@ -290,7 +292,7 @@ char *getenv(const char *name)
     size_t n = strlen(name);
     for (int i = 0; g_env[i] != NULL; i++) {
         if (strncmp(g_env[i], name, n) == 0 && g_env[i][n] == '=')
-            return (char *)g_env[i] + n + 1;
+            return g_env[i] + n + 1;
     }
     return NULL;
 }
@@ -311,7 +313,7 @@ int rhu_shim_init(void)
     g_block_module = h;
     env_build();
     if (rhu_entropy(&__stack_chk_guard, (uint32_t)sizeof __stack_chk_guard) != 0) {
-        rhu_shim_log("init: the entropy door refused the stack guard's seed");
+        rhu_shim_log("init: the kernel's entropy call refused the stack guard's seed");
         rhu_exit(120);
     }
     rhu_shim_log("init: per-thread block registered as module %d (%u bytes)", h,
@@ -407,13 +409,13 @@ int munlock(const void *a, size_t l)
 }
 
 /* ------------------------------------------------------------------ */
-/* time: the 64-bit time surface on the kernel clock                    */
+/* time: the 64-bit time surface on the kernel clock and its calendar   */
 /* ------------------------------------------------------------------ */
 
 /* The 64-bit timespec on a 32-bit little-endian target: seconds, then the
- * nanoseconds, then padding. Both clock ids share the boot-relative
- * nanosecond clock; the wall clock has no epoch source on this platform,
- * so it reports time since boot. */
+ * nanoseconds, then padding. The two real-time clock ids read the kernel's
+ * calendar as Unix time; every other id reads the boot-relative nanosecond
+ * clock. A timed wait honors the clock its timestamp names (below). */
 struct shim_ts64 {
     int64_t sec;
     int32_t nsec;
@@ -435,9 +437,90 @@ static void ts64_from_ns(struct shim_ts64 *ts, uint64_t ns)
 #define SHIM_CLOCK_REALTIME 0
 #define SHIM_CLOCK_REALTIME_COARSE 5
 
+static int clock_is_realtime(int id)
+{
+    return id == SHIM_CLOCK_REALTIME || id == SHIM_CLOCK_REALTIME_COARSE;
+}
+
+/* The clock a timed wait honors. The real-time ids name the calendar, so
+ * a real-time timestamp is translated into the boot-clock domain the
+ * kernel's deadlines live in (below); every other id names the boot
+ * clock, so the timestamp is the deadline itself. */
+static int wait_clock_is_realtime(int id)
+{
+#ifdef RHU_SHIM_BREAK_REALTIME_WAIT
+    /* A test knob: the clock a timed wait names discarded, a real-time
+     * timestamp read as a boot-relative one. Never set in a hosted image. */
+    (void)id;
+    return 0;
+#else
+    return clock_is_realtime(id);
+#endif
+}
+
+/* A timestamp's nanosecond field within its second. */
+static int ts64_valid(const struct shim_ts64 *ts)
+{
+    return ts->nsec >= 0 && ts->nsec < (int32_t)NS_PER_S;
+}
+
+/* The boot-clock instant `ns` past now, saturated below the no-deadline
+ * word: a deadline the clock cannot reach is a deadline still. */
+static uint64_t deadline_after(uint64_t ns)
+{
+    uint64_t now = rhu_now_ns();
+    return ns > RHU_DEADLINE_NONE - 1u - now ? RHU_DEADLINE_NONE - 1u : now + ns;
+}
+
+/* A boot-clock absolute timestamp as a kernel deadline: a negative second
+ * count is already past; a count past the clock's range saturates below
+ * the no-deadline word. */
+static uint64_t monotonic_deadline(const struct shim_ts64 *ts)
+{
+    if (ts->sec < 0)
+        return 0u;
+    uint64_t sec = (uint64_t)ts->sec;
+    if (sec > (RHU_DEADLINE_NONE - 1u - (uint64_t)ts->nsec) / NS_PER_S)
+        return RHU_DEADLINE_NONE - 1u;
+    return sec * NS_PER_S + (uint64_t)ts->nsec;
+}
+
+/* A real-time absolute wait re-reads the calendar this often while it is
+ * pending. The calendar is a base plus the boot clock, and a set moves
+ * the base without waking anyone, so the wait follows a set within one
+ * slice: set past the timestamp, the wait ends; set back, the wait lasts
+ * until the calendar reaches the timestamp again. The runtime's own timed
+ * waits name the boot clock and never take a slice. */
+#define SHIM_REALTIME_SLICE_NS (100u * 1000u * 1000u)
+
+/* The nanoseconds a real-time absolute timestamp is still ahead of the
+ * calendar: 0 once the calendar has reached it (a pre-epoch or otherwise
+ * past timestamp is past), saturated below the no-deadline word for a
+ * timestamp the calendar cannot reach. Every step is checked: the second
+ * count is bounded before the multiply into calendar ticks, the
+ * nanoseconds round up to the tick so the wait is never early, the
+ * difference is taken in unsigned arithmetic where it is known positive,
+ * and the ticks are bounded before the multiply into nanoseconds. */
+static uint64_t realtime_remaining_ns(const struct shim_ts64 *ts)
+{
+    const int64_t sec_bound = 900000000000ll; /* 9e11 s of Unix time: 9e18 ticks, inside the signed range */
+    if (ts->sec < -sec_bound)
+        return 0u;
+    if (ts->sec > sec_bound)
+        return RHU_DEADLINE_NONE - 1u;
+    int64_t target = ts->sec * 10000000ll + (int64_t)((ts->nsec + 99) / 100);
+    int64_t now = rhu_shim_calendar_unix_ticks();
+    if (target <= now)
+        return 0u;
+    uint64_t ticks = (uint64_t)target - (uint64_t)now; /* exact: 0 < target - now < 2^64 */
+    if (ticks > (RHU_DEADLINE_NONE - 1u) / 100u)
+        return RHU_DEADLINE_NONE - 1u;
+    return ticks * 100u;
+}
+
 int __clock_gettime64(int id, struct shim_ts64 *ts)
 {
-    if (id == SHIM_CLOCK_REALTIME || id == SHIM_CLOCK_REALTIME_COARSE) {
+    if (clock_is_realtime(id)) {
         int64_t sec;
         int32_t nsec;
         rhu_shim_unix_split(rhu_shim_calendar_unix_ticks(), &sec, &nsec);
@@ -450,16 +533,37 @@ int __clock_gettime64(int id, struct shim_ts64 *ts)
     return 0;
 }
 
+/* The sleep honors the clock id: a relative request is a boot-clock
+ * interval (a negative second count refused); an absolute boot-clock
+ * timestamp is slept to as a deadline; an absolute real-time timestamp is
+ * slept to against the calendar, one slice at a time, so a calendar set
+ * while the sleep is pending moves it. A nanosecond field outside its
+ * second is refused. No signal interrupts a sleep here, so the remaining
+ * time reported is always zero. */
 int __clock_nanosleep_time64(int id, int flags, const struct shim_ts64 *rq, struct shim_ts64 *rm)
 {
-    (void)id;
-    uint64_t ns = (uint64_t)rq->sec * NS_PER_S + (uint64_t)rq->nsec;
-    if ((flags & GLIBC_TIMER_ABSTIME) != 0) {
+    if (!ts64_valid(rq))
+        return RHU_GERR_EINVAL;
+    if ((flags & GLIBC_TIMER_ABSTIME) == 0) {
+        if (rq->sec < 0)
+            return RHU_GERR_EINVAL;
+        uint64_t sec = (uint64_t)rq->sec;
+        uint64_t ns = sec > (UINT64_MAX - (uint64_t)rq->nsec) / NS_PER_S ? UINT64_MAX : sec * NS_PER_S + (uint64_t)rq->nsec;
+        if (ns != 0)
+            rhu_sleep_ns(ns);
+    } else if (wait_clock_is_realtime(id)) {
+        for (;;) {
+            uint64_t left = realtime_remaining_ns(rq);
+            if (left == 0)
+                break;
+            rhu_sleep_ns(left < SHIM_REALTIME_SLICE_NS ? left : SHIM_REALTIME_SLICE_NS);
+        }
+    } else {
+        uint64_t deadline = monotonic_deadline(rq);
         uint64_t now = rhu_now_ns();
-        ns = ns > now ? ns - now : 0u;
+        if (deadline > now)
+            rhu_sleep_ns(deadline - now);
     }
-    if (ns != 0)
-        rhu_sleep_ns(ns);
     if (rm != NULL)
         ts64_from_ns(rm, 0u);
     return 0;
@@ -586,6 +690,98 @@ static void word_unlock(volatile uint32_t *w)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* the 64-bit atomics: the library calls the compiler names            */
+/* ------------------------------------------------------------------ */
+
+/* The runtime archives are compiled for the core they run on, and no
+ * Cortex-M has a 64-bit exclusive-access instruction, so the compiler
+ * lowers every 64-bit atomic operation in them to a call of this family
+ * (the compare-and-swap, the exchange and its release, the
+ * fetch-and-operate forms); the managed interlocked operations on a
+ * 64-bit value reach the runtime's own helper, which calls the
+ * compare-and-swap. Each call holds one lock word of the futex family
+ * for the operation's few instructions: an uncontended take is one
+ * 32-bit exclusive operation and a contended one waits in the kernel, so
+ * every 64-bit atomic is atomic against every other, no interrupt is
+ * masked, and the recipe holds on a second core. A full barrier on each
+ * side keeps the family's ordering contract. The symbol names are the
+ * compiler's; the C names are this file's own. */
+
+static volatile uint32_t atomic64_word;
+
+static void atomic64_enter(void)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    word_lock(&atomic64_word);
+}
+
+static void atomic64_leave(void)
+{
+    word_unlock(&atomic64_word);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+
+uint64_t shim_sync_val_compare_and_swap_8(volatile uint64_t *p, uint64_t expected, uint64_t desired) __asm__("__sync_val_compare_and_swap_8");
+int shim_sync_bool_compare_and_swap_8(volatile uint64_t *p, uint64_t expected, uint64_t desired) __asm__("__sync_bool_compare_and_swap_8");
+uint64_t shim_sync_lock_test_and_set_8(volatile uint64_t *p, uint64_t value) __asm__("__sync_lock_test_and_set_8");
+void shim_sync_lock_release_8(volatile uint64_t *p) __asm__("__sync_lock_release_8");
+
+uint64_t shim_sync_val_compare_and_swap_8(volatile uint64_t *p, uint64_t expected, uint64_t desired)
+{
+    atomic64_enter();
+    uint64_t old = *p;
+    if (old == expected)
+        *p = desired;
+    atomic64_leave();
+    return old;
+}
+
+int shim_sync_bool_compare_and_swap_8(volatile uint64_t *p, uint64_t expected, uint64_t desired)
+{
+    return shim_sync_val_compare_and_swap_8(p, expected, desired) == expected;
+}
+
+uint64_t shim_sync_lock_test_and_set_8(volatile uint64_t *p, uint64_t value)
+{
+    atomic64_enter();
+    uint64_t old = *p;
+    *p = value;
+    atomic64_leave();
+    return old;
+}
+
+void shim_sync_lock_release_8(volatile uint64_t *p)
+{
+    atomic64_enter();
+    *p = 0u;
+    atomic64_leave();
+}
+
+/* The fetch-and-operate forms: the old value returned, the new one
+ * stored, under the same lock. */
+#define ATOMIC64_FETCH_AND(cname, symbol, type, expr)                       \
+    type cname(volatile type *p, type value) __asm__(symbol);               \
+    type cname(volatile type *p, type value)                                \
+    {                                                                       \
+        atomic64_enter();                                                   \
+        type old = *p;                                                      \
+        *p = (expr);                                                        \
+        atomic64_leave();                                                   \
+        return old;                                                         \
+    }
+
+ATOMIC64_FETCH_AND(shim_sync_fetch_and_add_8, "__sync_fetch_and_add_8", uint64_t, old + value)
+ATOMIC64_FETCH_AND(shim_sync_fetch_and_sub_8, "__sync_fetch_and_sub_8", uint64_t, old - value)
+ATOMIC64_FETCH_AND(shim_sync_fetch_and_and_8, "__sync_fetch_and_and_8", uint64_t, old & value)
+ATOMIC64_FETCH_AND(shim_sync_fetch_and_or_8, "__sync_fetch_and_or_8", uint64_t, old | value)
+ATOMIC64_FETCH_AND(shim_sync_fetch_and_xor_8, "__sync_fetch_and_xor_8", uint64_t, old ^ value)
+ATOMIC64_FETCH_AND(shim_sync_fetch_and_nand_8, "__sync_fetch_and_nand_8", uint64_t, ~(old & value))
+ATOMIC64_FETCH_AND(shim_sync_fetch_and_max_8, "__sync_fetch_and_max_8", int64_t, old > value ? old : value)
+ATOMIC64_FETCH_AND(shim_sync_fetch_and_min_8, "__sync_fetch_and_min_8", int64_t, old < value ? old : value)
+ATOMIC64_FETCH_AND(shim_sync_fetch_and_umax_8, "__sync_fetch_and_umax_8", uint64_t, old > value ? old : value)
+ATOMIC64_FETCH_AND(shim_sync_fetch_and_umin_8, "__sync_fetch_and_umin_8", uint64_t, old < value ? old : value)
+
 static void mutex_lock(shim_mutex *m)
 {
     int32_t self = rhu_thread_self();
@@ -625,26 +821,72 @@ static void cond_wake(shim_cond *c, uint32_t n)
     rhu_futex_wake((const uint32_t *)&c->seq, n);
 }
 
+/* A slot in the static-initializer form (all zero) is adopted at its first
+ * use, and two threads may arrive at once: the adoption is ONE
+ * compare-and-swap of the magic word from zero, and a thread that finds
+ * the slot no longer zero reads the magic again before it refuses -- the
+ * other thread's adoption, and perhaps its lock, is what it found. */
+#ifdef RHU_SHIM_BREAK_MUTEX_ADOPT
+/* The control's window: held open, blocked in the kernel's sleep, until
+ * another first user has adopted the slot; a first user alone gives up at
+ * this deadline of the kernel's clock, the only way the deadline is
+ * reached (the core ladder runs its second first user one step below the
+ * ladder's thread, so it runs only while the first is blocked here). */
+#define SHIM_CONTROL_WINDOW_NS 500000000ull
+static uint32_t g_control_inside;
+#endif
+
 static shim_mutex *mutex_of(void *slot)
 {
     mutex_slot *s = (mutex_slot *)slot;
+#ifdef RHU_SHIM_BREAK_MUTEX_ADOPT
+    /* The control's fault: the adoption as a read, a check and a store,
+     * the window between the read and the check held open, blocked, until
+     * another first user has adopted the slot (the first user inside holds
+     * the window; a second one, arriving while it waits, adopts at once).
+     * With two first users inside together the second adopts and the
+     * first is refused, every time -- the core ladder's two-thread
+     * adoption check must refuse. */
     if (s->magic != MAGIC_MUTEX) {
         static const mutex_slot zero;
+        if (__atomic_fetch_add(&g_control_inside, 1u, __ATOMIC_ACQ_REL) == 0u) {
+            uint64_t deadline = rhu_now_ns() + SHIM_CONTROL_WINDOW_NS;
+            while (__builtin_memcmp(s, &zero, sizeof zero) == 0 && rhu_now_ns() < deadline)
+                rhu_sleep_ns(1000000ull);
+        }
+        __atomic_fetch_sub(&g_control_inside, 1u, __ATOMIC_ACQ_REL);
         if (__builtin_memcmp(s, &zero, sizeof zero) != 0)
             return NULL;
         s->magic = MAGIC_MUTEX;
     }
     return &s->m;
+#else
+    if (__atomic_load_n(&s->magic, __ATOMIC_ACQUIRE) != MAGIC_MUTEX) {
+        static const mutex_slot zero;
+        if (__builtin_memcmp(s, &zero, sizeof zero) != 0)
+            return __atomic_load_n(&s->magic, __ATOMIC_ACQUIRE) == MAGIC_MUTEX ? &s->m : NULL;
+        uint32_t expected = 0;
+        if (!__atomic_compare_exchange_n(&s->magic, &expected, MAGIC_MUTEX, 0, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)
+            && expected != MAGIC_MUTEX)
+            return NULL;
+    }
+    return &s->m;
+#endif
 }
 
 static shim_cond *cond_of(void *slot)
 {
+    /* Adopted as a mutex slot is: one compare-and-swap, and the magic read
+     * again before a slot found non-zero is refused. */
     cond_slot *s = (cond_slot *)slot;
-    if (s->magic != MAGIC_COND) {
+    if (__atomic_load_n(&s->magic, __ATOMIC_ACQUIRE) != MAGIC_COND) {
         static const cond_slot zero;
         if (__builtin_memcmp(s, &zero, sizeof zero) != 0)
+            return __atomic_load_n(&s->magic, __ATOMIC_ACQUIRE) == MAGIC_COND ? &s->c : NULL;
+        uint32_t expected = 0;
+        if (!__atomic_compare_exchange_n(&s->magic, &expected, MAGIC_COND, 0, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)
+            && expected != MAGIC_COND)
             return NULL;
-        s->magic = MAGIC_COND;
     }
     return &s->c;
 }
@@ -739,16 +981,41 @@ int pthread_cond_wait(void *cs, void *ms)
     return cond_wait(c, m, RHU_DEADLINE_NONE);
 }
 
-/* Both clock ids share the boot-relative timebase, so an absolute timespec
- * converts directly to a kernel deadline. */
+/* A real-time timed wait: the calendar re-read every slice on the one
+ * captured sequence word, so a signal between slices ends the wait at
+ * once (the word no longer matches when the wait re-arms), a wake
+ * inside a slice ends it as any wait's does, and a calendar set while the
+ * wait is pending moves it. Only the timestamp's arrival answers
+ * ETIMEDOUT. */
+static int cond_wait_realtime(shim_cond *c, shim_mutex *m, const struct shim_ts64 *abs)
+{
+    uint32_t s = __atomic_load_n(&c->seq, __ATOMIC_ACQUIRE);
+    mutex_unlock(m);
+    int32_t rc;
+    for (;;) {
+        uint64_t left = realtime_remaining_ns(abs);
+        uint64_t slice = left < SHIM_REALTIME_SLICE_NS ? left : SHIM_REALTIME_SLICE_NS;
+        rc = rhu_futex_wait((const uint32_t *)&c->seq, s, deadline_after(slice));
+        if (rc != RHU_ETIMEDOUT || left == 0)
+            break;
+    }
+    mutex_lock(m);
+    return rc == RHU_ETIMEDOUT ? RHU_GERR_ETIMEDOUT : 0;
+}
+
+/* A timed wait honors the clock the condition variable was initialized
+ * with (the default the real-time clock): a boot-clock timestamp is the
+ * kernel deadline itself; a real-time timestamp is waited for against the
+ * calendar. A nanosecond field outside its second is refused. */
 int __pthread_cond_timedwait64(void *cs, void *ms, const struct shim_ts64 *abs)
 {
     shim_cond *c = cond_of(cs);
     shim_mutex *m = mutex_of(ms);
-    if (c == NULL || m == NULL)
+    if (c == NULL || m == NULL || !ts64_valid(abs))
         return RHU_GERR_EINVAL;
-    uint64_t deadline = (uint64_t)abs->sec * NS_PER_S + (uint64_t)abs->nsec;
-    return cond_wait(c, m, deadline);
+    if (wait_clock_is_realtime(c->clock))
+        return cond_wait_realtime(c, m, abs);
+    return cond_wait(c, m, monotonic_deadline(abs));
 }
 
 int pthread_cond_signal(void *cs)
@@ -779,11 +1046,27 @@ int pthread_cond_destroy(void *cs)
 /* threads: kernel threads at the flat hosted priority                  */
 /* ------------------------------------------------------------------ */
 
+/* The default managed stack size: the value the SDK's link line defines
+ * from the program's RhuThreadStack knob as an absolute symbol (its
+ * address IS the value; the SDK refuses a value outside the kernel's
+ * minimum and the row's clamp, or one that leaves fewer than three
+ * stacks in the pool), or the row's constant when no such symbol was
+ * given -- the gate images, and every program that leaves the knob
+ * alone. The runtime's own default-stack knob cannot carry a value
+ * inside a row's range (its reader keeps a 64 KB floor), so this is the
+ * one way a program sizes its unsized threads on this system. */
+extern const char __rhu_thread_stack_default[] __attribute__((weak));
+
+static uint32_t row_stack_default(void)
+{
+    return __rhu_thread_stack_default != NULL ? (uint32_t)(uintptr_t)__rhu_thread_stack_default : (uint32_t)MGC_ROW_STACK_DEFAULT;
+}
+
 int pthread_attr_init(void *a)
 {
     attr_slot *s = (attr_slot *)a;
     s->magic = MAGIC_ATTR;
-    s->stack_bytes = MGC_ROW_STACK_DEFAULT;
+    s->stack_bytes = row_stack_default();
     s->detached = 0;
     s->tid = 0;
     return 0;
@@ -850,7 +1133,7 @@ static int spawn_thread(uint32_t stack_bytes, void *(*fn)(void *), void *arg, ui
 {
     uint32_t asked = stack_bytes;
     if (stack_bytes == 0)
-        stack_bytes = MGC_ROW_STACK_DEFAULT;
+        stack_bytes = row_stack_default();
     if (stack_bytes > MGC_ROW_STACK_CLAMP) {
         rhu_shim_log("pthread_create: stack %u KB clamped to %u KB (the row's clamp)",
                      (unsigned)(stack_bytes / 1024u), (unsigned)(MGC_ROW_STACK_CLAMP / 1024u));
@@ -867,6 +1150,17 @@ static int spawn_thread(uint32_t stack_bytes, void *(*fn)(void *), void *arg, ui
      * refused spawn is asked again for a bounded while before it becomes
      * the caller's error. */
     int32_t tid = rhu_thread_spawn(thread_entry, s, stack_bytes, RHU_SHIM_PRIO_FLAT, NULL);
+    /* A clamped ask the pool cannot serve (the kernel serves an ask from
+     * its never-carved remainder or a retired stack of exactly that size)
+     * is asked again at the row's default before the bounded retries: a
+     * thread on the row's default runs managed code as every hosted
+     * thread does, and the pool's retired default-sized stacks serve it. */
+    if (tid == RHU_EAGAIN && stack_bytes > row_stack_default()) {
+        rhu_shim_log("pthread_create: the pool cannot serve the clamped %u KB; asked again at the row's default %u KB",
+                     (unsigned)(stack_bytes / 1024u), (unsigned)(row_stack_default() / 1024u));
+        stack_bytes = row_stack_default();
+        tid = rhu_thread_spawn(thread_entry, s, stack_bytes, RHU_SHIM_PRIO_FLAT, NULL);
+    }
     unsigned retries = 0u;
     while (tid == RHU_EAGAIN && retries < 100u) {
         rhu_sleep_ns(1000000ull);
@@ -875,7 +1169,11 @@ static int spawn_thread(uint32_t stack_bytes, void *(*fn)(void *), void *arg, ui
     }
     if (tid < 0) {
         rhu_kheap_free(s);
-        rhu_shim_log("pthread_create: the kernel refused the spawn (%d) -> EAGAIN", tid);
+        /* The door answers one code for four reasons; the kernel's own
+         * [sched] line above carries the pool's numbers and the reason,
+         * this line the request's story in the same words. */
+        rhu_shim_log("pthread_create: refused by the kernel after %u tries: a stack of %u B asked (the row's default %u B, the clamp %u B); the [sched] line above names the reason -> EAGAIN",
+                     retries + 1u, (unsigned)stack_bytes, (unsigned)row_stack_default(), (unsigned)MGC_ROW_STACK_CLAMP);
         return RHU_GERR_EAGAIN;
     }
     if (retries != 0u)
@@ -890,7 +1188,7 @@ static int spawn_thread(uint32_t stack_bytes, void *(*fn)(void *), void *arg, ui
 int pthread_create(uint32_t *out, const void *attr, void *(*fn)(void *), void *arg)
 {
     const attr_slot *s = (const attr_slot *)attr;
-    uint32_t stack_bytes = (s != NULL && s->magic == MAGIC_ATTR) ? s->stack_bytes : MGC_ROW_STACK_DEFAULT;
+    uint32_t stack_bytes = (s != NULL && s->magic == MAGIC_ATTR) ? s->stack_bytes : row_stack_default();
     return spawn_thread(stack_bytes, fn, arg, out);
 }
 
@@ -1480,7 +1778,7 @@ long getrandom(void *buf, size_t len, unsigned flags)
 void arc4random_buf(void *buf, size_t len)
 {
     if (secure_fill(buf, len) != 0) {
-        rhu_shim_log("arc4random_buf: the secure door refused; refusing to return weak bytes");
+        rhu_shim_log("arc4random_buf: the kernel's secure entropy call refused; refusing to return weak bytes");
         rhu_exit(134);
     }
 }
@@ -1789,8 +2087,10 @@ void __aeabi_unwind_cpp_pr1(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* file descriptors at the C-runtime level: the console, and every    */
-/* path refused with its errno -- the file surface is behind the PAL  */
+/* file descriptors at the C-runtime level: the console, the bus device */
+/* nodes (the bus device unit's, by the path's prefix and the device    */
+/* band), and every other path refused with its errno -- the file      */
+/* surface is behind the PAL                                           */
 /* ------------------------------------------------------------------ */
 
 static int fd_is_console(int fd)
@@ -1798,9 +2098,15 @@ static int fd_is_console(int fd)
     return fd >= RHU_SHIM_FD_CONSOLE_LO && fd < RHU_SHIM_FD_CONSOLE_HI;
 }
 
+static int fd_is_device(int fd)
+{
+    return fd >= RHU_SHIM_FD_DEVICE_LO && fd < RHU_SHIM_FD_DEVICE_LO + RHU_SHIM_FD_DEVICE_COUNT;
+}
+
 int open(const char *path, int flags, ...)
 {
-    (void)flags;
+    if (path != NULL && (strncmp(path, "/dev/i2c-", 9) == 0 || strncmp(path, "/dev/spidev", 11) == 0))
+        return rhu_busdev_open(path, flags);
     rhu_shim_log("open(%s): no such path (ENOENT)", path != NULL ? path : "(null)");
     SET_ERRNO(RHU_GERR_ENOENT);
     return -1;
@@ -1826,14 +2132,24 @@ int close(int fd)
 {
     if (fd_is_console(fd))
         return 0;
+    if (fd_is_device(fd))
+        return rhu_busdev_close(fd);
     SET_ERRNO(RHU_GERR_EBADF);
     return -1;
 }
 
+/* Every request the bus device unit serves takes a pointer argument; the
+ * one it refuses without reading (the file-transfer form's address by
+ * value) is read as a pointer and never dereferenced. */
 int ioctl(int fd, unsigned long request, ...)
 {
-    (void)fd;
-    (void)request;
+    if (fd_is_device(fd)) {
+        va_list ap;
+        va_start(ap, request);
+        void *arg = va_arg(ap, void *);
+        va_end(ap);
+        return rhu_busdev_ioctl(fd, request, arg);
+    }
     SET_ERRNO(RHU_GERR_ENOTTY);
     return -1;
 }

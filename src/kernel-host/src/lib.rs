@@ -32,6 +32,9 @@ mod abi_window;
 mod claims;
 #[path = "../../kernel/src/gpio_math.rs"]
 mod gpio_math;
+/// The bus doors' pure half: the descriptors, the message partition, the timing word, the divisor ladder and the budget.
+#[path = "../../kernel/src/bus_math.rs"]
+mod bus_math;
 /// The double-precision emulation's pure halves: the arithmetic and the decoder.
 mod fpemul {
     #[path = "../../../kernel/src/fpemul/soft.rs"]

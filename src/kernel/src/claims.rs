@@ -16,7 +16,8 @@
 /// the RP2350B). A board states its own count at init.
 pub const MAX_LINES: usize = 192;
 pub const BANKS: usize = MAX_LINES / 32;
-/// Interrupt slots: the ST families' sixteen EXTI line numbers.
+/// Interrupt slots: thirty-two, one bit each of the slot word; the ST
+/// families use sixteen of them, their EXTI line numbers.
 pub const SLOTS: usize = 32;
 pub const NO_OWNER: u16 = u16::MAX;
 /// Tenants of a family handler's interrupt line (a hook's register and bit).
@@ -122,6 +123,25 @@ pub fn claim(c: &mut Claims, line: u32) -> i32 {
     }
     c.program[bank] |= mask;
     c.claims_taken += 1;
+    0
+}
+
+/// A board claim taken at runtime (a bus's pads at its claim, a chip select
+/// at its first use): refused `REFUSED_INVAL` past the count, `REFUSED_BUSY`
+/// when a program holds the line; 0 when the board takes it now or already
+/// holds it (idempotent), a taken line counted.
+pub fn claim_board(c: &mut Claims, line: u32) -> i32 {
+    if line >= c.line_count {
+        return refuse(c, line, REFUSED_INVAL);
+    }
+    let (bank, mask) = split(line);
+    if c.program[bank] & mask != 0 {
+        return refuse(c, line, REFUSED_BUSY);
+    }
+    if c.board[bank] & mask == 0 {
+        c.board[bank] |= mask;
+        c.claims_taken += 1;
+    }
     0
 }
 

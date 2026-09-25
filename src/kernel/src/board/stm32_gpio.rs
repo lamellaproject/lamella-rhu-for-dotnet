@@ -1,15 +1,19 @@
-//! The GPIO family driver for ST's Cortex-M parts: one register layout
-//! for the port block on the F7 (RM0410 sections 6.4.1 to 6.4.10; RM0385
-//! the same for the F74x) and the U5 (RM0456 sections 13.4.1 to 13.4.11),
-//! and one arm per family for the external-interrupt routing, which
-//! differs: the F7 selects a line's port in SYSCFG (RM0410 7.2.3) and its
-//! EXTI block (11.9) feeds vector positions shared by groups of line
-//! numbers; the U5's EXTI block (RM0456 chapter 23) selects the port
-//! itself, keeps rising and falling pending bits apart, and has one vector
-//! position per line. The board's facts state the block's base, the port
-//! count and the clock-enable register; the mode is programmed explicitly
-//! on every family (the U5 resets its pins to analog). The kernel takes no
-//! vendor headers.
+//! The GPIO family driver for ST's Cortex-M parts. The port block's layout
+//! is what the reference manuals state: RM0410 (the STM32F76x/F77x) and
+//! RM0385 (the STM32F74x/F75x), 6.4.1 to 6.4.10 in both; RM0432 (the
+//! STM32L4+), 8.4.1 to 8.4.11; RM0456 (the STM32U5), 13.4.1 to 13.4.11. A
+//! board's row names its arm; a part whose manual states another layout
+//! gets its own, never one of these by implication. The routing arms: the
+//! classic arm (the F7 and the L4+) selects a line's port in SYSCFG and its
+//! EXTI block feeds vector positions shared by groups of line numbers, both
+//! blocks at the addresses the board's facts state; the U5's EXTI block
+//! (RM0456 chapter 23) selects the port itself, keeps rising and falling
+//! pending bits apart and has one vector position per line. The board's
+//! facts state the block's base, the port count and the clock-enable
+//! register; the mode is programmed explicitly on every family; no vendor
+//! header is used. The handlers do bounded work in the board band: read
+//! the pending bits, clear them, fire the owning line's event (the counter
+//! and the wake through the scheduler's critical-section path), return.
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
@@ -100,22 +104,22 @@ fn nvic_enable(line: usize) {
     }
 }
 
-/// The F7 arm: SYSCFG selects the port of each of the sixteen lines
-/// (EXTICR1..4 at 0x08 to 0x14, four bits per line, 0000 PA to 1010 PK;
-/// RM0410 7.2.3, the block clocked by RCC_APB2ENR bit 14, 5.3.14); the EXTI
-/// block at 0x4001_3C00 (IMR 0x00, RTSR 0x08, FTSR 0x0C, SWIER 0x10, PR
-/// 0x14; a pending bit cleared by writing 1; 11.9); the vector positions
-/// 6 to 10 for lines 0 to 4, 23 for lines 5 to 9, 40 for lines 10 to 15.
-#[cfg(feature = "board-stm32f769i-disco")]
+/// The classic arm (the F7 family and the L4+): SYSCFG selects the port of
+/// each of the sixteen lines (EXTICR1..4, four bits per line, 0000 PA up the
+/// alphabet; RM0410 7.2.3, RM0432 9.2.3); the EXTI block (IMR 0x00, RTSR 0x08,
+/// FTSR 0x0C, SWIER 0x10, PR 0x14, a pending bit cleared by writing 1; RM0410
+/// 11.9, RM0432 chapter 16) feeds the vector positions 6 to 10 for lines 0 to
+/// 4, 23 for lines 5 to 9, 40 for lines 10 to 15; the addresses the facts'.
+#[cfg(any(feature = "board-st-nucleo-l4r5zi", feature = "board-st-stm32f746g-disco", feature = "board-st-stm32f769i-disco"))]
 mod exti {
     use core::sync::atomic::{AtomicU8, Ordering};
 
     use super::*;
 
-    const RCC_APB2ENR: *mut u32 = 0x4002_3844 as *mut u32;
-    const APB2ENR_SYSCFGEN: u32 = 1 << 14;
-    const SYSCFG_EXTICR1: usize = 0x4001_3808;
-    const EXTI: usize = 0x4001_3C00;
+    const RCC_SYSCFG_EN: *mut u32 = facts::RCC_SYSCFG_EN;
+    const RCC_SYSCFG_EN_BIT: u32 = facts::RCC_SYSCFG_EN_BIT;
+    const SYSCFG_EXTICR1: usize = facts::SYSCFG_EXTICR1;
+    const EXTI: usize = facts::EXTI_BASE;
     const EXTI_IMR: *mut u32 = EXTI as *mut u32;
     const EXTI_RTSR: *mut u32 = (EXTI + 0x08) as *mut u32;
     const EXTI_FTSR: *mut u32 = (EXTI + 0x0C) as *mut u32;
@@ -129,8 +133,8 @@ mod exti {
             return r;
         }
         with_cs(|| unsafe {
-            rmw(RCC_APB2ENR, 0, APB2ENR_SYSCFGEN);
-            let _ = read_volatile(RCC_APB2ENR);
+            rmw(RCC_SYSCFG_EN, 0, RCC_SYSCFG_EN_BIT);
+            let _ = read_volatile(RCC_SYSCFG_EN);
             let cr = (SYSCFG_EXTICR1 + 4 * (bit as usize / 4)) as *mut u32;
             rmw(cr, 0xF << (4 * (bit % 4)), port << (4 * (bit % 4)));
             rmw(EXTI_RTSR, 1 << bit, (rising as u32) << bit);
@@ -217,7 +221,8 @@ mod exti {
         unsafe { dispatch(0xFC00) }
     }
 
-    /// The handlers the board file folds through `BOARD_IRQS`.
+    /// The handlers the board file re-exports as `GPIO_IRQS`, folded into
+    /// the vector table beside `BOARD_IRQS`.
     pub const IRQS: [(usize, unsafe extern "C" fn()); 7] = [
         (6, exti0),
         (7, exti1),
@@ -236,7 +241,7 @@ mod exti {
 /// triggers (RTSR1 0x000, FTSR1 0x004), the software trigger (SWIER1 0x008,
 /// which sets the rising pending bit) and the mask (IMR1 0x080) -- RM0456
 /// chapter 23; one vector position per line, EXTI0 to EXTI15 at 11 to 26.
-#[cfg(feature = "board-nucleo-u5a5zj-q")]
+#[cfg(feature = "board-st-nucleo-u5a5zj-q")]
 mod exti {
     use super::*;
 
@@ -338,7 +343,8 @@ mod exti {
     handler!(exti14, 14);
     handler!(exti15, 15);
 
-    /// The handlers the board file folds through `BOARD_IRQS`.
+    /// The handlers the board file re-exports as `GPIO_IRQS`, folded into
+    /// the vector table beside `BOARD_IRQS`.
     pub const IRQS: [(usize, unsafe extern "C" fn()); 16] = [
         (11, exti0),
         (12, exti1),

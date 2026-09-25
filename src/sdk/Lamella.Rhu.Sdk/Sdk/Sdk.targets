@@ -69,14 +69,46 @@
       <RhuObjects>@(_RhuRow->'%(Objects)')</RhuObjects>
       <RhuMachine>@(_RhuRow->'%(Machine)')</RhuMachine>
       <RhuBase>@(_RhuRow->'%(Base)')</RhuBase>
+      <RhuStackPool>@(_RhuRow->'%(StackPool)')</RhuStackPool>
+      <RhuStackDefault>@(_RhuRow->'%(StackDefault)')</RhuStackDefault>
+      <RhuStackClamp>@(_RhuRow->'%(StackClamp)')</RhuStackClamp>
     </PropertyGroup>
     <Message Importance="high" Text="Lamella RHU: board $(RhuBoard) (class $(RhuClass); map $(RhuMap); kernel $(RhuKernel); base $(RhuBase))" />
+  </Target>
+
+  <!-- The thread stack budget. The row's pool, default and clamp are
+       facts copied from the kernel and the hosting layer (the verification
+       chain's parity leg ties them to the tree). RhuThreadStack, when a
+       project sets it, replaces the default for every thread that sizes
+       none of its own and reaches the image as an absolute symbol the link
+       defines, so the compiled object is the same with or without it. A
+       value that is not a whole number, is below the kernel's minimum, is
+       above the row's clamp, or leaves fewer than three such stacks in the
+       pool beside the idle thread's kilobyte is refused before anything
+       is compiled; the budget is printed beside the board line. -->
+  <Target Name="RhuStackBudget" DependsOnTargets="RhuResolveBoard" BeforeTargets="Build">
+    <PropertyGroup>
+      <RhuThreadStackMin>512</RhuThreadStackMin>
+      <_RhuThreadStackNumeric>$([System.Text.RegularExpressions.Regex]::IsMatch('$(RhuThreadStack)', '^[0-9]{1,9}$'))</_RhuThreadStackNumeric>
+      <_RhuThreadStack Condition="'$(RhuThreadStack)' == ''">$(RhuStackDefault)</_RhuThreadStack>
+      <_RhuThreadStack Condition="'$(RhuThreadStack)' != '' and '$(_RhuThreadStackNumeric)' == 'True'">$(RhuThreadStack)</_RhuThreadStack>
+    </PropertyGroup>
+    <Error Condition="'$(RhuThreadStack)' != '' and '$(_RhuThreadStackNumeric)' != 'True'" Text="REFUSE: RhuThreadStack='$(RhuThreadStack)' is not a whole number of bytes" />
+    <Error Condition="'$(_RhuThreadStackNumeric)' == 'True' and '$(_RhuThreadStack)' &lt; '$(RhuThreadStackMin)'" Text="REFUSE: RhuThreadStack=$(RhuThreadStack) is below the kernel's minimum stack of $(RhuThreadStackMin) bytes" />
+    <Error Condition="'$(_RhuThreadStackNumeric)' == 'True' and '$(_RhuThreadStack)' &gt; '$(RhuStackClamp)'" Text="REFUSE: RhuThreadStack=$(RhuThreadStack) is above the row's clamp of $(RhuStackClamp) bytes for $(RhuBoard)" />
+    <PropertyGroup>
+      <_RhuStackBudgetNeed>$([MSBuild]::Add($([MSBuild]::Multiply(3, $(_RhuThreadStack))), 1024))</_RhuStackBudgetNeed>
+      <_RhuStacksFit>$([System.Math]::Floor($([MSBuild]::Divide($([MSBuild]::Subtract($(RhuStackPool), 1024)), $(_RhuThreadStack)))))</_RhuStacksFit>
+      <_RhuStackDefsym Condition="'$(RhuThreadStack)' != ''">--defsym=__rhu_thread_stack_default=$(RhuThreadStack)</_RhuStackDefsym>
+    </PropertyGroup>
+    <Error Condition="'$(_RhuStackBudgetNeed)' &gt; '$(RhuStackPool)'" Text="REFUSE: RhuThreadStack=$(_RhuThreadStack) leaves fewer than three stacks in the row's pool of $(RhuStackPool) bytes beside the idle thread's (three stacks need $(_RhuStackBudgetNeed)) for $(RhuBoard)" />
+    <Message Importance="high" Text="Lamella RHU: the thread stack pool $(RhuStackPool) B; the default managed stack $(_RhuThreadStack) B (the row's clamp $(RhuStackClamp) B): $(_RhuStacksFit) hosted stacks fit beside the idle thread's" />
   </Target>
 
   <!-- Every frozen byte the package carries is verified against the
        package's own records before any link, and the two tools against
        the tools package's; a moved byte is a refusal, never a rebuild. -->
-  <Target Name="RhuVerifyFrozen" DependsOnTargets="RhuResolveBoard">
+  <Target Name="RhuVerifyFrozen" DependsOnTargets="RhuStackBudget">
     <Error Condition="'@(RhuFrozen)' == ''" Text="REFUSE: the package carries no frozen-bytes record (Sdk/frozen.props)" />
     <Error Condition="'$(RhuToolsDir)' == ''" Text="REFUSE: the tools package $(RhuToolsPackageId) is not restored (its build properties name the tools)" />
     <ItemGroup>
@@ -101,7 +133,8 @@
        data, the compiled object merged with that member and the runtime
        archives into one relocatable whose build attributes are the class's
        donor, and the image linked under the board's payload map with the
-       tier objects and the board's kernel. The linker of record prints
+       tier objects and the board's kernel, with the thread stack symbol
+       defined when the project set the knob. The linker of record prints
        nothing: any diagnostic is a refusal. -->
   <Target Name="LinkNative"
           Inputs="$(NativeObject);@(NativeLibrary);@(_RhuLinkInput)"
@@ -120,7 +153,7 @@
     <Exec Command="&quot;$(RhuObjcopy)&quot; --rename-section .rodata=.data.__security_cookie,alloc,load,data,contents &quot;$(_RhuMember)&quot; &quot;$(_RhuSurgery)&quot;" />
     <Exec Command="&quot;$(RhuLld)&quot; -r -u RhRegisterOSModule -u DotNetRuntimeContractDescriptor &quot;$(_RhuObject)&quot; &quot;$(_RhuSurgery)&quot; --start-group libRuntime.WorkstationGC.a libeventpipe-disabled.a libstandalonegc-enabled.a libaotminipal.a libstdc++compat.a --end-group -o &quot;$(_RhuMergePre)&quot;" WorkingDirectory="$(RhuSdkRoot)$(RhuArchives)" />
     <AttrsUpdate Input="$(_RhuMergePre)" Donor="$(RhuSdkRoot)$(RhuDonor)" Output="$(_RhuMerged)" />
-    <Exec Command="&quot;$(RhuLld)&quot; -T $(RhuMap) --gc-sections -Map=&quot;$(_RhuMapFile)&quot; -u RhInitialize -u RhRegisterOSModule -u DotNetRuntimeContractDescriptor &quot;$(_RhuMerged)&quot; $(RhuObjects) $(RhuKernel) -o &quot;$(_RhuElf)&quot;"
+    <Exec Command="&quot;$(RhuLld)&quot; -T $(RhuMap) --gc-sections -Map=&quot;$(_RhuMapFile)&quot; -u RhInitialize -u RhRegisterOSModule -u DotNetRuntimeContractDescriptor &quot;$(_RhuMerged)&quot; $(_RhuStackDefsym) $(RhuObjects) $(RhuKernel) -o &quot;$(_RhuElf)&quot;"
           WorkingDirectory="$(RhuSdkRoot)" ConsoleToMSBuild="true" IgnoreExitCode="true" IgnoreStandardErrorWarningFormat="true">
       <Output TaskParameter="ExitCode" PropertyName="_RhuLdRc" />
       <Output TaskParameter="ConsoleOutput" ItemName="_RhuLdOut" />

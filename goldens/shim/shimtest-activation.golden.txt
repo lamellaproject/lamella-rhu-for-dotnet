@@ -1,4 +1,4 @@
-shimtest-activation: the activation costume on the kernel's delivery, and the signal rows
+shimtest-activation: the activation compatibility adapter on the kernel's delivery, and the signal rows
 PASS shim-act-init (the realtime floor; the set operations; the mask blocks, reports and clears)
 PASS shim-act-refuse (a send with no handler, a non-activation signal, an unknown thread, an unrecordable signal: each refused with its errno)
 PASS shim-act-register (the query form reads the default; the install keeps the old disposition; the read-back matches; a one-argument disposition answers its predecessor)
@@ -7,4 +7,4 @@ PASS shim-act-setctx (a pc and r0 edit through the signal context landed on the 
 PASS shim-act-block (the handler blocked on a futex inside the activation; the interrupted flow stood still and resumed after the release)
 PASS shim-act-eintr (a blocked condition wait returned after the handler ran on the waiter, re-waited on the false predicate, and a real signal released it)
 PASS shim-act-pal (initialization reports success; the posix signal numbers map; enable and disable record; the continue and window signals take no action)
-SHIMTEST-ACTIVATION: ALL GOOD (the activation costume on the kernel's delivery; the signal rows recorded, none deliverable)
+SHIMTEST-ACTIVATION: ALL GOOD (the activation adapter on the kernel's delivery; the signal rows recorded, none deliverable)

@@ -9,4 +9,19 @@
     <ImplicitUsings>disable</ImplicitUsings>
   </PropertyGroup>
 
+  <!-- The standard GPIO package at the version the suite's section thirteen
+       was frozen against; the rt tiers' manifests record the package's
+       identity. -->
+  <ItemGroup>
+    <PackageReference Include="System.Device.Gpio" Version="4.2.0" />
+  </ItemGroup>
+
+  <!-- The two bus sections read the row's bus numbers from the kernel's
+       own doors, bound at link time by entry point, so one program serves
+       both emulator worlds. -->
+  <ItemGroup>
+    <DirectPInvoke Include="rhu-kernel!rhu_i2c_bus" />
+    <DirectPInvoke Include="rhu-kernel!rhu_spi_bus" />
+  </ItemGroup>
+
 </Project>

@@ -99,7 +99,7 @@
  * statics size (slack 320K; the roomy row is deliberately
  * conservative). Cover 4M is minimal: a 2M granule at 0x20000000
  * ends below the SRAM end 0x20270000. */
-#define MGC_ROW_BOARD             "nucleo-u5a5zj-q"
+#define MGC_ROW_BOARD             "st-nucleo-u5a5zj-q"
 #define MGC_ROW_PROFILE           "suite"
 #define MGC_ROW_BASIS             "floor"
 #define MGC_ROW_REGION_BYTES      1048576u
@@ -131,7 +131,7 @@
  * class; the grace round trip is the protocol either way). Cover 512K
  * is minimal: the granule at 0x20000000 is exactly the DATA window
  * [0x20000000, 0x20080000). */
-#define MGC_ROW_BOARD             "stm32f769i-disco"
+#define MGC_ROW_BOARD             "st-stm32f769i-disco"
 #define MGC_ROW_PROFILE           "mini"
 #define MGC_ROW_BASIS             "floor"
 #define MGC_ROW_REGION_BYTES        98304u
@@ -156,7 +156,7 @@
  * floor (slack 5K). Cover 1M is minimal: a 512K granule at 0x20000000
  * ends at 0x20080000, 8K short of the window's end 0x20082000; the 1M
  * granule holds it. */
-#define MGC_ROW_BOARD             "pico-2"
+#define MGC_ROW_BOARD             "rpi-pico2"
 #define MGC_ROW_PROFILE           "mini"
 #define MGC_ROW_BASIS             "floor"
 #define MGC_ROW_REGION_BYTES        98304u
@@ -177,7 +177,7 @@
 /* Pimoroni Pico Plus 2 (and Plus 2 W): the same chip, the same 520K SRAM
  * window and map floor as the Pico 2, so the same mini row and the same
  * 1M cover; the board's PSRAM is not part of the map. */
-#define MGC_ROW_BOARD             "pico-plus-2"
+#define MGC_ROW_BOARD             "pimoroni-pico-plus-2-w"
 #define MGC_ROW_PROFILE           "mini"
 #define MGC_ROW_BASIS             "floor"
 #define MGC_ROW_REGION_BYTES        98304u

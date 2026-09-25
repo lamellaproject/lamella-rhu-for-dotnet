@@ -4,8 +4,9 @@
  * memory mapping with the frozen-object reservation guard, the malloc
  * family, the threading primitives on the kernel futex, time, random
  * bytes, and what the class library asks about the process it runs in:
- * its identity, its working directory, its environment and its log
- * streams. Managed callers pass and receive the PAL's own constants and
+ * its identity (its id, its path, and the one procfs line the runtime's
+ * process-name path reads), its working directory, its environment and
+ * its log streams. Managed callers pass and receive the PAL's own constants and
  * structure layouts (the generated headers), never a platform's; errno
  * crosses the boundary through the generated mapping in both directions.
  * Every descriptor belongs to exactly one band, and the console never
@@ -34,10 +35,10 @@
 #include "rhu_pal_process_net11_rc1.h"
 #include "rhu_pal_random_net11_rc1.h"
 #include "rhu_pal_signal_net11_rc1.h"
+#include "rhu_pal_surface_net11_rc1.h"
 #include "rhu_pal_threading_net11_rc1.h"
 #include "rhu_pal_time_net11_rc1.h"
 #include "rhu_pal_uid_net11_rc1.h"
-#include "rhu_pal_surface_net11_rc1.h"
 
 #ifndef RHU_SHIM_BREAK_FD_BASE
 _Static_assert(RHU_SHIM_FD_FILE_LO >= RHU_SHIM_FD_CONSOLE_HI, "the file band starts above the console band");
@@ -101,14 +102,22 @@ int32_t SystemNative_ConvertErrorPalToPlatform(int32_t error)
     }
 }
 
+/* The errno doors carry the RAW platform errno: the PAL's contract at the
+ * pin (pal_errno.c returns errno as it is), with the managed side
+ * converting the number to its own code through ConvertErrorPlatformToPal
+ * itself. A P/Invoke marked SetLastError saves what GetErrNo answers, and
+ * a caller's Marshal.GetLastPInvokeError() must read the platform number
+ * -- the standard GPIO library's driver compares it with 4 for EINTR
+ * (the converted code was measured on the wire as 65581 for a
+ * refused open, where the contract gives 2). */
 int32_t SystemNative_GetErrNo(void)
 {
-    return SystemNative_ConvertErrorPlatformToPal(ERRNO);
+    return ERRNO;
 }
 
 void SystemNative_SetErrNo(int32_t errorCode)
 {
-    ERRNO = SystemNative_ConvertErrorPalToPlatform(errorCode);
+    ERRNO = errorCode;
 }
 
 static const char *errno_name(int32_t platformErrno)
@@ -497,6 +506,56 @@ static int64_t positioned(int64_t fileOffset)
 /* The resources first -- a descriptor, and for a new object a slot --
  * so a refused open leaves the store as it was; the object is created or
  * truncated only once both are in hand. */
+/* The process identity line: the one procfs file the runtime's
+ * process-name path reads (/proc/self/stat, parsed as twenty-four
+ * fields: pid, the name in the outer parentheses, the state, ppid, pgrp,
+ * session, tty, tpgid, flags, four fault counts, four times, priority,
+ * nice, num_threads, itrealvalue, starttime, vsize, rss, rsslim). This
+ * system has one program: pid 1, its name the base of the process path
+ * ("program"), state R, no parent, priority 20 and nice 0 as an ordinary
+ * process prints, one thread stated (the shim keeps no live count), and
+ * 0 for every counter this system does not keep -- all fifty-two fields
+ * Linux prints, so the parser's last field is never the line's last
+ * token (a token that carries the newline is refused). A read-only open of the
+ * path materializes the line as an UNLINKED in-memory object, which the
+ * store releases at its last close (the lifetime rule below); the name
+ * is never findable, so no create, write, link or list can reach it. The
+ * command-line file beside it is not answered: the runtime's own
+ * fallback then takes the name from this line. */
+#define RFS_IDENTITY_PATH "/proc/self/stat"
+static const char rfs_identity_line[] =
+    "1 (program) R 0 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0"
+    " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+
+static int identity_file(const char *path, int32_t access)
+{
+    if (access != RHU_PAL_O_RDONLY || strcmp(path, RFS_IDENTITY_PATH) != 0)
+        return -1;
+    int ni = -1;
+    for (int i = 0; i < RFS_FILES && ni < 0; i++) {
+        if (g_files[i].used == 0)
+            ni = i;
+    }
+    if (ni < 0)
+        return -1;
+    rfs_file *f = &g_files[ni];
+    memset(f, 0, sizeof *f);
+    f->used = 1;
+    f->linked = 0;
+    strcpy(f->path, RFS_IDENTITY_PATH);
+    f->mode = 0444u;
+    f->atime = rfs_now();
+    f->mtime = f->atime;
+    uint32_t n = (uint32_t)(sizeof rfs_identity_line - 1u);
+    if (file_grow(f, n) != 0) {
+        memset(f, 0, sizeof *f);
+        return -1;
+    }
+    memcpy(f->data, rfs_identity_line, n);
+    f->size = n;
+    return ni;
+}
+
 static intptr_t open_locked(const char *path, int32_t flags, int32_t mode)
 {
     char nb[RFS_PATH];
@@ -511,6 +570,8 @@ static intptr_t open_locked(const char *path, int32_t flags, int32_t mode)
         return -1;
     }
     int fi = file_find(path);
+    if (fi < 0)
+        fi = identity_file(path, access);
     if (fi < 0) {
         if ((flags & RHU_PAL_O_CREAT) == 0) {
             ERRNO = RHU_GERR_ENOENT;
@@ -1739,7 +1800,7 @@ static const char *entropy_refusal_text(int32_t code)
     case RHU_EAGAIN:
         return "the bytes were not ready in time";
     default:
-        return "a code the door does not name";
+        return "a code the kernel call does not name";
     }
 }
 
@@ -1772,13 +1833,13 @@ int32_t SystemNative_GetCryptographicallySecureRandomBytes(uint8_t *buffer, int3
             if (buffer != NULL && off > 0)
                 memset(buffer, 0, off);
             if (refusal_announced++ == 0)
-                rhu_shim_log("entropy: the secure door refused a cryptographic draw (%s); the draw fails and nothing is served (further refusals counted silently)", entropy_refusal_text(r));
+                rhu_shim_log("entropy: the kernel's secure entropy call refused a cryptographic draw (%s); the draw fails and nothing is served (further refusals counted silently)", entropy_refusal_text(r));
             return -1;
         }
         off += piece;
     }
     if (n != 0 && served_announced++ == 0)
-        rhu_shim_log("entropy: cryptographic draws through the kernel's secure door; hardware source: %s", rhu_entropy_is_hardware() != 0 ? "yes" : "no");
+        rhu_shim_log("entropy: cryptographic draws through the kernel's secure entropy call; hardware source: %s", rhu_entropy_is_hardware() != 0 ? "yes" : "no");
     return 0;
 }
 
@@ -2132,7 +2193,7 @@ void SystemNative_LogError(uint8_t *buffer, int32_t length)
 }
 
 /* ------------------------------------------------------------------ */
-/* the surface beyond the gate programs' demand (F135): the answers    */
+/* the surface beyond the gate programs' demand: the answers           */
 /* RHU serves, over the store, the calendar and the kernel             */
 /* ------------------------------------------------------------------ */
 

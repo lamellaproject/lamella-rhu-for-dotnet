@@ -30,10 +30,10 @@ const TIMEOUT_S: u64 = 120;
 const LINK_TIMEOUT_S: u64 = 120;
 
 /// Frozen-input pin table: must equal goldens/payload/MANIFEST.md.
-const SHA_RTSMOKE_O: &str = "8f0e4e4caaccf0dc23133df72b15ce1a4dd3c79c1f5a567d0e0ec919397c6b92";
-const SHA_GCTEST_O: &str = "1d15b7f19bc9c0606ed50056875e07a3064dd30cdc866f46153c67965f87c61f";
-const SHA_RTSMOKE_G: &str = "d6c040565d4346117cac8d750244ec62a9cffbb228fdd6088d5dfc8336df1dc5";
-const SHA_GCTEST_G: &str = "5900b85b44294d57e75e9160feed525a8f0465b481d6992e716d6331b5d49fa1";
+const SHA_RTSMOKE_O: &str = "e72d824a26cc516190aee0db37b39e7520aa0c4c353fd8ee3837e788b0370a81";
+const SHA_GCTEST_O: &str = "c0a91cd86216595f1a52a0d6088bd26ea1bac656ae33cd639660cdcb3fcb05e4";
+const SHA_RTSMOKE_G: &str = "230e32ad303a37564fdc2093fde03730592113aa3718f533e70adfe547c90eb5";
+const SHA_GCTEST_G: &str = "0eb3d1ba8a9f0fc4be43ee4fe5d626626147d98a9a5605da6d1c8ae2887d8b2c";
 
 /// Collections pin: RHU's own derived value, never inherited, re-derived
 /// per image and per clock. Derived on the canonical link (the rust-lld
@@ -41,7 +41,7 @@ const SHA_GCTEST_G: &str = "5900b85b44294d57e75e9160feed525a8f0465b481d6992e716d
 /// final line remains the expected-free source because the derived value
 /// equals it; a divergent derivation would have moved that expectation
 /// into a gate-owned constant.
-const COLLECTIONS_EXACT: &str = "62";
+const COLLECTIONS_EXACT: &str = "61";
 
 /// The deterministic profile's name in the results surface (additive,
 /// report-only, between "control" and "image"). Emitted only on case
@@ -80,6 +80,28 @@ fn objects_dir_fault(dir: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Where the documented publish writes each program's object: the leg reads
+/// them there when no directory is named and no publish environment drives
+/// the rebuild (a reader runs the two commands, then the leg, nothing copied).
+const IN_PLACE_RTSMOKE: &str = "src/payload/rtsmoke/obj/Release/net11.0/linux-arm/native/rtsmoke.o";
+const IN_PLACE_GCTEST: &str = "src/payload/gctest/obj/Release/net11.0/linux-arm/native/gctest.o";
+
+/// The in-place objects' presence: both, neither, or one absent (named).
+enum InPlace {
+    Both,
+    Neither,
+    Missing(&'static str),
+}
+
+fn objects_in_place(repo: &Path) -> InPlace {
+    match (repo.join(IN_PLACE_RTSMOKE).is_file(), repo.join(IN_PLACE_GCTEST).is_file()) {
+        (true, true) => InPlace::Both,
+        (false, false) => InPlace::Neither,
+        (true, false) => InPlace::Missing(IN_PLACE_GCTEST),
+        (false, true) => InPlace::Missing(IN_PLACE_RTSMOKE),
+    }
 }
 
 /// A hosted-runtime world's tier on this checkout: present when its
@@ -249,8 +271,8 @@ pub(crate) fn check_world_demand(world_gate: &str, demand: &[String]) -> Result<
 
 /// The frozen minirt objects' own managed code: the brackets on every
 /// payload-family link read these exactly.
-const MANAGED_BYTES_RTSMOKE: u64 = 5_534;
-const MANAGED_BYTES_GCTEST: u64 = 5_190;
+const MANAGED_BYTES_RTSMOKE: u64 = 5_890;
+const MANAGED_BYTES_GCTEST: u64 = 5_474;
 
 /// The gate's shared an500 staticlib (the payload-feature build the gc and
 /// shim gates link against too) and the an500 payload map of record.
@@ -274,13 +296,15 @@ struct RtBoard {
     world: &'static crate::gates::rt::RtWorld,
 }
 
-const RT_BOARDS: [RtBoard; 6] = [
+const RT_BOARDS: [RtBoard; 8] = [
     RtBoard { board: "mps2-an500", target: "thumbv7em-none-eabihf", features: "qemu-exit,board-mps2-an500,payload", world: &crate::gates::rt::WORLD_M7 },
     RtBoard { board: "mps2-an505", target: "thumbv8m.main-none-eabihf", features: "qemu-exit,board-mps2-an505,payload", world: &crate::gates::rt::WORLD_M33 },
-    RtBoard { board: "nucleo-u5a5zj-q", target: "thumbv8m.main-none-eabihf", features: "board-nucleo-u5a5zj-q,payload", world: &crate::gates::rt::WORLD_M33 },
-    RtBoard { board: "stm32f769i-disco", target: "thumbv7em-none-eabihf", features: "board-stm32f769i-disco,payload", world: &crate::gates::rt::WORLD_M7 },
-    RtBoard { board: "pico-2", target: "thumbv8m.main-none-eabihf", features: "board-pico-2,payload", world: &crate::gates::rt::WORLD_M33 },
-    RtBoard { board: "pico-plus-2", target: "thumbv8m.main-none-eabihf", features: "board-pico-plus-2,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "pimoroni-pico-plus-2", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-plus-2,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "pimoroni-pico-plus-2-w", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-plus-2-w,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "rpi-pico2", target: "thumbv8m.main-none-eabihf", features: "board-rpi-pico2,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "rpi-pico2-w", target: "thumbv8m.main-none-eabihf", features: "board-rpi-pico2-w,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "st-nucleo-u5a5zj-q", target: "thumbv8m.main-none-eabihf", features: "board-st-nucleo-u5a5zj-q,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "st-stm32f769i-disco", target: "thumbv7em-none-eabihf", features: "board-st-stm32f769i-disco,payload", world: &crate::gates::rt::WORLD_M7 },
 ];
 
 /// What the rt-link checker reads off a linked artifact.
@@ -2133,16 +2157,16 @@ impl MPayload {
         managed
     }
 
-    /// Negative control: a scratch copy of the tree with one comment line
-    /// inserted at the top of the shared system module's source, published
-    /// through the real tool -- its object must move against the record's.
-    fn rederive_control_doctored_source(&mut self, rd: &Path) {
-        const CASE: &str = "rederive-control-doctored-source";
-        const BROKE: &str = "one comment line inserted at the top of minirt.cs in a scratch copy of the payload tree";
-        println!("== control {CASE}: {BROKE} -- the object must move ==");
-        let obj = rd.join("control-doctored-source-rtsmoke.o");
+    /// Negative control: a scratch copy of the tree with one code literal
+    /// changed in the smoke program's source, published through the real
+    /// tool -- its object must move against the record's, in the code.
+    fn rederive_control_doctored_code(&mut self, rd: &Path) {
+        const CASE: &str = "rederive-control-doctored-code";
+        const BROKE: &str = "one code literal changed in rtsmoke's Program.cs in a scratch copy of the payload tree";
+        println!("== control {CASE}: {BROKE} -- the object must move, in the code ==");
+        let obj = rd.join("control-doctored-code-rtsmoke.o");
         if !obj.is_file() {
-            let log = std::fs::read_to_string(rd.join("control-doctored-source-rtsmoke.publish.log")).unwrap_or_default();
+            let log = std::fs::read_to_string(rd.join("control-doctored-code-rtsmoke.publish.log")).unwrap_or_default();
             for l in compiler_refusal_lines(&log) {
                 println!("  | {l}");
             }
@@ -2153,11 +2177,14 @@ impl MPayload {
         match tie_object(&self.facts, &obj, &record, rd) {
             Ok(Tie::Identical) => {
                 self.emit_control_case(CASE, "fail", BROKE);
-                self.ctx.gate_fail(&format!("{CASE}: the doctored source's object ties the record's byte for byte -- the control does not distinguish"));
+                self.ctx.gate_fail(&format!("{CASE}: the doctored code's object ties the record's byte for byte -- the control does not distinguish"));
             }
-            Ok(Tie::Moved { fresh_len, frozen_len, code_moved }) => {
-                let diag = if code_moved { "the code moved" } else { "the debug strings moved, the loadable code the same" };
-                println!("  moved as predicted: {fresh_len} bytes against the record's {frozen_len} ({diag})");
+            Ok(Tie::Moved { fresh_len, frozen_len, code_moved: true }) => {
+                println!("  moved as predicted: {fresh_len} bytes against the record's {frozen_len} (the code moved)");
+            }
+            Ok(Tie::Moved { .. }) => {
+                self.emit_control_case(CASE, "fail", BROKE);
+                self.ctx.gate_fail(&format!("{CASE}: the doctored code moved only the debug strings -- the tier's objects carry none, so the control does not read"));
             }
             Err(e) => {
                 self.emit_control_case(CASE, "fail", BROKE);
@@ -2165,27 +2192,60 @@ impl MPayload {
             }
         }
         self.emit_control_case(CASE, "pass", BROKE);
-        println!("== control {CASE}: PASS (a source that moves is read: the object moved) ==");
+        println!("== control {CASE}: PASS (a source whose code moves is read: the object moved) ==");
     }
 
-    /// Negative control: the same tree published with the path map absent
-    /// -- its object names the checkout and the neutral-path read refuses it.
-    fn rederive_control_unmapped(&mut self, rd: &Path, root: &str) {
-        const CASE: &str = "rederive-control-unmapped";
-        const BROKE: &str = "the path map absent (a scratch copy published with Deterministic on and no map)";
-        println!("== control {CASE}: {BROKE} -- the object must be refused as a per-checkout object ==");
-        let bytes = std::fs::read(rd.join("control-unmapped-rtsmoke.o")).unwrap_or_default();
+    /// Positive control: a scratch copy of the tree with one comment line
+    /// inserted at the top of the shared system module's source, published
+    /// through the real tool -- its object must NOT move against the
+    /// record's: the objects carry no debug information, so a source whose
+    /// comment lines differ is the same bytes.
+    fn rederive_control_comment_only(&mut self, rd: &Path) {
+        const CASE: &str = "rederive-control-comment-only";
+        const SHAPE: &str = "one comment line inserted at the top of minirt.cs in a scratch copy of the payload tree";
+        println!("== control {CASE}: {SHAPE} -- the object must not move ==");
+        let obj = rd.join("control-comment-only-rtsmoke.o");
+        if !obj.is_file() {
+            let log = std::fs::read_to_string(rd.join("control-comment-only-rtsmoke.publish.log")).unwrap_or_default();
+            for l in compiler_refusal_lines(&log) {
+                println!("  | {l}");
+            }
+            self.ctx.gate_fail(&format!("{CASE}: the comment-only copy did not publish, so the control cannot read"));
+        }
+        let record = rd.join("record-rtsmoke.o");
+        match tie_object(&self.facts, &obj, &record, rd) {
+            Ok(Tie::Identical) => {
+                println!("  byte-identical to the record's object, as predicted");
+            }
+            Ok(Tie::Moved { fresh_len, frozen_len, code_moved }) => {
+                let diag = if code_moved { "the code moved" } else { "the debug strings moved" };
+                self.ctx.gate_fail(&format!("{CASE}: a comment line moved the object ({fresh_len} bytes against the record's {frozen_len}; {diag}) -- the project's debug type is not none"));
+            }
+            Err(e) => self.ctx.gate_fail(&format!("{CASE}: {e}")),
+        }
+        self.emit_case(CASE, "pass", "null", "null", "", "", "null", None, Some("{\"control\":\"comment-only\"}"));
+        println!("== control {CASE}: PASS (a source whose comment lines alone differ is the same bytes) ==");
+    }
+
+    /// Negative control: the same tree published with the debug type
+    /// overridden to the SDK's usual value -- its object carries debug
+    /// information and the class read refuses it before any tie.
+    fn rederive_control_debug_on(&mut self, rd: &Path) {
+        const CASE: &str = "rederive-control-debug-on";
+        const BROKE: &str = "the debug type overridden to portable (a scratch copy published with the compiler's debug information on)";
+        println!("== control {CASE}: {BROKE} -- the object must be refused as carrying debug information ==");
+        let bytes = std::fs::read(rd.join("control-debug-on-rtsmoke.o")).unwrap_or_default();
         if bytes.is_empty() {
             self.emit_control_case(CASE, "fail", BROKE);
-            self.ctx.gate_fail(&format!("{CASE}: the unmapped copy did not publish, so the control cannot read"));
+            self.ctx.gate_fail(&format!("{CASE}: the debug-on copy did not publish, so the control cannot read"));
         }
-        let Some(fault) = neutral_path_fault(&bytes, root) else {
+        let Some(fault) = debug_class_fault(&bytes) else {
             self.emit_control_case(CASE, "fail", BROKE);
-            self.ctx.gate_fail(&format!("{CASE}: the unmapped copy's object passed the neutral-path read -- the control does not bite"));
+            self.ctx.gate_fail(&format!("{CASE}: the debug-carrying object passed the class read -- the control does not bite"));
         };
         println!("  refused as predicted: {fault}");
         self.emit_control_case(CASE, "pass", BROKE);
-        println!("== control {CASE}: PASS (an object naming its checkout is refused) ==");
+        println!("== control {CASE}: PASS (an object carrying debug information is refused) ==");
     }
 
     /// Negative control: a scratch copy whose project renames the
@@ -2547,11 +2607,6 @@ pub fn run(repo: &Path) -> ! {
     exit(0);
 }
 
-/// The mapped path the tier's objects carry: the SDK's path map over the
-/// whole payload tree, one string on every host, so an object published at
-/// any directory is byte-identical and names no checkout.
-const PAYLOAD_MAPPED_PATH: &str = "/rhu/src/payload";
-
 /// The re-derivation leg's reading of one rebuilt object against its
 /// frozen one.
 enum Tie {
@@ -2618,18 +2673,15 @@ fn manifest_ties(rows: &[(String, String, u64)], pins: &[(&str, &str, u64)]) -> 
     Ok(())
 }
 
-/// A rebuilt object's paths: it carries the mapped payload path (the map
-/// applied) and never the checkout's own root -- an object that names its
-/// checkout is a per-checkout object, never tied and never frozen.
-fn neutral_path_fault(obj: &[u8], checkout_root: &str) -> Option<String> {
-    let carries = |s: &str| !s.is_empty() && obj.windows(s.len()).any(|w| w == s.as_bytes());
-    if !carries(PAYLOAD_MAPPED_PATH) {
-        return Some(format!("the object does not carry the mapped path {PAYLOAD_MAPPED_PATH} (the SDK's path map did not apply)"));
-    }
-    if carries(checkout_root) {
-        return Some(format!("the object carries the checkout's own path '{checkout_root}' (a per-checkout object)"));
-    }
-    None
+/// A rebuilt object's class: the tier's objects carry no debug information
+/// (the projects publish with the debug type none), so an object is the
+/// same bytes from any directory and whatever the sources' comment lines;
+/// one carrying a section named `.debug_...` was published with another
+/// debug type and is refused before any tie, never read as MOVED.
+fn debug_class_fault(obj: &[u8]) -> Option<String> {
+    crate::objfile::section_names(obj).into_iter().find(|n| n.starts_with(".debug_")).map(|n| {
+        format!("the object carries debug information (a section named {n}): the tier's objects carry none, so a rebuild is the same bytes from any directory and whatever the sources' comment lines -- publish with the project's debug type as committed")
+    })
 }
 
 /// The compiler's refusal, read off a publish log: its lines carrying
@@ -2660,24 +2712,27 @@ fn tie_object(facts: &RustcFacts, fresh: &Path, frozen: &Path, scratch_dir: &Pat
 }
 
 /// THE RE-DERIVATION LEG: the tier's two programs rebuilt from
-/// `src/payload/` through the pinned .NET SDK in the publish world (the
+/// `src/payload/` through the pinned .NET SDK in the Linux environment for the publish (the
 /// publish-side script through the publish pointer: the tree's own pin,
-/// Deterministic on, the whole payload tree mapped to one fixed string,
-/// nothing fetched) -- or, without a publish world, read from a directory
-/// named by RHU_PAYLOAD_OBJECTS holding the two objects a reader published
-/// from src/payload by the documented commands, the controls then NOT RUN
-/// with the reason on the verdict line -- each object tied
-/// byte for byte to the frozen one, the rebuilt objects linked and booted
-/// by this gate's own method against the goldens (rtsmoke's stream byte
-/// for byte, gctest's pins), then the controls through the real tool (a
-/// doctored source, the map absent, a doctored project). A compiler that
-/// refuses the system module at the pin is the leg's loud FAIL with the
-/// compiler's lines; a passing build whose bytes differ from the frozen
-/// object's reads MOVED with the diagnosis from the loadable identity, and
-/// the leg exits nonzero until the tier is re-frozen under this read. A
-/// maintainer's leg beside the gate: it needs the publish world (the pinned
-/// .NET SDK on the Linux side), NOT RUN and exit 1 without it -- never a
-/// pass.
+/// each project as committed -- the debug type none, so the object carries
+/// no debug information and no path and is the same bytes from any
+/// directory and whatever the sources' comment lines -- nothing fetched)
+/// -- or, without the Linux environment for the publish, read from a directory named by
+/// RHU_PAYLOAD_OBJECTS holding the two objects a reader published from
+/// src/payload by the documented commands, the controls then NOT RUN with
+/// the reason on the verdict line -- each object read for its class (one
+/// carrying debug information is refused) and tied byte for byte to the
+/// frozen one, the rebuilt objects linked and booted by this gate's own
+/// method against the goldens (rtsmoke's stream byte for byte, gctest's
+/// pins), then the controls through the real tool (a code literal changed,
+/// a comment line inserted -- the object must not move -- the debug type
+/// overridden, a doctored project). A compiler that refuses the system
+/// module at the pin is the leg's loud FAIL with the compiler's lines; a
+/// passing build whose bytes differ from the frozen object's reads MOVED
+/// with the diagnosis from the loadable identity, and the leg exits nonzero
+/// until the tier is re-frozen under this read. A maintainer's leg beside
+/// the gate: it needs the Linux environment for the publish (the pinned .NET SDK on the Linux
+/// side), NOT RUN and exit 1 without it -- never a pass.
 pub fn rederive(repo: &Path) -> ! {
     const GATE_ID: &str = "payload-rederive";
     const DISPLAY_ID: &str = "PAYLOAD REDERIVE";
@@ -2696,10 +2751,23 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     let publish = crate::gates::rt::resolve_publish(repo);
+    if publish.is_some() && !repo.join("tools").join("rt-publish").join("payload-rebuild.sh").is_file() {
+        println!("{DISPLAY_ID}: NOT RUN (the Linux environment for the publish is named but this checkout carries no tools/rt-publish/payload-rebuild.sh, the maintainers' script that drives the rebuild there; publish the two objects by the documented commands in their directories and run the leg again, which reads each object where the publish wrote it)");
+        exit(1);
+    }
     let objects_dir = std::env::var("RHU_PAYLOAD_OBJECTS").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     if publish.is_none() && objects_dir.is_none() {
-        println!("{DISPLAY_ID}: NOT RUN (no publish world resolved: set RHU_PUBLISH to the command prefix that runs a script in the publish world and RHU_PUBLISH_ROOT to this checkout's root there, or write tools/toolchains/publish.local with those two lines; or set RHU_PAYLOAD_OBJECTS to a directory holding rtsmoke.o and gctest.o published from src/payload by the documented commands)");
-        exit(1);
+        match objects_in_place(repo) {
+            InPlace::Both => {}
+            InPlace::Missing(absent) => {
+                println!("{DISPLAY_ID}: NOT RUN ({absent} is absent where the publish writes it while the other program's object is present: publish both programs by the documented commands, then run the leg again)");
+                exit(1);
+            }
+            InPlace::Neither => {
+                println!("{DISPLAY_ID}: NOT RUN (no rebuilt objects to read: publish the two programs by the documented commands and run the leg again, which reads each object where the publish writes it ({IN_PLACE_RTSMOKE} and {IN_PLACE_GCTEST}); or name a directory holding rtsmoke.o and gctest.o by RHU_PAYLOAD_OBJECTS; or name the Linux environment for the publish by RHU_PUBLISH and RHU_PUBLISH_ROOT, or the two lines of tools/toolchains/publish.local, with the maintainers' script present)");
+                exit(1);
+            }
+        }
     }
     let words: Vec<String> = match publish.as_ref().map(|(p, _)| command_words(p)) {
         None => Vec::new(),
@@ -2769,14 +2837,14 @@ pub fn rederive(repo: &Path) -> ! {
     );
     g.build_staticlib();
 
-    let (root, controls_run) = if let Some((_, root)) = publish {
+    let controls_run = if let Some((_, root)) = publish {
         let case = "rederive-publish";
         let script = format!("{root}/tools/rt-publish/payload-rebuild.sh");
         let out_there = format!("{root}/{OUT_REL}");
         let mut args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
         args.push(&script);
         args.push(&out_there);
-        println!("== case {case}: the publish world: {} {} {} ==", words.join(" "), script, out_there);
+        println!("== case {case}: the Linux environment for the publish: {} {} {} ==", words.join(" "), script, out_there);
         let script_out = rd.join("script.stdout");
         let script_err = rd.join("script.stderr");
         let outcome = run_captured(Path::new(&words[0]), &args, &script_out, &script_err, Duration::from_secs(2400));
@@ -2800,25 +2868,36 @@ pub fn rederive(repo: &Path) -> ! {
             g.fail_case(case, "null", "null", "", "", None, "the publish fetched into the package cache (the script's cache lines above)");
         }
         g.emit_case(case, "pass", "null", "null", "", "", "null", None, Some("{\"fetched\":0}"));
-        println!("== case {case}: PASS (the two programs published at the tree's pin with the payload tree mapped; nothing fetched) ==");
-        (root, true)
+        println!("== case {case}: PASS (the two programs published at the tree's pin by the documented command; nothing fetched) ==");
+        true
     } else {
-        let dir = std::path::PathBuf::from(objects_dir.clone().unwrap_or_default());
         let case = "rederive-objects";
-        println!("== case {case}: the objects published from src/payload by the documented commands, read from {} ==", dir.display());
-        if let Some(f) = objects_dir_fault(&dir) {
-            g.fail_case(case, "null", "null", "", "", None, &f);
-        }
-        for prog in ["rtsmoke", "gctest"] {
+        let sources: [(&str, PathBuf); 2] = if let Some(d) = objects_dir.clone() {
+            let dir = std::path::PathBuf::from(d);
+            println!("== case {case}: the objects published from src/payload by the documented commands, read from {} ==", dir.display());
+            if let Some(f) = objects_dir_fault(&dir) {
+                g.fail_case(case, "null", "null", "", "", None, &f);
+            }
+            [("rtsmoke", dir.join("rtsmoke.o")), ("gctest", dir.join("gctest.o"))]
+        } else {
+            println!("== case {case}: the objects published from src/payload by the documented commands, read where the publish wrote them ({IN_PLACE_RTSMOKE}, {IN_PLACE_GCTEST}) ==");
+            [("rtsmoke", repo.join(IN_PLACE_RTSMOKE)), ("gctest", repo.join(IN_PLACE_GCTEST))]
+        };
+        for (prog, src) in &sources {
             let dst = rd.join(format!("record-{prog}.o"));
-            if std::fs::copy(dir.join(format!("{prog}.o")), &dst).is_err() {
-                g.fail_case(case, "null", "null", "", "", None, &format!("{prog}.o could not be read from {}", dir.display()));
+            if std::fs::copy(src, &dst).is_err() {
+                g.fail_case(case, "null", "null", "", "", None, &format!("{prog}.o could not be read from {}", src.display()));
             }
             let _ = std::fs::remove_file(rd.join(format!("record-{prog}.publish.log")));
         }
-        g.emit_case(case, "pass", "null", "null", "", "", "null", None, Some("{\"source\":\"objects\"}"));
-        println!("== case {case}: PASS (rtsmoke.o and gctest.o read from the directory; the publish's transcript is the reader's) ==");
-        (repo.display().to_string(), false)
+        let (stats, how) = if objects_dir.is_some() {
+            ("{\"source\":\"objects\"}", "rtsmoke.o and gctest.o read from the directory")
+        } else {
+            ("{\"source\":\"in-place\"}", "rtsmoke.o and gctest.o read where the publish wrote them")
+        };
+        g.emit_case(case, "pass", "null", "null", "", "", "null", None, Some(stats));
+        println!("== case {case}: PASS ({how}; the publish's transcript is the reader's) ==");
+        false
     };
 
     let short = |s: &str| s.get(..16).unwrap_or(s).to_string();
@@ -2836,10 +2915,10 @@ pub fn rederive(repo: &Path) -> ! {
             g.fail_case(&case, "null", "null", "", "", None, "the publish left no object: the compiler refused");
         }
         let bytes = std::fs::read(&fresh).unwrap_or_default();
-        if let Some(f) = neutral_path_fault(&bytes, &root) {
+        if let Some(f) = debug_class_fault(&bytes) {
             g.fail_case(&case, "null", "null", "", "", None, &f);
         }
-        println!("  the object carries the mapped path {PAYLOAD_MAPPED_PATH} and never the checkout's ({root})");
+        println!("  the object carries no debug information (no .debug_ section): the tier's class, the same bytes from any directory");
         let frozen = g.gold_dir.join(format!("{prog}.o"));
         match tie_object(&g.facts, &fresh, &frozen, &rd) {
             Ok(Tie::Identical) => {
@@ -2862,12 +2941,13 @@ pub fn rederive(repo: &Path) -> ! {
     let managed_gctest = g.rederive_boot("gctest", ExecProfile::Deterministic);
 
     if controls_run {
-        g.rederive_control_doctored_source(&rd);
-        g.rederive_control_unmapped(&rd, &root);
+        g.rederive_control_doctored_code(&rd);
+        g.rederive_control_comment_only(&rd);
+        g.rederive_control_debug_on(&rd);
         g.rederive_control_doctored_project(&rd);
     } else {
-        for c in ["doctored-source", "unmapped", "doctored-project"] {
-            println!("== case rederive-control-{c}: NOT RUN (no publish world: the controls run each through the real tool there) ==");
+        for c in ["doctored-code", "comment-only", "debug-on", "doctored-project"] {
+            println!("== case rederive-control-{c}: NOT RUN (no Linux environment for the publish: the controls run each through the real tool there) ==");
         }
     }
 
@@ -2887,9 +2967,10 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     if controls_run {
-        println!("{DISPLAY_ID}: PASS (2/2 frozen objects re-derived byte-identical from src/payload at the pin with the payload tree mapped; the rebuilt objects boot to the goldens; 3 negative controls through the real tool; the publish world's transcript under {OUT_REL})  {tools}");
+        println!("{DISPLAY_ID}: PASS (2/2 frozen objects re-derived byte-identical from src/payload at the pin; the rebuilt objects boot to the goldens; 4 controls through the real tool (three negative, one positive); the Linux environment's transcript under {OUT_REL})  {tools}");
     } else {
-        println!("{DISPLAY_ID}: PASS (2/2 frozen objects re-derived byte-identical from the objects read from the directory named, published from src/payload by the documented commands with the payload tree mapped; the rebuilt objects boot to the goldens; the 3 negative controls NOT RUN (no publish world); the objects under {OUT_REL})  {tools}");
+        let read_how = if objects_dir.is_some() { "read from the directory named" } else { "read where the publish wrote them" };
+        println!("{DISPLAY_ID}: PASS (2/2 frozen objects re-derived byte-identical from the objects {read_how}, published from src/payload by the documented commands; the rebuilt objects boot to the goldens; the 4 controls NOT RUN (no Linux environment for the publish); the objects under {OUT_REL})  {tools}");
     }
     exit(0);
 }
@@ -3493,17 +3574,37 @@ pub fn selfcheck(repo: &Path) -> ! {
         "the manifest's rtsmoke.o row with one hex digit of its sha256 changed",
         manifest_ties(&manifest_object_rows(&doctored_manifest), &pins).is_ok(),
     );
-    let neutral = b"\x7fELF\0/rhu/src/payload/minirt/minirt.cs\0".to_vec();
-    let per_checkout = b"\x7fELF\0/checkout-a/src/payload/minirt/minirt.cs\0".to_vec();
+    let plain = std::fs::read(gold_dir.join("rtsmoke.o")).unwrap_or_default();
     sc.accept_probe(
-        "rederive-path-neutral",
-        "an object carrying the mapped payload path and no checkout path accepted",
-        neutral_path_fault(&neutral, "/checkout-a").is_none(),
+        "rederive-class-plain",
+        "the frozen rtsmoke.o, carrying no .debug_ section, accepted as the tier's class",
+        !plain.is_empty() && debug_class_fault(&plain).is_none(),
     );
+    let debug_line = tmp.join("rederive-class.debug_line");
+    write_fixture(&debug_line, b"a line table planted by the selfcheck");
+    let with_debug = tmp.join("rederive-class-debug.o");
+    let _ = std::fs::remove_file(&with_debug);
+    let planted = match llvm_tool(&facts, "llvm-objcopy") {
+        Ok(objcopy) => {
+            let add = format!(".debug_line={}", debug_line.display());
+            let src = gold_dir.join("rtsmoke.o").display().to_string();
+            let dst = with_debug.display().to_string();
+            let ok = matches!(
+                run_captured(&objcopy, &["--add-section", &add, &src, &dst], &tmp.join("rederive-class.objcopy.stdout"), &tmp.join("rederive-class.objcopy.stderr"), Duration::from_secs(60)),
+                Ok(o) if o.exit == 0
+            );
+            if ok { std::fs::read(&with_debug).unwrap_or_default() } else { Vec::new() }
+        }
+        Err(_) => Vec::new(),
+    };
+    if planted.is_empty() {
+        println!("PAYLOAD SELFCHECK: FAIL -- the debug-carrying fixture could not be written by the toolchain's object copier");
+        exit(1);
+    }
     sc.probe(
-        "rederive-path-checkout",
-        "an object carrying its checkout's own path (the map absent)",
-        neutral_path_fault(&per_checkout, "/checkout-a").is_none(),
+        "rederive-class-debug",
+        "a copy of the frozen rtsmoke.o with a .debug_line section added by the toolchain's object copier",
+        debug_class_fault(&planted).is_none(),
     );
 
     let w7 = &crate::gates::rt::WORLD_M7;
@@ -3602,6 +3703,26 @@ pub fn selfcheck(repo: &Path) -> ! {
         "rederive-objects-missing",
         "a directory missing one of the two published objects",
         objects_dir_fault(&objs).is_none(),
+    );
+    let root = tmp.join("in-place-root");
+    let _ = std::fs::remove_dir_all(&root);
+    for p in [IN_PLACE_RTSMOKE, IN_PLACE_GCTEST] {
+        let f = root.join(p);
+        if let Some(parent) = f.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        write_fixture(&f, b"o");
+    }
+    sc.accept_probe(
+        "rederive-objects-in-place-genuine",
+        "both objects where the publish writes them under src/payload accepted as the leg's source",
+        matches!(objects_in_place(&root), InPlace::Both),
+    );
+    let _ = std::fs::remove_file(root.join(IN_PLACE_GCTEST));
+    sc.probe(
+        "rederive-objects-in-place-missing",
+        "one of the two objects absent where the publish writes it",
+        matches!(objects_in_place(&root), InPlace::Both),
     );
 
     sc.finish("genuine inputs accepted");

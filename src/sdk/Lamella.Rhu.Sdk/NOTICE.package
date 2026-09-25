@@ -16,3 +16,7 @@ texts under licenses/:
   merged from the newlib C library's members as distributed with the Arm GNU
   Toolchain; newlib is distributed under a collection of BSD-style licenses
   whose texts are licenses/newlib-COPYING.NEWLIB.txt.
+
+The archives, the tier objects and the licence texts named above are placed
+in the package when it is built; a source checkout carries this notice, the
+project file and the Sdk folder alone.

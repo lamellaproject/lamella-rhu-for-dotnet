@@ -16,4 +16,4 @@ PASS is-cast
 PASS as-cast
 PASS generics
 PASS string
-rtsmoke: 17 pass, 0 fail  ALL GOOD
+rtsmoke: 17 pass, 0 fail - ALL GOOD

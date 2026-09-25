@@ -5,7 +5,7 @@
 //! objects are committed.
 
 use crate::gate::{class_flag_sets_tie, write_fixture, Class, Selfcheck};
-use crate::gates::gc::{parse_undefined, parse_vendored_manifest, resolve_clang, resolve_ld, run_tool_bounded, ToolCmd};
+use crate::gates::gc::{parse_sdk_rows, parse_undefined, parse_vendored_manifest, resolve_clang, resolve_ld, row_selector_of, run_tool_bounded, ToolCmd, SDK_BOARD_TABLE};
 use crate::image::{header_abi, header_abi_compat};
 use crate::objfile::{distinct_stamps, producer_stamp_of, section_span, section_span_prefixed, sha256_without_stamp, symbol_word};
 use crate::results::{chain_json_from_env, validate_results, Results};
@@ -93,7 +93,7 @@ fn cc_flags(class: Class) -> &'static [&'static str] {
 /// goldens/shim/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates objects + goldens + manifest + this pin
 /// together in one reviewed commit.
-const SHA_FROZEN_MANIFEST: &str = "ff352b6225db86e593eece3ac4c97023f31375db49537dbf62ff4805cf8a7acd";
+const SHA_FROZEN_MANIFEST: &str = "569867314e529ea32f0ea6bad14b5773ffd8ad6969ecd9218b49454ff835144f";
 
 /// The frozen-object plan of record: file name under goldens/shim/,
 /// source TU, extra defines beyond the class's flag set, and the class
@@ -102,12 +102,13 @@ const SHA_FROZEN_MANIFEST: &str = "ff352b6225db86e593eece3ac4c97023f31375db49537
 /// name both directions; 'rhu-gate shim rederive' recompiles every row
 /// under its class's flag set and byte-asserts the output against the
 /// frozen bytes.
-const FROZEN_PLAN: [(&str, &str, &[&str], Class); 36] = [
+const FROZEN_PLAN: [(&str, &str, &[&str], Class); 61] = [
     ("shim-core.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
     ("shim-core-break-sipid.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SIPID"], Class::CortexM7),
     ("shim-core-break-ctxpc.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_CTXPC"], Class::CortexM7),
     ("shim-core-break-tlsoff.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_TLSOFF"], Class::CortexM7),
     ("shim-core-break-tlscache.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_TLSCACHE"], Class::CortexM7),
+    ("shim-core-break-realtime-wait.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_REALTIME_WAIT"], Class::CortexM7),
     ("shim-sysnative.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
     ("shim-sysnative-break-fdbase.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_FD_BASE"], Class::CortexM7),
     ("shim-sysnative-break-store-bounds.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_BOUNDS"], Class::CortexM7),
@@ -137,8 +138,32 @@ const FROZEN_PLAN: [(&str, &str, &[&str], Class); 36] = [
     ("shim-libc-glue-an505.o", "src/shim/rhu_libc_glue.c", &[], Class::CortexM33),
     ("shim-host-an505.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
     ("shim-stdio-sym-an505.o", "src/shim/rhu_stdio_sym.c", &[], Class::CortexM33),
+    ("shim-core-u5a5.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_U5A5"], Class::CortexM33),
     ("shim-pal-surface.o", "src/shim/rhu_pal_surface_net11_rc1.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
     ("shim-pal-surface-an505.o", "src/shim/rhu_pal_surface_net11_rc1.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
+    ("shim-gpiod.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
+    ("shim-gpiod-an505.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
+    ("shim-gpiod-break-version.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_VERSION"], Class::CortexM7),
+    ("shim-gpiod-break-version-an505.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN505", "-DRHU_SHIM_BREAK_GPIOD_VERSION"], Class::CortexM33),
+    ("shim-busdev.o", "src/shim/rhu_busdev.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
+    ("shim-busdev-an505.o", "src/shim/rhu_busdev.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
+    ("shim-busdev-break-funcs.o", "src/shim/rhu_busdev.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_BUSDEV_FUNCS"], Class::CortexM7),
+    ("shim-busdev-break-funcs-an505.o", "src/shim/rhu_busdev.c", &["-DMGC_HOST_ROW_AN505", "-DRHU_SHIM_BREAK_BUSDEV_FUNCS"], Class::CortexM33),
+    ("shimtest-busdev.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_BUSDEV"], Class::CortexM7),
+    ("shimtest-gpiod.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_GPIOD"], Class::CortexM7),
+    ("shim-core-break-mutex-adopt.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_MUTEX_ADOPT"], Class::CortexM7),
+    ("shim-busdev-break-select-name.o", "src/shim/rhu_busdev.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_BUSDEV_SELECT_NAME"], Class::CortexM7),
+    ("shim-busdev-break-funcs-wide.o", "src/shim/rhu_busdev.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_BUSDEV_FUNCS_WIDE"], Class::CortexM7),
+    ("shim-busdev-break-reread.o", "src/shim/rhu_busdev.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_BUSDEV_REREAD"], Class::CortexM7),
+    ("shim-busdev-break-unowned.o", "src/shim/rhu_busdev.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_BUSDEV_UNOWNED"], Class::CortexM7),
+    ("shim-gpiod-break-open-unlocked.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_OPEN_UNLOCKED"], Class::CortexM7),
+    ("shim-gpiod-break-close-keeps.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_CLOSE_KEEPS"], Class::CortexM7),
+    ("shim-gpiod-break-iter-shared.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_ITER_SHARED"], Class::CortexM7),
+    ("shim-gpiod-break-both-pulls.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_BOTH_PULLS"], Class::CortexM7),
+    ("shim-gpiod-break-bias-stale.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_BIAS_STALE"], Class::CortexM7),
+    ("shim-gpiod-break-timeout-fields.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_TIMEOUT_FIELDS"], Class::CortexM7),
+    ("shim-gpiod-break-arm-order.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_ARM_ORDER"], Class::CortexM7),
+    ("shim-gpiod-break-kind-order.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_KIND_ORDER"], Class::CortexM7),
 ];
 
 /// The tier's text records beside the objects and goldens: the surface
@@ -149,12 +174,14 @@ const FROZEN_RECORDS: [&str; 1] = ["pal-surface.txt"];
 
 /// The frozen goldens: the payload stream of each positive image, class
 /// bytes. Recorded in the manifest beside the objects.
-const GOLDENS: [&str; 5] = [
+const GOLDENS: [&str; 7] = [
     "shimtest-core.golden.txt",
     "shimtest-fdmap.golden.txt",
     "shimtest-activation.golden.txt",
     "shimtest-tls.golden.txt",
     "shimtest-host.golden.txt",
+    "shimtest-busdev.golden.txt",
+    "shimtest-gpiod.golden.txt",
 ];
 
 /// The core object's EXACT import closure: the kernel verbs it consumes
@@ -164,7 +191,7 @@ const GOLDENS: [&str; 5] = [
 /// helper the compiler of record emits among them) and the 64-bit
 /// division helper (the loader-seam hooks are weak references, not
 /// imports, and stay outside the pin).
-const IMPORTS_CORE: [&str; 35] = [
+const IMPORTS_CORE: [&str; 38] = [
     "__aeabi_ldivmod",
     "__aeabi_memclr4",
     "__aeabi_uldivmod",
@@ -178,6 +205,9 @@ const IMPORTS_CORE: [&str; 35] = [
     "rhu_arena_alloc_at",
     "rhu_arena_headroom",
     "rhu_arena_rezero",
+    "rhu_busdev_close",
+    "rhu_busdev_ioctl",
+    "rhu_busdev_open",
     "rhu_calendar_get",
     "rhu_console_write",
     "rhu_entropy",
@@ -253,6 +283,53 @@ const IMPORTS_SYSNATIVE: [&str; 41] = [
 /// The surface object's EXACT import closure: a refusal sets errno and
 /// returns, and reaches nothing else.
 const IMPORTS_PAL_SURFACE: [&str; 1] = ["__errno_location"];
+
+/// The GPIO API object's EXACT import closure: the kernel's seven GPIO
+/// calls, the futex wait, the boot clock, the core's errno, diagnostics
+/// and mutex pair (the unit's one lock over its chips, lines and
+/// iterators), the C library's allocation and string functions, and the
+/// compiler's 64-bit division helper.
+const IMPORTS_GPIOD: [&str; 19] = [
+    "__aeabi_uldivmod",
+    "__errno_location",
+    "free",
+    "malloc",
+    "memcpy",
+    "memset",
+    "pthread_mutex_lock",
+    "pthread_mutex_unlock",
+    "rhu_futex_wait",
+    "rhu_gpio_claim",
+    "rhu_gpio_count",
+    "rhu_gpio_edge",
+    "rhu_gpio_event_word",
+    "rhu_gpio_read",
+    "rhu_gpio_release",
+    "rhu_gpio_write",
+    "rhu_now_ns",
+    "rhu_shim_log",
+    "strlen",
+];
+
+/// The bus device unit's EXACT import closure: the four bus doors it calls
+/// (the claim and the transfer of each family; the node's number passes
+/// through as the bus number), the clock, the core's errno, diagnostics
+/// and mutex pair, and the C library's three (every record a request names
+/// is copied once before it is checked).
+const IMPORTS_BUSDEV: [&str; 12] = [
+    "__errno_location",
+    "memcpy",
+    "memset",
+    "pthread_mutex_lock",
+    "pthread_mutex_unlock",
+    "rhu_i2c_claim",
+    "rhu_i2c_transfer",
+    "rhu_now_ns",
+    "rhu_shim_log",
+    "rhu_spi_claim",
+    "rhu_spi_transfer",
+    "strncmp",
+];
 
 /// The glue object's EXACT import closure: the kernel heap and console
 /// doors, the exit door, the core's errno and diagnostics, the builtins.
@@ -368,16 +445,18 @@ const PINNED_CORE_LINES: [&str; 11] = [
     "[shim] mmap: MAP_FIXED re-zero in place (decommit; further requests counted silently)",
     "[shim] frozen-object reserve 4096 KB -> pool 64 KB (commit guard armed)",
     "[shim] frozen-object commit refused beyond the pool (managed allocation failure, never a wild write)",
-    "[shim] entropy: cryptographic draws through the kernel's secure door; hardware source: no",
-    "[shim] entropy: the secure door refused a cryptographic draw (an invalid argument); the draw fails and nothing is served (further refusals counted silently)",
+    "[shim] entropy: cryptographic draws through the kernel's secure entropy call; hardware source: no",
+    "[shim] entropy: the kernel's secure entropy call refused a cryptographic draw (an invalid argument); the draw fails and nothing is served (further refusals counted silently)",
     "[shim] calendar: the kernel's calendar serves the wall clock; source: unset (the epoch plus the elapsed clock)",
     "[shim] fork: not available (ENOSYS)",
     "[shim] syscall 999: not available (ENOSYS)",
     "[shim] open(/nonexistent): no such path (ENOENT)",
 ];
 
-const CORE_ALL_GOOD: &str = "SHIMTEST: ALL GOOD (glibc personality + PAL on the kernel doors)";
+const CORE_ALL_GOOD: &str = "SHIMTEST: ALL GOOD (glibc personality + PAL on the kernel API)";
 const FDMAP_ALL_GOOD: &str = "SHIMTEST-FDMAP: ALL GOOD (explicit descriptor bands; the console never answers for a file)";
+const BUSDEV_ALL_GOOD: &str = "SHIMTEST-BUSDEV: ALL GOOD (the bus device nodes from a native caller's side)";
+const GPIOD_ALL_GOOD: &str = "SHIMTEST-GPIOD: ALL GOOD (the GPIO library surface from a native caller's side)";
 const CANARY_LINE: &str = "[shim] free: corrupt block header (canary)";
 
 /// The diagnostic lines the activation run must carry (fixed strings):
@@ -394,7 +473,7 @@ const PINNED_ACT_LINES: [&str; 8] = [
     "[shim] activation: a stack-pointer edit in the signal context is ignored (frame geometry never moves)",
     "[shim] signals: no signal source on this platform; registrations are recorded, none can arrive",
 ];
-const ACT_ALL_GOOD: &str = "SHIMTEST-ACTIVATION: ALL GOOD (the activation costume on the kernel's delivery; the signal rows recorded, none deliverable)";
+const ACT_ALL_GOOD: &str = "SHIMTEST-ACTIVATION: ALL GOOD (the activation adapter on the kernel's delivery; the signal rows recorded, none deliverable)";
 const ACT_FAIL_SIPID: &str = "FAIL shim-act-deliver (the activation named a foreign process)";
 const ACT_FAIL_CTXPC: &str = "FAIL shim-act-deliver (the interrupted pc is outside the worker's window)";
 
@@ -534,12 +613,13 @@ const PENDING: [&str; 0] = [];
 /// no instruction outside the Cortex-M7 decoder's reach, so one decoder
 /// censuses the whole tier. A moved count means the source, a flag or the
 /// compiler changed.
-const FP_CENSUS: [(&str, u32); 36] = [
+const FP_CENSUS: [(&str, u32); 61] = [
     ("shim-core.o", 0),
     ("shim-core-break-sipid.o", 0),
     ("shim-core-break-ctxpc.o", 0),
     ("shim-core-break-tlsoff.o", 0),
     ("shim-core-break-tlscache.o", 0),
+    ("shim-core-break-realtime-wait.o", 0),
     ("shim-sysnative.o", 1),
     ("shim-sysnative-break-fdbase.o", 1),
     ("shim-sysnative-break-store-bounds.o", 1),
@@ -569,8 +649,32 @@ const FP_CENSUS: [(&str, u32); 36] = [
     ("shim-libc-glue-an505.o", 0),
     ("shim-host-an505.o", 0),
     ("shim-stdio-sym-an505.o", 0),
+    ("shim-core-u5a5.o", 0),
     ("shim-pal-surface.o", 0),
     ("shim-pal-surface-an505.o", 0),
+    ("shim-gpiod.o", 0),
+    ("shim-gpiod-an505.o", 0),
+    ("shim-gpiod-break-version.o", 0),
+    ("shim-gpiod-break-version-an505.o", 0),
+    ("shim-busdev.o", 0),
+    ("shim-busdev-an505.o", 0),
+    ("shim-busdev-break-funcs.o", 0),
+    ("shim-busdev-break-funcs-an505.o", 0),
+    ("shimtest-busdev.o", 0),
+    ("shimtest-gpiod.o", 0),
+    ("shim-core-break-mutex-adopt.o", 0),
+    ("shim-busdev-break-select-name.o", 0),
+    ("shim-busdev-break-funcs-wide.o", 0),
+    ("shim-busdev-break-reread.o", 0),
+    ("shim-busdev-break-unowned.o", 0),
+    ("shim-gpiod-break-open-unlocked.o", 0),
+    ("shim-gpiod-break-close-keeps.o", 0),
+    ("shim-gpiod-break-iter-shared.o", 0),
+    ("shim-gpiod-break-both-pulls.o", 0),
+    ("shim-gpiod-break-bias-stale.o", 0),
+    ("shim-gpiod-break-timeout-fields.o", 0),
+    ("shim-gpiod-break-arm-order.o", 0),
+    ("shim-gpiod-break-kind-order.o", 0),
 ];
 
 /// Count the floating-point instructions in a decoded listing: every line whose
@@ -627,7 +731,7 @@ pub(crate) fn generation_fault(name: &str, frozen: &[u8], header_abi: u32) -> Op
     ))
 }
 
-const INTERNAL_CASES: [&str; 8] = [
+const INTERNAL_CASES: [&str; 9] = [
     "shim.foreign-errno-refused -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record",
     "shim.newlib-header-ties-kit -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the generated C-library layout header against the kit's own headers",
     "shim.classlib-order-ties-pin -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the host's copy tying the frozen host object apart from the producer stamp, then the same compile against a copy of the generated runtime-entry header with one class-library slot shifted, refused at the assertion that names the slot",
@@ -636,6 +740,7 @@ const INTERNAL_CASES: [&str; 8] = [
     "shim.fp-census-instrument -- compile-tier; runs under 'rhu-gate shim rederive': a compiled double multiply-add must be counted by the census the shim.fp-census case runs over the frozen tier",
     "shim.pal-surface-survey -- survey-tier; runs under 'rhu-gate shim rederive' when the pinned runtime pack's native directory is resolved (RHU_NET_PACK or tools/toolchains/netpack.local): the pack's five class-library archives re-read for their sha256s and exported family names against the frozen expectation goldens/shim/pal-surface.txt",
     "shim.an505-row-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the core, sysnative and host sources under the an505 selector with the Cortex-M7 flag set tie the frozen an500 objects apart from the producer stamp, so the class flag set is the one variable behind the row's Cortex-M33 objects",
+    "shim.sdk-rows-tie-their-row -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: every row of the SDK's board table names shim objects that tie their sources compiled under that row's own selector apart from the producer stamp; the table with the U5A5 row's core object put back to the emulator row's is refused",
 ];
 
 /// The module-root template brackets, read from a linked artifact: the
@@ -817,7 +922,7 @@ fn surface_fault(defined: &[String], expected: &[String]) -> Option<String> {
     for e in expected {
         if have.binary_search(&e).is_err() {
             return Some(format!(
-                "the pinned pack exports {e} and the shim does not define it: regenerate the surface at the pin (tools/extract-pal/gen_pal_surface.py) and answer it"
+                "the pinned pack exports {e} and the shim does not define it: the surface expectation was generated at the pin by the maintainers' generator, which this repository does not carry; a re-pin regenerates it there, and the shim answers the name"
             ));
         }
     }
@@ -892,22 +997,26 @@ fn read_surface_header_tag(repo: &Path) -> Result<String, String> {
     Ok(rest[..end].to_string())
 }
 
-/// The six link objects of a row: the five the images link and the surface object.
-const ROW_AN500_LINK: [&str; 6] = [
+/// The eight link objects of a row: the five the images link, the surface object, the GPIO API object and the bus device unit.
+const ROW_AN500_LINK: [&str; 8] = [
     "goldens/shim/shim-core.o",
     "goldens/shim/shim-sysnative.o",
     "goldens/shim/shim-libc-glue.o",
     "goldens/shim/shim-stdio-sym.o",
     "goldens/shim/shim-host.o",
     "goldens/shim/shim-pal-surface.o",
+    "goldens/shim/shim-gpiod.o",
+    "goldens/shim/shim-busdev.o",
 ];
-const ROW_AN505_LINK: [&str; 6] = [
+const ROW_AN505_LINK: [&str; 8] = [
     "goldens/shim/shim-core-an505.o",
     "goldens/shim/shim-sysnative-an505.o",
     "goldens/shim/shim-libc-glue-an505.o",
     "goldens/shim/shim-stdio-sym-an505.o",
     "goldens/shim/shim-host-an505.o",
     "goldens/shim/shim-pal-surface-an505.o",
+    "goldens/shim/shim-gpiod-an505.o",
+    "goldens/shim/shim-busdev-an505.o",
 ];
 
 /// True when the sorted import list equals the pinned set exactly.
@@ -1435,11 +1544,37 @@ impl Shim {
         let surface = self.pin_closure(facts, "shim.core", "shim-pal-surface.o", &IMPORTS_PAL_SURFACE);
         println!("   shim-pal-surface.o: import closure pinned exactly ({} names: {})", IMPORTS_PAL_SURFACE.len(), surface.join(" "));
         let core_an505 = self.pin_closure(facts, "shim.core", "shim-core-an505.o", &IMPORTS_CORE);
+        let _core_u5a5 = self.pin_closure(facts, "shim.core", "shim-core-u5a5.o", &IMPORTS_CORE);
         let sysn_an505 = self.pin_closure(facts, "shim.core", "shim-sysnative-an505.o", &IMPORTS_SYSNATIVE);
         let glue_an505 = self.pin_closure(facts, "shim.core", "shim-libc-glue-an505.o", &IMPORTS_GLUE);
         let surface_an505 = self.pin_closure(facts, "shim.core", "shim-pal-surface-an505.o", &IMPORTS_PAL_SURFACE);
         if surface_an505 != surface {
             self.fail("shim.core", "shim-pal-surface-an505.o's closure differs from shim-pal-surface.o's: the class moved an import");
+        }
+        let gpiod = self.pin_closure(facts, "shim.core", "shim-gpiod.o", &IMPORTS_GPIOD);
+        println!("   shim-gpiod.o: import closure pinned exactly ({} names: the seven GPIO doors, the futex wait and the boot clock among them)", IMPORTS_GPIOD.len());
+        let gpiod_an505 = self.pin_closure(facts, "shim.core", "shim-gpiod-an505.o", &IMPORTS_GPIOD);
+        let gpiod_break = self.pin_closure(facts, "shim.core", "shim-gpiod-break-version.o", &IMPORTS_GPIOD);
+        let gpiod_break_an505 = self.pin_closure(facts, "shim.core", "shim-gpiod-break-version-an505.o", &IMPORTS_GPIOD);
+        for knob in ["close-keeps", "iter-shared", "both-pulls", "bias-stale", "timeout-fields", "open-unlocked", "arm-order", "kind-order"] {
+            self.pin_closure(facts, "shim.core", &format!("shim-gpiod-break-{knob}.o"), &IMPORTS_GPIOD);
+        }
+        println!("   the GPIO unit's eight control objects pinned against the unit's closure ({} names; the three race controls block on the kernel's futex the unit imports, no yield)", IMPORTS_GPIOD.len());
+        if gpiod_an505 != gpiod || gpiod_break != gpiod || gpiod_break_an505 != gpiod {
+            self.fail("shim.core", "shim-gpiod-an505.o's, shim-gpiod-break-version.o's or shim-gpiod-break-version-an505.o's closure differs from shim-gpiod.o's: the class or a control moved an import");
+        }
+        let busdev = self.pin_closure(facts, "shim.core", "shim-busdev.o", &IMPORTS_BUSDEV);
+        println!("   shim-busdev.o: import closure pinned exactly ({} names: the four bus doors it calls, the clock and the mutex pair among them)", IMPORTS_BUSDEV.len());
+        let busdev_an505 = self.pin_closure(facts, "shim.core", "shim-busdev-an505.o", &IMPORTS_BUSDEV);
+        let busdev_break = self.pin_closure(facts, "shim.core", "shim-busdev-break-funcs.o", &IMPORTS_BUSDEV);
+        let busdev_break_an505 = self.pin_closure(facts, "shim.core", "shim-busdev-break-funcs-an505.o", &IMPORTS_BUSDEV);
+        for knob in ["select-name", "funcs-wide", "reread", "unowned"] {
+            self.pin_closure(facts, "shim.core", &format!("shim-busdev-break-{knob}.o"), &IMPORTS_BUSDEV);
+        }
+        self.pin_closure(facts, "shim.core", "shim-core-break-mutex-adopt.o", &IMPORTS_CORE);
+        println!("   the bus unit's four control objects and the core's adoption control: pinned against their units' closures");
+        if busdev_an505 != busdev || busdev_break != busdev || busdev_break_an505 != busdev {
+            self.fail("shim.core", "shim-busdev-an505.o's, shim-busdev-break-funcs.o's or shim-busdev-break-funcs-an505.o's closure differs from shim-busdev.o's: the class or a control moved an import");
         }
         println!(
             "   the mps2-an505 row's Cortex-M33 objects: core {}/{}, PAL {}/{}, glue {}/{} pinned against the same closures",
@@ -1450,11 +1585,11 @@ impl Shim {
             glue_an505.len(),
             IMPORTS_GLUE.len()
         );
-        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o"];
-        self.sweep_strong(facts, "shim.core", &[world[0], world[1], world[2], "goldens/shim/shimtest-core.o"]);
-        println!("   one strong definition per symbol across the four linked objects; every import resolves (the objects, the kernel staticlib, and the link's own symbols: the map's arena window, data and template brackets, and the linker's constructor-array brackets)");
+        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o", "goldens/shim/shim-busdev.o"];
+        self.sweep_strong(facts, "shim.core", &[world[0], world[1], world[2], world[3], "goldens/shim/shimtest-core.o"]);
+        println!("   one strong definition per symbol across the five linked objects; every import resolves (the objects, the kernel staticlib, and the link's own symbols: the map's arena window, data and template brackets, and the linker's constructor-array brackets)");
 
-        let (sha, rel) = self.link_image(ld, "shim.core", &[world[0], world[1], world[2], "goldens/shim/shimtest-core.o"], "shim-core");
+        let (sha, rel) = self.link_image(ld, "shim.core", &[world[0], world[1], world[2], world[3], "goldens/shim/shimtest-core.o"], "shim-core");
         self.artifact_contract(facts, "shim.core", &rel, &["SystemNative_GetErrNo", "__errno_location"], NO_TEMPLATE);
         let (raw, code) = self.run_qemu(qemu, "shim.core", &rel);
         self.assert_positive("shim.core", &raw, code, &sha, &rel, GOLDENS[0], &PINNED_CORE_LINES, CORE_ALL_GOOD);
@@ -1463,7 +1598,7 @@ impl Shim {
 
         println!("== case shim.core-break-errno (negative control) ==");
         let broke = "a worker writes through the main thread's errno pointer (RHU_SHIMTEST_BREAK_ERRNO)";
-        let (sha_b, rel_b) = self.link_image(ld, "shim.core-break-errno", &[world[0], world[1], world[2], "goldens/shim/shimtest-core-break-errno.o"], "shim-core-break-errno");
+        let (sha_b, rel_b) = self.link_image(ld, "shim.core-break-errno", &[world[0], world[1], world[2], world[3], "goldens/shim/shimtest-core-break-errno.o"], "shim-core-break-errno");
         let (raw_b, code_b) = self.run_qemu(qemu, "shim.core-break-errno", &rel_b);
         self.assert_control("shim.core-break-errno", &raw_b, code_b, 1, broke, &sha_b, &rel_b, GOLDENS[0], "FAIL shim-errno-thread", CORE_ALL_GOOD);
         self.emit_pass("shim.core-break-errno", 1, "negative", broke, &sha_b, &rel_b, None);
@@ -1471,7 +1606,7 @@ impl Shim {
 
         println!("== case shim.core-break-canary (negative control) ==");
         let broke = "a block header corrupted before free (RHU_SHIMTEST_BREAK_CANARY)";
-        let (sha_c, rel_c) = self.link_image(ld, "shim.core-break-canary", &[world[0], world[1], world[2], "goldens/shim/shimtest-core-break-canary.o"], "shim-core-break-canary");
+        let (sha_c, rel_c) = self.link_image(ld, "shim.core-break-canary", &[world[0], world[1], world[2], world[3], "goldens/shim/shimtest-core-break-canary.o"], "shim-core-break-canary");
         let (raw_c, code_c) = self.run_qemu(qemu, "shim.core-break-canary", &rel_c);
         self.assert_control("shim.core-break-canary", &raw_c, code_c, 134, broke, &sha_c, &rel_c, GOLDENS[0], CANARY_LINE, CORE_ALL_GOOD);
         self.emit_pass("shim.core-break-canary", 134, "negative", broke, &sha_c, &rel_c, None);
@@ -1479,7 +1614,7 @@ impl Shim {
 
         println!("== case shim.core-break-entropy-refusal (negative control) ==");
         let broke = "the cryptographic entry reporting a refused draw as served (RHU_SHIM_BREAK_ENTROPY_REFUSAL)";
-        let (sha_e, rel_e) = self.link_image(ld, "shim.core-break-entropy-refusal", &[world[0], "goldens/shim/shim-sysnative-break-entropy-refusal.o", world[2], "goldens/shim/shimtest-core.o"], "shim-core-break-entropy-refusal");
+        let (sha_e, rel_e) = self.link_image(ld, "shim.core-break-entropy-refusal", &[world[0], "goldens/shim/shim-sysnative-break-entropy-refusal.o", world[2], world[3], "goldens/shim/shimtest-core.o"], "shim-core-break-entropy-refusal");
         let (raw_e, code_e) = self.run_qemu(qemu, "shim.core-break-entropy-refusal", &rel_e);
         self.assert_control("shim.core-break-entropy-refusal", &raw_e, code_e, 1, broke, &sha_e, &rel_e, GOLDENS[0], "FAIL shim-entropy (a refused draw reported as served)", CORE_ALL_GOOD);
         self.emit_pass("shim.core-break-entropy-refusal", 1, "negative", broke, &sha_e, &rel_e, None);
@@ -1487,11 +1622,27 @@ impl Shim {
 
         println!("== case shim.core-break-calendar-clock (negative control) ==");
         let broke = "the system time answered from the boot clock instead of the kernel's calendar (RHU_SHIM_BREAK_CALENDAR_CLOCK)";
-        let (sha_k, rel_k) = self.link_image(ld, "shim.core-break-calendar-clock", &[world[0], "goldens/shim/shim-sysnative-break-calendar-clock.o", world[2], "goldens/shim/shimtest-core.o"], "shim-core-break-calendar-clock");
+        let (sha_k, rel_k) = self.link_image(ld, "shim.core-break-calendar-clock", &[world[0], "goldens/shim/shim-sysnative-break-calendar-clock.o", world[2], world[3], "goldens/shim/shimtest-core.o"], "shim-core-break-calendar-clock");
         let (raw_k, code_k) = self.run_qemu(qemu, "shim.core-break-calendar-clock", &rel_k);
         self.assert_control("shim.core-break-calendar-clock", &raw_k, code_k, 1, broke, &sha_k, &rel_k, GOLDENS[0], "FAIL shim-calendar (the system time is not the kernel's calendar)", CORE_ALL_GOOD);
         self.emit_pass("shim.core-break-calendar-clock", 1, "negative", broke, &sha_k, &rel_k, None);
         println!("== case shim.core-break-calendar-clock: PASS (exit 1; the tenant refused a system time that was not the calendar) ==");
+
+        println!("== case shim.core-break-realtime-wait (negative control) ==");
+        let broke = "the clock a timed wait names discarded, a real-time timestamp read as a boot-relative one (RHU_SHIM_BREAK_REALTIME_WAIT)";
+        let (sha_w, rel_w) = self.link_image(ld, "shim.core-break-realtime-wait", &["goldens/shim/shim-core-break-realtime-wait.o", world[1], world[2], world[3], "goldens/shim/shimtest-core.o"], "shim-core-break-realtime-wait");
+        let (raw_w, code_w) = self.run_qemu(qemu, "shim.core-break-realtime-wait", &rel_w);
+        self.assert_control("shim.core-break-realtime-wait", &raw_w, code_w, 1, broke, &sha_w, &rel_w, GOLDENS[0], "FAIL shim-time-realtime (the absolute sleep on the real-time clock did not end within its bound)", CORE_ALL_GOOD);
+        self.emit_pass("shim.core-break-realtime-wait", 1, "negative", broke, &sha_w, &rel_w, None);
+        println!("== case shim.core-break-realtime-wait: PASS (exit 1; the tenant's bounded watch refused a real-time sleep that read its timestamp as uptime) ==");
+
+        println!("== case shim.core-break-mutex-adopt (negative control) ==");
+        let broke = "a zero-filled mutex adopted by a read, a check and a store, the window held open until a second first user has stepped in (RHU_SHIM_BREAK_MUTEX_ADOPT)";
+        let (sha_m, rel_m) = self.link_image(ld, "shim.core-break-mutex-adopt", &["goldens/shim/shim-core-break-mutex-adopt.o", world[1], world[2], world[3], "goldens/shim/shimtest-core.o"], "shim-core-break-mutex-adopt");
+        let (raw_m, code_m) = self.run_qemu(qemu, "shim.core-break-mutex-adopt", &rel_m);
+        self.assert_control("shim.core-break-mutex-adopt", &raw_m, code_m, 1, broke, &sha_m, &rel_m, GOLDENS[0], "FAIL shim-mutex-adopt (one of two first users of a zero-filled mutex was refused)", CORE_ALL_GOOD);
+        self.emit_pass("shim.core-break-mutex-adopt", 1, "negative", broke, &sha_m, &rel_m, None);
+        println!("== case shim.core-break-mutex-adopt: PASS (exit 1; one of two first users of a zero-filled mutex was refused and the tenant's two-thread check said so) ==");
     }
 
     fn run_fdmap(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
@@ -1500,9 +1651,9 @@ impl Shim {
         if let Some(hit) = forbidden_import(&tenant) {
             self.fail("shim.fdmap", &format!("the tenant imports forbidden family symbol '{hit}'"));
         }
-        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o"];
-        self.sweep_strong(facts, "shim.fdmap", &[world[0], world[1], world[2], "goldens/shim/shimtest-fdmap.o"]);
-        let (sha, rel) = self.link_image(ld, "shim.fdmap", &[world[0], world[1], world[2], "goldens/shim/shimtest-fdmap.o"], "shim-fdmap");
+        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o", "goldens/shim/shim-busdev.o"];
+        self.sweep_strong(facts, "shim.fdmap", &[world[0], world[1], world[2], world[3], "goldens/shim/shimtest-fdmap.o"]);
+        let (sha, rel) = self.link_image(ld, "shim.fdmap", &[world[0], world[1], world[2], world[3], "goldens/shim/shimtest-fdmap.o"], "shim-fdmap");
         self.artifact_contract(facts, "shim.fdmap", &rel, &["SystemNative_GetErrNo", "__errno_location"], NO_TEMPLATE);
         let (raw, code) = self.run_qemu(qemu, "shim.fdmap", &rel);
         self.assert_positive("shim.fdmap", &raw, code, &sha, &rel, GOLDENS[1], &[PINNED_CORE_LINES[0]], FDMAP_ALL_GOOD);
@@ -1511,7 +1662,7 @@ impl Shim {
 
         println!("== case shim.fdmap-break-fdbase (negative control) ==");
         let broke = "the file band placed at the console's base (RHU_SHIM_BREAK_FD_BASE)";
-        let (sha_b, rel_b) = self.link_image(ld, "shim.fdmap-break-fdbase", &[world[0], "goldens/shim/shim-sysnative-break-fdbase.o", world[2], "goldens/shim/shimtest-fdmap.o"], "shim-fdmap-break-fdbase");
+        let (sha_b, rel_b) = self.link_image(ld, "shim.fdmap-break-fdbase", &[world[0], "goldens/shim/shim-sysnative-break-fdbase.o", world[2], world[3], "goldens/shim/shimtest-fdmap.o"], "shim-fdmap-break-fdbase");
         let (raw_b, code_b) = self.run_qemu(qemu, "shim.fdmap-break-fdbase", &rel_b);
         self.assert_control("shim.fdmap-break-fdbase", &raw_b, code_b, 1, broke, &sha_b, &rel_b, GOLDENS[1], "FAIL shim-fdmap-open-fstat", FDMAP_ALL_GOOD);
         self.emit_pass("shim.fdmap-break-fdbase", 1, "negative", broke, &sha_b, &rel_b, None);
@@ -1530,11 +1681,83 @@ impl Shim {
             println!("== case {case} (negative control) ==");
             let obj_rel = format!("goldens/shim/{obj}");
             let image = case.replace('.', "-");
-            let (sha_s, rel_s) = self.link_image(ld, case, &[world[0], obj_rel.as_str(), world[2], "goldens/shim/shimtest-fdmap.o"], &image);
+            let (sha_s, rel_s) = self.link_image(ld, case, &[world[0], obj_rel.as_str(), world[2], world[3], "goldens/shim/shimtest-fdmap.o"], &image);
             let (raw_s, code_s) = self.run_qemu(qemu, case, &rel_s);
             self.assert_control(case, &raw_s, code_s, 1, broke, &sha_s, &rel_s, GOLDENS[1], expect, FDMAP_ALL_GOOD);
             self.emit_pass(case, 1, "negative", broke, &sha_s, &rel_s, None);
             println!("== case {case}: PASS (exit 1; the ladder refused the restored defect at its own check) ==");
+        }
+    }
+
+    /// The bus device nodes and the GPIO library surface from a native
+    /// caller's side: one positive image per unit's ladder, and one negative
+    /// control per restored defect, the unit's control object linked in the
+    /// unit's place under the same tenant, refused by the ladder's own check
+    /// at a line of its own.
+    fn run_devnodes(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
+        const CORE3: [&str; 3] = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o"];
+        const BUSDEV_CONTROLS: [(&str, &str, &str); 4] = [
+            ("select-name", "the kernel's no-select value accepted as a select's name (RHU_SHIM_BREAK_BUSDEV_SELECT_NAME)", "FAIL shim-busdev-names (the no-select value opened as a select's name)"),
+            ("funcs-wide", "the functionality word stored eight bytes wide (RHU_SHIM_BREAK_BUSDEV_FUNCS_WIDE)", "FAIL shim-busdev-funcs (the functionality request stored past its four-byte output)"),
+            ("reread", "a transfer's count re-read from the caller's memory after the receive write (RHU_SHIM_BREAK_BUSDEV_REREAD)", "FAIL shim-busdev-spi-overlay (a receive buffer over the record's length word changed the count returned)"),
+            ("unowned", "a closed node's entry handed out while a request still runs on it (RHU_SHIM_BREAK_BUSDEV_UNOWNED)", "FAIL shim-busdev-close-under-request (the reopen received the entry a request still ran on)"),
+        ];
+        const GPIOD_CONTROLS: [(&str, &str, &str); 8] = [
+            ("open-unlocked", "the list of open chips joined with no lock, the window held open, blocked, until another opener has moved its head (RHU_SHIM_BREAK_GPIOD_OPEN_UNLOCKED)", "FAIL shim-gpiod-open-race (a chip opened while another thread opened is not a live chip)"),
+            ("close-keeps", "a closed chip keeping its lines (RHU_SHIM_BREAK_GPIOD_CLOSE_KEEPS)", "FAIL shim-gpiod-opens (a closed chip's line is still held)"),
+            ("iter-shared", "every iterator one object (RHU_SHIM_BREAK_GPIOD_ITER_SHARED)", "FAIL shim-gpiod-iterators (two iterators are one object, or yielded no chip)"),
+            ("both-pulls", "pull-up and pull-down accepted together (RHU_SHIM_BREAK_GPIOD_BOTH_PULLS)", "FAIL shim-gpiod-bias (pull-up and pull-down together were accepted)"),
+            ("bias-stale", "the bias reading kept through flagless requests (RHU_SHIM_BREAK_GPIOD_BIAS_STALE)", "FAIL shim-gpiod-bias (a flagless input does not read \"as is\" with the pad's pull left as it was)"),
+            ("timeout-fields", "a timespec field outside its range taken as a deadline (RHU_SHIM_BREAK_GPIOD_TIMEOUT_FIELDS)", "FAIL shim-gpiod-timeouts (a timespec field outside its range became a deadline)"),
+            ("arm-order", "the edge armed before the mark is read, the window held open, blocked on the line's word, until an edge is counted (RHU_SHIM_BREAK_GPIOD_ARM_ORDER)", "FAIL shim-gpiod-arm (an edge the kernel counted after the arm was never delivered)"),
+            ("kind-order", "the level read apart from the count, the window held open, blocked on the word, until another edge is counted (RHU_SHIM_BREAK_GPIOD_KIND_ORDER)", "FAIL shim-gpiod-kind (the first event after a rising edge was labelled falling)"),
+        ];
+        let ladders: [(&str, &str, &str, &str, &[&str], bool); 2] = [
+            ("shim.busdev", "goldens/shim/shimtest-busdev.o", GOLDENS[5], BUSDEV_ALL_GOOD, &["__errno_location", "rhu_busdev_open", "rhu_busdev_ioctl", "rhu_busdev_close"], false),
+            ("shim.gpiod", "goldens/shim/shimtest-gpiod.o", GOLDENS[6], GPIOD_ALL_GOOD, &["__errno_location", "gpiod_chip_open_by_number", "gpiod_line_event_read"], true),
+        ];
+        for (case, tenant_obj, golden, all_good, symbols, with_gpiod) in ladders {
+            println!("== case {case} ==");
+            let tenant = parse_undefined(&self.nm_dump(facts, case, tenant_obj, true));
+            if let Some(hit) = forbidden_import(&tenant) {
+                self.fail(case, &format!("the tenant imports forbidden family symbol '{hit}'"));
+            }
+            let unit = if with_gpiod { "gpiod" } else { "busdev" };
+            let world_of = |control: Option<&str>| -> Vec<String> {
+                let mut w: Vec<String> = CORE3.iter().map(|o| o.to_string()).collect();
+                let own = match control {
+                    Some(knob) => format!("goldens/shim/shim-{unit}-break-{knob}.o"),
+                    None => format!("goldens/shim/shim-{unit}.o"),
+                };
+                if with_gpiod {
+                    w.push("goldens/shim/shim-busdev.o".to_string());
+                }
+                w.push(own);
+                w.push(tenant_obj.to_string());
+                w
+            };
+            let objs = world_of(None);
+            let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+            self.sweep_strong(facts, case, &refs);
+            let image = case.replace('.', "-");
+            let (sha, rel) = self.link_image(ld, case, &refs, &image);
+            self.artifact_contract(facts, case, &rel, symbols, NO_TEMPLATE);
+            let (raw, code) = self.run_qemu(qemu, case, &rel);
+            self.assert_positive(case, &raw, code, &sha, &rel, golden, &[PINNED_CORE_LINES[0]], all_good);
+            self.emit_pass(case, 0, "positive", "", &sha, &rel, Some(golden));
+            println!("== case {case}: PASS (exit 0; the payload stream equals its golden; the verdict line last) ==");
+            let controls: &[(&str, &str, &str)] = if with_gpiod { &GPIOD_CONTROLS } else { &BUSDEV_CONTROLS };
+            for &(knob, broke, expect) in controls {
+                let control_case = format!("{case}-break-{knob}");
+                println!("== case {control_case} (negative control) ==");
+                let objs_c = world_of(Some(knob));
+                let refs_c: Vec<&str> = objs_c.iter().map(String::as_str).collect();
+                let (sha_c, rel_c) = self.link_image(ld, &control_case, &refs_c, &control_case.replace('.', "-"));
+                let (raw_c, code_c) = self.run_qemu(qemu, &control_case, &rel_c);
+                self.assert_control(&control_case, &raw_c, code_c, 1, broke, &sha_c, &rel_c, golden, expect, all_good);
+                self.emit_pass(&control_case, 1, "negative", broke, &sha_c, &rel_c, None);
+                println!("== case {control_case}: PASS (exit 1; the ladder refused the restored defect at its own check) ==");
+            }
         }
     }
 
@@ -1544,9 +1767,9 @@ impl Shim {
         if let Some(hit) = forbidden_import(&tenant) {
             self.fail("shim.activation", &format!("the tenant imports forbidden family symbol '{hit}'"));
         }
-        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o"];
-        self.sweep_strong(facts, "shim.activation", &[world[0], world[1], world[2], "goldens/shim/shimtest-activation.o"]);
-        let (sha, rel) = self.link_image(ld, "shim.activation", &[world[0], world[1], world[2], "goldens/shim/shimtest-activation.o"], "shim-activation");
+        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o", "goldens/shim/shim-busdev.o"];
+        self.sweep_strong(facts, "shim.activation", &[world[0], world[1], world[2], world[3], "goldens/shim/shimtest-activation.o"]);
+        let (sha, rel) = self.link_image(ld, "shim.activation", &[world[0], world[1], world[2], world[3], "goldens/shim/shimtest-activation.o"], "shim-activation");
         self.artifact_contract(facts, "shim.activation", &rel, &ACT_SYMBOLS, NO_TEMPLATE);
         let (raw, code) = self.run_qemu(qemu, "shim.activation", &rel);
         self.assert_positive("shim.activation", &raw, code, &sha, &rel, GOLDENS[2], &PINNED_ACT_LINES, ACT_ALL_GOOD);
@@ -1555,7 +1778,7 @@ impl Shim {
 
         println!("== case shim.activation-break-sipid (negative control) ==");
         let broke = "the activation's signal information names a foreign process (RHU_SHIM_BREAK_SIPID)";
-        let (sha_b, rel_b) = self.link_image(ld, "shim.activation-break-sipid", &["goldens/shim/shim-core-break-sipid.o", world[1], world[2], "goldens/shim/shimtest-activation.o"], "shim-activation-break-sipid");
+        let (sha_b, rel_b) = self.link_image(ld, "shim.activation-break-sipid", &["goldens/shim/shim-core-break-sipid.o", world[1], world[2], world[3], "goldens/shim/shimtest-activation.o"], "shim-activation-break-sipid");
         let (raw_b, code_b) = self.run_qemu(qemu, "shim.activation-break-sipid", &rel_b);
         self.assert_control("shim.activation-break-sipid", &raw_b, code_b, 1, broke, &sha_b, &rel_b, GOLDENS[2], ACT_FAIL_SIPID, ACT_ALL_GOOD);
         self.emit_pass("shim.activation-break-sipid", 1, "negative", broke, &sha_b, &rel_b, None);
@@ -1563,7 +1786,7 @@ impl Shim {
 
         println!("== case shim.activation-break-ctxpc (negative control) ==");
         let broke = "the context's program counter filled from the link register (RHU_SHIM_BREAK_CTXPC)";
-        let (sha_c, rel_c) = self.link_image(ld, "shim.activation-break-ctxpc", &["goldens/shim/shim-core-break-ctxpc.o", world[1], world[2], "goldens/shim/shimtest-activation.o"], "shim-activation-break-ctxpc");
+        let (sha_c, rel_c) = self.link_image(ld, "shim.activation-break-ctxpc", &["goldens/shim/shim-core-break-ctxpc.o", world[1], world[2], world[3], "goldens/shim/shimtest-activation.o"], "shim-activation-break-ctxpc");
         let (raw_c, code_c) = self.run_qemu(qemu, "shim.activation-break-ctxpc", &rel_c);
         self.assert_control("shim.activation-break-ctxpc", &raw_c, code_c, 1, broke, &sha_c, &rel_c, GOLDENS[2], ACT_FAIL_CTXPC, ACT_ALL_GOOD);
         self.emit_pass("shim.activation-break-ctxpc", 1, "negative", broke, &sha_c, &rel_c, None);
@@ -1576,9 +1799,9 @@ impl Shim {
         if let Some(hit) = forbidden_import(&tenant) {
             self.fail("shim.tls", &format!("the tenant imports forbidden family symbol '{hit}'"));
         }
-        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o"];
-        self.sweep_strong(facts, "shim.tls", &[world[0], world[1], world[2], "goldens/shim/shimtest-tls.o"]);
-        let (sha, rel) = self.link_image(ld, "shim.tls", &[world[0], world[1], world[2], "goldens/shim/shimtest-tls.o"], "shim-tls");
+        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o", "goldens/shim/shim-busdev.o"];
+        self.sweep_strong(facts, "shim.tls", &[world[0], world[1], world[2], world[3], "goldens/shim/shimtest-tls.o"]);
+        let (sha, rel) = self.link_image(ld, "shim.tls", &[world[0], world[1], world[2], world[3], "goldens/shim/shimtest-tls.o"], "shim-tls");
         self.artifact_contract(facts, "shim.tls", &rel, &TLS_SYMBOLS, TLS_TEMPLATE_SPAN);
         let (raw, code) = self.run_qemu(qemu, "shim.tls", &rel);
         self.assert_positive("shim.tls", &raw, code, &sha, &rel, GOLDENS[3], &[PINNED_CORE_LINES[0]], TLS_ALL_GOOD);
@@ -1587,7 +1810,7 @@ impl Shim {
 
         println!("== case shim.tls-break-tlsoff (negative control) ==");
         let broke = "a thread-local access resolved without its offset (RHU_SHIM_BREAK_TLSOFF)";
-        let (sha_b, rel_b) = self.link_image(ld, "shim.tls-break-tlsoff", &["goldens/shim/shim-core-break-tlsoff.o", world[1], world[2], "goldens/shim/shimtest-tls.o"], "shim-tls-break-tlsoff");
+        let (sha_b, rel_b) = self.link_image(ld, "shim.tls-break-tlsoff", &["goldens/shim/shim-core-break-tlsoff.o", world[1], world[2], world[3], "goldens/shim/shimtest-tls.o"], "shim-tls-break-tlsoff");
         let (raw_b, code_b) = self.run_qemu(qemu, "shim.tls-break-tlsoff", &rel_b);
         self.assert_control("shim.tls-break-tlsoff", &raw_b, code_b, 1, broke, &sha_b, &rel_b, GOLDENS[3], TLS_FAIL_OFF, TLS_ALL_GOOD);
         self.emit_pass("shim.tls-break-tlsoff", 1, "negative", broke, &sha_b, &rel_b, None);
@@ -1595,7 +1818,7 @@ impl Shim {
 
         println!("== case shim.tls-break-tlscache (negative control) ==");
         let broke = "the first thread-local block seen handed to every thread after it (RHU_SHIM_BREAK_TLSCACHE)";
-        let (sha_c, rel_c) = self.link_image(ld, "shim.tls-break-tlscache", &["goldens/shim/shim-core-break-tlscache.o", world[1], world[2], "goldens/shim/shimtest-tls.o"], "shim-tls-break-tlscache");
+        let (sha_c, rel_c) = self.link_image(ld, "shim.tls-break-tlscache", &["goldens/shim/shim-core-break-tlscache.o", world[1], world[2], world[3], "goldens/shim/shimtest-tls.o"], "shim-tls-break-tlscache");
         let (raw_c, code_c) = self.run_qemu(qemu, "shim.tls-break-tlscache", &rel_c);
         self.assert_control("shim.tls-break-tlscache", &raw_c, code_c, 1, broke, &sha_c, &rel_c, GOLDENS[3], TLS_FAIL_CACHE, TLS_ALL_GOOD);
         self.emit_pass("shim.tls-break-tlscache", 1, "negative", broke, &sha_c, &rel_c, None);
@@ -1629,6 +1852,7 @@ impl Shim {
         );
         let world = [
             "goldens/shim/shim-core.o",
+            "goldens/shim/shim-busdev.o",
             "goldens/shim/shim-sysnative.o",
             "goldens/shim/shim-libc-glue.o",
             "goldens/shim/shim-host.o",
@@ -1657,9 +1881,10 @@ impl Shim {
             world[0],
             world[1],
             world[2],
+            world[3],
             "goldens/shim/shim-host-break-dataverify.o",
-            world[4],
             world[5],
+            world[6],
         ];
         let (sha_b, rel_b) = self.link_image(ld, "shim.host-break-dataverify", &broken_world, "shim-host-break-dataverify");
         let (raw_b, code_b) = self.run_qemu(qemu, "shim.host-break-dataverify", &rel_b);
@@ -1720,6 +1945,7 @@ impl Shim {
         println!("== case {CASE} (link-tier control) ==");
         let world = [
             "goldens/shim/shim-core.o",
+            "goldens/shim/shim-busdev.o",
             "goldens/shim/shim-sysnative.o",
             "goldens/shim/shim-libc-glue.o",
             "goldens/shim/shim-host.o",
@@ -1832,7 +2058,7 @@ impl Shim {
     }
 
     /// The shim's P/Invoke-facing surface against the pinned pack's export
-    /// tables (F135): the frozen expectation's pin ties the SDK's pin and
+    /// tables: the frozen expectation's pin ties the SDK's pin and
     /// the generated header's tag, then each row's six link objects define
     /// the expectation's family names exactly.
     fn run_pal_surface(&mut self, facts: &RustcFacts) {
@@ -1869,7 +2095,7 @@ impl Shim {
             if let Some(f) = surface_fault(&defined, &exp.names) {
                 self.fail(CASE, &format!("the {row} row: {f}"));
             }
-            println!("   the {row} row's six link objects define the expectation's {} family names exactly", exp.names.len());
+            println!("   the {row} row's eight link objects define the expectation's {} family names exactly", exp.names.len());
         }
         self.results.emit(&format!(
             "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"names\":{},\"archives\":{},\"pin\":\"{}\"}}}}",
@@ -2063,6 +2289,7 @@ impl Shim {
         self.run_classlib_order_control(gxx);
         self.run_f769_shared_control(gxx);
         self.run_an505_row_control(gxx);
+        self.run_sdk_row_tie(gxx);
     }
 
     /// The compile-tier control for the F769 rider's shared objects: the
@@ -2171,6 +2398,133 @@ impl Shim {
         ));
         self.results.tally("pass", "positive");
         println!("== case {CASE}: PASS (the three row-consuming sources under the an505 selector with the Cortex-M7 flag set tie the frozen an500 objects apart from the producer stamp: the class flag set is the one variable behind the row's Cortex-M33 objects) ==");
+    }
+
+    /// THE ROW TIE, driven by the SDK's board table: every row of the table
+    /// names the shim objects its image links, and each of those this plan
+    /// builds under a row selector must be the object the row's OWN
+    /// declaration compiles to -- its source under the selector of the
+    /// header block that names the row, with the row's class flag set,
+    /// tying the frozen object the row names apart from the producer stamp.
+    /// A row may share another row's object only where the bytes agree (no
+    /// field that differs reaches that source). The doctored table -- the
+    /// U5A5 row naming the emulator row's core object again, the defect
+    /// this case was written after -- must be refused by the same routine,
+    /// naming the row and the object.
+    fn run_sdk_row_tie(&mut self, gxx: &ToolCmd) {
+        const CASE: &str = "shim.sdk-rows-tie-their-row";
+        const CONTROL: &str = "shim.sdk-rows-tie-control-borrowed-object";
+        println!("== case {CASE} (compile-tier control) ==");
+        let facts = match rustc_facts() {
+            Ok(f) => f,
+            Err(e) => self.fail(CASE, &e),
+        };
+        let stripped = self.out.join("obj").join("stripped");
+        let table = match std::fs::read_to_string(self.repo.join(SDK_BOARD_TABLE.replace('/', std::path::MAIN_SEPARATOR_STR))) {
+            Ok(t) => t,
+            Err(e) => self.fail(CASE, &format!("{SDK_BOARD_TABLE} unreadable: {e}")),
+        };
+        let header = match std::fs::read_to_string(self.repo.join("src").join("gc").join("host").join("mgc_board_rows.h")) {
+            Ok(t) => t,
+            Err(e) => self.fail(CASE, &format!("src/gc/host/mgc_board_rows.h unreadable: {e}")),
+        };
+        let mut memo: Vec<(String, String)> = Vec::new();
+        let ties = match self.sdk_row_tie_pass(gxx, CASE, &facts, &stripped, &table, &header, &mut memo) {
+            Ok(n) => n,
+            Err(f) => self.fail(CASE, &f),
+        };
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"ties\":{ties},\"compiles\":{}}}}}",
+            self.gate_id,
+            memo.len()
+        ));
+        self.results.tally("pass", "positive");
+        println!("== case {CASE}: PASS ({ties} shim objects over the board table's rows tie their own row's selector apart from the producer stamp; {} compiles) ==", memo.len());
+
+        println!("== case {CONTROL} (negative control) ==");
+        let doctored = table.replace("shim-core-u5a5.o", "shim-core-an505.o");
+        if doctored == table {
+            self.fail(CONTROL, "the board table names no shim-core-u5a5.o: the doctored table cannot be built");
+        }
+        match self.sdk_row_tie_pass(gxx, CONTROL, &facts, &stripped, &doctored, &header, &mut memo) {
+            Ok(_) => self.fail(CONTROL, "the board table with the U5A5 row's core object put back to the emulator row's was ACCEPTED: the tie cannot see a row that links another row's object"),
+            Err(f) => {
+                if !(f.contains("st-nucleo-u5a5zj-q") && f.contains("shim-core-an505.o")) {
+                    self.fail(CONTROL, &format!("the doctored table was refused for another reason: {f}"));
+                }
+                println!("   refused: {f}");
+            }
+        }
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CONTROL}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"negative\",\"image\":null,\"broke\":\"the board table with the U5A5 row's core object put back to the emulator row's\"}}",
+            self.gate_id
+        ));
+        self.results.tally("pass", "negative");
+        println!("== case {CONTROL}: PASS (the board table with the U5A5 row's core object put back to the emulator row's refused, naming the row and the object) ==");
+    }
+
+    /// One pass of the row tie over a board table's text: the ties made, or
+    /// the first fault. A compile is made once per source, define set and
+    /// class (`memo`), so the doctored pass costs none.
+    #[allow(clippy::too_many_arguments)]
+    fn sdk_row_tie_pass(&mut self, gxx: &ToolCmd, case: &str, facts: &RustcFacts, stripped: &Path, table: &str, header: &str, memo: &mut Vec<(String, String)>) -> Result<u32, String> {
+        let sdk_rows = parse_sdk_rows(table)?;
+        let mut ties = 0u32;
+        for r in &sdk_rows {
+            let Some(selector) = row_selector_of(header, &r.board) else {
+                return Err(format!("{}: no row block of src/gc/host/mgc_board_rows.h names the board, so its image would link another board's shim objects", r.board));
+            };
+            let own = format!("-D{selector}");
+            let mut core_seen = false;
+            for o in &r.objects {
+                let Some((_, src, defines, plan_class)) = FROZEN_PLAN.iter().find(|(n, _, _, _)| n == o) else {
+                    continue;
+                };
+                if !defines.iter().any(|d| d.starts_with("-DMGC_HOST_ROW_")) {
+                    continue;
+                }
+                if *plan_class != r.class {
+                    return Err(format!("{}: the row's class is {:?}, the object {o} it names was frozen for {:?}", r.board, r.class, plan_class));
+                }
+                let defs: Vec<&str> = defines.iter().map(|d| if d.starts_with("-DMGC_HOST_ROW_") { own.as_str() } else { *d }).collect();
+                let key = format!("{src}|{}|{:?}", defs.join(" "), r.class);
+                let got = match memo.iter().find(|(k, _)| *k == key) {
+                    Some((_, s)) => s.clone(),
+                    None => {
+                        let out_rel = format!("src/kernel/target/shim-gate/obj/rowtie-{}.o", memo.len());
+                        let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+                        let _ = std::fs::remove_file(&out_abs);
+                        self.compile(gxx, case, src, &defs, &out_rel, r.class);
+                        let s = match sha256_without_stamp(facts, &out_abs, &stripped.join(format!("rowtie-{}.o", memo.len()))) {
+                            Ok(s) => s,
+                            Err(e) => self.fail(case, &format!("{src} under {own} produced no object, or its copy failed ({e})")),
+                        };
+                        memo.push((key, s.clone()));
+                        s
+                    }
+                };
+                let frozen_abs = self.repo.join("goldens").join("shim").join(o);
+                let want = match sha256_without_stamp(facts, &frozen_abs, &stripped.join(format!("rowtie-frozen-{o}"))) {
+                    Ok(s) => s,
+                    Err(e) => self.fail(case, &format!("goldens/shim/{o} unreadable, or its copy failed: {e}")),
+                };
+                if got != want {
+                    return Err(format!(
+                        "{}: the row names {o}; {src} compiled under the row's own selector {own} is {got}, not {want} apart from the producer stamp -- the row links a shim object built from another board's row declaration, and a field that differs reaches it (freeze the row's own object and name it in the board table)",
+                        r.board
+                    ));
+                }
+                println!("   {}: {o} ties {src} under {own} ({})", r.board, &got[..16]);
+                if *src == "src/shim/rhu_shim.c" {
+                    core_seen = true;
+                }
+                ties += 1;
+            }
+            if !core_seen {
+                return Err(format!("{}: the row's list names no core object of the shim", r.board));
+            }
+        }
+        Ok(ties)
     }
 
     /// The compile-tier control for the generated C-library layout header
@@ -2370,6 +2724,7 @@ pub fn run(repo: &Path) -> ! {
     shim.run_activation(&facts, &ld, &qemu);
     shim.run_tls(&facts, &ld, &qemu);
     shim.run_host(&facts, &ld, &qemu);
+    shim.run_devnodes(&facts, &ld, &qemu);
     shim.run_fp_census(&facts);
     shim.run_pal_surface(&facts);
     for p in PENDING {
@@ -2384,7 +2739,7 @@ pub fn run(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "{DISPLAY}: PASS (25/25 cases incl. 17 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        "{DISPLAY}: PASS (41/41 cases incl. 31 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
         PENDING.len(),
         INTERNAL_CASES.len(),
         qemu_v,
@@ -2488,7 +2843,7 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; foreign-errno control refused at compile; C-library layout header ties the kit; class-library order ties the pin; the F769 row's shared objects tie the an500 bytes; the an505 row's objects tie the an500 bytes under the Cortex-M7 flag set apart from the producer stamp; the floating-point census instrument counts a compiled double multiply-add; C-library retarget {}); the surface survey {})  [{}]",
+        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; foreign-errno control refused at compile; C-library layout header ties the kit; class-library order ties the pin; the F769 row's shared objects tie the an500 bytes; the an505 row's objects tie the an500 bytes under the Cortex-M7 flag set apart from the producer stamp; every row of the SDK's board table names shim objects that tie their own row's selector, the table with a borrowed core object refused; the floating-point census instrument counts a compiled double multiply-add; C-library retarget {}; the surface survey {})  [{}]",
         FROZEN_PLAN.len(),
         FROZEN_PLAN.len(),
         retarget,

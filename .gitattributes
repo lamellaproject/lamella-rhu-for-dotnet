@@ -5,3 +5,4 @@
 /goldens/** -text
 # Protected paths ship byte-exact; never normalized.
 /src/vendor/** -text
+/src/kernel/src/board/facts/vendored/** -text

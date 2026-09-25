@@ -116,6 +116,18 @@ pub fn find(addr: u32) -> Option<(i32, ModuleDesc)> {
     })
 }
 
+/// Whether a `bytes`-long read at `pc` lies inside a registered module's
+/// text range (module 0 is the primary image, so the primary range answers
+/// here too): where the double-precision emulation accepts a faulting
+/// instruction's address. CS-bounded like `find`; never blocks.
+#[allow(dead_code)]
+pub fn code_holds(pc: u32, bytes: u32) -> bool {
+    match find(pc) {
+        Some((_, m)) => pc.checked_add(bytes).is_some_and(|end| end <= m.text_hi),
+        None => false,
+    }
+}
+
 /// The GC-facing enumeration: a copy of the stored desc for
 /// a handle, or None for any handle outside [0, count) -- the walk's
 /// terminator. CS-bounded copy; never blocks.

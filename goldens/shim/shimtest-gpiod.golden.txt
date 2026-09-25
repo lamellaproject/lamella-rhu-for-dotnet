@@ -1,0 +1,12 @@
+shimtest-gpiod: the GPIO library surface from a native caller's side, on the row's virtual lines
+PASS shim-gpiod-init
+PASS shim-gpiod-opens (each open its own chip and lines; one holder per line across them; a close gives back its own chip's lines)
+PASS shim-gpiod-open-race (two opens at once are two live chips; a closed chip's handle is refused, never followed)
+PASS shim-gpiod-iterators (each iterator its own progress and chip; a yielded chip is the caller's)
+PASS shim-gpiod-bias (two bias flags refused EINVAL; the reading the living request's flag, "as is" otherwise; a flagless request leaves the pad's pull as it is)
+PASS shim-gpiod-values (EPERM on a line not held and on an input's write; the loop's input follows its output)
+PASS shim-gpiod-events (EPERM without an event request; each edge delivered once with its kind; a burst alternates backwards from the last)
+PASS shim-gpiod-timeouts (a field outside its range refused EINVAL; no timespec waits without limit)
+PASS shim-gpiod-arm (every edge counted from the arm on is delivered)
+PASS shim-gpiod-kind (the count and the level read together)
+SHIMTEST-GPIOD: ALL GOOD (the GPIO library surface from a native caller's side)

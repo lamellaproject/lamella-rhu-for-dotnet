@@ -39,7 +39,7 @@ extern "C" {
  *     [payload] entry REFUSED: the payload was built for hosting-API
  *     contract generation N, outside this kernel's window C..A
  * where C is RHU_ABI_COMPAT and A is RHU_ABI. */
-#define RHU_ABI 33
+#define RHU_ABI 34
 #define RHU_ABI_COMPAT 31
 
 /* Error surface (RHU-owned values, errno-mirroring by convention). */
@@ -192,7 +192,10 @@ typedef struct rhu_module_desc {
  * both directions: registering allocates this module's block for every
  * live thread; spawning allocates every registered module's block for
  * the new thread -- so a lazy-allocation surprise never exists. There
- * is no unregister: modules never unload. */
+ * is no unregister: modules never unload. A registered module's text
+ * range is also where the single-precision rows' double-precision
+ * emulation accepts a faulting instruction's address: a form outside
+ * every registered range is refused and the fault is terminal. */
 #define RHU_MODULE_MAX 4
 int32_t rhu_module_register(const rhu_module_desc *d);
 
@@ -252,7 +255,9 @@ int32_t rhu_thread_atexit(void (*fn)(void *), void *arg);
  * resolves RHU_ESRCH and never to a newer thread. The id space is the
  * positive int32_t range: a spawn that would exceed it is refused
  * RHU_EAGAIN with nothing committed, never handed a negative id (the
- * counter does not wrap). */
+ * counter does not wrap). A refused spawn prints one kernel line naming
+ * the reason and, when the stack pool is short, the request, the pool's
+ * size, its remainder and its retired stacks. */
 int32_t rhu_thread_spawn(void (*entry)(void *), void *arg,
                          uint32_t stack_bytes, uint32_t prio,
                          const char *name);
@@ -473,16 +478,19 @@ int32_t rhu_entropy_secure(void *buf, uint32_t n);
  * rhu_gpio_edge arms an event kind on a claimed line: RHU_GPIO_EDGE_NONE
  * disarms; RISING, FALLING and BOTH are served; the level-triggered kinds
  * and the wakeup variants are refused RHU_ENOTSUP (an edge block cannot
- * serve a level contract honestly); RHU_EBUSY when
- * the family's routing cannot serve the line (ST's sixteen interrupt lines
- * are shared by line number across the ports). rhu_gpio_event_word returns
- * the line's event counter, typed as the futex's word (NULL on an
- * unclaimed line): the kernel increments it once per detected edge and
- * wakes its waiters, so the wait recipe is -- read the word, call
- * rhu_futex_wait(word, the value read, deadline), re-read: an edge between
- * the read and the wait returns RHU_EAGAIN at once, an edge during the
- * wait wakes it, a burst coalesces into one wake and a count of two. No
- * callback and no blocking verb: the program's own thread waits. */
+ * serve a level contract honestly); RHU_EBUSY when the family's routing
+ * cannot serve the line (ST's sixteen interrupt lines are shared by line
+ * number across the ports). rhu_gpio_event_word returns the line's event
+ * counter, typed as the futex's word (NULL on an unclaimed line): the
+ * kernel increments it once per detected edge and wakes its waiters, so
+ * the wait recipe is -- read the word, call rhu_futex_wait(word, the value
+ * read, deadline), re-read: an edge between the read and the wait returns
+ * RHU_EAGAIN at once, an edge during the wait wakes it, a burst coalesces
+ * into one wake and a count of two. With BOTH armed, a pulse shorter than
+ * the handler's latency counts once on a family that latches one pending
+ * bit per line (the STM32F7, which then reads the direction off the pad)
+ * and twice on a family that latches each edge (the STM32U5, the RP2350).
+ * No callback and no blocking verb: the program's own thread waits. */
 #define RHU_EBUSY (-16)     /* the line, or its interrupt routing, is held   */
 #define RHU_EACCES (-13)    /* a write on an input; an output on input-only  */
 #define RHU_ENOTSUP (-95)   /* a level-triggered or wakeup event kind        */
@@ -509,6 +517,105 @@ int32_t rhu_gpio_read(uint32_t line);
 int32_t rhu_gpio_edge(uint32_t line, uint32_t kind);
 const uint32_t *rhu_gpio_event_word(uint32_t line);
 int32_t rhu_entropy_is_hardware(void);
+
+/* The I2C doors: a program's I2C driver over one of the kernel's buses. A
+ * bus is named by its NUMBER -- the chip's own block number (I2C1 is bus
+ * 1), the number a Linux device node carries (/dev/i2c-1) -- never by an
+ * index: rhu_i2c_count answers how many buses the board has (0 on a row
+ * with none: every other door of this family then answers RHU_ENODEV) and
+ * rhu_i2c_bus answers the number of the index-th of them (the index from
+ * 0 below the count; RHU_EINVAL past it), so a program enumerates without
+ * guessing. A number the board has no bus of answers RHU_ENODEV at every
+ * door below.
+ * rhu_i2c_claim takes a bus for the program's whole run at a rate in Hz:
+ * its two pins become the board's (a program holding one refuses the claim
+ * RHU_EBUSY, nothing programmed), the bus is recovered if a device holds
+ * the data line low (up to nine clocks, then a stop), the block is enabled
+ * -- 100000 is served; another rate is refused RHU_ENOTSUP, judged before
+ * the bus's state and so on a claimed bus too; a bus the board has none of
+ * RHU_ENODEV. A claimed bus lives for the boot: this generation has no release
+ * call, and a second claim of the same bus at the served rate answers 0 and
+ * changes nothing. rhu_i2c_transfer runs one combined transaction over a
+ * list of message records (the layout below: the address, the flags with
+ * bit 0 the read flag, the length, a reserved word that must read 0, the
+ * buffer -- twelve bytes, 4-aligned), a repeated start between the
+ * messages and a stop after the last: 0 when every byte moved; RHU_ENXIO
+ * when the address was not acknowledged; RHU_EIO when a data byte was not
+ * acknowledged or the block reported a bus error or arbitration lost;
+ * RHU_ETIMEDOUT when a wait on the wire passed its budget (twice a byte's
+ * time plus two ticks, never fewer than three: a stuck wire fails within
+ * milliseconds wherever it sticks) or the caller's deadline (the block
+ * reset first); RHU_EINVAL for a flag other than the read flag, a
+ * reserved word not 0, a length over RHU_I2C_LEN_MAX, a count of 0 or over
+ * RHU_I2C_MSG_MAX, a NULL buffer with a length, an address over 0x7F, a
+ * NULL list, a bus not claimed; RHU_ENODEV for a bus the board has none
+ * of. The bus is shared: a
+ * transaction that finds the bus busy WAITS for it (bounded by the
+ * deadline), never RHU_EBUSY. No transaction runs under the kernel's
+ * critical section. A refusal moves no byte. */
+#define RHU_ENXIO (-6)      /* the address was not acknowledged            */
+#define RHU_I2C_MSG_READ 1
+#define RHU_I2C_MSG_MAX 8
+#define RHU_I2C_LEN_MAX 255
+typedef struct rhu_i2c_msg {
+    uint16_t addr;
+    uint16_t flags;
+    uint16_t len;
+    uint16_t reserved;
+    uint8_t *buf;
+} rhu_i2c_msg;
+int32_t rhu_i2c_count(void);
+int32_t rhu_i2c_bus(uint32_t index);
+int32_t rhu_i2c_claim(uint32_t bus, uint32_t hz);
+int32_t rhu_i2c_transfer(uint32_t bus, const rhu_i2c_msg *msgs, uint32_t count, uint64_t deadline_ns);
+
+/* The SPI doors: a program's SPI driver over one of the kernel's buses,
+ * shared by any number of devices, each with its own chip select, mode
+ * and clock. A bus is named by its NUMBER, the chip's own block number
+ * (SPI2 is bus 2), as /dev/spidev2.0 names it; rhu_spi_count is the
+ * board's bus count (0 on a row with none: every other door of this
+ * family then answers RHU_ENODEV) and rhu_spi_bus the number of the
+ * index-th bus (the index from 0 below the count; RHU_EINVAL past it); a
+ * number the board has no bus of answers RHU_ENODEV at every door below.
+ * rhu_spi_claim takes a bus for the program's whole run: its three pins
+ * become the board's (a program holding one refuses the claim RHU_EBUSY,
+ * nothing programmed), the block is enabled; 0 when taken, RHU_ENODEV for
+ * a bus the board has none of; a claimed bus lives for the boot (no release verb in this
+ * generation) and a second claim answers 0. rhu_spi_transfer runs one
+ * full-duplex exchange with THE DEVICE'S OWN SETTINGS: the mode
+ * (RHU_SPI_MODE_0 to RHU_SPI_MODE_3) and the rate in Hz are applied to the
+ * block for this transfer, the clock at the largest divisor whose rate is
+ * at or below the request; the select is one of the bus's chip-select
+ * lines (0 or 1), claimed for the board at its first use (RHU_EBUSY when
+ * the program holds it as a GPIO line), or RHU_SPI_SELECT_NONE for a
+ * program that drives its own chip select through the GPIO doors around
+ * the transfer; the select is asserted low before the first clock and
+ * released after the last, len bytes are clocked as eight-bit frames, most
+ * significant bit first (tx NULL sends 0xFF; rx NULL discards). THE ANSWER
+ * IS THE RATE ACHIEVED in Hz, never the request. RHU_ETIMEDOUT when a wait
+ * on the wire passed its budget -- twice a byte's time at the achieved rate
+ * plus two ticks, never fewer than three, so a stuck wire fails within
+ * milliseconds and a transfer of n bytes is bounded by n such waits -- the
+ * block reset; RHU_EIO when the block refused its configuration (it fell
+ * out of master mode): answered at once, nothing clocked, the fault flag
+ * cleared; RHU_EINVAL
+ * for a mode over 3, a rate below the block's slowest, a select the bus
+ * does not have, a length of 0 or over RHU_SPI_LEN_MAX, tx and rx both
+ * NULL, a bus not claimed (RHU_ENODEV for a bus the board has none of). A
+ * transfer that finds the bus
+ * busy WAITS for it (every holder's exchange is bounded wait by wait, so
+ * the wait is), never RHU_EBUSY. No transaction runs under the kernel's
+ * critical section. A refusal moves no byte. */
+#define RHU_SPI_MODE_0 0
+#define RHU_SPI_MODE_1 1
+#define RHU_SPI_MODE_2 2
+#define RHU_SPI_MODE_3 3
+#define RHU_SPI_SELECT_NONE 0xFFFFFFFFu
+#define RHU_SPI_LEN_MAX 65535
+int32_t rhu_spi_count(void);
+int32_t rhu_spi_bus(uint32_t index);
+int32_t rhu_spi_claim(uint32_t bus);
+int32_t rhu_spi_transfer(uint32_t bus, uint32_t select, uint32_t mode, uint32_t hz, const void *tx, void *rx, uint32_t len);
 
 /* --- The payload entry seam: the one member of this surface the
  * kernel CALLS rather than serves. After the platform is up (the

@@ -12,9 +12,12 @@ pub const SYSCLK_HZ: u32 = 20_000_000;
 /// SysTick rate.
 pub const TICK_HZ: u32 = 1_000;
 
-/// Thread stack pool (lives in .kstacks) -- a board-scalable knob;
-/// small-RAM boards re-derive it from their own budgets.
-pub const STACK_POOL_BYTES: usize = 64 * 1024;
+/// Thread stack pool (lives in .kstacks): 96 KiB on this row's 4 MB data
+/// window -- the idle thread's 1 KiB, the hosting thread's and the
+/// finalizer's 16 KiB each, and three default 16 KiB workers (the runtime's
+/// thread pool takes two of them); the link asserts the arena window that
+/// remains above the row's floor.
+pub const STACK_POOL_BYTES: usize = 96 * 1024;
 
 /// The boot kheap carve out of the arena (the GC board table's
 /// `kheap_carve` row). Sized conservatively rather than from measured
@@ -38,6 +41,8 @@ pub const SPARE_IRQ: usize = NIRQ - 1;
 /// only -- kernel f64 stays on the soft-float path, byte-for-byte the
 /// an500 posture. Consumed by records and gates, never by
 /// context-switch code (lazy stacking of S0-S31 is FP-shape-agnostic).
+/// The part: QEMU's Cortex-M33 model with a single-precision FPU (the
+/// emulation row).
 #[allow(dead_code)]
 pub const FPU_DP: bool = false;
 /// The cycle counter the lost-tick witness reads: this emulator row

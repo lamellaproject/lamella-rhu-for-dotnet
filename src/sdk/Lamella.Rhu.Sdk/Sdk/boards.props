@@ -4,10 +4,14 @@
        A row names the processor class, the payload map, the prebuilt
        kernel, the runtime archive set, the build-attributes donor, the
        tier objects the image links in the link's order (the five shim
-       objects and the P/Invoke-facing surface object, the three collector
-       row objects, the C-library closure),
-       the emulator machine and the image base. Every path is relative to
-       the package root. -->
+       objects, the P/Invoke-facing surface object and the GPIO API
+       object, the three collector row objects, the C-library closure),
+       the thread stack facts (the kernel's stack pool for the row, the
+       default managed stack and its clamp, in bytes: copies of the
+       kernel's and the hosting layer's constants that the verification
+       chain's parity leg ties to the tree), the emulator machine (empty
+       for a physical board) and the image base. Every path is relative
+       to the package root. -->
   <ItemGroup>
     <RhuBoardRow Include="arm-mps2-an500"
                  Class="cortex-m7"
@@ -15,7 +19,10 @@
                  Kernel="kernels/arm-mps2-an500/librhu_kernel.a"
                  Archives="archives/cortex-m7"
                  Donor="tier/cortex-m7/attr-donor-v7em.bin"
-                 Objects="tier/cortex-m7/shim-core.o tier/cortex-m7/shim-sysnative.o tier/cortex-m7/shim-libc-glue.o tier/cortex-m7/shim-stdio-sym.o tier/cortex-m7/shim-host.o tier/cortex-m7/shim-pal-surface.o tier/cortex-m7/skel-row.o tier/cortex-m7/heap-row.o tier/cortex-m7/collect-row.o tier/cortex-m7/rt-libc.o"
+                 Objects="tier/cortex-m7/shim-core.o tier/cortex-m7/shim-sysnative.o tier/cortex-m7/shim-libc-glue.o tier/cortex-m7/shim-stdio-sym.o tier/cortex-m7/shim-host.o tier/cortex-m7/shim-pal-surface.o tier/cortex-m7/shim-gpiod.o tier/cortex-m7/shim-busdev.o tier/cortex-m7/skel-row.o tier/cortex-m7/heap-row.o tier/cortex-m7/collect-row.o tier/cortex-m7/rt-libc.o"
+                 StackPool="98304"
+                 StackDefault="16384"
+                 StackClamp="24576"
                  Machine="mps2-an500"
                  Base="0x00000000" />
     <RhuBoardRow Include="arm-mps2-an505"
@@ -24,9 +31,42 @@
                  Kernel="kernels/arm-mps2-an505/librhu_kernel.a"
                  Archives="archives/cortex-m33"
                  Donor="tier/cortex-m33/attr-donor-v8m.bin"
-                 Objects="tier/cortex-m33/shim-core-an505.o tier/cortex-m33/shim-sysnative-an505.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-an505.o tier/cortex-m33/collect-row-an505.o tier/cortex-m33/rt-libc.o"
+                 Objects="tier/cortex-m33/shim-core-an505.o tier/cortex-m33/shim-sysnative-an505.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-an505.o tier/cortex-m33/collect-row-an505.o tier/cortex-m33/rt-libc.o"
+                 StackPool="98304"
+                 StackDefault="16384"
+                 StackClamp="24576"
                  Machine="mps2-an505"
                  Base="0x10000000" />
+    <!-- The physical rows: no emulator machine; the image base is the
+         board's flash. The F769's row links its own core, heap and collect
+         objects (the board's row fields differ from the emulator row's);
+         the U5A5's row links its own core and heap objects (the row's
+         managed region differs from the an505 row's) and shares the rest of
+         the Cortex-M33 objects with the an505 row. -->
+    <RhuBoardRow Include="st-stm32f769i-disco"
+                 Class="cortex-m7"
+                 Map="maps/payload-st-stm32f769i-disco.x"
+                 Kernel="kernels/st-stm32f769i-disco/librhu_kernel.a"
+                 Archives="archives/cortex-m7"
+                 Donor="tier/cortex-m7/attr-donor-v7em.bin"
+                 Objects="tier/cortex-m7/shim-core-f769.o tier/cortex-m7/shim-sysnative.o tier/cortex-m7/shim-libc-glue.o tier/cortex-m7/shim-stdio-sym.o tier/cortex-m7/shim-host.o tier/cortex-m7/shim-pal-surface.o tier/cortex-m7/shim-gpiod.o tier/cortex-m7/shim-busdev.o tier/cortex-m7/skel-row.o tier/cortex-m7/heap-row-f769.o tier/cortex-m7/collect-row-f769.o tier/cortex-m7/rt-libc.o"
+                 StackPool="98304"
+                 StackDefault="16384"
+                 StackClamp="24576"
+                 Machine=""
+                 Base="0x08000000" />
+    <RhuBoardRow Include="st-nucleo-u5a5zj-q"
+                 Class="cortex-m33"
+                 Map="maps/payload-st-nucleo-u5a5zj-q.x"
+                 Kernel="kernels/st-nucleo-u5a5zj-q/librhu_kernel.a"
+                 Archives="archives/cortex-m33"
+                 Donor="tier/cortex-m33/attr-donor-v8m.bin"
+                 Objects="tier/cortex-m33/shim-core-u5a5.o tier/cortex-m33/shim-sysnative-an505.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-u5a5.o tier/cortex-m33/collect-row-an505.o tier/cortex-m33/rt-libc.o"
+                 StackPool="262144"
+                 StackDefault="16384"
+                 StackClamp="24576"
+                 Machine=""
+                 Base="0x08000000" />
   </ItemGroup>
 
 </Project>

@@ -50,6 +50,12 @@ Please note that gate results are pinned against a specific QEMU release
 QEMU and Rust versions it ran under). If your QEMU version is different, the
 chain may report correspondingly-different results.
 
+The kernel each gate image links is built with its compilation directory
+remapped to a neutral prefix, so a gate-built image's identity does not
+depend on where the checkout sits. The remap keeps the host's path
+separators inside that prefix, so a Windows and a Linux build of the same
+tree differ there: the identity of record is per host.
+
 ## Which gates a checkout runs
 
 The chain has nine gates, published in this repository and driven through
@@ -124,14 +130,15 @@ whereas the Windows kit keeps them under
 ### The payload leg
 
 The payload leg rebuilds the payload tier's two programs from `src/payload`
-through the pinned .NET SDK with the compiler's deterministic option and a
-path map over the whole `src/payload` tree, so the objects carry no checkout
-path and are byte-identical at any directory; each rebuilt object is
-compared whole against the frozen one, and the rebuilt objects are linked
-and booted by the payload gate's own method against the goldens. Name the
-directory holding the two rebuilt objects by `RHU_PAYLOAD_OBJECTS`; without
-it, and without the publish environment of the second form below, the leg is
-declared not run.
+through the pinned .NET SDK. The two projects publish without debug
+information, so each object depends on the code alone: the same bytes from
+any directory and whatever the sources' comment lines. Each rebuilt object
+is compared whole against the frozen one, and the rebuilt objects are linked
+and booted by the payload gate's own method against the goldens; an object
+published with another debug type is refused, never compared. The leg reads
+each rebuilt object where the publish wrote it, or from a directory named by
+`RHU_PAYLOAD_OBJECTS`; without either, and without the publish environment of
+the second form below, the leg is declared not run.
 
 Publish the two objects from this checkout's `src/payload` in a Linux
 environment where the SDK named by `src/payload/global.json` is installed
@@ -139,14 +146,15 @@ environment where the SDK named by `src/payload/global.json` is installed
 a cross-OS native publish). Each command runs in its program's directory,
 where `dotnet` reads that pin:
 
-    (cd src/payload/rtsmoke && dotnet publish rtsmoke.csproj -c Release -r linux-arm -p:Deterministic=true "-p:PathMap=<this checkout's src/payload directory>=/rhu/src/payload")
-    (cd src/payload/gctest && dotnet publish gctest.csproj -c Release -r linux-arm -p:Deterministic=true "-p:PathMap=<this checkout's src/payload directory>=/rhu/src/payload")
+    (cd src/payload/rtsmoke && dotnet publish rtsmoke.csproj -c Release -r linux-arm)
+    (cd src/payload/gctest && dotnet publish gctest.csproj -c Release -r linux-arm)
 
 Each publish writes its object at
 `src/payload/<program>/obj/Release/net11.0/linux-arm/native/<program>.o` and
 then fails at the host's native link step, by design (the host cannot link
-an ARM image); copy the two objects into one directory, name it, and run
-the leg. A compiler that refuses the programs' system module at the pin
+an ARM image); then run the leg, which reads each object where the publish
+wrote it (to read them from another directory, name it by
+`RHU_PAYLOAD_OBJECTS`). A compiler that refuses the programs' system module at the pin
 fails the publish with the compiler's lines; a build whose bytes differ
 from the tier's reads MOVED, and the leg's boot of the rebuilt objects
 against the goldens is the read a re-freeze of the tier rests on.
@@ -158,10 +166,11 @@ root as that environment sees it) are set, or the two lines of the
 untracked pointer file `tools/toolchains/publish.local` are present; on a
 Windows host use the pointer file, since a POSIX-emulating shell converts a
 path-shaped value typed into a variable before the harness reads it.
-That form is the one the maintainers run, and it adds three controls through
-the real tool: a source with one line moved, the path map absent, and a
-project with its system-module property renamed; from an objects directory
-the three are named NOT RUN on the verdict line.
+That form adds four controls through the real tool: a source with one code
+literal changed, a source with one comment line added (its object must be
+the same bytes), a build with the debug type overridden (its object is
+refused), and a project with its system-module property renamed; from an
+objects directory the four are named NOT RUN on the verdict line.
 
 The frozen objects were produced by the LLVM 22.1.8 release from llvm.org,
 run on Linux. Another build of clang 22.1.8 carries another producer stamp,
@@ -181,12 +190,24 @@ says which.
 Each hosted-runtime gate links a .NET 11 program, compiled ahead of time by
 the .NET SDK, against the .NET runtime's native archives built for its
 processor class. The two programs under `src/rt/gate` carry the project
-properties, the SDK pin and the single package source; they are published with
+properties, the SDK pin and the package sources; each is published in its
+own directory with the board named, since the SDK refuses a build that
+names no board:
 
-    dotnet publish -c Release -r linux-arm
+    cd src/rt/gate/rthello
+    dotnet publish -c Release -r linux-arm -p:RhuBoard=arm-mps2-an500
 
-on a project with `PublishAot` set, and the gate links the object the SDK
-writes under `obj/Release/net11.0/linux-arm/native/`.
+(the Cortex-M33 gate publishes the same programs for `arm-mps2-an505`),
+and the gate links the object the SDK writes under
+`obj/Release/net11.0/linux-arm/native/`. The projects name the
+`Lamella.Rhu.Sdk` package, which publishes at the launch: the gate
+consumes the tier's frozen objects, and the SDK parity leg declares itself
+not run without the Linux environment for the publish. With it, the leg ties
+the object, the surgery object, the merged object and the image byte for
+byte, ties the board table's stack facts to the tree, boots the image a
+program's stack knob produces, and exercises the SDK's refusals through
+the real tool, among them a publish from a git checkout at another path,
+which must tie the frozen object.
 
 Lamella RHU builds the runtime archives itself from the dotnet/runtime
 source at its pinned tag (.NET 11 RC1 today), with clang 22.1.8,
@@ -195,19 +216,30 @@ whose target sysroot is Ubuntu 22.04's armhf packages:
 
     ./build.sh clr.nativeaotruntime -c Release -arch arm -cross
 
-with one build flag moved from the stock build:
+with two build flags moved from the stock build:
 
     CLR_ARM_FPU_TYPE=fpv5-d16
+    -mcpu=cortex-m7        (the C and C++ compiles)
 
 The stock pack is built for application-profile cores, whose FPU has
-thirty-two double-precision registers; the Cortex-M7's FPU has sixteen,
-so a stock archive contains instructions the Cortex-M7 cannot execute.
-The flag keeps every compiled function inside the sixteen. The Cortex-M33
-class's archives are built by the same recipe with `fpv5-sp-d16`: that
-core's FPU is single-precision, so the compiler emits software
-double-precision arithmetic, and the hosted-runtime gate for that class
-consumes those archives. The stock runtime pack for the same version,
+thirty-two double-precision registers and whose instruction set has
+64-bit exclusive-access instructions; the Cortex-M7's FPU has sixteen,
+and no Cortex-M has those instructions, so a stock archive contains
+instructions the Cortex-M7 cannot execute. The first flag keeps every
+compiled function inside the sixteen. The second names the core, so the
+compiler emits no 64-bit exclusive-access instruction and calls a library
+function for each 64-bit atomic operation instead, which the hosting shim
+answers under one lock. The Cortex-M33 class's archives are built by the
+same recipe with `fpv5-sp-d16` and `-mcpu=cortex-m33`: that core's FPU is
+single-precision, so the compiler emits software double-precision
+arithmetic, and the hosted-runtime gate for that class consumes those
+archives. The stock runtime pack for the same version,
 `Microsoft.NETCore.App.Runtime.NativeAOT.linux-arm`, is the parity control:
 it and the RHU build have the same archive members with the same defined
-and undefined names, and differ only in that flag's effect.
+names; the RHU build's undefined names add the 64-bit atomic library
+calls and drop the integer division helpers the core has in hardware, and
+the two differ otherwise only in the flags' effect. Because the emulator
+executes both kinds of instruction, each hosted-runtime gate censuses its
+frozen objects and its linked images for them at instruction boundaries,
+with a frozen control object of each kind that the census must refuse.
 

@@ -687,6 +687,51 @@ const INVENTORY_HANDLES_BREAK: [&str; 5] = [
     "IGCHeap::Initialize",
 ];
 
+/// The no-GC drive host's EXACT import closure: the windows host's verbs
+/// less the worker's (no thread is spawned, no futex waited on, no
+/// activation sent) -- the arena, the sleep, the resume and yield the
+/// activation host keeps, the two hooks, memset and the console.
+const IMPORTS_HOST_NOGC: [&str; 9] = [
+    "__aeabi_memset",
+    "__mgc_dlopen_hook",
+    "__mgc_dlsym_hook",
+    "rhu_arena_alloc_at",
+    "rhu_arena_headroom",
+    "rhu_sleep_ns",
+    "rhu_thread_resume",
+    "rhu_thread_yield",
+    "sh_write0",
+];
+/// The no-GC region drive's pinned lines (gc.no-gc-region): the banner,
+/// the three entries refused in size order, the end's answer, the
+/// verdict; the control's knob line, its claimed entry and the drive's
+/// loud check.
+const NG_BANNER: &str = "[gc-host] gc.no-gc-region drive: the no-GC region's entry and end through the interface, the statuses read against the pinned enums (a byte, a kilobyte, the heap)";
+const NG_START_1: &str = "[mgc-skel] call IGCHeap::StartNoGCRegion(size=1) -> no_memory (no region is provided; refused, nothing entered)";
+const NG_START_1024: &str = "[mgc-skel] call IGCHeap::StartNoGCRegion(size=1024) -> no_memory (no region is provided; refused, nothing entered)";
+const NG_START_HEAP: &str = "[mgc-skel] call IGCHeap::StartNoGCRegion(size=2097152) -> no_memory (no region is provided; refused, nothing entered)";
+const NG_END: &str = "[mgc-skel] call IGCHeap::EndNoGCRegion -> not_in_progress (no region is ever entered)";
+const NG_DONE: &str = "[gc-host] GC NO-GC REGION EXERCISE OK (three entries refused with no_memory -- a byte, a kilobyte, the heap -- each end and a bare end answering not_in_progress; nothing claimed)";
+const NG_KNOB: &str = "[mgc-skel] BREAK_NOGC_CLAIM: the entry claims success with nothing entered (the negative control's knob)";
+const NG_CLAIMED: &str = "[mgc-skel] call IGCHeap::StartNoGCRegion(size=1) -> success (claimed; nothing entered)";
+const NG_CHECK_FAILED: &str = "[gc-host] ALLOC DRIVE CHECK FAILED: StartNoGCRegion claimed success with nothing entered";
+/// The no-GC boot's call inventory: the init-time calls and the two region
+/// entries; the drive reaches the heap through no other vtable method.
+const INVENTORY_NOGC: [&str; 5] = [
+    "IGCHandleManager::GetGlobalHandleStore",
+    "IGCHandleManager::Initialize",
+    "IGCHeap::EndNoGCRegion",
+    "IGCHeap::Initialize",
+    "IGCHeap::StartNoGCRegion",
+];
+/// The control dies at the first entry's check: no end is ever reached.
+const INVENTORY_NOGC_BREAK: [&str; 4] = [
+    "IGCHandleManager::GetGlobalHandleStore",
+    "IGCHandleManager::Initialize",
+    "IGCHeap::Initialize",
+    "IGCHeap::StartNoGCRegion",
+];
+
 const INVENTORY_SWEEP: [&str; 17] = [
     "IGCHandleManager::DestroyHandleOfType",
     "IGCHandleManager::GetGlobalHandleStore",
@@ -945,8 +990,9 @@ const PENDING: [&str; 1] = [
 /// The compile-tier posture control: listed in every consumer run (the
 /// pending-list idiom -- stated loudly, never counted), armed on the
 /// maintainer's re-derivation leg, where the compiler is.
-const INTERNAL_CASES: [&str; 1] = [
+const INTERNAL_CASES: [&str; 2] = [
     "gc.E-posture-refused -- compile-tier; runs under 'rhu-gate gc rederive' with the compiler of record",
+    "gc.sdk-rows-tie-their-row -- compile-tier; runs under 'rhu-gate gc rederive' with the compiler of record: every row of the SDK's board table names collector objects that tie their sources compiled under that row's own declaration apart from the producer stamp; the table with the U5A5 row's heap object put back to the emulator row's is refused",
 ];
 
 /// goldens/gc/MANIFEST.md's own sha256: the in-code anchor beside the
@@ -954,7 +1000,7 @@ const INTERNAL_CASES: [&str; 1] = [
 /// manifest and the objects together still cannot pass without editing
 /// this reviewed surface). A re-freeze updates objects + manifest + this
 /// pin together in one reviewed commit.
-const SHA_FROZEN_MANIFEST: &str = "587b5c922b2f4b106ff4866fc8b8d24e8ddf3834649bd450c37f69c81a86f644";
+const SHA_FROZEN_MANIFEST: &str = "9516c07bbebeae8a00268c9c52b7e5ef0fc0b884da08d4331222a0ae8931c3d9";
 
 /// The frozen-object plan of record: file name under goldens/gc/, source
 /// TU, extra defines beyond the class's flag set, and the class (the
@@ -965,7 +1011,7 @@ const SHA_FROZEN_MANIFEST: &str = "587b5c922b2f4b106ff4866fc8b8d24e8ddf3834649bd
 /// Worlds stage these files where they once compiled them -- the bytes
 /// are frozen inputs, produced by ONE recorded build, never rebuilt by
 /// a consumer.
-const FROZEN_PLAN: [(&str, &str, &[&str], Class); 36] = [
+const FROZEN_PLAN: [(&str, &str, &[&str], Class); 39] = [
     ("skel-bare.o", "src/gc/mgc_skeleton.cpp", &[], Class::CortexM7),
     ("skel-bad.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_SKEL_BAD_VERSION"], Class::CortexM7),
     ("host.o", "src/gc/host/mgc_host.cpp", &[], Class::CortexM7),
@@ -999,9 +1045,12 @@ const FROZEN_PLAN: [(&str, &str, &[&str], Class); 36] = [
     ("heap-sweep-break-freepad.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_BREAK_FREE_PAD"], Class::CortexM7),
     ("host-handles.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_HANDLES", "-DMGC_HANDLES_ITER=100000u"], Class::CortexM7),
     ("skel-tune-break-lock.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64", "-DMGC_BREAK_HANDLE_LOCK"], Class::CortexM7),
+    ("host-nogc.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_NOGC"], Class::CortexM7),
+    ("skel-tune-break-nogc.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64", "-DMGC_BREAK_NOGC_CLAIM"], Class::CortexM7),
     ("skel-row-an505.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64"], Class::CortexM33),
     ("heap-row-an505.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_ARENA_COVER_BYTES=4194304u"], Class::CortexM33),
     ("collect-row-an505.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE"], Class::CortexM33),
+    ("heap-row-u5a5.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=1048576u", "-DMGC_ARENA_COVER_BYTES=4194304u"], Class::CortexM33),
 ];
 
 /// Parse VENDORED.md's per-file sha bullets: a line whose trimmed form is
@@ -1179,6 +1228,77 @@ fn parse_board_rows(text: &str) -> Result<Vec<BoardRow>, String> {
         });
     }
     Ok(rows)
+}
+
+/// The SDK's board table, where the row tie of the two rederive legs reads
+/// the rows from.
+pub(crate) const SDK_BOARD_TABLE: &str = "src/sdk/Lamella.Rhu.Sdk/Sdk/boards.props";
+
+/// One row of the SDK's board table: its name, its processor class and the
+/// tier objects its image links, by file name.
+#[derive(Debug, Clone)]
+pub(crate) struct SdkRow {
+    pub(crate) board: String,
+    pub(crate) class: Class,
+    pub(crate) objects: Vec<String>,
+}
+
+/// An attribute's value inside one row element of the board table.
+fn sdk_row_attr(row: &str, name: &str) -> Option<String> {
+    let key = format!("{name}=\"");
+    let start = row.find(&key)? + key.len();
+    let end = row[start..].find('"')? + start;
+    Some(row[start..end].to_string())
+}
+
+/// Parse the board table's rows. An empty parse, a row without a name, a
+/// class this harness does not compile for or an empty object list is a
+/// broken instrument, never "nothing to check".
+pub(crate) fn parse_sdk_rows(text: &str) -> Result<Vec<SdkRow>, String> {
+    let mut rows = Vec::new();
+    for (i, _) in text.match_indices("<RhuBoardRow Include=\"") {
+        let end = text[i..].find("/>").ok_or("a board row without its end")? + i;
+        let row = &text[i..end];
+        let board = sdk_row_attr(row, "Include").ok_or("a board row without a name")?;
+        let class = match sdk_row_attr(row, "Class").as_deref() {
+            Some("cortex-m7") => Class::CortexM7,
+            Some("cortex-m33") => Class::CortexM33,
+            other => return Err(format!("{board}: the class {other:?} is not one this harness compiles for")),
+        };
+        let objects: Vec<String> = sdk_row_attr(row, "Objects")
+            .ok_or(format!("{board}: no Objects"))?
+            .split_whitespace()
+            .map(|p| p.rsplit('/').next().unwrap_or(p).to_string())
+            .collect();
+        if objects.is_empty() {
+            return Err(format!("{board}: an empty object list"));
+        }
+        rows.push(SdkRow { board, class, objects });
+    }
+    if rows.is_empty() {
+        return Err("the board table has no rows (broken instrument or a gutted table)".to_string());
+    }
+    Ok(rows)
+}
+
+/// The selector macro of the row-header block whose MGC_ROW_BOARD names
+/// the board: the SDK's name, or that name without its `arm-` prefix (the
+/// two emulator rows' blocks carry the machine's name).
+pub(crate) fn row_selector_of(header: &str, sdk_board: &str) -> Option<String> {
+    let name = sdk_board.strip_prefix("arm-").unwrap_or(sdk_board);
+    let quoted = format!("\"{name}\"");
+    let mut current: Option<String> = None;
+    for line in header.lines() {
+        let t = line.trim();
+        if (t.starts_with("#if ") || t.starts_with("#elif ")) && t.contains("defined(MGC_HOST_ROW_") {
+            let at = t.find("defined(")? + "defined(".len();
+            let end = t[at..].find(')')? + at;
+            current = Some(t[at..end].to_string());
+        } else if t.starts_with("#define MGC_ROW_BOARD") && t.contains(&quoted) {
+            return current;
+        }
+    }
+    None
 }
 
 /// Parse a size token of the linker-script form: `4M`, `384K`, `2496K`
@@ -3763,6 +3883,197 @@ impl Gc {
         println!("== case gc.handle-pool-break: PASS (the unlocked pool lost free-list entries under two threads until it was exhausted; the skeleton fail-fasted, exit 134) ==");
     }
 
+    /// The no-GC region's contract at the interface (gc.no-gc-region):
+    /// the windows world's objects with the drive host that asks for a
+    /// region of a byte, a kilobyte and the heap, reading each start's
+    /// status as the refusal no_memory (never success: no budget and no
+    /// suppression state exist, so nothing is claimed) and each end's,
+    /// and a bare end's, as not_in_progress. The negative control links
+    /// the skeleton built with MGC_BREAK_NOGC_CLAIM (the entry claims
+    /// success with nothing entered): the drive's first check fails
+    /// loudly and the host aborts (exit 134).
+    fn run_no_gc_region(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
+        println!("== case gc.no-gc-region (the no-GC region's entry refused honestly, its end answering no region; the statuses read against the pinned enums) ==");
+        for (name, obj_rel, want) in [
+            ("host-nogc.o", "goldens/gc/host-nogc.o", &IMPORTS_HOST_NOGC[..]),
+            ("skel-tune-break-nogc.o", "goldens/gc/skel-tune-break-nogc.o", &IMPORTS_SKEL_TUNE[..]),
+        ] {
+            let got = self.undefined_of(facts, "gc.no-gc-region", obj_rel);
+            if !imports_match(&got, want) {
+                self.fail(
+                    "gc.no-gc-region",
+                    &format!("{name} import closure moved: got [{}] (pinned {} names)", got.join(" "), want.len()),
+                );
+            }
+            if let Some(hit) = forbidden_import(&got) {
+                self.fail("gc.no-gc-region", &format!("{name} imports forbidden family symbol '{hit}'"));
+            }
+        }
+        println!(
+            "   import closures: host-nogc {} (the windows host's verbs less the worker's: no thread is spawned); skel-tune-break-nogc {} == the windows skeleton's (the knob moves no import)",
+            IMPORTS_HOST_NOGC.len(),
+            IMPORTS_SKEL_TUNE.len()
+        );
+        let (sha_ok, rel_ok) = self.link_image(
+            ld,
+            "gc.no-gc-region",
+            &[
+                "goldens/gc/skel-tune.o",
+                "goldens/gc/heap-tune.o",
+                "goldens/gc/collect-tune.o",
+                "goldens/gc/host-nogc.o",
+            ],
+            "gc-nogc-rhu",
+        );
+        let (sha_ctl, rel_ctl) = self.link_image(
+            ld,
+            "gc.no-gc-region",
+            &[
+                "goldens/gc/skel-tune-break-nogc.o",
+                "goldens/gc/heap-tune.o",
+                "goldens/gc/collect-tune.o",
+                "goldens/gc/host-nogc.o",
+            ],
+            "gc-nogc-break-rhu",
+        );
+        let (raw, code) = self.run_qemu(qemu, "gc-nogc", &rel_ok);
+        if cr_count(&raw) == 0 {
+            self.fail_run("gc.no-gc-region", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
+        }
+        for m in [
+            "flavor: payload",
+            "[gc-host] GC ACTIVATION OK (heap + handle manager live; the allocator drive follows)",
+            NG_BANNER,
+            NG_START_1,
+            NG_START_1024,
+            NG_START_HEAP,
+            NG_END,
+            NG_DONE,
+            "[payload] managed Main returned 0",
+        ] {
+            if !contains_fixed(&raw, m) {
+                self.fail_run("gc.no-gc-region", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
+            }
+        }
+        if !in_order(&raw, &[NG_BANNER, NG_START_1, NG_START_1024, NG_START_HEAP, NG_DONE]) {
+            self.fail_run(
+                "gc.no-gc-region",
+                code,
+                0,
+                "positive",
+                "",
+                &sha_ok,
+                &rel_ok,
+                "drive order violated (banner -> the three entries in size order -> verdict is an ORDER claim)",
+            );
+        }
+        for m in [
+            "DRIVE CHECK FAILED",
+            "BREAK_NOGC_CLAIM",
+            "-> success",
+            "KERNEL PANIC",
+            "EXCEPTION:",
+            "REFUSED",
+            "FAIL-FAST",
+            "MISMATCH",
+            "abort()",
+            "heap walk CORRUPT",
+        ] {
+            if contains_fixed(&raw, m) {
+                self.fail_run("gc.no-gc-region", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
+            }
+        }
+        let union = call_union(&raw);
+        if !imports_match(&union, &INVENTORY_NOGC) {
+            self.fail_run(
+                "gc.no-gc-region",
+                code,
+                0,
+                "positive",
+                "",
+                &sha_ok,
+                &rel_ok,
+                &format!("no-gc-region boot call inventory moved: got [{}] (banked {} heads)", union.join(" "), INVENTORY_NOGC.len()),
+            );
+        }
+        if code != 0 {
+            self.fail_run("gc.no-gc-region", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
+        }
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.no-gc-region\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
+        ));
+        self.results.tally("pass", "positive");
+        println!(
+            "== case gc.no-gc-region: PASS (exit 0; three entries refused with no_memory in size order, each end and a bare end not_in_progress, nothing claimed; the boot's call inventory the banked {} heads) ==",
+            INVENTORY_NOGC.len()
+        );
+
+        println!("== case gc.no-gc-region-break (negative control) ==");
+        let broke = "the entry claims success with nothing entered (MGC_BREAK_NOGC_CLAIM): the drive's first check must fail loudly";
+        let (rawc, codec) = self.run_qemu(qemu, "gc-nogc-break", &rel_ctl);
+        if cr_count(&rawc) == 0 {
+            self.fail_run("gc.no-gc-region-break", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
+        }
+        for m in [NG_KNOB, NG_BANNER, NG_CLAIMED, NG_CHECK_FAILED] {
+            if !contains_fixed(&rawc, m) {
+                self.fail_run(
+                    "gc.no-gc-region-break",
+                    codec,
+                    134,
+                    "negative",
+                    broke,
+                    &sha_ctl,
+                    &rel_ctl,
+                    &format!("control pin '{m}' not found (the knob must be loud and the claim must be caught)"),
+                );
+            }
+        }
+        for m in [NG_START_1, NG_END, NG_DONE] {
+            if contains_fixed(&rawc, m) {
+                self.fail_run(
+                    "gc.no-gc-region-break",
+                    codec,
+                    134,
+                    "negative",
+                    broke,
+                    &sha_ctl,
+                    &rel_ctl,
+                    &format!("positive pin '{m}' PRESENT under BREAK_NOGC_CLAIM -- the detector does not bite"),
+                );
+            }
+        }
+        let ctl_union = call_union(&rawc);
+        if !imports_match(&ctl_union, &INVENTORY_NOGC_BREAK) {
+            self.fail_run(
+                "gc.no-gc-region-break",
+                codec,
+                134,
+                "negative",
+                broke,
+                &sha_ctl,
+                &rel_ctl,
+                &format!("control call inventory moved: got [{}]", ctl_union.join(" ")),
+            );
+        }
+        if codec != 134 {
+            self.fail_run(
+                "gc.no-gc-region-break",
+                codec,
+                134,
+                "negative",
+                broke,
+                &sha_ctl,
+                &rel_ctl,
+                &format!("exit {codec}, wanted 134 (the host's abort)"),
+            );
+        }
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.no-gc-region-break\",\"verdict\":\"pass\",\"exit\":134,\"exit_want\":134,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
+        ));
+        self.results.tally("pass", "negative");
+        println!("== case gc.no-gc-region-break: PASS (the claimed entry was caught by the drive's first check; the host aborted, exit 134) ==");
+    }
+
     fn run_tune(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
         println!("== case gc.D (alloc-context windows + the futex-backed GC-done event) ==");
 
@@ -4108,6 +4419,7 @@ impl Gc {
             ("skel-row-an505.o", "goldens/gc/skel-row-an505.o", &IMPORTS_SKEL_TUNE[..]),
             ("heap-row-an505.o", "goldens/gc/heap-row-an505.o", &IMPORTS_HEAP_SWEEP[..]),
             ("collect-row-an505.o", "goldens/gc/collect-row-an505.o", &IMPORTS_COLLECT_TUNE[..]),
+            ("heap-row-u5a5.o", "goldens/gc/heap-row-u5a5.o", &IMPORTS_HEAP_SWEEP[..]),
         ] {
             let got = self.undefined_of(facts, "gc.E", obj_rel);
             if !imports_match(&got, want) {
@@ -4138,6 +4450,7 @@ impl Gc {
             IMPORTS_HEAP_SWEEP.len(),
             IMPORTS_COLLECT_TUNE.len()
         );
+        println!("   the U5A5 row's own Cortex-M33 heap object: heap-row-u5a5 {} pinned against the same closure", IMPORTS_HEAP_SWEEP.len());
 
         let (sha_ok, rel_ok) = self.link_image(
             ld,
@@ -4341,6 +4654,138 @@ impl Gc {
 
     }
 
+    /// THE ROW TIE, driven by the SDK's board table: every row of the table
+    /// names the collector objects its image links (the skeleton, the heap
+    /// and the collect object), and each must be the object the row's OWN
+    /// declaration compiles to -- its source under the fields of the header
+    /// block that names the row, passed as the collector's knob macros (the
+    /// form the F769 row's frozen objects are built in), with the row's
+    /// class flag set, tying the frozen object the row names apart from the
+    /// producer stamp. A row may share another row's object only where the
+    /// bytes agree. The doctored table -- the U5A5 row naming the emulator
+    /// row's heap object again, the defect this case was written after --
+    /// must be refused by the same routine, naming the row and the object.
+    fn run_sdk_row_tie(&mut self, gxx: &ToolCmd, facts: &RustcFacts, stripped: &Path) {
+        const CASE: &str = "gc.sdk-rows-tie-their-row";
+        const CONTROL: &str = "gc.sdk-rows-tie-control-borrowed-object";
+        println!("== case {CASE} (compile-tier control) ==");
+        let table = match std::fs::read_to_string(self.repo.join(SDK_BOARD_TABLE.replace('/', std::path::MAIN_SEPARATOR_STR))) {
+            Ok(t) => t,
+            Err(e) => self.fail(CASE, &format!("{SDK_BOARD_TABLE} unreadable: {e}")),
+        };
+        let header = match std::fs::read_to_string(self.repo.join("src").join("gc").join("host").join("mgc_board_rows.h")) {
+            Ok(t) => t,
+            Err(e) => self.fail(CASE, &format!("src/gc/host/mgc_board_rows.h unreadable: {e}")),
+        };
+        let mut memo: Vec<(String, String)> = Vec::new();
+        let ties = match self.sdk_row_tie_pass(gxx, CASE, facts, stripped, &table, &header, &mut memo) {
+            Ok(n) => n,
+            Err(f) => self.fail(CASE, &f),
+        };
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc-rederive\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"ties\":{ties},\"compiles\":{}}}}}",
+            memo.len()
+        ));
+        self.results.tally("pass", "positive");
+        println!("== case {CASE}: PASS ({ties} collector objects over the board table's rows tie their own row's declaration apart from the producer stamp; {} compiles) ==", memo.len());
+
+        println!("== case {CONTROL} (negative control) ==");
+        let doctored = table.replace("heap-row-u5a5.o", "heap-row-an505.o");
+        if doctored == table {
+            self.fail(CONTROL, "the board table names no heap-row-u5a5.o: the doctored table cannot be built");
+        }
+        match self.sdk_row_tie_pass(gxx, CONTROL, facts, stripped, &doctored, &header, &mut memo) {
+            Ok(_) => self.fail(CONTROL, "the board table with the U5A5 row's heap object put back to the emulator row's was ACCEPTED: the tie cannot see a row that links another row's object"),
+            Err(f) => {
+                if !(f.contains("st-nucleo-u5a5zj-q") && f.contains("heap-row-an505.o")) {
+                    self.fail(CONTROL, &format!("the doctored table was refused for another reason: {f}"));
+                }
+                println!("   refused: {f}");
+            }
+        }
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc-rederive\",\"case\":\"{CONTROL}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"negative\",\"broke\":\"the board table with the U5A5 row's heap object put back to the emulator row's\",\"image\":null}}"
+        ));
+        self.results.tally("pass", "negative");
+        println!("== case {CONTROL}: PASS (the board table with the U5A5 row's heap object put back to the emulator row's refused, naming the row and the object) ==");
+    }
+
+    /// One pass of the row tie over a board table's text: the ties made, or
+    /// the first fault. A compile is made once per source, knob set and
+    /// class (`memo`), so the doctored pass costs none.
+    #[allow(clippy::too_many_arguments)]
+    fn sdk_row_tie_pass(&mut self, gxx: &ToolCmd, case: &str, facts: &RustcFacts, stripped: &Path, table: &str, header: &str, memo: &mut Vec<(String, String)>) -> Result<u32, String> {
+        let sdk_rows = parse_sdk_rows(table)?;
+        let host_rows = parse_board_rows(header)?;
+        let mut ties = 0u32;
+        for r in &sdk_rows {
+            let name = r.board.strip_prefix("arm-").unwrap_or(&r.board);
+            let Some(h) = host_rows.iter().find(|h| h.board == name) else {
+                return Err(format!("{}: no row block of src/gc/host/mgc_board_rows.h names the board, so its image would link another board's collector objects", r.board));
+            };
+            let mut row_ties = 0u32;
+            for o in &r.objects {
+                let Some((_, src, _, plan_class)) = FROZEN_PLAN.iter().find(|(n, _, _, _)| n == o) else {
+                    continue;
+                };
+                let knobs: Vec<String> = match *src {
+                    "src/gc/mgc_skeleton.cpp" => vec![format!("-DMGC_HANDLE_SLOTS={}", h.handles)],
+                    "src/gc/mgc_heap.cpp" => vec![
+                        format!("-DMGC_HEAP_BYTES={}u", h.region),
+                        format!("-DMGC_ARENA_COVER_BYTES={}u", h.cover),
+                        format!("-DMGC_FINQ_CAP={}u", h.finq),
+                        format!("-DMGC_OOM_RESERVE={}u", h.reserve),
+                        format!("-DMGC_WINDOW_BYTES={}u", h.window),
+                        format!("-DMGC_WINDOW_FLOOR={}u", h.wfloor),
+                        format!("-DMGC_WALL_RETRIES={}u", h.retries),
+                    ],
+                    "src/gc/mgc_collect.cpp" => vec![format!("-DMGC_MARK_STACK_ENTRIES={}u", h.markstack), format!("-DMGC_OOM_RESERVE={}u", h.reserve)],
+                    _ => continue,
+                };
+                if *plan_class != r.class {
+                    return Err(format!("{}: the row's class is {:?}, the object {o} it names was frozen for {:?}", r.board, r.class, plan_class));
+                }
+                let key = format!("{src}|{}|{:?}", knobs.join(" "), r.class);
+                let got = match memo.iter().find(|(k, _)| *k == key) {
+                    Some((_, s)) => s.clone(),
+                    None => {
+                        let out_rel = format!("src/kernel/target/gc-gate/obj/rowtie-{}.o", memo.len());
+                        let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+                        let _ = std::fs::remove_file(&out_abs);
+                        let mut defs: Vec<&str> = vec!["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE"];
+                        defs.extend(knobs.iter().map(|s| s.as_str()));
+                        self.compile(gxx, case, src, &defs, &out_rel, r.class);
+                        let s = match sha256_without_stamp(facts, &out_abs, &stripped.join(format!("rowtie-{}.o", memo.len()))) {
+                            Ok(s) => s,
+                            Err(e) => self.fail(case, &format!("{src} under the {} row's declaration produced no object, or the copier refused it ({e})", r.board)),
+                        };
+                        memo.push((key, s.clone()));
+                        s
+                    }
+                };
+                let frozen_abs = self.repo.join("goldens").join("gc").join(o);
+                let want = match sha256_without_stamp(facts, &frozen_abs, &stripped.join(format!("rowtie-frozen-{o}"))) {
+                    Ok(s) => s,
+                    Err(e) => self.fail(case, &format!("goldens/gc/{o} unreadable, or the copier refused it: {e}")),
+                };
+                if got != want {
+                    return Err(format!(
+                        "{}: the row names {o}; {src} compiled under the row's own declaration ({}) is {got}, not {want} apart from the producer stamp -- the row links a collector object built from another board's row declaration (freeze the row's own object and name it in the board table)",
+                        r.board,
+                        knobs.join(" ")
+                    ));
+                }
+                println!("   {}: {o} ties {src} under the row's own declaration ({})", r.board, &got[..16]);
+                ties += 1;
+                row_ties += 1;
+            }
+            if row_ties != 3 {
+                return Err(format!("{}: {row_ties} of the three collector row objects (the skeleton, the heap and the collect object) found in the row's list", r.board));
+            }
+        }
+        Ok(ties)
+    }
+
     /// The maintainer's re-derivation leg ('rhu-gate gc rederive'): recompile
     /// every frozen-plan object from src/gc with the compiler of record and
     /// byte-assert it against goldens/gc, then run the compile-tier
@@ -4470,6 +4915,8 @@ impl Gc {
         self.results.tally("pass", "positive");
         println!("== case gc.f769-shared-control: PASS (the skeleton under the F769 row's defines ties the frozen an500 skel-row.o {} apart from the producer stamp: one skeleton object serves both rows; a copy with one code byte moved refused) ==", &shared_want[..16]);
 
+        self.run_sdk_row_tie(gxx, &facts, &stripped);
+
         println!("== case gc.E-posture-refused (negative control) ==");
         self.compile_expect_fail(
             gxx,
@@ -4546,6 +4993,7 @@ pub fn run(repo: &Path) -> ! {
     gc.run_sweep(&facts, &ld, &qemu);
     gc.run_free_pad(&facts, &ld, &qemu);
     gc.run_handle_pool(&facts, &ld, &qemu);
+    gc.run_no_gc_region(&facts, &ld, &qemu);
     gc.run_tune(&facts, &ld, &qemu);
     gc.run_row(&facts, &ld, &qemu);
     for p in PENDING {
@@ -4560,7 +5008,7 @@ pub fn run(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "{DISPLAY}: PASS (18/18 cases incl. 8 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        "{DISPLAY}: PASS (20/20 cases incl. 9 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
         PENDING.len(),
         INTERNAL_CASES.len(),
         qemu_v,
@@ -4628,7 +5076,7 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "GC REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; the F769 row's shared skeleton ties the an500 object apart from the stamp, a copy with one code byte moved refused; posture control refused at compile)  [{}]",
+        "GC REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; the F769 row's shared skeleton ties the an500 object apart from the stamp, a copy with one code byte moved refused; every row of the SDK's board table names collector objects that tie their own row's declaration, the table with a borrowed heap object refused; posture control refused at compile)  [{}]",
         FROZEN_PLAN.len(),
         FROZEN_PLAN.len(),
         gxx.version
@@ -5196,7 +5644,7 @@ pub fn selfcheck(repo: &Path) -> ! {
 
     let mk = |region: u64, cover: u64, kheap: u64, profile: &str, basis: &str| {
         format!(
-            "#if defined(MGC_HOST_ROW_TEST)\n#define MGC_ROW_BOARD \"stm32f769i-disco\"\n#define MGC_ROW_PROFILE \"{profile}\"\n#define MGC_ROW_BASIS \"{basis}\"\n#define MGC_ROW_REGION_BYTES {region}u\n#define MGC_ROW_COVER_BYTES {cover}u\n#define MGC_ROW_KHEAP_BYTES {kheap}u\n#define MGC_ROW_STACK_DEFAULT 16384u\n#define MGC_ROW_STACK_CLAMP 24576u\n#define MGC_ROW_HANDLE_SLOTS 64u\n#define MGC_ROW_FOH_POOL_BYTES 4096u\n#define MGC_ROW_MARKSTACK_ENTRIES 2048u\n#define MGC_ROW_FINQ_CAP 256u\n#define MGC_ROW_OOM_RESERVE 8192u\n#define MGC_ROW_WINDOW_BYTES 4096u\n#define MGC_ROW_WINDOW_FLOOR 256u\n#define MGC_ROW_WALL_RETRIES 4u\n#define MGC_ROW_FROZEN_SEGS 8u\n#endif\n"
+            "#if defined(MGC_HOST_ROW_TEST)\n#define MGC_ROW_BOARD \"st-stm32f769i-disco\"\n#define MGC_ROW_PROFILE \"{profile}\"\n#define MGC_ROW_BASIS \"{basis}\"\n#define MGC_ROW_REGION_BYTES {region}u\n#define MGC_ROW_COVER_BYTES {cover}u\n#define MGC_ROW_KHEAP_BYTES {kheap}u\n#define MGC_ROW_STACK_DEFAULT 16384u\n#define MGC_ROW_STACK_CLAMP 24576u\n#define MGC_ROW_HANDLE_SLOTS 64u\n#define MGC_ROW_FOH_POOL_BYTES 4096u\n#define MGC_ROW_MARKSTACK_ENTRIES 2048u\n#define MGC_ROW_FINQ_CAP 256u\n#define MGC_ROW_OOM_RESERVE 8192u\n#define MGC_ROW_WINDOW_BYTES 4096u\n#define MGC_ROW_WINDOW_FLOOR 256u\n#define MGC_ROW_WALL_RETRIES 4u\n#define MGC_ROW_FROZEN_SEGS 8u\n#endif\n"
         )
     };
     let gutted = mk(98304, 524288, 16384, "mini", "floor").replace("#define MGC_ROW_REGION_BYTES 98304u\n", "");

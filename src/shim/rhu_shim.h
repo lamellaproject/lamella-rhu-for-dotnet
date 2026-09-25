@@ -20,8 +20,9 @@
 
 /* The file-descriptor bands, disjoint by declaration: a descriptor's band
  * names its owner, so no fast path can mistake one kind of descriptor for
- * another. The console band and the file band are served; a descriptor in
- * a reserved band is refused as invalid, never handed to a fallback. */
+ * another. The console band, the file band and the device band are
+ * served; a descriptor in a reserved band is refused as invalid, never
+ * handed to a fallback. */
 #define RHU_SHIM_FD_CONSOLE_LO 0
 #define RHU_SHIM_FD_CONSOLE_HI 3 /* exclusive: the console is 0, 1, 2 */
 #ifndef RHU_SHIM_FD_FILE_LO
@@ -29,7 +30,8 @@
 #endif
 #define RHU_SHIM_FD_FILE_COUNT 13 /* 3 .. 15 */
 #define RHU_SHIM_FD_SOCKET_LO 32  /* reserved: 32 .. 47 */
-#define RHU_SHIM_FD_DEVICE_LO 64  /* reserved: 64 .. 79 */
+#define RHU_SHIM_FD_DEVICE_LO 64  /* the bus device nodes: 64 .. 79 */
+#define RHU_SHIM_FD_DEVICE_COUNT 16
 #define RHU_SHIM_FD_STORAGE_LO 80 /* reserved: 80 .. 95 */
 
 /* Every hosted thread the shim spawns runs at the one flat priority the
@@ -39,6 +41,16 @@
  * can exist among them. The shim adopts the kernel's name, never a
  * literal of its own. */
 #define RHU_SHIM_PRIO_FLAT ((uint32_t)RHU_HOSTED_PRIO_FLAT)
+
+/* The bus device unit (rhu_busdev.c): the two device-node families a
+ * program's I2C and SPI drivers open, presented over the kernel's bus
+ * doors. The core's open hands it a path that starts with /dev/i2c- or
+ * /dev/spidev; the core's ioctl and close hand it every descriptor of the
+ * device band. Each answers as the C library's call would: the result, or
+ * -1 with errno set. */
+int rhu_busdev_open(const char *path, int flags);
+int rhu_busdev_ioctl(int fd, unsigned long request, void *arg);
+int rhu_busdev_close(int fd);
 
 /* Initialization, called once on the main thread before any other shim
  * entry: registers the per-thread block with the kernel's module registry

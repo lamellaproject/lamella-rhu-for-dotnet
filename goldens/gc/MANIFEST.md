@@ -25,8 +25,9 @@ release; the version the runtime archives at the pin were built with, so
 one LLVM lineage spells the 32-bit types and mangles the interface names
 the same way on both sides of the seam), targeting arm-none-eabi for the
 Cortex-M7 with hard-float FPv5-D16 -- and, for the mps2-an505 row's three
-objects, the Cortex-M33 with the single-precision FPv5 under the same flag
-set but the core and FPU words -- no C++ standard library headers (the
+objects and the st-nucleo-u5a5zj-q row's heap object, the Cortex-M33 with
+the single-precision FPv5 under the same flag set but the core and FPU
+words -- no C++ standard library headers (the
 collector is freestanding C++ over the kit's C headers).
 
 Frozen at the compile of record for the .NET 11 RC1 pin
@@ -36,16 +37,25 @@ surface the gate ties three ways at 53 names); the mps2-an505 row's three
 collector objects are the an500 row's sources and defines compiled for the
 Cortex-M33 with the single-precision FPv5 (the class flag set beside the
 Cortex-M7's in gc.rs; the collector reads no board row, so the class is
-the one variable), each carrying no double-precision instruction;
-36 objects.
+the one variable), each carrying no double-precision instruction; the
+st-nucleo-u5a5zj-q row's heap object is that source under the row's own
+managed region as the row header declares it (the row shares the
+mps2-an505 row's skeleton and collect objects, which no differing field
+reaches; the rederive leg ties every board-table row's objects to the
+row's own declaration by bytes); the
+no-GC region's entry is refused through the pinned status (no budget and
+no suppression state exist, so nothing is claimed) and its end answers
+that no region is in progress, with a negative control built from the
+skeleton with the claim restored and a host drive that reads both
+statuses; 39 objects.
 
 Records (repo-relative path, sha256; defines documented per record):
 
 - `goldens/gc/skel-bare.o`
-  `cb5a40f2bbaac4da6f46581670c57355a06c8c28118cb9991c12a68f5a064465`
+  `f80612096df93dd648322816a721ac60c3824db179ad0dd2a42c8e6a9f513b38`
   (src/gc/mgc_skeleton.cpp; no extra defines)
 - `goldens/gc/skel-bad.o`
-  `4aa666c476882560938b047ccabc26b7a34bb4b2ed617947aee4a552f59b638b`
+  `46b82f542bcfeecb739e5f8fbfef58311be4cdb9e88f8adc27fc36046e5f88b7`
   (src/gc/mgc_skeleton.cpp; -DMGC_SKEL_BAD_VERSION)
 - `goldens/gc/host.o`
   `ddc3a08beb674b869cdf88bc7367d07295309effdb3b173aeb00ba8cb91770b5`
@@ -54,7 +64,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `cc9a74e2da19dca3aaab850361cf52b03c46474c58d654411dda87f85b29a958`
   (src/gc/mgc_ee_probe.cpp; no extra defines)
 - `goldens/gc/skel-heap.o`
-  `3189bbd6e86a43a40747d071a1b38099611a04d65b676cf68f37982628328bed`
+  `ac1f6e7e2c8368e88d2310edab536ae74f2a13a65043b657f889cb0b0b9690fe`
   (src/gc/mgc_skeleton.cpp; -DMGC_HEAP_LIVE)
 - `goldens/gc/heap.o`
   `7605d891c090e3ce6d93a3038d8994f158954caf5947d932984216b241c3239a`
@@ -63,7 +73,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `a73856b119ef28fbe6b4cc5be56ae10d2c3893d056db419cdd849fcc39cbffda`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC)
 - `goldens/gc/skel-collect.o`
-  `1b47e043a831d656331757842f9c9677db2ff691997600a452c66bdb8b8eec99`
+  `e3043a37955ee1fec16b8ec9a5c3e12168639573fd041979285d46ea23371d4d`
   (src/gc/mgc_skeleton.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE)
 - `goldens/gc/heap-collect.o`
   `714f14afebcafc534425db7752a2a2560a30566fcf49a753cf28446fda45202c`
@@ -78,7 +88,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `538be9f3a4da63bc5e74912b5f5f017ae3ce59dbc1d9f88df59df61e29d00baa`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT)
 - `goldens/gc/skel-sweep.o`
-  `7efed8dffa1097d85d083bea6ad8b59e56fc37d528bbe782308d31016733e36c`
+  `4690e0bd0c590763c93d63388c59c6fc6a677bca99bc9491e164dcea490358f1`
   (src/gc/mgc_skeleton.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE)
 - `goldens/gc/heap-sweep.o`
   `e6a5519992157d57f33e04382c23f3406376a225f275bb7eb5622ec3b8326c96`
@@ -93,7 +103,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `2f6fedf73a45690b6e56a407f611db07a343888b791eb4c2c27140bec5df0f83`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP)
 - `goldens/gc/skel-tune.o`
-  `14b23de1645945ac4ebd0fcdf8a3ebfbfcba7a174ba3cdfea2aca1e13ce5010f`
+  `206689a0c24a2dd7dacd63052889290955aa56bac539203a459ee5b3372aab0d`
   (src/gc/mgc_skeleton.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HANDLE_SLOTS=64)
 - `goldens/gc/heap-tune.o`
   `f562dd57438fa9515a7779235daa6642b75ab801f37cde82c9d1c31b898d039c`
@@ -108,7 +118,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `8b1b19c5776d01de3bd0b9296b64eae57fabd6022823dd6e9443ab0dd36890cd`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE)
 - `goldens/gc/skel-row.o`
-  `14b23de1645945ac4ebd0fcdf8a3ebfbfcba7a174ba3cdfea2aca1e13ce5010f`
+  `206689a0c24a2dd7dacd63052889290955aa56bac539203a459ee5b3372aab0d`
   (src/gc/mgc_skeleton.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HANDLE_SLOTS=64)
 - `goldens/gc/heap-row.o`
   `4f34d74e25a9b2319012b29fe7347cec5a68b5fa9872f1b69510a1b099b56be7`
@@ -138,10 +148,16 @@ Records (repo-relative path, sha256; defines documented per record):
   `abe273d6ee3eb8b21446ae133f9946e4e26d380d9a1e65afa8fc77e68d87976e`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE -DMGC_HOST_DRIVE_HANDLES -DMGC_HANDLES_ITER=100000u)
 - `goldens/gc/skel-tune-break-lock.o`
-  `f860fc70362a890a5e013077e99393407a1f6958b5d1ad91861b4804da47e67e`
+  `86ecfe2f39f8e74a7be3d627cc28560ed32b6ee9254477fac3507fa4225a0ca4`
   (src/gc/mgc_skeleton.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HANDLE_SLOTS=64 -DMGC_BREAK_HANDLE_LOCK)
+- `goldens/gc/host-nogc.o`
+  `a824a178e891c6ec53f568dbb2d9a0656ce826014a3569bd05111516fac2d088`
+  (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE -DMGC_HOST_DRIVE_NOGC)
+- `goldens/gc/skel-tune-break-nogc.o`
+  `17b526a844ec008542869927a34d828bc86f8acb4f42383cbb31b4c9ba5a4717`
+  (src/gc/mgc_skeleton.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HANDLE_SLOTS=64 -DMGC_BREAK_NOGC_CLAIM)
 - `goldens/gc/skel-row-an505.o`
-  `fb174cf14361e2ef5f8eb8914b654c9ef4d150ad3e9fa806d3d94c1c1bdf3aa2`
+  `275fc4e7844d91fd2e45577ba938e6f45d3ea27319513b1db9ff67a3d1833ce6`
   (src/gc/mgc_skeleton.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HANDLE_SLOTS=64; the Cortex-M33 class flag set)
 - `goldens/gc/heap-row-an505.o`
   `d25728e835907f4ad8eaeaaded81f847b51f1531f9b96829583dbf61e7ee445c`
@@ -149,3 +165,6 @@ Records (repo-relative path, sha256; defines documented per record):
 - `goldens/gc/collect-row-an505.o`
   `05e6fbf7f2a2e91b0233bbcc9572334a8fe695e894e4db6495a185d3b4dd1101`
   (src/gc/mgc_collect.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE; the Cortex-M33 class flag set)
+- `goldens/gc/heap-row-u5a5.o`
+  `270539bc7f52c139890cbe9d7d8ba39442782b8539c09ab0e5e6c013cc6f5ea3`
+  (src/gc/mgc_heap.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HEAP_BYTES=1048576u -DMGC_ARENA_COVER_BYTES=4194304u; the Cortex-M33 class flag set)
