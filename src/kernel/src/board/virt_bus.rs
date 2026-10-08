@@ -18,11 +18,17 @@
 //! software select management and a low internal select, whether or not
 //! the block is enabled -- the fault flag set, the master bit cleared, the
 //! enable refused until the flag-clear bit clears the fault. The pad seam
-//! is empty (the models have no pins). The
+//! is empty but for the I2C recovery's (the models have no other pin): the
+//! recovery's clock released after less than the specification's 35 ms of
+//! low is refused loudly. The
 //! doctored feature `test-bus-doctored` makes the sensor refuse the second
 //! data byte of a write, the I2C block never complete a non-last message,
 //! and the drivers' pumps unbounded -- the negative controls the api
-//! flavor's doctored image runs.
+//! flavor's doctored image runs -- and that image arms, through `doctor`,
+//! a device that holds the clock low 25 ms in one byte and then answers, and
+//! a device left holding the data line low at the block's next reset: until
+//! three clocks have come, until the clock has been held low 35 ms, or for
+//! good.
 
 use core::ptr::addr_of_mut;
 
@@ -34,13 +40,93 @@ use crate::sched;
 const DOCTORED: bool = cfg!(feature = "test-bus-doctored");
 
 
+/// What the doctored image arms before a transfer: a device that holds the
+/// clock low 25 ms in the next byte and then answers; a device left holding
+/// the data line low at the block's next reset -- until three clocks have
+/// come, until the clock has been held low 35 ms, or for good; the line free
+/// again.
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Doctor {
+    Stretch,
+    HeldClocks,
+    HeldLong,
+    HeldStuck,
+    Free,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Held {
+    No,
+    Clocks(u32),
+    Long,
+    Stuck,
+}
+
+/// The modelled wire: what holds the data line now, what will at the
+/// block's next reset, whether the next byte is stretched, and when the
+/// recovery's clock went low.
+struct Wire {
+    held: Held,
+    next: Held,
+    stretch: bool,
+    low_ns: u64,
+}
+
+static mut WIRE: Wire = Wire { held: Held::No, next: Held::No, stretch: false, low_ns: 0 };
+
+fn wire() -> &'static mut Wire {
+    unsafe { &mut *addr_of_mut!(WIRE) }
+}
+
+/// The clock held low in one byte by the doctored device, and the low time
+/// the specification's remedy asks of the recovery's clock.
+const STRETCH_NS: u64 = 25_000_000;
+const HOLD_NS: u64 = 35_000_000;
+
+#[allow(dead_code)]
+pub fn doctor(what: Doctor) {
+    let w = wire();
+    match what {
+        Doctor::Stretch => w.stretch = true,
+        Doctor::HeldClocks => w.next = Held::Clocks(3),
+        Doctor::HeldLong => w.next = Held::Long,
+        Doctor::HeldStuck => w.next = Held::Stuck,
+        Doctor::Free => {
+            w.held = Held::No;
+            w.next = Held::No;
+        }
+    }
+}
+
 pub fn pad_take(_pad: &Pad) {}
 
 pub fn i2c_sda_low(_d: &I2cBus) -> bool {
-    false
+    wire().held != Held::No
 }
 
-pub fn i2c_scl_pulse(_d: &I2cBus) {}
+pub fn i2c_scl_pulse(_d: &I2cBus) {
+    let w = wire();
+    if let Held::Clocks(n) = w.held {
+        w.held = if n > 1 { Held::Clocks(n - 1) } else { Held::No };
+    }
+}
+
+/// The recovery's long clock: released after less than the specification's
+/// 35 ms of low, it is refused; a device that resets on the clock held low
+/// lets the data line go at the release.
+pub fn i2c_scl_hold(_d: &I2cBus, low: bool) {
+    let w = wire();
+    if low {
+        w.low_ns = sched::now_ns();
+        return;
+    }
+    let held_ns = sched::now_ns() - w.low_ns;
+    assert!(held_ns >= HOLD_NS, "[bus model] the recovery's clock released after {} ns of low, under the 35 ms of the specification's remedy", held_ns);
+    if w.held == Held::Long {
+        w.held = Held::No;
+    }
+}
 
 pub fn i2c_stop(_d: &I2cBus) {}
 
@@ -278,9 +364,12 @@ fn i2c() -> &'static mut I2cModel {
 }
 
 impl I2cModel {
+    /// The next flag after the bytes' time -- and, once, after the clock the
+    /// doctored device holds low in that byte.
     fn schedule(&mut self, what: Pending, bytes: u64) {
+        let stretch = if core::mem::take(&mut wire().stretch) { STRETCH_NS } else { 0 };
         self.pending = what;
-        self.due_ns = sched::now_ns() + bytes * I2C_BYTE_NS;
+        self.due_ns = sched::now_ns() + bytes * I2C_BYTE_NS + stretch;
     }
 
     /// The message's end: a stop where the automatic end was asked, else
@@ -374,6 +463,11 @@ impl I2cModel {
                 }
                 if !pe {
                     self.clear_all();
+                    let w = wire();
+                    if self.pe && w.next != Held::No {
+                        w.held = w.next;
+                        w.next = Held::No;
+                    }
                 }
                 self.pe = pe;
             }

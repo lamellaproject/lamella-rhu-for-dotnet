@@ -1,7 +1,7 @@
 /* The shim gate's tenant: a C program hosted exactly like a managed
  * payload (the payload board map, the kernel's managed entry sequence,
  * the machine's exit code), exercising the shim's C-runtime surface and
- * the PAL from the caller's side. Seven ladders, one per build:
+ * the PAL from the caller's side. Eight ladders, one per build:
  *
  *   RHU_SHIMTEST_LADDER_CORE        the glibc personality and the PAL's
  *                                   threading, memory, time and random verbs
@@ -20,6 +20,9 @@
  *                                   before managed code, in the host's own
  *                                   entry: its order, the module handle,
  *                                   the table by the runtime's export names
+ *   RHU_SHIMTEST_LADDER_FROZEN      the frozen object heap on a small board's
+ *                                   row: a pool smaller than the runtime's
+ *                                   commit, and what memory backs it
  *
  * Every check prints one PASS line; the first failed check prints one
  * FAIL line and ends the run with exit 1. Workers never print, no line
@@ -36,8 +39,10 @@
  * base (the descriptor ladder refuses it), name a foreign process in the
  * activation's signal information, fill the context's program counter
  * from the link register (the activation ladder refuses both), drop the
- * offset from a thread-local access, and hand every thread the first
- * block seen (the thread-local ladder refuses both). */
+ * offset from a thread-local access, hand every thread the first block
+ * seen (the thread-local ladder refuses both), and answer every page of
+ * the frozen object heap's reservation as backed (the frozen ladder
+ * refuses it). */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -56,8 +61,8 @@
 #if !defined(RHU_SHIMTEST_LADDER_CORE) && !defined(RHU_SHIMTEST_LADDER_FDMAP) \
     && !defined(RHU_SHIMTEST_LADDER_ACTIVATION) && !defined(RHU_SHIMTEST_LADDER_TLS) \
     && !defined(RHU_SHIMTEST_LADDER_HOST) && !defined(RHU_SHIMTEST_LADDER_BUSDEV) \
-    && !defined(RHU_SHIMTEST_LADDER_GPIOD)
-#error "a tenant build names its ladder (RHU_SHIMTEST_LADDER_CORE, RHU_SHIMTEST_LADDER_FDMAP, RHU_SHIMTEST_LADDER_ACTIVATION, RHU_SHIMTEST_LADDER_TLS, RHU_SHIMTEST_LADDER_HOST, RHU_SHIMTEST_LADDER_BUSDEV or RHU_SHIMTEST_LADDER_GPIOD)"
+    && !defined(RHU_SHIMTEST_LADDER_GPIOD) && !defined(RHU_SHIMTEST_LADDER_FROZEN)
+#error "a tenant build names its ladder (RHU_SHIMTEST_LADDER_CORE, RHU_SHIMTEST_LADDER_FDMAP, RHU_SHIMTEST_LADDER_ACTIVATION, RHU_SHIMTEST_LADDER_TLS, RHU_SHIMTEST_LADDER_HOST, RHU_SHIMTEST_LADDER_BUSDEV, RHU_SHIMTEST_LADDER_GPIOD or RHU_SHIMTEST_LADDER_FROZEN)"
 #endif
 
 /* --- the C-runtime surface, declared as the caller sees it --- */
@@ -77,6 +82,7 @@ unsigned long getauxval(unsigned long type);
 char *realpath(const char *path, char *resolved);
 char *getenv(const char *name);
 void *mmap64(void *addr, size_t len, int prot, int flags, int fd, int64_t off);
+int mincore(void *addr, size_t length, unsigned char *vec);
 long sysconf(int name);
 int getpid(void);
 long syscall(long number, ...);
@@ -209,6 +215,29 @@ static int fail(const char *name, const char *detail)
     } while (0)
 #else
 #define SCHECK(cond, name, detail) CHECK(cond, name, detail)
+#endif
+
+#if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_FROZEN)
+/* The runtime's hard-limit row as a number: "0x" and hexadecimal digits,
+ * nothing else. A row that is absent or malformed reads as all ones, a
+ * value no board's memory reaches. */
+static uint32_t hard_limit_row(void)
+{
+    const char *v = getenv("DOTNET_GCHeapHardLimit");
+    if (v == NULL || v[0] != '0' || v[1] != 'x' || v[2] == 0)
+        return 0xFFFFFFFFu;
+    uint32_t n = 0;
+    for (v += 2; *v != 0; v++) {
+        uint32_t d = *v >= '0' && *v <= '9'   ? (uint32_t)(*v - '0')
+                     : *v >= 'a' && *v <= 'f' ? (uint32_t)(*v - 'a') + 10u
+                     : *v >= 'A' && *v <= 'F' ? (uint32_t)(*v - 'A') + 10u
+                                              : 16u;
+        if (d == 16u || n > 0x0FFFFFFFu)
+            return 0xFFFFFFFFu;
+        n = n * 16u + d;
+    }
+    return n;
+}
 #endif
 
 /* Named positively: only the ladders that measure elapsed time carry
@@ -568,6 +597,9 @@ static int core_ladder(void)
 {
     uint32_t t1;
     uint32_t t2;
+    /* The system memory free before the shim initializes: the environment
+     * check reads the runtime's hard-limit row against it. */
+    uint32_t free_at_start = rhu_arena_headroom();
 
     out("shimtest: the glibc personality and the PAL on the kernel's hosting API");
 
@@ -753,7 +785,14 @@ static int core_ladder(void)
         CHECK(SystemNative_MProtect(base + 64u * 1024u, 64u * 1024u, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOMEM, "shim-foh", "(a commit beyond the pool was not refused)");
         CHECK(SystemNative_MMap(NULL, 4u * 1024u * 1024u, RHU_PAL_PROT_NONE, RHU_PAL_MAP_PRIVATE | RHU_PAL_MAP_ANONYMOUS, -1, 0) == NULL, "shim-foh", "(a second reservation was not refused)");
         CHECK(SystemNative_MUnmap(base, 4u * 1024u * 1024u) == 0, "shim-foh", "(the release was refused)");
-        pass("shim-foh", " (the reservation served from the row's pool; a commit beyond it refused; a second reservation NULL)");
+        /* what memory backs the reservation: the row's pool of 64 KB, sixteen pages, and nothing past it */
+        unsigned char backed[17];
+        int pool_backed = 1;
+        CHECK(mincore(base, 68u * 1024u, backed) == 0, "shim-foh", "(the question of what memory backs the reservation was refused)");
+        for (int i = 0; i < 16; i++)
+            pool_backed &= backed[i] == 1;
+        CHECK(pool_backed && backed[16] == 0, "shim-foh", "(the pool's pages are not answered as backed, or the page past the pool is)");
+        pass("shim-foh", " (the reservation served from the row's pool; a commit beyond it refused; a second reservation NULL; the pool's pages answered as backed, the page past it not)");
     }
 
     /* time */
@@ -975,10 +1014,12 @@ static int core_ladder(void)
         CHECK(v != NULL && strcmp(v, "0") == 0, "shim-env", "(gcConcurrent)");
         v = getenv("HOME");
         CHECK(v != NULL && strcmp(v, "/tmp") == 0, "shim-env", "(HOME)");
-        v = getenv("DOTNET_GCHeapHardLimit");
-        CHECK(v != NULL && strcmp(v, "0x200000") == 0, "shim-env", "(the hard limit is not the row's region)");
+        /* The hard limit is the system memory free at initialization less
+         * what the row keeps for later draws, in whole pages: on this row
+         * the frozen object heap's 64 KB and 64 KB left unallocated. */
+        CHECK(hard_limit_row() == ((free_at_start - 131072u) & ~4095u), "shim-env", "(the hard limit is not the system memory free at the start less what the row keeps)");
         CHECK(getenv("NO_SUCH_ROW") == NULL, "shim-env", "(a missing row was answered)");
-        pass("shim-env", " (the four rows; the hard limit generated from the row; a miss NULL)");
+        pass("shim-env", " (the four rows; the hard limit is the system memory free at the start less what the row keeps; a miss NULL)");
     }
 
     /* the small identities */
@@ -2163,6 +2204,7 @@ static int32_t host_checks(int argc)
 #define BD_I2C_SLAVE 0x0703ul
 #define BD_I2C_FUNCS 0x0705ul
 #define BD_I2C_RDWR 0x0707ul
+#define BD_I2C_RATE 0x0740ul
 #define BD_SPI_WR_MODE 0x40016b01ul
 #define BD_SPI_RD_MODE 0x80016b01ul
 #define BD_SPI_WR_BITS 0x40016b03ul
@@ -2269,6 +2311,37 @@ static int busdev_ladder(void)
         CHECK(word[1] == 0xC0FFEE00u, "shim-busdev-funcs", "(the functionality request stored past its four-byte output)");
         CHECK(ioctl(fi, BD_I2C_FUNCS, NULL) == -1 && BD_ERRNO_IS(RHU_GERR_EFAULT), "shim-busdev-funcs", "(a NULL output was not refused EFAULT)");
         pass("shim-busdev-funcs", " (one four-byte word, the word after it untouched; NULL refused EFAULT)");
+    }
+    /* The one RHU request on the I2C node: the bus's rate for the program's
+     * run (the rate request). This row's emulated block serves 100 kHz alone (the
+     * generic timing arm's one pair), so the served rate is the default and
+     * the second-rate refusal -- EBUSY with the running rate read back -- is
+     * the bench's to prove, by the kernel's contract. The request on a fresh
+     * node of the same bus: the claim is the bus's, not the node's, and the
+     * transaction then runs through the first node. */
+    {
+        int fr = open(bd_name("/dev/i2c-", (uint32_t)i2c_bus, 0, 0), BD_O_RDWR);
+        CHECK(fr >= RHU_SHIM_FD_DEVICE_LO && fr != fi, "shim-busdev-rate", "(a second I2C node of the bus did not open apart)");
+        uint32_t hz = 0;
+        CHECK(ioctl(fr, BD_I2C_RATE, NULL) == -1 && BD_ERRNO_IS(RHU_GERR_EFAULT), "shim-busdev-rate", "(a NULL word was not refused EFAULT)");
+        CHECK(ioctl(fr, BD_I2C_RATE, &hz) == -1 && BD_ERRNO_IS(RHU_GERR_EINVAL), "shim-busdev-rate", "(a rate of 0 Hz was not refused EINVAL)");
+        int ft = open(bd_name("/dev/spidev", (uint32_t)spi_bus, 1, 0), BD_O_RDWR);
+        hz = 100000u;
+        CHECK(ft >= RHU_SHIM_FD_DEVICE_LO && ioctl(ft, BD_I2C_RATE, &hz) == -1 && BD_ERRNO_IS(RHU_GERR_ENOTTY) && close(ft) == 0, "shim-busdev-rate", "(the request on the SPI node was not refused ENOTTY)");
+        CHECK(ioctl(fr, BD_I2C_RATE, &hz) == 0 && hz == 100000u, "shim-busdev-rate", "(the served rate was not claimed with the rate read back)");
+        uint8_t reg = 0xD0;
+        uint8_t id = 0;
+        struct bd_i2c_msg two[2] = { { 0x76, 0, 1, &reg }, { 0x76, 1, 1, &id } };
+        struct bd_i2c_rdwr set = { two, 2 };
+        CHECK(ioctl(fi, BD_I2C_RDWR, &set) == 2 && id == 0x60, "shim-busdev-rate", "(a transaction on the claimed bus did not read the sensor's identity)");
+        hz = 100000u;
+        CHECK(ioctl(fr, BD_I2C_RATE, &hz) == 0 && hz == 100000u, "shim-busdev-rate", "(the same rate again did not answer 0)");
+        hz = 400000u;
+        CHECK(ioctl(fr, BD_I2C_RATE, &hz) == -1 && BD_ERRNO_IS(RHU_GERR_ENOTSUP) && hz == 400000u, "shim-busdev-rate", "(an unserved rate was not refused ENOTSUP with the word untouched)");
+        hz = 250000u;
+        CHECK(ioctl(fr, BD_I2C_RATE, &hz) == -1 && BD_ERRNO_IS(RHU_GERR_ENOTSUP) && hz == 250000u, "shim-busdev-rate", "(a rate outside the set was not refused ENOTSUP with the word untouched)");
+        CHECK(close(fr) == 0, "shim-busdev-rate", "(the second node's close refused)");
+        pass("shim-busdev-rate", " (the one RHU request on the I2C node: a served rate claims the bus for the run and reads back, the same rate again 0, an unserved rate ENOTSUP before the state with the word untouched, NULL EFAULT, 0 EINVAL, the SPI node ENOTTY; this row serves one rate, so a second served rate's EBUSY with the running rate read back is the bench's, by the kernel's contract)");
     }
     {
         uint8_t reg = 0xD0;
@@ -2671,6 +2744,95 @@ static int gpiod_ladder(void)
 
 #endif /* RHU_SHIMTEST_LADDER_GPIOD */
 
+#ifdef RHU_SHIMTEST_LADDER_FROZEN
+/* The frozen object heap on a small board's row, linked with that row's
+ * shim objects: a pool of 16 KB under the runtime's reservation of 4 MB
+ * and its commits of 64 KB, and a row that keeps 24 KB of system memory
+ * for later draws (the pool and 8 KB left unallocated). */
+#define FROZEN_POOL 16384u
+#define FROZEN_KEEP 24576u
+#define FROZEN_RESERVE (4u * 1024u * 1024u)
+#define FROZEN_COMMIT (64u * 1024u)
+#define FROZEN_RW (RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE)
+
+/* The answers for the first commit's span and the page after it: the
+ * pool's four pages backed, the thirteen pages past the pool not. Returns
+ * 0 when they are so, 1 when a page inside the pool is not backed, 2
+ * when a page past it is, 3 when the question was refused. */
+static int frozen_backing(uint8_t *base)
+{
+    unsigned char backed[17];
+    if (mincore(base, FROZEN_COMMIT + 4096u, backed) != 0)
+        return 3;
+    for (int i = 0; i < 4; i++)
+        if (backed[i] != 1)
+            return 1;
+    for (int i = 4; i < 17; i++)
+        if (backed[i] != 0)
+            return 2;
+    return 0;
+}
+
+static int frozen_ladder(void)
+{
+    uint32_t free_at_start = rhu_arena_headroom();
+
+    out("shimtest-frozen: the frozen object heap on a small board's pool");
+
+    CHECK(rhu_shim_init() == 0, "shim-frozen-init", "(initialization refused)");
+    CHECK(rhu_arena_headroom() == free_at_start, "shim-frozen-init", "(the initialization drew system memory)");
+    pass("shim-frozen-init", " (per-thread block registered; no system memory drawn)");
+
+    CHECK(hard_limit_row() == ((free_at_start - FROZEN_KEEP) & ~4095u), "shim-frozen-env", "(the hard limit is not the system memory free at the start less what the row keeps)");
+    pass("shim-frozen-env", " (the hard limit is the system memory free at the start less the 24 KB the row keeps)");
+
+    /* An ordinary mapping first: its page is memory, and it leaves the
+     * arena's next draw on a page boundary, so the reservation's cost
+     * below is exact. */
+    unsigned char one = 0;
+    uint8_t *plain = (uint8_t *)mmap64(NULL, 4096, 3, 0x22, -1, 0);
+    CHECK(plain != (uint8_t *)-1 && mincore(plain, 4096, &one) == 0 && one == 1, "shim-frozen-plain", "(an ordinary mapping's page is not answered as backed)");
+    pass("shim-frozen-plain", " (an ordinary mapping's page is answered as backed)");
+
+    uint32_t before = rhu_arena_headroom();
+    uint8_t *base = (uint8_t *)SystemNative_MMap(NULL, FROZEN_RESERVE, RHU_PAL_PROT_NONE, RHU_PAL_MAP_PRIVATE | RHU_PAL_MAP_ANONYMOUS, -1, 0);
+    CHECK(base != NULL, "shim-frozen-reserve", "(the reservation was refused)");
+    CHECK(before - rhu_arena_headroom() == FROZEN_POOL, "shim-frozen-reserve", "(the reservation did not draw exactly the row's pool)");
+    pass("shim-frozen-reserve", " (a reservation of 4 MB drew the row's pool of 16 KB and nothing more)");
+
+    int answer = frozen_backing(base);
+    CHECK(answer != 3, "shim-frozen-backing", "(the question of what memory backs the reservation was refused)");
+    CHECK(answer != 1, "shim-frozen-backing", "(a page inside the pool was not answered as backed)");
+    CHECK(answer != 2, "shim-frozen-backing", "(a page past the pool was answered as backed)");
+    pass("shim-frozen-backing", " (the pool's four pages answered as backed; the twelve past it in the first commit's span and the page after that span not)");
+
+    /* The runtime's first commit covers 64 KB from the base: it starts
+     * inside the pool and is accepted, and it backs nothing new. */
+    volatile uint8_t *pool = base;
+    CHECK(SystemNative_MProtect(base, FROZEN_COMMIT, FROZEN_RW) == 0, "shim-frozen-commit", "(the runtime's first commit, which starts inside the pool, was refused)");
+    CHECK(SystemNative_MProtect(base + 8192u, FROZEN_COMMIT, FROZEN_RW) == 0, "shim-frozen-commit", "(a commit that starts inside the pool off its base was refused)");
+    CHECK(frozen_backing(base) == 0, "shim-frozen-commit", "(a commit changed what memory backs the reservation)");
+    CHECK(pool[0] == 0 && pool[FROZEN_POOL - 1u] == 0, "shim-frozen-commit", "(the pool is not zero-born)");
+    pool[0] = 0x5A;
+    pool[FROZEN_POOL - 1u] = 0xA5;
+    CHECK(pool[0] == 0x5A && pool[FROZEN_POOL - 1u] == 0xA5, "shim-frozen-commit", "(the pool's first and last bytes do not hold what was written)");
+    pass("shim-frozen-commit", " (a commit that starts inside the pool accepted; the answers unchanged; the pool's first and last bytes hold what is written)");
+
+    CHECK(SystemNative_MProtect(base + FROZEN_POOL, FROZEN_COMMIT, FROZEN_RW) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOMEM, "shim-frozen-refusals", "(a commit that starts at the pool's end was not refused)");
+    CHECK(SystemNative_MProtect(base + FROZEN_COMMIT, FROZEN_COMMIT, FROZEN_RW) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOMEM, "shim-frozen-refusals", "(the runtime's second commit was not refused)");
+    CHECK(SystemNative_MMap(NULL, FROZEN_RESERVE, RHU_PAL_PROT_NONE, RHU_PAL_MAP_PRIVATE | RHU_PAL_MAP_ANONYMOUS, -1, 0) == NULL, "shim-frozen-refusals", "(a second reservation was not refused)");
+    CHECK(before - rhu_arena_headroom() == FROZEN_POOL, "shim-frozen-refusals", "(a refusal drew system memory)");
+    pass("shim-frozen-refusals", " (a commit that starts at or past the pool's end refused with no memory; a second reservation NULL; nothing more drawn)");
+
+    CHECK(mincore(base + 1, 4096, &one) == -1 && *__errno_location() == RHU_GERR_EINVAL, "shim-frozen-arguments", "(an address off a page boundary was answered)");
+    CHECK(mincore(base, 4096, NULL) == -1 && *__errno_location() == RHU_GERR_EFAULT, "shim-frozen-arguments", "(a missing answer was accepted)");
+    pass("shim-frozen-arguments", " (an address off a page boundary and a missing answer refused, each with its errno)");
+
+    out("SHIMTEST-FROZEN: ALL GOOD (the frozen object heap on a small board's pool)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_FROZEN */
+
 /* The managed entry, spelled as the runtime's own bootstrapper declares
  * it: the kernel's default entry calls it in every ladder but the host's,
  * where the host does. */
@@ -2695,6 +2857,9 @@ int __managed__Main(int argc, char *argv[])
 #elif defined(RHU_SHIMTEST_LADDER_GPIOD)
     (void)argc;
     return gpiod_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_FROZEN)
+    (void)argc;
+    return frozen_ladder();
 #else
     return host_checks(argc);
 #endif

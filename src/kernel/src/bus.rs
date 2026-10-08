@@ -14,8 +14,12 @@
 //! scheduler's futex by a thread that finds it held, released with a wake.
 //! Nothing of a transaction runs under the kernel critical section (the
 //! claims' few instructions are the only section, as every claim's); every
-//! wait on the wire is a poll against a budget from the bit rate, yielding
-//! between polls, and a budget passed resets the block.
+//! wait on the wire is a poll against a budget, yielding between polls, and
+//! a budget passed resets the block. An I2C wait's budget is the wire time
+//! of two bytes plus the 25 ms the SMBus specification lets a device hold
+//! the clock low; after an I2C budget the data line is read, and a device
+//! left holding it low is given up to nine clocks and a stop before the
+//! call returns.
 
 #![cfg_attr(not(rhu_bus_rows), allow(dead_code))]
 
@@ -36,8 +40,10 @@ const _: () = assert!(m::i2c_numbers_unique(facts::I2C_BUSES) && m::spi_numbers_
 const _: () = assert!(m::spi_selects_sound(facts::SPI_BUSES), "a bus offers more than eight selects, or its select list is neither empty nor as long as its count");
 const _: () = assert!(core::mem::size_of::<m::I2cMsg>() == 12, "the I2C message record is twelve bytes");
 
-/// Per bus: the claimed flag, and the tenancy word (0 free, 1 held) that is
-/// a futex word; per SPI bus the chip selects already claimed, one bit each.
+/// Per bus: the claimed mode plus one (0 free; 1 standard, 2 fast, 3 fast
+/// mode plus -- the rate's index in `I2C_RATES_HZ` plus one; an SPI bus 1),
+/// and the tenancy word (0 free, 1 held) that is a futex word; per SPI bus
+/// the chip selects already claimed, one bit each.
 static I2C_CLAIMED: [AtomicU8; NI] = [const { AtomicU8::new(0) }; NI];
 static I2C_TENANCY: [AtomicU32; NI] = [const { AtomicU32::new(0) }; NI];
 static SPI_CLAIMED: [AtomicU8; NS] = [const { AtomicU8::new(0) }; NS];
@@ -144,11 +150,24 @@ pub fn spi_bus(index: u32) -> i32 {
 }
 
 /// What a driver reports back beside its code: the message and byte the
-/// refusal names, and the fault's kind for the kernel's line.
+/// refusal names, the fault's kind for the kernel's line, and what the
+/// recovery after an I2C budget found.
 pub struct Outcome {
     pub message: u32,
     pub byte: u32,
     pub kind: Fault,
+    pub recovery: Recovery,
+}
+
+/// What a recovery of an I2C bus found: the data line free; a device holding
+/// it low and clocked free; held through nine clocks and freed by the clock
+/// held low; still held when the recovery ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Recovery {
+    None,
+    Clocked,
+    Held,
+    Stuck,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -164,10 +183,10 @@ pub enum Fault {
 /// first `spin_ns` (about two byte times: a byte in flight arrives sooner
 /// than a context switch costs), then yielding between reads so the core
 /// stays available while a stuck wire is awaited; false when THIS WAIT's
-/// budget (twice a byte's time plus two ticks, never fewer than three: a
-/// stuck wire fails within milliseconds wherever it sticks) or the caller's
-/// deadline passes first. A slow poller never runs out of budget by its own
-/// pace: each wait's budget is its own.
+/// budget (the caller's: on I2C two bytes' wire time plus the 25 ms a device
+/// may hold the clock low, on SPI twice a byte's time plus two ticks) or the
+/// caller's deadline passes first. A slow poller never runs out of budget by
+/// its own pace: each wait's budget is its own.
 pub fn wait_until(budget_ticks: u32, deadline_ns: u64, spin_ns: u64, mut cond: impl FnMut() -> bool) -> bool {
     let start_ms = sched::now_ms();
     let t0 = sched::now_ns();
@@ -255,19 +274,57 @@ mod served {
         any
     };
 
+    /// An I2C bus recovered through its pads as plain lines, the block off
+    /// them: the data line read; low, up to nine clocks with a read after
+    /// each (a device left in the middle of a byte lets go within them), then
+    /// a stop. With `hold`, a line still low after the nine clocks gets the
+    /// SMBus specification's remedy once: the clock held low for its 35 ms
+    /// (a sleep: the bus's tenancy is held, the core is not), released, a
+    /// stop, and the line read once more. The caller hands the pads back.
+    pub fn i2c_recover(d: &m::I2cBus, hold: bool) -> Recovery {
+        if !hw::i2c_sda_low(d) {
+            return Recovery::None;
+        }
+        let mut free = false;
+        for _ in 0..9 {
+            hw::i2c_scl_pulse(d);
+            if !hw::i2c_sda_low(d) {
+                free = true;
+                break;
+            }
+        }
+        if free || !hold {
+            hw::i2c_stop(d);
+            return Recovery::Clocked;
+        }
+        hw::i2c_scl_hold(d, true);
+        sched::sleep_ns(m::I2C_CLOCK_HOLD_MS as u64 * 1_000_000);
+        hw::i2c_scl_hold(d, false);
+        hw::i2c_stop(d);
+        if hw::i2c_sda_low(d) {
+            Recovery::Stuck
+        } else {
+            Recovery::Held
+        }
+    }
+
     pub fn i2c_claim(bus: u32, hz: u32) -> i32 {
         let Some(ix) = m::i2c_index(facts::I2C_BUSES, bus) else {
             return refused(sched::ERR_NODEV, 0, 0);
         };
         let d = &facts::I2C_BUSES[ix];
-        let Some(timing) = m::i2c_timing(d.kernel_hz, hz) else {
+        let Some(timing) = i2c_driver::timing(d.kernel_hz, hz) else {
+            return refused(ERR_NOTSUP, 0, 0);
+        };
+        let Some(mode) = m::i2c_mode_index(hz) else {
             return refused(ERR_NOTSUP, 0, 0);
         };
         let word = &I2C_TENANCY[ix];
         let _ = tenancy_take(word, sched::DEADLINE_NONE);
-        if I2C_CLAIMED[ix].load(Ordering::Acquire) != 0 {
+        let held = I2C_CLAIMED[ix].load(Ordering::Acquire);
+        if held != 0 {
             tenancy_give(word);
-            return 0;
+            return if held == 1 + mode { 0 } else { refused(crate::claims::REFUSED_BUSY, 0, 0) };
         }
         let r = claim_lines(d.pads.iter().map(|p| p.line as u32));
         if r != 0 {
@@ -275,7 +332,7 @@ mod served {
             return refused(r, 0, 0);
         }
         let recovered = i2c_driver::claim(d, timing);
-        I2C_CLAIMED[ix].store(1, Ordering::Release);
+        I2C_CLAIMED[ix].store(1 + mode, Ordering::Release);
         tenancy_give(word);
         with_cs(|| unsafe {
             let w = witness();
@@ -298,18 +355,23 @@ mod served {
             return refused(sched::ERR_INVAL, 0, 0);
         }
         let msgs = unsafe { core::slice::from_raw_parts(msgs, count as usize) };
-        if m::i2c_msgs_check(msgs) != 0 || I2C_CLAIMED[ix].load(Ordering::Acquire) == 0 {
+        let held = I2C_CLAIMED[ix].load(Ordering::Acquire);
+        if m::i2c_msgs_check(msgs) != 0 || held == 0 {
             return refused(sched::ERR_INVAL, 0, 0);
         }
         let d = &facts::I2C_BUSES[ix];
-        let budget = m::budget_ticks(1, m::I2C_BITS_PER_BYTE, 100_000, crate::board::TICK_HZ);
+        let hz = match m::I2C_RATES_HZ.get(held as usize - 1) {
+            Some(&hz) => hz,
+            None => m::I2C_RATES_HZ[0],
+        };
+        let budget = m::i2c_wait_ticks(100_000, crate::board::TICK_HZ);
         let word = &I2C_TENANCY[ix];
         let waited = match tenancy_take(word, deadline_ns) {
             Ok(w) => w,
             Err(code) => return refused(code, 0, 0),
         };
-        let mut out = Outcome { message: 0, byte: 0, kind: Fault::None };
-        let r = i2c_driver::transfer(d, msgs, budget, deadline_ns, &mut out);
+        let mut out = Outcome { message: 0, byte: 0, kind: Fault::None, recovery: Recovery::None };
+        let r = i2c_driver::transfer(d, msgs, hz, budget, deadline_ns, &mut out);
         tenancy_give(word);
         with_cs(|| unsafe {
             let w = witness();
@@ -323,6 +385,9 @@ mod served {
             if out.kind == Fault::Budget {
                 bump(addr_of_mut!((*w).resets), 1);
             }
+            if matches!(out.recovery, Recovery::Clocked | Recovery::Held) {
+                bump(addr_of_mut!((*w).recoveries), 1);
+            }
         });
         match out.kind {
             Fault::DataNack => kprintln!("[bus] i2c {}: a data byte not acknowledged at message {} byte {}", bus, out.message, out.byte),
@@ -330,6 +395,12 @@ mod served {
             Fault::ArbitrationLost => kprintln!("[bus] i2c {}: arbitration lost at message {}", bus, out.message),
             Fault::Budget => kprintln!("[bus] i2c {}: the wire wait passed its budget at message {}; the block reset", bus, out.message),
             Fault::None => {}
+        }
+        match out.recovery {
+            Recovery::Clocked => kprintln!("[bus] i2c {}: the bus recovered after the timeout (a device held the data line low; clocked free, then a stop)", bus),
+            Recovery::Held => kprintln!("[bus] i2c {}: the bus recovered after the timeout (a device held the data line low through nine clocks; the clock held low 35 ms, then a stop)", bus),
+            Recovery::Stuck => kprintln!("[bus] i2c {}: the data line is still held low after the timeout's recovery (nine clocks, the clock held low 35 ms, a stop); while it stays so, every transfer on this bus fails", bus),
+            Recovery::None => {}
         }
         if r != 0 {
             return refused(r, out.message, out.byte);
@@ -371,7 +442,7 @@ mod served {
         let Some((cpol, cpha)) = m::mode_bits(mode) else {
             return refused(sched::ERR_INVAL, 0, 0);
         };
-        let Some((divisor, achieved)) = m::spi_divisor(d.kernel_hz, hz) else {
+        let Some((divisor, achieved)) = spi_driver::divisor(d.kernel_hz, hz) else {
             return refused(sched::ERR_INVAL, 0, 0);
         };
         let sel = match m::select_class(select, d.select_count) {
@@ -402,7 +473,7 @@ mod served {
         }
         let tx = if tx.is_null() { None } else { Some(unsafe { core::slice::from_raw_parts(tx, len as usize) }) };
         let rx = if rx.is_null() { None } else { Some(unsafe { core::slice::from_raw_parts_mut(rx, len as usize) }) };
-        let mut out = Outcome { message: 0, byte: 0, kind: Fault::None };
+        let mut out = Outcome { message: 0, byte: 0, kind: Fault::None, recovery: Recovery::None };
         let r = spi_driver::transfer(d, sel, cpol, cpha, divisor, tx, rx, len, budget, &mut out);
         tenancy_give(word);
         with_cs(|| unsafe {
@@ -433,7 +504,7 @@ mod served {
 }
 
 #[cfg(rhu_bus_rows)]
-pub use served::{i2c_claim, i2c_transfer, spi_claim, spi_transfer};
+pub use served::{i2c_claim, i2c_recover, i2c_transfer, spi_claim, spi_transfer};
 
 
 #[cfg(not(rhu_bus_rows))]

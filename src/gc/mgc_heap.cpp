@@ -181,10 +181,30 @@ static void heap_failfast(const char* what)
 /* knobs                                                              */
 /* ------------------------------------------------------------------ */
 
-#ifndef MGC_HEAP_BYTES          /* region size: large enough for a real
-                                 * payload's allocations, small enough to
-                                 * hit a wall inside the 16 MB PSRAM budget */
-#define MGC_HEAP_BYTES (8u * 1024u * 1024u)
+/* The managed heap's size: exactly one of two knobs.
+ *  MGC_HEAP_BYTES    a compiled size (the gate's ladder worlds: the
+ *                    collector's mechanics on a fixed world).
+ *  MGC_HEAP_AT_BOOT  a board row: the size is read at boot from the
+ *                    system memory still free, less what the row keeps
+ *                    for later draws (MGC_HEAP_KEEP_BYTES: the frozen
+ *                    object heap and the row's unallocated amount) and
+ *                    less the collector tables for that size. A heap
+ *                    under MGC_HEAP_MIN_GUARANTEED_BYTES (the least the
+ *                    board guarantees a program) is refused at boot,
+ *                    loudly; the heap is never trimmed to fit. */
+#if defined(MGC_HEAP_BYTES) == defined(MGC_HEAP_AT_BOOT)
+#error "the managed heap takes exactly one of MGC_HEAP_BYTES (a compiled size) and MGC_HEAP_AT_BOOT (sized at boot)"
+#endif
+#ifdef MGC_HEAP_AT_BOOT
+#if !defined(MGC_HEAP_KEEP_BYTES) || !defined(MGC_HEAP_MIN_GUARANTEED_BYTES)
+#error "MGC_HEAP_AT_BOOT needs MGC_HEAP_KEEP_BYTES and MGC_HEAP_MIN_GUARANTEED_BYTES (the row's two numbers)"
+#endif
+#if defined(MGC_COMPACT) || defined(MGC_MULTIRANGE)
+#error "the compacting and two-range postures size static tables from MGC_HEAP_BYTES: they never ride a heap sized at boot"
+#endif
+#define HEAP_BYTES g_heap_bytes     /* set once in mgc_heap_init */
+#else
+#define HEAP_BYTES MGC_HEAP_BYTES
 #endif
 
 #ifndef MGC_FINQ_CAP            /* finalize-registration list capacity */
@@ -227,6 +247,12 @@ static void heap_failfast(const char* what)
                                  * LOUD boot failfast, never a silent
                                  * out-of-buffer card write. */
 #define MGC_ARENA_COVER_BYTES (16u * 1024u * 1024u)
+#endif
+#ifdef MGC_HEAP_AT_BOOT
+static_assert(MGC_OOM_RESERVE < MGC_HEAP_MIN_GUARANTEED_BYTES,
+              "the out-of-memory reserve lives inside the least managed heap the board guarantees");
+static_assert((MGC_HEAP_KEEP_BYTES & 4095u) == 0u,
+              "what the row keeps is whole pages");
 #endif
 static_assert((MGC_ARENA_COVER_BYTES & (MGC_ARENA_COVER_BYTES - 1u)) == 0u,
               "MGC_ARENA_COVER_BYTES must be a power of two (floor mask)");
@@ -324,6 +350,10 @@ static uint32_t g_finq_n, g_finq_lost;
 #define FQ_FREACH      2u   /* dead, finalizer pending (normal) */
 #define FQ_FREACH_CRIT 3u   /* dead, critical finalizer -- drained after
                              * ALL normal ones (the runtime's guarantee) */
+#define FQ_HELD        4u   /* taken by a finalizable request that has no
+                             * memory yet: no object, and skipped by every
+                             * scan (they act on registered and pending
+                             * slots only) */
 static uint8_t  g_finq_state[MGC_FINQ_CAP];
 static uint32_t g_finq_live;        /* REG slots */
 static uint32_t g_freach_n, g_freach_crit_n;
@@ -418,6 +448,63 @@ static int      g_win_state;    /* 0=not handed 1=handed 2=verdict logged */
 /* init + stomp                                                       */
 /* ------------------------------------------------------------------ */
 
+#ifdef MGC_HEAP_AT_BOOT
+/* The C library's own questions for the page size and the pages still
+ * free; the shim answers both from the kernel's system memory, so
+ * nothing RHU-named enters the collector. */
+extern "C" long sysconf(int name);
+#define GLIBC_SC_PAGESIZE     30
+#define GLIBC_SC_AVPHYS_PAGES 86
+extern "C" uint32_t mgc_collect_tables_bytes(uint32_t heap_bytes,
+                                             uint32_t page_bytes);
+static uint32_t g_heap_bytes;
+
+/* The rule at boot: the managed heap is the largest whole number of
+ * pages that fits beside the collector tables for that size and what
+ * the row keeps for later draws, so no system memory is left
+ * unassigned (one page may stay over where one more heap page would
+ * need one more table page). Two refusals, both loud: no room at all,
+ * and a heap under the least the board guarantees. */
+static uint32_t heap_size_at_boot(void)
+{
+    long page_l  = sysconf(GLIBC_SC_PAGESIZE);
+    long avail_l = sysconf(GLIBC_SC_AVPHYS_PAGES);
+    if (page_l <= 0 || avail_l < 0)
+        heap_failfast("the C library did not answer the page size and the free pages (sysconf)");
+    uint32_t page   = (uint32_t)page_l;
+    uint32_t free_b = (uint32_t)avail_l * page;
+    uint32_t keep   = MGC_HEAP_KEEP_BYTES;
+    uint32_t h = 0, tables = 0;
+    if (free_b > keep) {
+        uint32_t room = free_b - keep;
+        for (h = room / page * page; h; h -= page) {
+            tables = mgc_collect_tables_bytes(h, page);
+            if (tables <= room && h <= room - tables)
+                break;
+        }
+    }
+#ifdef MGC_BREAK_BOOT_LESS
+    HPLOG("BREAK_BOOT_LESS: the managed heap takes one page less than the rule gives (the negative control)");
+    if (h > page) h -= page;
+#endif
+#ifdef MGC_BREAK_BOOT_MORE
+    HPLOG("BREAK_BOOT_MORE: the managed heap takes one page more than the rule gives (the negative control)");
+    h += page;
+#endif
+    HPLOG("managed heap sized at boot: system memory free %lu B, kept for later draws %lu B, collector tables %lu B, managed heap %lu B",
+          (unsigned long)free_b, (unsigned long)keep,
+          (unsigned long)tables, (unsigned long)h);
+    if (!h)
+        heap_failfast("no room for a managed heap (the free system memory is at or under what the row keeps and the collector tables need)");
+    if (h < MGC_HEAP_MIN_GUARANTEED_BYTES) {
+        HPLOG("the managed heap would be %lu B, under the %lu B this board guarantees a program",
+              (unsigned long)h, (unsigned long)MGC_HEAP_MIN_GUARANTEED_BYTES);
+        heap_failfast("managed heap under the board's guaranteed least");
+    }
+    return h;
+}
+#endif /* MGC_HEAP_AT_BOOT */
+
 extern "C" void mgc_heap_init(void)
 {
     if (g_region)
@@ -438,21 +525,33 @@ extern "C" void mgc_heap_init(void)
                      MGC_HEAP_BYTES + MGC_RANGE_GAP_BYTES + MGC_HEAP2_BYTES,
                      GLIBC_PROT_RW, GLIBC_MAP_ANON_PRIV, -1, 0);
 #else
-    void* p = mmap64(nullptr, MGC_HEAP_BYTES, GLIBC_PROT_RW,
+#ifdef MGC_HEAP_AT_BOOT
+    g_heap_bytes = heap_size_at_boot();
+#endif
+    void* p = mmap64(nullptr, HEAP_BYTES, GLIBC_PROT_RW,
                      GLIBC_MAP_ANON_PRIV, -1, 0);
 #endif
     if (p == (void*)-1 || p == nullptr)
         heap_failfast("region mmap failed (see the arena audit above)");
 
     g_region     = (uint8_t*)p;
-    g_region_end = g_region + MGC_HEAP_BYTES;
+    g_region_end = g_region + HEAP_BYTES;
     g_ptr        = g_region + 4; /* plug skew: first object's -4 header
                                   * slot lives at region+0 */
     g_free_mt    = GCToEEInterface::GetFreeObjectMethodTable();
 
     HPLOG("region [%p,%p) %lu KB via shim mmap (pre-zeroed, plug skew +4, free MT=%p)",
           (void*)g_region, (void*)g_region_end,
-          (unsigned long)(MGC_HEAP_BYTES / 1024u), (void*)g_free_mt);
+          (unsigned long)(HEAP_BYTES / 1024u), (void*)g_free_mt);
+#ifdef MGC_BREAK_ALLOC_BOUND
+    HPLOG("BREAK_ALLOC_BOUND: the bound before the fit is compiled out (the negative control)");
+#endif
+#ifdef MGC_BREAK_FINALIZE_FULL
+    HPLOG("BREAK_FINALIZE_FULL: a finalizable request takes no slot before its memory and a full table is ignored (the negative control)");
+#endif
+#ifdef MGC_BREAK_WINDOW_KEEP
+    HPLOG("BREAK_WINDOW_KEEP: every slow call retires the thread's window (the negative control)");
+#endif
 
 #if defined(MGC_MULTIRANGE) && defined(MGC_HEAP2_BASE)
 #ifdef MGC_HEAP2_CLKEN
@@ -655,7 +754,7 @@ extern "C" void mgc_heap_census(const char* why)
     HPLOG("region [%p,%p) used %lu of %lu KB (ptr=%p stomped=%d oom=%d)",
           (void*)g_region, (void*)g_region_end,
           (unsigned long)((uint32_t)(g_ptr - g_region) / 1024u),
-          (unsigned long)(MGC_HEAP_BYTES / 1024u), (void*)g_ptr,
+          (unsigned long)(HEAP_BYTES / 1024u), (void*)g_ptr,
           g_stomped, g_oom);
 #ifdef MGC_MULTIRANGE
     HPLOG("range 1 [%p,%p) used %lu of %lu KB (ptr=%p); gap [%p,%p) untabled",
@@ -810,6 +909,87 @@ static int finq_append_unlocked(Object* obj, size_t size)
 }
 
 #ifdef MGC_SWEEP_LIVE
+#ifndef MGC_FINQ_DRAIN_YIELDS   /* the most yields a full finalization
+                                 * table waits on the finalizer thread */
+#define MGC_FINQ_DRAIN_YIELDS 1024u
+#endif
+extern "C" uint32_t mgc_freach_count(void);
+
+/* A finalizable request takes its slot BEFORE its memory, so no object
+ * is ever handed out unregistered. Lock-free like the append: FREE ->
+ * HELD by CAS; the slot carries no object until finq_commit. */
+static int32_t finq_hold(void)
+{
+    uint32_t rover = __atomic_load_n(&g_finq_rover, __ATOMIC_RELAXED);
+    for (uint32_t k = 0; k < MGC_FINQ_CAP; k++) {
+        uint32_t i = (rover + k) % MGC_FINQ_CAP;
+        uint8_t expect = FQ_FREE;
+        if (__atomic_compare_exchange_n(&g_finq_state[i], &expect,
+                                        (uint8_t)FQ_HELD, false,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            return (int32_t)i;
+    }
+    return -1;
+}
+
+/* A held slot given back: the request's memory was not found. */
+static void finq_release(int32_t slot)
+{
+    __atomic_store_n(&g_finq_state[(uint32_t)slot], (uint8_t)FQ_FREE,
+                     __ATOMIC_RELEASE);
+}
+
+/* The held slot receives its object: HELD -> REG, the same books and
+ * the same line as an append. */
+static void finq_commit(int32_t slot, Object* obj, size_t size)
+{
+    uint32_t i = (uint32_t)slot;
+    g_finq[i] = obj;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&g_finq_state[i], (uint8_t)FQ_REG, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&g_finq_live, 1u, __ATOMIC_RELAXED);
+    uint32_t total = __atomic_add_fetch(&g_finq_reg_total, 1u,
+                                        __ATOMIC_RELAXED);
+    __atomic_store_n(&g_finq_rover, (i + 1) % MGC_FINQ_CAP,
+                     __ATOMIC_RELAXED);
+    if (i >= g_finq_n) g_finq_n = i + 1;   /* census high-water */
+    if (total <= 4 || (total & 63u) == 0)
+        HPLOG("finalizable #%lu registered: obj=%p size=%lu (slot %lu)",
+              (unsigned long)total, (void*)obj,
+              (unsigned long)size, (unsigned long)i);
+}
+
+static bool finq_has_free(void)
+{
+    for (uint32_t i = 0; i < MGC_FINQ_CAP; i++)
+        if (__atomic_load_n(&g_finq_state[i], __ATOMIC_RELAXED) == FQ_FREE)
+            return true;
+    return false;
+}
+
+/* After the collection a full table made: a dead finalizable object's
+ * slot is freed only when the finalizer thread takes the object. While
+ * such objects are pending and no slot is free, give the processor away
+ * the allocator's own way (preemptive, so a suspension never waits on
+ * this thread; the caller holds no lock), a bounded number of times.
+ * The wait rests on every hosted thread running at one priority, round
+ * robin: a yield reaches the finalizer thread. A later change that maps managed
+ * priorities into the band meets this wait here -- a requester that
+ * outranks the finalizer thread would exhaust its yields and be
+ * refused. The finalizer thread itself, asking while every slot is
+ * pending, cannot be helped by the wait (it is the thread the wait is
+ * for): it meets the refusal after the yields. */
+static void finq_wait_drain(void)
+{
+    GCToEEInterface::EnablePreemptiveGC();
+    for (uint32_t n = 0; n < MGC_FINQ_DRAIN_YIELDS; n++) {
+        if (mgc_freach_count() == 0 || finq_has_free())
+            break;
+        sched_yield();
+    }
+    GCToEEInterface::DisablePreemptiveGC();
+}
+
 /* skeleton's RegisterForFinalization (ReRegisterForFinalize path) --
  * lock-free, see finq_append_unlocked */
 extern "C" int mgc_finq_append(Object* obj)
@@ -941,11 +1121,18 @@ extern "C" void mgc_heap_free_done(uint32_t live_objs)
     if (g_sweep_pads)
         HPLOG("sweep pads: %lu (dead spaces of 12 bytes left unlinked: walkable, unusable until the next sweep coalesces them)",
               (unsigned long)g_sweep_pads);
-    /* grace closes when the heap again has a reserve's worth of slack */
-    if (g_grace && g_free_bytes >= MGC_OOM_RESERVE) {
+    /* grace closes when the heap again has a reserve's worth of slack:
+     * the free runs, and the untouched tail below the reserve (a dead
+     * run at the top rejoins the tail, not the list) */
+    uint32_t slack = g_free_bytes;
+#ifndef MGC_MULTIRANGE
+    if ((uint32_t)(g_region_end - g_ptr) > MGC_OOM_RESERVE)
+        slack += (uint32_t)(g_region_end - g_ptr) - MGC_OOM_RESERVE;
+#endif
+    if (g_grace && slack >= MGC_OOM_RESERVE) {
         g_grace = 0;
         HPLOG("grace CLOSED: sweep recovered %lu KB free (reserve %lu KB)",
-              (unsigned long)(g_free_bytes / 1024u),
+              (unsigned long)(slack / 1024u),
               (unsigned long)(MGC_OOM_RESERVE / 1024u));
     }
 }
@@ -964,11 +1151,16 @@ extern "C" uint32_t mgc_heap_live_bytes(void)
     return bump - g_free_bytes;
 }
 
+/* The sweep's surface for a dead run at the top of the used part: the
+ * collector zeroes the run and sets the bump mark back to its start, so
+ * the bytes rejoin the untouched tail (world stopped; every thread's
+ * window was retired before the sweep). */
+extern "C" void         mgc_heap_bump_set(uint8_t* p)  { g_ptr = p; }
+
 #ifdef MGC_COMPACT
 /* Compaction surface: the compactor (mgc_collect.cpp) resets the bump and
  * fixes finq slots after a slide; all callers run STW. */
 extern "C" uint8_t*     mgc_heap_bump(void)            { return g_ptr; }
-extern "C" void         mgc_heap_bump_set(uint8_t* p)  { g_ptr = p; }
 extern "C" MethodTable* mgc_heap_freemt(void)          { return g_free_mt; }
 extern "C" void         mgc_finq_fix(uint32_t i, Object* o) { g_finq[i] = o; }
 
@@ -1312,6 +1504,42 @@ extern "C" void mgc_heap_window_fix(gc_alloc_context* acontext)
 #endif /* MGC_TUNE_LIVE */
 #endif /* MGC_SWEEP_LIVE */
 
+#ifdef MGC_SWEEP_LIVE
+/* The managed heap's whole size (the bound a request is held to). */
+static size_t heap_total_bytes(void)
+{
+#ifdef MGC_MULTIRANGE
+    return (size_t)(g_region_end - g_region) + (size_t)(g_r1_end - g_r1);
+#else
+    return (size_t)(g_region_end - g_region);
+#endif
+}
+
+/* The out-of-memory report (the managed protocol): NULL to the runtime,
+ * the reserve opened for the exception's own allocations. Called with
+ * the alloc lock held; releases it. */
+static void* oom_report_locked(size_t size, uint32_t flags)
+{
+    g_oom_reports++;
+    g_null_returns++;
+    if (!g_grace) {
+        g_grace = 1;
+        HPLOG("OOM at alloc #%lu: size=%lu flags=0x%lx -> NULL (managed protocol); headroom reserve OPEN (%lu KB) for exception dispatch",
+              (unsigned long)(g_allocs + 1), (unsigned long)size,
+              (unsigned long)flags,
+              (unsigned long)(MGC_OOM_RESERVE / 1024u));
+    } else if (g_oom_reports <= 6 || (g_oom_reports & 31u) == 0) {
+        HPLOG("OOM at alloc #%lu: size=%lu -> NULL (grace already open, report #%lu)",
+              (unsigned long)(g_allocs + 1), (unsigned long)size,
+              (unsigned long)g_oom_reports);
+    }
+    if (g_oom_reports == 1)
+        mgc_heap_census("first OOM report");
+    alloc_lock_release();
+    return nullptr;
+}
+#endif /* MGC_SWEEP_LIVE */
+
 extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
                                 uint32_t flags)
 {
@@ -1397,13 +1625,90 @@ extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
     uint32_t align_flags = flags & (GC_ALLOC_ALIGN8 | GC_ALLOC_ALIGN8_BIAS);
     uint32_t pad_bytes = 0;
     uint8_t* result = nullptr;
+#ifndef MGC_BREAK_ALLOC_BOUND
+    /* --- the bound before the arithmetic: a request larger than the
+     * managed heap itself can never be served, and within 12 bytes of
+     * 4 GB the alignment pad wraps the fit's sum to a small number.
+     * Straight to the out-of-memory report, with no collection. --- */
+    if (size > heap_total_bytes()) {
+        HPLOG("request of %lu bytes exceeds the managed heap (%lu bytes): answered no memory without a collection (alloc #%lu flags=0x%lx)",
+              (unsigned long)size, (unsigned long)heap_total_bytes(),
+              (unsigned long)(g_allocs + 1), (unsigned long)flags);
+        return oom_report_locked(size, flags);
+    }
+#endif
+    /* --- a finalizable request takes its finalization slot first --- */
+    int32_t fq_slot = -1;
+#ifndef MGC_BREAK_FINALIZE_FULL
+    if (flags & GC_ALLOC_FINALIZE) {
+        fq_slot = finq_hold();
+        if (fq_slot < 0) {
+            HPLOG("finalization table full (%lu entries): one collection before the request is answered (alloc #%lu size=%lu)",
+                  (unsigned long)MGC_FINQ_CAP,
+                  (unsigned long)(g_allocs + 1), (unsigned long)size);
+            alloc_lock_release();
+            mgc_heap_collect(2, /*low_memory_p*/ 1, /*mode*/ 0);
+            finq_wait_drain();
+            alloc_lock_acquire();
+            fq_slot = finq_hold();
+            if (fq_slot < 0) {
+                HPLOG("finalization table FULL: all %lu entries hold finalizable objects that are live or not yet finalized; the request of %lu bytes is answered no memory (no finalizable object is handed out unregistered)",
+                      (unsigned long)MGC_FINQ_CAP, (unsigned long)size);
+                g_null_returns++;
+                alloc_lock_release();
+                return nullptr;
+            }
+        }
+    }
+#endif
 #ifdef MGC_TUNE_LIVE
-    /* An outstanding window on this context means the EE fast path
-     * missed (request too big for the remainder): retire it first --
-     * the remainder becomes a plug. */
+    /* An outstanding window on this context. A small request the
+     * runtime routes here by its flags alone (finalizable, 8-byte
+     * aligned) is served INSIDE the window when it fits -- the runtime's
+     * own allocation contract -- and the window stands, so such requests
+     * do not cut the heap into window-sized pieces. Anything else means
+     * the EE fast path missed (request too big for the remainder): the
+     * window is retired first and its remainder becomes a plug. */
+    int in_window = 0;
     if (acontext && (win_lookup(acontext)
-                     || acontext->alloc_ptr || acontext->alloc_limit))
-        window_fix_locked(acontext);
+                     || acontext->alloc_ptr || acontext->alloc_limit)) {
+#ifndef MGC_BREAK_WINDOW_KEEP
+        WinRec*  kw     = win_lookup(acontext);
+        uint8_t* kptr   = (uint8_t*)acontext->alloc_ptr;
+        uint8_t* klimit = (uint8_t*)acontext->alloc_limit;
+        if (kw && kptr >= kw->base && kptr <= klimit
+            && (flags & (GC_ALLOC_FINALIZE | GC_ALLOC_ALIGN8 | GC_ALLOC_ALIGN8_BIAS)) != 0
+            && (flags & ~(GC_ALLOC_FINALIZE | GC_ALLOC_ALIGN8 | GC_ALLOC_ALIGN8_BIAS
+                          | GC_ALLOC_CONTAINS_REF | GC_ALLOC_ZEROING_OPTIONAL)) == 0) {
+            uint32_t kpad = 0;
+            if (align_flags) {
+                uintptr_t want = (align_flags & GC_ALLOC_ALIGN8_BIAS) ? 4u : 0u;
+                if (((uintptr_t)kptr & 7u) != want)
+                    kpad = 12;
+            }
+            size_t room = (size_t)(klimit - kptr);
+            if (room >= size && room - size >= kpad) {
+                if (kpad) {
+                    /* a 12-byte free object: window memory is zero, so
+                     * its component count is already 0; the window's own
+                     * walk counts it at retirement */
+                    *(MethodTable**)kptr = g_free_mt;
+                    kptr += 12;
+                    g_pads++;
+                    /* the pad is no object of the thread's: its bytes
+                     * leave the charge the window carried in full */
+                    acontext->alloc_bytes -= 12;
+                    g_bytes -= 12u;
+                }
+                result = kptr;
+                acontext->alloc_ptr = kptr + size;
+                in_window = 1;
+            }
+        }
+#endif
+        if (!in_window)
+            window_fix_locked(acontext);
+    }
     /* window-eligible request: serve from the window head and hand
      * the rest to the EE fast path (GcAllocInternal refreshes
      * combined_limit from alloc_limit after Alloc returns) */
@@ -1492,6 +1797,8 @@ extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
     }
 #endif
     if (!result) {
+        if (fq_slot >= 0)
+            finq_release(fq_slot);
         if (size <= 4096u && g_grace) {
             /* a dispatch-sized allocation missing even the open
              * reserve is the livelock precondition -- die loudly
@@ -1501,23 +1808,7 @@ extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
             mgc_heap_census("reserve exhausted");
             heap_failfast("headroom reserve exhausted during OOM dispatch (raise MGC_OOM_RESERVE)");
         }
-        g_oom_reports++;
-        g_null_returns++;
-        if (!g_grace) {
-            g_grace = 1;
-            HPLOG("OOM at alloc #%lu: size=%lu flags=0x%lx -> NULL (managed protocol); headroom reserve OPEN (%lu KB) for exception dispatch",
-                  (unsigned long)(g_allocs + 1), (unsigned long)size,
-                  (unsigned long)flags,
-                  (unsigned long)(MGC_OOM_RESERVE / 1024u));
-        } else if (g_oom_reports <= 6 || (g_oom_reports & 31u) == 0) {
-            HPLOG("OOM at alloc #%lu: size=%lu -> NULL (grace already open, report #%lu)",
-                  (unsigned long)(g_allocs + 1), (unsigned long)size,
-                  (unsigned long)g_oom_reports);
-        }
-        if (g_oom_reports == 1)
-            mgc_heap_census("first OOM report");
-        alloc_lock_release();
-        return nullptr;
+        return oom_report_locked(size, flags);
     }
 #else
     /* --- alignment: ALIGN8 wants result%8==0, +BIAS wants ==4 --- */
@@ -1545,7 +1836,7 @@ extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
               (unsigned long)(g_allocs + 1), (unsigned long)size,
               (unsigned long)pad, (unsigned long)flags,
               (unsigned long)((uint32_t)(g_ptr - g_region) / 1024u),
-              (unsigned long)(MGC_HEAP_BYTES / 1024u));
+              (unsigned long)(HEAP_BYTES / 1024u));
         mgc_heap_census("OOM wall");
         heap_failfast("region exhausted under mark-only collector (sweep-stage entry evidence)");
 #else
@@ -1553,7 +1844,7 @@ extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
               (unsigned long)(g_allocs + 1), (unsigned long)size,
               (unsigned long)pad, (unsigned long)flags,
               (unsigned long)((uint32_t)(g_ptr - g_region) / 1024u),
-              (unsigned long)(MGC_HEAP_BYTES / 1024u));
+              (unsigned long)(HEAP_BYTES / 1024u));
         mgc_heap_census("OOM wall");
         return nullptr;
 #endif
@@ -1573,6 +1864,9 @@ extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
 #endif /* MGC_SWEEP_LIVE */
 
     g_allocs++;
+#ifdef MGC_TUNE_LIVE
+    if (!in_window)     /* a window's span was charged at its handout */
+#endif
     g_bytes += (uint32_t)size + pad_bytes;
     if ((uint32_t)size > g_max_size) {
         g_max_size = (uint32_t)size;
@@ -1583,13 +1877,25 @@ extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
     /* per-thread accounting the EE reads (GcAllocInternal maintains
      * combined_limit only; alloc_bytes is the GC's book) */
     if (acontext) {
+#ifdef MGC_TUNE_LIVE
+        if (!in_window)
+#endif
         acontext->alloc_bytes += (int64_t)size;
         acontext->alloc_count++;
     }
 
     /* --- finalize registration (the GC's duty; EE does none) --- */
+#ifdef MGC_SWEEP_LIVE
+    if (fq_slot >= 0)
+        finq_commit(fq_slot, (Object*)result, size);
+#ifdef MGC_BREAK_FINALIZE_FULL
+    else if (flags & GC_ALLOC_FINALIZE)
+        finq_append_unlocked((Object*)result, size);
+#endif
+#else
     if (flags & GC_ALLOC_FINALIZE)
         finq_append_unlocked((Object*)result, size);
+#endif
 
 #ifdef MGC_COMPACT
     if (flags & GC_ALLOC_PINNED_OBJECT_HEAP) {
@@ -1622,7 +1928,7 @@ extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
         HPLOG("progress: %lu allocs, %lu KB used of %lu KB",
               (unsigned long)g_allocs,
               (unsigned long)((uint32_t)(g_ptr - g_region) / 1024u),
-              (unsigned long)(MGC_HEAP_BYTES / 1024u));
+              (unsigned long)(HEAP_BYTES / 1024u));
 
 #ifdef MGC_PROBE_WINDOW
     /* --- hand out exactly ONE small window, early, on a plain

@@ -10,7 +10,7 @@
 
 pub use super::rp2350::*;
 
-pub const NAME: &str = "Pimoroni Pico Plus 2";
+pub const NAME: &str = "Pimoroni Pico Plus 2 W";
 pub const CONSOLE: &str = "UART0 (GPIO 0 TX, GPIO 1 RX)";
 
 /// The boot kheap carve out of the arena (the GC board table's

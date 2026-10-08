@@ -3,7 +3,7 @@
 //! the event counter's modular difference, and the families' line
 //! arithmetic (the ST port and bit of a line, the F7's grouped and the U5's
 //! per-line interrupt positions, the RP2350's interrupt word and shift).
-//! Pure, host-tested; the drivers cite the manuals for the numbers here.
+//! No hardware access and no state, covered by the host tests; the drivers cite the manuals for the numbers here.
 
 /// The modes and pulls of `rhu_gpio_claim`, as the header numbers them.
 pub const MODE_INPUT: u32 = 0;

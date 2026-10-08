@@ -50,11 +50,23 @@ Please note that gate results are pinned against a specific QEMU release
 QEMU and Rust versions it ran under). If your QEMU version is different, the
 chain may report correspondingly-different results.
 
+The few gate runs that count the guest's instructions are each a fixed
+amount of emulator work, so the harness judges them by the processor time
+your machine gave the emulator -- read from the operating system through
+`GetProcessTimes` on Windows and through the process's `stat` file under
+`/proc` with `sysconf` on Linux, while on any other host the wall clock
+judges them -- and a busy machine slows the chain down without failing it,
+while a run that works past its budget, or does no work for a whole
+deadline, is stopped and fails its gate.
+
 The kernel each gate image links is built with its compilation directory
 remapped to a neutral prefix, so a gate-built image's identity does not
-depend on where the checkout sits. The remap keeps the host's path
-separators inside that prefix, so a Windows and a Linux build of the same
-tree differ there: the identity of record is per host.
+depend on where the checkout sits. The identity of record is still per
+host, and not by that prefix's path separators: cargo hashes the host's
+compiler identity into the crate's metadata, so another host's build of
+the same tree carries the same functions at the same sizes in another
+order, with other symbol hashes (the remapped prefix and the host's
+separators sit in the debug strings alone, outside the loadable sections).
 
 ## Which gates a checkout runs
 
@@ -74,7 +86,16 @@ a passing chain never overstates what it checked.
 This repository publishes the payload, garbage-collector and shim tiers'
 inputs (`goldens/payload`; `goldens/gc` and `goldens/shim`, which carry
 objects for every processor class); their re-derivation legs run with the
-prerequisites above. The payload gate's two programs, a boot smoke test and
+prerequisites above. The garbage-collector gate's cases include the
+collector's two never-abort behaviours: a mark stack that fills defers the
+push and rescans the marked objects inside the window the deferred objects
+span, and a handle pool that spends the row's slots grows by segments from
+the shim's mmap and answers no handle only when the mmap refuses. A program
+may hold as many finalizable objects, live or not yet finalized, as the
+board's finalization table has entries; the next request for one is
+answered out of memory after one collection, and none is ever handed out
+unregistered (the gate's `gc.finalize-full` case). The
+payload gate's two programs, a boot smoke test and
 a collector test compiled against a minimal runtime, are the payload tier's
 frozen objects, built from the sources under `src/payload/`; the payload leg
 rebuilds them with the pinned .NET SDK and ties them to the tier byte for
@@ -195,7 +216,7 @@ own directory with the board named, since the SDK refuses a build that
 names no board:
 
     cd src/rt/gate/rthello
-    dotnet publish -c Release -r linux-arm -p:RhuBoard=arm-mps2-an500
+    dotnet publish -c Release -r linux-arm -p:LamellaTargetBoard=arm-mps2-an500
 
 (the Cortex-M33 gate publishes the same programs for `arm-mps2-an505`),
 and the gate links the object the SDK writes under
@@ -208,6 +229,16 @@ byte, ties the board table's stack facts to the tree, boots the image a
 program's stack knob produces, and exercises the SDK's refusals through
 the real tool, among them a publish from a git checkout at another path,
 which must tie the frozen object.
+The SDK's link runs the tools package for the host the .NET SDK reports;
+the packages are packed for `linux-x64` and `osx-arm64`, and a macOS host
+publishes natively. The compile reads its reference assemblies from the
+package `Microsoft.NETCore.App.Ref`, never from the copy a .NET SDK
+bundles, and the SDK names that package's version itself, whatever .NET
+SDK is installed; so the object of record is one object on every host of
+the pinned .NET SDK (measured on a Linux x64 host and natively on a macOS
+arm64 host). Another .NET SDK version compiles the same code under another
+identity: its object differs in the sixteen bytes of the assembly's module
+version id alone (measured with an older and a newer .NET SDK).
 
 Lamella RHU builds the runtime archives itself from the dotnet/runtime
 source at its pinned tag (.NET 11 RC1 today), with clang 22.1.8,

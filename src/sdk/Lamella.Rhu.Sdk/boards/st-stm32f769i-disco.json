@@ -1,0 +1,14 @@
+{
+  "name": "st-stm32f769i-disco",
+  "maker": "STMicroelectronics",
+  "product": "STM32F769I-DISCO",
+  "chip": "STM32F769NI",
+  "clockHz": 16000000,
+  "posture": "default",
+  "postureName": "the internal oscillator posture",
+  "pins": 176,
+  "labels": "port",
+  "functions": "gpio",
+  "i2c": [],
+  "spi": []
+}

@@ -11,8 +11,9 @@ use crate::text::{
     payload_stream, word_sym_present, word_sym_value,
 };
 use crate::tools::{
-    cargo_build_kernel_at, command_words, echo_file, llvm_tool, resolve_qemu, run_captured,
-    rustc_facts, status_bounded, ExecProfile, RustcFacts,
+    budget, cargo_build_kernel_at, command_words, echo_file, host_unit, llvm_tool, resolve_qemu,
+    run_captured, run_counted, rustc_facts, say_counted, status_bounded, ExecProfile, Limits,
+    RustcFacts,
 };
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, Stdio};
@@ -23,6 +24,10 @@ const DISPLAY: &str = "PAYLOAD GATE";
 const HOST: &str = "qemu-mps2-an500";
 const RUNNER: &str = "src/harness";
 const TIMEOUT_S: u64 = 120;
+
+/// The gctest run's work in units of the host's unit of emulator work: the
+/// run's share as measured on the instruction-counted profile, times four.
+const GCTEST_WORK: u32 = 4;
 
 /// Deadline for one external-linker merge. A link completes in seconds;
 /// even a WSL-crossing external linker gets enormous headroom here, and a
@@ -1974,26 +1979,44 @@ impl MPayload {
         args.extend_from_slice(profile.qemu_args());
         args.push("-kernel");
         args.push(&elf_arg);
-        let outcome = match run_captured(
-            &self.ctx.qemu,
-            &args,
-            &raw_path,
-            &stderr_path,
-            self.ctx.timeout,
-        ) {
-            Ok(o) => o,
-            Err(e) => self.ctx.gate_fail(&format!("{name}: {e}")),
+        let exit = match profile {
+            ExecProfile::Parity => {
+                let outcome = match run_captured(
+                    &self.ctx.qemu,
+                    &args,
+                    &raw_path,
+                    &stderr_path,
+                    self.ctx.timeout,
+                ) {
+                    Ok(o) => o,
+                    Err(e) => self.ctx.gate_fail(&format!("{name}: {e}")),
+                };
+                if outcome.timed_out {
+                    println!("  (run killed at its timeout; exit recorded as 124 -- a hang is observed, never a pass)");
+                }
+                outcome.exit
+            }
+            ExecProfile::Deterministic => {
+                let unit = host_unit(&self.ctx.qemu, &self.ctx.out, self.ctx.timeout);
+                let limits = Limits {
+                    deadline: self.ctx.timeout,
+                    budget: budget(self.ctx.timeout, GCTEST_WORK, unit),
+                };
+                let run = match run_counted(&self.ctx.qemu, &args, &raw_path, &stderr_path, limits) {
+                    Ok(r) => r,
+                    Err(e) => self.ctx.gate_fail(&format!("{name}: {e}")),
+                };
+                say_counted(&run);
+                run.exit
+            }
         };
-        if outcome.timed_out {
-            println!("  (run killed at its timeout; exit recorded as 124 -- a hang is observed, never a pass)");
-        }
         let raw = std::fs::read(&raw_path).unwrap_or_default();
         echo_file(&raw_path, "  | ");
         PayloadRun {
             sha: sha.to_string(),
             path_rel: path_rel.to_string(),
             raw,
-            exit: outcome.exit,
+            exit,
         }
     }
 

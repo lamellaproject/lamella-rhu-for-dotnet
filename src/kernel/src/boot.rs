@@ -137,6 +137,17 @@ unsafe extern "C" fn __rhu_reset() -> ! { unsafe {
     let ebss = addr_of!(__ebss) as *const u8;
     ptr::write_bytes(sbss, 0, ebss as usize - sbss as usize);
 
+    #[cfg(feature = "payload")]
+    {
+        unsafe extern "C" {
+            static mut __rhu_payload_arena_lo: u32;
+            static __rhu_payload_arena_hi: u32;
+        }
+        let lo = addr_of_mut!(__rhu_payload_arena_lo) as *mut u8;
+        let hi = addr_of!(__rhu_payload_arena_hi) as *const u8;
+        ptr::write_bytes(lo, 0, hi as usize - lo as usize);
+    }
+
     SCB_VTOR.write_volatile(addr_of!(__vector_table) as usize as u32);
     core::arch::asm!("dsb sy", "isb sy", options(nostack, preserves_flags));
 

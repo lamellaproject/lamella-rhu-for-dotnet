@@ -1456,13 +1456,19 @@ int32_t SystemNative_ShmUnlink(const char *name)
 /* ------------------------------------------------------------------ */
 
 /* The runtime reserves a large frozen-object segment with no access and
- * then commits it in fixed chunks; the constants are baked into the
- * runtime and a failed commit surfaces as a managed allocation failure.
- * The reservation is served from the board row's pool: at the asked
- * size when the ask fits the pool, otherwise the ask is recorded over the
- * pool and every commit beyond the pool is refused -- the guard is what
- * keeps the runtime out of arena memory it never received. The pool is
- * drawn once and never returned. */
+ * then commits it in fixed chunks of 64 KB; the constants are baked into
+ * the runtime and a failed commit surfaces as a managed allocation
+ * failure. The reservation is served from the board row's pool, the
+ * frozen object heap: at the asked size when the ask fits the pool,
+ * otherwise the ask is recorded over the pool. A commit that starts
+ * inside the pool is accepted; one that starts at or past the pool's end
+ * is refused, which keeps the runtime out of arena memory it never
+ * received. On a pool of one chunk the runtime's second commit is that
+ * refusal. On a smaller pool the first commit is accepted although only
+ * the pool's pages have memory behind them: the collector asks mincore
+ * (below) how much of the segment is backed and stops the program before
+ * a byte is written past the pool. The pool is drawn once and never
+ * returned. */
 #define FOH_SITE 0x464F4821u
 #define GLIBC_MAP_SHARED 0x01
 #define GLIBC_MAP_PRIVATE 0x02
@@ -1478,8 +1484,8 @@ void *SystemNative_MMap(void *address, uint64_t length, int32_t protection, int3
 {
     if (address == NULL && protection == RHU_PAL_PROT_NONE && fd == -1 && (flags & RHU_PAL_MAP_ANONYMOUS) != 0) {
         if (g_foh_base != NULL) {
-            rhu_shim_log("frozen-object reserve %u KB: the pool is already claimed -> NULL (managed allocation failure)",
-                         (unsigned)(length / 1024u));
+            rhu_shim_log("frozen object heap: a second reservation of %u KB refused, the board's one pool of %u KB is already reserved (the runtime reports out of memory)",
+                         (unsigned)(length / 1024u), (unsigned)(g_foh_pool / 1024u));
             return NULL;
         }
         uint32_t pool = length <= (uint64_t)MGC_ROW_FOH_POOL_BYTES ? (uint32_t)length : (uint32_t)MGC_ROW_FOH_POOL_BYTES;
@@ -1520,15 +1526,46 @@ int32_t SystemNative_MProtect(void *address, uint64_t length, int32_t protection
     (void)protection;
     uint8_t *a = (uint8_t *)address;
     if (g_foh_base != NULL && a >= g_foh_base && a < g_foh_base + g_foh_claimed) {
-        if ((uint64_t)(uintptr_t)(a - g_foh_base) + length <= (uint64_t)g_foh_pool) {
-            uint32_t end = (uint32_t)((a - g_foh_base) + (uint32_t)length);
-            if (end > g_foh_committed)
-                g_foh_committed = end;
+        uint32_t start = (uint32_t)(a - g_foh_base);
+        if (start < g_foh_pool) {
+            uint64_t end = (uint64_t)start + length;
+            if (end > (uint64_t)g_foh_pool)
+                end = (uint64_t)g_foh_pool;
+            if ((uint32_t)end > g_foh_committed)
+                g_foh_committed = (uint32_t)end;
             return 0;
         }
-        rhu_shim_log("frozen-object commit refused beyond the pool (managed allocation failure, never a wild write)");
+        rhu_shim_log("frozen object heap: a commit of %u KB refused, it starts past the board's pool of %u KB (the runtime reports out of memory)",
+                     (unsigned)(length / 1024u), (unsigned)(g_foh_pool / 1024u));
         ERRNO = RHU_GERR_ENOMEM;
         return -1;
+    }
+    return 0;
+}
+
+/* The C library's question for how much of a mapping memory backs, one
+ * answer per page. Every page of a mapping here is memory, with one
+ * exception: the frozen object heap's reservation is larger than the
+ * board's pool, and its pages past the pool have nothing behind them. */
+int mincore(void *addr, size_t length, unsigned char *vec)
+{
+    if (((uintptr_t)addr & (PAGE_BYTES - 1u)) != 0) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    if (vec == NULL) {
+        ERRNO = RHU_GERR_EFAULT;
+        return -1;
+    }
+    const uint8_t *page = (const uint8_t *)addr;
+    size_t pages = length / PAGE_BYTES + (length % PAGE_BYTES != 0 ? 1u : 0u);
+    for (size_t i = 0; i < pages; i++, page += PAGE_BYTES) {
+        unsigned char backed = 1;
+#ifndef RHU_SHIM_BREAK_FROZEN_BACKED
+        if (g_foh_base != NULL && page >= g_foh_base + g_foh_pool && page < g_foh_base + g_foh_claimed)
+            backed = 0;
+#endif
+        vec[i] = backed;
     }
     return 0;
 }

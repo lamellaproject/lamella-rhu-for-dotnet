@@ -6,7 +6,10 @@ use crate::image::{check_records, header_abi, synth_records, HEADER_MAGIC, LAYOU
 use crate::results::{chain_json_from_env, validate_results, Results};
 use crate::text::{contains_fixed, cr_count, word_sym_present, word_sym_value};
 use crate::sha256::sha256_file;
-use crate::tools::{cargo_build_kernel_at, echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts, RustcFacts};
+use crate::tools::{
+    budget, cargo_build_kernel_at, echo_file, host_unit, llvm_tool, resolve_qemu, run_captured, run_counted,
+    run_guest, rustc_facts, say_counted, ExecProfile, Guest, Limits, RustcFacts, Stop,
+};
 use std::path::Path;
 use std::process::exit;
 use std::time::Duration;
@@ -79,6 +82,10 @@ const MARKERS_E: [&str; 2] = [
     "[api] PASS mod-find (kernel text resolved to module 0 half-open exact, arena address refused ESRCH, miss wrote nothing)",
     "[api] PASS mod-roots (module 0 ranges tie the link brackets, frozen, exidx, and tls empty in this family, walk ends ESRCH at the table count)",
 ];
+/// The exit-door line: the machine's own exit routed through the door, the
+/// LAST transcript line of a run that reached it; a run on either emulator
+/// row is judged by it together with the run's exit status.
+const MARKER_EXIT_DOOR: &str = "[api] exit-door: handing the machine exit to rhu_exit(0)";
 /// The four hosting-door markers, boot order: the console-door line is
 /// the write door's own wire output (the door IS the path that emits
 /// it); the exit-door line is the LAST transcript line -- the machine
@@ -87,7 +94,7 @@ const MARKERS_F: [&str; 4] = [
     "[api] console-door: this line reached the wire through rhu_console_write",
     "[api] PASS console-pair (door write returned exact and hit the wire, no-input read returned 0 writing nothing, null, oversize and over-bound refused)",
     "[api] PASS entropy-honesty (draws filled and distinct, null refused, zero-length trivial, hardware query answers 0 on this class)",
-    "[api] exit-door: handing the machine exit to rhu_exit(0)",
+    MARKER_EXIT_DOOR,
 ];
 /// The two debug-facing markers, boot order: the thread-local-base door
 /// check (after tls-blocks: the layout record walked from memory against
@@ -174,11 +181,14 @@ const MARKERS_L: [&str; 6] = [
 
 /// The band-interrupt control (the double-precision emulation's fault at the
 /// floor): the armed line, the binary group's digest under preemption (the
-/// hardware row's value, pinned in full) and the hardware class's PASS line,
+/// hardware row's value, pinned in full), the landing line (whole: the armed
+/// group repeated until a tick landed, the wait bounded by the kernel's own
+/// tick count -- a class, never a count) and the hardware class's PASS line,
 /// pinned as prefixes.
-const MARKERS_M: [&str; 3] = [
+const MARKERS_M: [&str; 4] = [
     "[api] fp-band: a band-priority exception firing every tick",
     "[api] fp-band: binary 43008 vectors digest 41ec5e6b under preemption",
+    "[api] fp-band: a tick landed while the group ran armed (the group repeated until one did, the wait bounded by the kernel's own tick count)",
     "[api] PASS fp-band (the band exception fired every tick through the hardware block",
 ];
 
@@ -202,11 +212,23 @@ const MARKERS_O: [&str; 6] = [
     "[api] PASS bus-tenancy (the worker's transfer of 4096 bytes intact,",
 ];
 
+/// The PWM and ADC doors' three checks (the device seam's third and fourth
+/// peripherals, on the rows whose facts carry the virtual models): the armed
+/// lines and the PASS lines, pinned as prefixes.
+const MARKERS_P: [&str; 6] = [
+    "[api] pwm-claim: the count and the lines stated;",
+    "[api] PASS pwm-claim (3 lines on 2 timers stated and enumerated,",
+    "[api] adc-claim: the count and the channels' facts stated;",
+    "[api] PASS adc-claim (6 channels on 2 blocks stated with their facts,",
+    "[api] pwm-adc-loop: three duty cycles set on the first PWM line",
+    "[api] PASS pwm-adc-loop (10, 50 and 90 percent read back as",
+];
+
 /// The futex + nanosecond-time + arena + kheap/TLS/thread/registry +
 /// suspension/activation + module-query + console/exit/entropy + GPIO
 /// C-ABI surface, pinned in the artifact (the waistline exists and
 /// survives every build of this flavor); the table names every export.
-const API_SYMS: [&str; 48] = [
+const API_SYMS: [&str; 62] = [
     "rhu_now_ns",
     "rhu_sleep_ns",
     "rhu_futex_wait",
@@ -255,6 +277,20 @@ const API_SYMS: [&str; 48] = [
     "rhu_spi_bus",
     "rhu_spi_claim",
     "rhu_spi_transfer",
+    "rhu_pwm_count",
+    "rhu_pwm_line",
+    "rhu_pwm_claim",
+    "rhu_pwm_set",
+    "rhu_pwm_period",
+    "rhu_pwm_enable",
+    "rhu_pwm_release",
+    "rhu_pwm_info",
+    "rhu_adc_count",
+    "rhu_adc_channel",
+    "rhu_adc_claim",
+    "rhu_adc_read",
+    "rhu_adc_reference",
+    "rhu_adc_release",
 ];
 
 struct API {
@@ -338,6 +374,7 @@ impl API {
         markers.extend(MARKERS_M);
         markers.extend(MARKERS_N);
         markers.extend(MARKERS_O);
+        markers.extend(MARKERS_P);
         markers.push(MARKER_OBSERVED_NULL);
         markers.push(MARKER_OBS_ROW);
         self.common_asserts("api", &run, 0, &markers, &["KERNEL PANIC", "EXCEPTION:"]);
@@ -383,7 +420,7 @@ impl API {
         };
         self.emit_case("api", "pass", code, 0, &sha, &path_rel);
         println!(
-            "== case api: PASS (exit 0, 49 hosting-API checks + the null-read observation (address 0 readable, no fault: the observation of record, not a check), contract + API symbols (the lazy floating-point witness among them) + zero-length module-root brackets in-artifact, no payload-entry seam in this family, the image header at {:#x} stating load address {:#010x} and generation {} and the layout record at {:#x} at version {} for {} threads with {} tls slots of {} bytes at offset {} in a {}-byte TCB, read off the artifact and tied) ==",
+            "== case api: PASS (exit 0, 52 hosting-API checks + the null-read observation (address 0 readable, no fault: the observation of record, not a check), contract + API symbols (the lazy floating-point witness among them) + zero-length module-root brackets in-artifact, no payload-entry seam in this family, the image header at {:#x} stating load address {:#010x} and generation {} and the layout record at {:#x} at version {} for {} threads with {} tls slots of {} bytes at offset {} in a {}-byte TCB, read off the artifact and tied) ==",
             rec.header_at, rec.load_addr, rec.abi, rec.layout_at, rec.layout_version, rec.max_threads, rec.tls_slots, rec.tls_slot_bytes, rec.tcb_off_tls, rec.tcb_stride
         );
     }
@@ -401,38 +438,53 @@ impl API {
         if hw.is_empty() {
             self.ctx.gate_fail("fp-parity: the double-precision row printed no fp-double block");
         }
-        let (run, sha, path_rel) = self.build_and_run_an505("fp-parity", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke");
-        let em = fp_block(&run);
-        if run_exit_bad(&run) {
-            self.fail_case("fp-parity", 1, 0, &sha, &path_rel, "the emulated row died: a fault or a panic in the transcript");
+        let run = self.build_and_run_an505("fp-parity", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke");
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        if let Err(why) = run_ending(code, 0, &run.raw) {
+            self.fail_case("fp-parity", code, 0, &sha, &path_rel, &why);
         }
+        self.common_asserts(
+            "fp-parity",
+            &run,
+            0,
+            &[
+                MARKER_EXIT_DOOR,
+                "[api] PASS fp-double (",
+                "every form emulated through the fault funnel, none refused, no frame promoted",
+                "[api] PASS fp-frames (the basic frame promoted once",
+                "[api] fp-band: a tick landed while the group ran armed (the group repeated until one did, the wait bounded by the kernel's own tick count)",
+                "[api] PASS fp-band (the band exception fired every tick and preempted emulated forms",
+            ],
+            &["EXCEPTION:", "KERNEL PANIC"],
+        );
+        let em = fp_block(&run.raw);
         if em != hw {
             let first = hw.iter().zip(em.iter()).position(|(a, b)| a != b).unwrap_or(hw.len().min(em.len()));
-            self.fail_case("fp-parity", 0, 0, &sha, &path_rel, &format!("the fp-double block differs between the classes at line {} of {} (hardware: {:?}; emulated: {:?})", first + 1, hw.len(), hw.get(first), em.get(first)));
+            self.fail_case("fp-parity", code, 0, &sha, &path_rel, &format!("the fp-double block differs between the classes at line {} of {} (hardware: {:?}; emulated: {:?})", first + 1, hw.len(), hw.get(first), em.get(first)));
         }
-        for want in ["[api] PASS fp-double (", "every form emulated through the fault funnel, none refused, no frame promoted", "[api] PASS fp-frames (the basic frame promoted once", "[api] PASS fp-band (the band exception fired every tick and preempted emulated forms"] {
-            if !contains_fixed(&run, want) {
-                self.fail_case("fp-parity", 0, 0, &sha, &path_rel, &format!("the emulated row lacks '{want}'"));
-            }
-        }
-        self.emit_case("fp-parity", "pass", 0, 0, &sha, &path_rel);
-        println!("== case fp-parity: PASS (the fp-double block of {} lines byte-equal across the classes -- the hardware row and the emulated row; the emulated row's own PASS lines present) ==", hw.len());
+        self.emit_case("fp-parity", "pass", code, 0, &sha, &path_rel);
+        println!("== case fp-parity: PASS (the fp-double block of {} lines byte-equal across the classes -- the hardware row and the emulated row; the emulated row's own PASS lines present; exit 0 through the exit door) ==", hw.len());
 
-        let (run2, sha2, path_rel2) = self.build_and_run_an505("fp-doctored-control", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke,test-fpemul-doctored");
-        let doc = fp_block(&run2);
+        let run2 = self.build_and_run_an505("fp-doctored-control", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke,test-fpemul-doctored");
+        let (sha2, path_rel2, code2) = (run2.sha.clone(), run2.path_rel.clone(), run2.exit);
+        let doc = fp_block(&run2.raw);
         if doc == hw {
-            self.emit_control("fp-doctored-control", "fail", FP_DOCTORED_BROKE, &sha2, &path_rel2);
+            self.emit_control("fp-doctored-control", "fail", FP_DOCTORED_BROKE, code2, 2, &sha2, &path_rel2);
             self.ctx.gate_fail("fp-doctored-control: the doctored decoder's fp-double block equals the hardware row's (the control did not bite)");
         }
-        let refused = contains_fixed(&run2, "[api] module-code-control: a form from an unregistered range follows")
-            && contains_fixed(&run2, "not emulated -- the stacked pc outside every registered code range")
-            && !contains_fixed(&run2, "[api] exit-door:");
+        let refused = contains_fixed(&run2.raw, "[api] module-code-control: a form from an unregistered range follows")
+            && contains_fixed(&run2.raw, "not emulated -- the stacked pc outside every registered code range")
+            && !contains_fixed(&run2.raw, "[api] exit-door:");
         if !refused {
-            self.emit_control("fp-doctored-control", "fail", FP_DOCTORED_BROKE, &sha2, &path_rel2);
+            self.emit_control("fp-doctored-control", "fail", FP_DOCTORED_BROKE, code2, 2, &sha2, &path_rel2);
             self.ctx.gate_fail("fp-doctored-control: the form from an unregistered range was not refused by the funnel, or the image reached the exit door (the control did not bite)");
         }
-        self.emit_control("fp-doctored-control", "pass", FP_DOCTORED_BROKE, &sha2, &path_rel2);
-        println!("== control fp-doctored-control: PASS (the decoder with add and subtract swapped prints a different fp-double block: the parity case would refuse it; the form from an unregistered range refused by the funnel, the exit door never reached) ==");
+        if let Err(why) = run_ending(code2, 2, &run2.raw) {
+            self.emit_control("fp-doctored-control", "fail", FP_DOCTORED_BROKE, code2, 2, &sha2, &path_rel2);
+            self.ctx.gate_fail(&format!("fp-doctored-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control("fp-doctored-control", "pass", FP_DOCTORED_BROKE, code2, 2, &sha2, &path_rel2);
+        println!("== control fp-doctored-control: PASS (the decoder with add and subtract swapped prints a different fp-double block: the parity case would refuse it; the form from an unregistered range refused by the funnel, the exit door never reached; the image died through the funnel's fault path, exit 2) ==");
     }
 
 
@@ -441,17 +493,127 @@ impl API {
     /// per change; the api flavor's edge check must refuse it -- two counted
     /// for one edge, no PASS line -- so the control shows the check reads
     /// the mechanism. The silicon control (the removed pending-mask clear)
-    /// is a flight-side control.
+    /// is a hardware-side control.
     fn run_gpio_latch_control(&mut self) {
         let run = self.ctx.build_and_run("gpio-latch-control", &["--features", "api-smoke,test-gpio-doctored-latch"]);
-        let (sha, path_rel) = (run.sha.clone(), run.path_rel.clone());
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
         let refused = !contains_fixed(&run.raw, "[api] PASS gpio-edge (") && contains_fixed(&run.raw, "gpio-edge: edge 0 counted 2 times");
         if !refused {
-            self.emit_control("gpio-latch-control", "fail", GPIO_LATCH_BROKE, &sha, &path_rel);
+            self.emit_control("gpio-latch-control", "fail", GPIO_LATCH_BROKE, code, 1, &sha, &path_rel);
             self.ctx.gate_fail("gpio-latch-control: the doctored latch's edge check passed, or died elsewhere than the count (the control did not bite)");
         }
-        self.emit_control("gpio-latch-control", "pass", GPIO_LATCH_BROKE, &sha, &path_rel);
-        println!("== control gpio-latch-control: PASS (the virtual latch firing twice per change is refused by the edge check: two counted for one edge, no PASS line)");
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control("gpio-latch-control", "fail", GPIO_LATCH_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("gpio-latch-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control("gpio-latch-control", "pass", GPIO_LATCH_BROKE, code, 1, &sha, &path_rel);
+        println!("== control gpio-latch-control: PASS (the virtual latch firing twice per change is refused by the edge check: two counted for one edge, no PASS line; the image died by its panic, exit 1)");
+    }
+
+    /// The emulator rows' second GPIO control: a virtual backend that makes
+    /// ONE event of its own beside the tenth counted edge -- an edge the
+    /// program did not make. The api flavor's edge check must refuse it by
+    /// its total -- thirteen where twelve were made, no PASS line -- so the
+    /// control shows the count refuses an edge the check did not make,
+    /// wherever it lands (on a board: an input nothing holds).
+    fn run_gpio_edge_control(&mut self) {
+        let run = self.ctx.build_and_run("gpio-edge-control", &["--features", "api-smoke,test-gpio-doctored-edge"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS gpio-edge (") && contains_fixed(&run.raw, "gpio-edge: 13 edges in all, want 12");
+        if !refused {
+            self.emit_control("gpio-edge-control", "fail", GPIO_EDGE_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("gpio-edge-control: the doctored backend's edge check passed, or died elsewhere than the total (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control("gpio-edge-control", "fail", GPIO_EDGE_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("gpio-edge-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control("gpio-edge-control", "pass", GPIO_EDGE_BROKE, code, 1, &sha, &path_rel);
+        println!("== control gpio-edge-control: PASS (one event the program did not make, beside the tenth edge, is refused by the edge check's total: thirteen where twelve were made, no PASS line; the image died by its panic, exit 1)");
+    }
+
+    /// The set-context check's control: a landing pad that stores its witness
+    /// word before its thread id and sleeps between the two. The check waits
+    /// on the witness and then reads the id, so it must refuse at its
+    /// off-thread assert -- the control shows the check's two words are read
+    /// in the order the pad must write them.
+    fn run_susp_order_control(&mut self) {
+        let run = self.ctx.build_and_run("susp-order-control", &["--features", "api-smoke,test-susp-doctored-order"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS susp-setctx (") && contains_fixed(&run.raw, "susp-setctx: pad ran off-thread");
+        if !refused {
+            self.emit_control("susp-order-control", "fail", SUSP_ORDER_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("susp-order-control: the doctored pad's check passed, or died elsewhere than the off-thread assert (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control("susp-order-control", "fail", SUSP_ORDER_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("susp-order-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control("susp-order-control", "pass", SUSP_ORDER_BROKE, code, 1, &sha, &path_rel);
+        println!("== control susp-order-control: PASS (the pad storing its witness before its thread id is refused by the set-context check's off-thread assert, no PASS line; the image died by its panic, exit 1)");
+    }
+
+    /// The RP2350's bus drivers on the Cortex-M33 emulator row: under the
+    /// test feature `test-bus-rp2350` the row carries register-level models
+    /// of that chip's I2C and SPI blocks in place of the ST blocks', and the
+    /// api flavor's three model-backed bus checks run over the chip's own
+    /// drivers, unchanged in their lines. Then the same image with the
+    /// doctored models and the unbounded pump: the three refusals, no bus
+    /// check passing, the image walking on to its exit door. The doctored
+    /// run is instruction-counted, as the ST drivers' control is.
+    fn run_bus_rp2350(&mut self) {
+        let run = self.build_and_run_an505("bus-rp2350", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke,test-bus-rp2350");
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        if let Err(why) = run_ending(code, 0, &run.raw) {
+            self.fail_case("bus-rp2350", code, 0, &sha, &path_rel, &why);
+        }
+        self.common_asserts(
+            "bus-rp2350",
+            &run,
+            0,
+            &[MARKER_EXIT_DOOR, "[api] PASS bus-i2c (", "[api] PASS bus-spi (", "[api] PASS bus-tenancy ("],
+            &["EXCEPTION:", "KERNEL PANIC", "[bus] "],
+        );
+        self.emit_case("bus-rp2350", "pass", code, 0, &sha, &path_rel);
+        println!("== case bus-rp2350: PASS (the three bus checks passed over the RP2350's I2C and SPI drivers against the register-level models of its blocks, no kernel bus line; exit 0 through the exit door) ==");
+
+        let CaseRun { sha, path_rel, raw, exit: code } =
+            self.build_and_run_an505_with("bus-rp2350-doctored-control", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke,test-bus-rp2350,test-bus-doctored", ExecProfile::Deterministic, BUS_CONTROL_WORK);
+        let bit = contains_fixed(&raw, "[api] bus-doctored: the data byte not acknowledged answered -5 at message 0 byte 1")
+            && contains_fixed(&raw, "[bus] i2c 0: the wire wait passed its budget at message 0; the block reset")
+            && contains_fixed(&raw, "[bus] i2c 0: the block did not come to rest at the claim (its reset or its disable did not complete); while it stays so, a transfer on this bus times out instead of hanging")
+            && contains_fixed(&raw, "[api] bus-doctored: the claim of a block that had not come to rest answered 0 and was told; the first transfer found the claim's registers lost and wrote them again")
+            && contains_fixed(&raw, "[api] bus-doctored: the fast-mode claim at 400000 Hz programmed the fast counts (low 15, high 7, spike 1 at 12000000 Hz; 387096 Hz achieved)")
+            && contains_fixed(&raw, "[api] bus-doctored: an opening whose disable did not complete answered -110 at once through the reset path")
+            && contains_fixed(&raw, "[api] bus-doctored: an abort whose stop never came answered -110 at message 0 byte 1 inside the budget")
+            && contains_fixed(&raw, "[api] bus-doctored: a clock held from the first of twenty bytes, with a byte nobody asked for in the receive queue, answered -110 inside the budget")
+            && contains_fixed(&raw, "[api] bus-doctored: a reserved address answered -22 at message 0 before the wire")
+            && contains_fixed(&raw, "[bus] spi 0: the block's reset did not complete at the claim; while it stays so, a transfer on this bus times out instead of hanging")
+            && contains_fixed(&raw, "[api] bus-doctored: the SPI claim of a block whose reset did not complete answered 0 and was told")
+            && contains_fixed(&raw, "[bus] spi 0: the wire wait passed its budget at byte 0; the block reset")
+            && contains_fixed(&raw, "[bus] spi 0: the wire wait passed its budget at byte 3; the block reset")
+            && contains_fixed(&raw, "[api] bus-doctored: an SPI clock that never came to rest answered -110 at byte 0 at once; an overrun at a burst's end answered it at byte 3 at once")
+            && contains_fixed(&raw, "[bus] i2c 0: the bus recovered after the timeout (a device held the data line low; clocked free, then a stop)")
+            && contains_fixed(&raw, "[bus] i2c 0: the bus recovered after the timeout (a device held the data line low through nine clocks; the clock held low 35 ms, then a stop)")
+            && contains_fixed(&raw, "[bus] i2c 0: the data line is still held low after the timeout's recovery (nine clocks, the clock held low 35 ms, a stop); while it stays so, every transfer on this bus fails")
+            && contains_fixed(&raw, "[api] bus-doctored: a data line held after the timeout came free by the clocks; the bus recovered and was counted")
+            && contains_fixed(&raw, "[api] bus-doctored: a data line held through nine clocks came free by the clock held low 35 ms; the bus recovered and was counted")
+            && contains_fixed(&raw, "[api] bus-doctored: a data line held through the whole recovery was told and not counted as recovered")
+            && contains_fixed(&raw, "[api] bus-doctored: a device that held the clock low 25 ms in one byte was served")
+            && contains_fixed(&raw, "[api] bus-doctored: the clock that never completed answered -110 inside the budget; the block reset once")
+            && contains_fixed(&raw, "[api] bus-doctored: the unbounded pump lost ")
+            && contains_fixed(&raw, " of 64 bytes to the receive queue's overflow; the transfer answered -110")
+            && !contains_fixed(&raw, "[api] PASS bus-");
+        if !bit {
+            self.emit_control_timed("bus-rp2350-doctored-control", "fail", BUS_RP2350_DOCTORED_BROKE, code, 0, &sha, &path_rel, Some("icount-shift0"));
+            self.ctx.gate_fail("bus-rp2350-doctored-control: the doctored models' pinned lines were not all read, or a bus check passed (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 0, &raw) {
+            self.emit_control_timed("bus-rp2350-doctored-control", "fail", BUS_RP2350_DOCTORED_BROKE, code, 0, &sha, &path_rel, Some("icount-shift0"));
+            self.ctx.gate_fail(&format!("bus-rp2350-doctored-control: {why} (the image must walk on to the exit door)"));
+        }
+        self.emit_control_timed("bus-rp2350-doctored-control", "pass", BUS_RP2350_DOCTORED_BROKE, code, 0, &sha, &path_rel, Some("icount-shift0"));
+        println!("== control bus-rp2350-doctored-control: PASS (the data byte refused answered EIO at message 0 byte 1, the clock that never completed answered ETIMEDOUT inside the budget with the block reset once, the unbounded pump lost bytes to the receive queue's overrun and timed out; no bus check passed; exit 0 through the exit door)");
     }
 
     /// The emulator rows' bus control: the api flavor's doctored image on the
@@ -464,35 +626,148 @@ impl API {
     /// takes the write order as it once stood (the block model must fall out of
     /// master mode and the call must answer EIO at once with its own line): the five
     /// lines present, no bus check's PASS line.
+    ///
+    /// The control runs on the Deterministic execution profile: its
+    /// judge in the image counts ticks of the guest's clock across two door
+    /// calls ("at once", "inside the budget"), a count-class claim the plain
+    /// profile exposes to the host's timing -- a parked emulator thread reads
+    /// as ticks inside a few-hundred-instruction refusal. Under the
+    /// instruction-counting clock the counts are the guest's own. The doctored
+    /// inputs are unchanged; every positive case keeps the Parity profile.
     fn run_bus_doctored_control(&mut self) {
-        let (raw, sha, path_rel) = self.build_and_run_an505("bus-doctored-control", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke,test-bus-doctored");
+        let CaseRun { sha, path_rel, raw, exit: code } = self.build_and_run_an505_with("bus-doctored-control", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke,test-bus-doctored", ExecProfile::Deterministic, BUS_CONTROL_WORK);
         let bit = contains_fixed(&raw, "[api] bus-doctored: the data byte not acknowledged answered -5 at message 0 byte 1")
             && contains_fixed(&raw, "[api] bus-doctored: the clock that never completed answered -110 inside the budget; the block reset once")
             && contains_fixed(&raw, "[bus] spi 1: the block fell out of master mode at its configuration; the fault cleared, nothing clocked")
             && contains_fixed(&raw, "[api] bus-doctored: the old write order answered -5 at once; the block fell out of master mode and the fault was cleared")
+            && contains_fixed(&raw, "[bus] i2c 1: the bus recovered after the timeout (a device held the data line low; clocked free, then a stop)")
+            && contains_fixed(&raw, "[bus] i2c 1: the bus recovered after the timeout (a device held the data line low through nine clocks; the clock held low 35 ms, then a stop)")
+            && contains_fixed(&raw, "[bus] i2c 1: the data line is still held low after the timeout's recovery (nine clocks, the clock held low 35 ms, a stop); while it stays so, every transfer on this bus fails")
+            && contains_fixed(&raw, "[api] bus-doctored: a data line held after the timeout came free by the clocks; the bus recovered and was counted")
+            && contains_fixed(&raw, "[api] bus-doctored: a data line held through nine clocks came free by the clock held low 35 ms; the bus recovered and was counted")
+            && contains_fixed(&raw, "[api] bus-doctored: a data line held through the whole recovery was told and not counted as recovered")
+            && contains_fixed(&raw, "[api] bus-doctored: a device that held the clock low 25 ms in one byte was served")
             && contains_fixed(&raw, "[api] bus-doctored: the unbounded pump lost ")
             && contains_fixed(&raw, " of 64 bytes to the receive queue's overflow; the transfer answered -110")
             && !contains_fixed(&raw, "[api] PASS bus-");
         if !bit {
-            self.emit_control("bus-doctored-control", "fail", BUS_DOCTORED_BROKE, &sha, &path_rel);
-            self.ctx.gate_fail("bus-doctored-control: the doctored models' and the old write order's four refusals were not all read, or a bus check passed (the control did not bite)");
+            self.emit_control_timed("bus-doctored-control", "fail", BUS_DOCTORED_BROKE, code, 0, &sha, &path_rel, Some("icount-shift0"));
+            self.ctx.gate_fail("bus-doctored-control: the doctored models' and the old write order's pinned lines were not all read, or a bus check passed (the control did not bite)");
         }
-        self.emit_control("bus-doctored-control", "pass", BUS_DOCTORED_BROKE, &sha, &path_rel);
-        println!("== control bus-doctored-control: PASS (the data byte refused answered EIO at message 0 byte 1, the clock that never completed answered ETIMEDOUT inside the budget with the block reset once, the old write order answered EIO at once with the block out of master mode, the unbounded pump lost bytes to the receive queue's overflow and timed out; no bus check's PASS line)");
+        if let Err(why) = run_ending(code, 0, &raw) {
+            self.emit_control_timed("bus-doctored-control", "fail", BUS_DOCTORED_BROKE, code, 0, &sha, &path_rel, Some("icount-shift0"));
+            self.ctx.gate_fail(&format!("bus-doctored-control: {why} (the image must walk on to the exit door)"));
+        }
+        self.emit_control_timed("bus-doctored-control", "pass", BUS_DOCTORED_BROKE, code, 0, &sha, &path_rel, Some("icount-shift0"));
+        println!("== control bus-doctored-control: PASS (the data byte refused answered EIO at message 0 byte 1, the clock that never completed answered ETIMEDOUT inside the budget with the block reset once, the old write order answered EIO at once with the block out of master mode, the unbounded pump lost bytes to the receive queue's overflow and timed out; no bus check's PASS line; on the deterministic profile; the image reached the exit door, exit 0)");
     }
 
-    /// A case record for a negative control of this gate, naming what the control broke.
-    fn emit_control(&mut self, case: &str, verdict: &str, broke: &str, sha: &str, path_rel: &str) {
+    /// The emulator rows' PWM control: the virtual timer's own reading of
+    /// the period it runs made one prescaler step long; the api flavor's
+    /// claim check ties the door's achieved period to the timer's own and
+    /// must refuse -- the refusal's words, no PASS line, the image dead by
+    /// its panic.
+    fn run_pwm_doctored_control(&mut self) {
+        let run = self.ctx.build_and_run("pwm-doctored-control", &["--features", "api-smoke,test-pwm-doctored"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS pwm-claim (") && contains_fixed(&run.raw, "pwm-claim: the door reports");
+        if !refused {
+            self.emit_control("pwm-doctored-control", "fail", PWM_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("pwm-doctored-control: the doctored timer's claim check passed, or died elsewhere than the tie (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control("pwm-doctored-control", "fail", PWM_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("pwm-doctored-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control("pwm-doctored-control", "pass", PWM_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+        println!("== control pwm-doctored-control: PASS (the virtual timer running its prescaler one step long is refused by the claim check's tie of the door's period to the timer's own: the refusal's words, no PASS line; the image died by its panic, exit 1)");
+    }
+
+    /// The emulator rows' ADC control: the virtual loop channel answering
+    /// the previous conversion's sample; the api flavor's loop check reads
+    /// a stale sample at its second duty cycle and must refuse -- the
+    /// refusal's words, no PASS line, the image dead by its panic.
+    fn run_adc_doctored_control(&mut self) {
+        let run = self.ctx.build_and_run("adc-doctored-control", &["--features", "api-smoke,test-adc-doctored"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS pwm-adc-loop (") && contains_fixed(&run.raw, "pwm-adc-loop: the loop read");
+        if !refused {
+            self.emit_control("adc-doctored-control", "fail", ADC_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("adc-doctored-control: the doctored converter's loop check passed, or died elsewhere than the reading (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control("adc-doctored-control", "fail", ADC_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("adc-doctored-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control("adc-doctored-control", "pass", ADC_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+        println!("== control adc-doctored-control: PASS (the virtual loop channel answering a stale sample is refused by the loop check at its second reading: the refusal's words, no PASS line; the image died by its panic, exit 1)");
+    }
+
+    /// The band-interrupt control's own control: the tick hook pends nothing
+    /// while the fp-band check runs, so the armed group's repetitions end at
+    /// the check's bound of the kernel's ticks with no hit, and the check must
+    /// refuse with its own words -- no PASS line, no landing line, the image
+    /// dead by its panic. Runs on the plain profile: the outcome is fixed in
+    /// guest time, the bound being the kernel's own tick count.
+    fn run_fp_band_doctored_control(&mut self) {
+        let run = self.ctx.build_and_run("fp-band-doctored-control", &["--features", "api-smoke,test-fp-band-doctored"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS fp-band (")
+            && !contains_fixed(&run.raw, MARKERS_M[2])
+            && contains_fixed(&run.raw, "fp-band: the band exception never fired");
+        if !refused {
+            self.emit_control("fp-band-doctored-control", "fail", FP_BAND_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("fp-band-doctored-control: the silenced tick hook's fp-band check passed, printed a landing, or died elsewhere than its own assert (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control("fp-band-doctored-control", "fail", FP_BAND_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("fp-band-doctored-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control("fp-band-doctored-control", "pass", FP_BAND_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+        println!("== control fp-band-doctored-control: PASS (the tick hook pending nothing is refused by the fp-band check at its bound of the kernel's ticks: the never-fired words, no PASS line, no landing line; the image died by its panic, exit 1)");
+    }
+
+    /// A case record for a negative control of this gate, naming what the
+    /// control broke and carrying the run's observed exit beside the wanted one.
+    fn emit_control(&mut self, case: &str, verdict: &str, broke: &str, code: i32, want: i32, sha: &str, path_rel: &str) {
+        self.emit_control_timed(case, verdict, broke, code, want, sha, path_rel, None);
+    }
+
+    /// The same record with the additive, report-only `timing` field the
+    /// payload gate's count-class records carry, naming the execution profile
+    /// the control ran on (the bus control on the Deterministic profile).
+    fn emit_control_timed(&mut self, case: &str, verdict: &str, broke: &str, code: i32, want: i32, sha: &str, path_rel: &str, timing: Option<&str>) {
+        let clk = match timing {
+            Some(t) => format!(",\"timing\":\"{t}\""),
+            None => String::new(),
+        };
         self.ctx.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"api\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"exit\":0,\"exit_want\":0,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{path_rel}\",\"sha256\":\"{sha}\"}},\"golden\":null}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"api\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"exit\":{code},\"exit_want\":{want},\"control\":\"negative\",\"broke\":\"{broke}\"{clk},\"image\":{{\"path\":\"{path_rel}\",\"sha256\":\"{sha}\"}},\"golden\":null}}"
         ));
         self.ctx.results.tally(verdict, "negative");
     }
 
     /// Build the kernel for the mps2-an505 row into the gate's own second
     /// target directory, stage it, run it on the an505 machine, and return
-    /// the raw transcript with the staged image's identity.
-    fn build_and_run_an505(&mut self, name: &str, feats: &str) -> (Vec<u8>, String, String) {
+    /// the family's case record: the raw transcript, the staged image's
+    /// identity and the run's exit (124 when the run was killed at its
+    /// deadline, the family's convention), judged by the case like any
+    /// run of the established row.
+    fn build_and_run_an505(&mut self, name: &str, feats: &str) -> CaseRun {
+        self.build_and_run_an505_with(name, feats, ExecProfile::Parity, 0)
+    }
+
+    /// build_and_run_an505 under an explicit execution profile: the
+    /// Deterministic profile's argv is inserted immediately before `-kernel`,
+    /// as `GateCtx::build_and_run_with` inserts it; the Parity profile inserts
+    /// nothing, so the two-argument form's argv is byte-identical to the
+    /// established invocation. A count-class case opts in per case,
+    /// deliberately -- never by default. An instruction-counted run is
+    /// judged by the processor time the host gave the emulator: its budget
+    /// is `work` units of the host's unit of emulator work, never under the
+    /// gate's deadline. A run on the plain profile is judged by the wall
+    /// clock and takes no `work`.
+    fn build_and_run_an505_with(&mut self, name: &str, feats: &str, profile: ExecProfile, work: u32) -> CaseRun {
         println!("== case {name} ==");
         let target_dir = self.ctx.repo.join("src").join("kernel").join("target").join("api-gate-an505");
         let log = self.ctx.out.join(format!("build-{name}.log"));
@@ -514,17 +789,81 @@ impl API {
         let raw_path = self.ctx.out.join(format!("{name}.raw"));
         let stderr_path = self.ctx.out.join(format!("{name}.stderr"));
         let staged_arg = staged.to_string_lossy().into_owned();
-        let args = ["-M", "mps2-an505", "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting", "-kernel", &staged_arg];
-        let outcome = match run_captured(&self.ctx.qemu, &args, &raw_path, &stderr_path, self.ctx.timeout) {
-            Ok(o) => o,
-            Err(e) => self.ctx.gate_fail(&format!("{name}: {e}")),
+        let mut args: Vec<&str> = vec!["-M", "mps2-an505", "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+        args.extend_from_slice(profile.qemu_args());
+        args.extend_from_slice(&["-kernel", &staged_arg]);
+        let exit = match profile {
+            ExecProfile::Parity => {
+                let outcome = match run_captured(&self.ctx.qemu, &args, &raw_path, &stderr_path, self.ctx.timeout) {
+                    Ok(o) => o,
+                    Err(e) => self.ctx.gate_fail(&format!("{name}: {e}")),
+                };
+                if outcome.timed_out {
+                    println!("  (run killed at its timeout; a hang is observed, never a pass)");
+                }
+                outcome.exit
+            }
+            ExecProfile::Deterministic => {
+                let unit = host_unit(&self.ctx.qemu, &self.ctx.out, self.ctx.timeout);
+                let limits = Limits { deadline: self.ctx.timeout, budget: budget(self.ctx.timeout, work, unit) };
+                let run = match run_counted(&self.ctx.qemu, &args, &raw_path, &stderr_path, limits) {
+                    Ok(r) => r,
+                    Err(e) => self.ctx.gate_fail(&format!("{name}: {e}")),
+                };
+                say_counted(&run);
+                run.exit
+            }
         };
-        if outcome.timed_out {
-            println!("  (run killed at its timeout; a hang is observed, never a pass)");
-        }
         let raw = std::fs::read(&raw_path).unwrap_or_default();
         echo_file(&raw_path, "  | ");
-        (raw, sha, path_rel)
+        CaseRun { sha, path_rel, raw, exit }
+    }
+
+    /// The two controls of the instruction-counted runs' limits: a guest
+    /// that never ends must be stopped. Each is a generated guest of the
+    /// mps2-an500 machine, no kernel image: one never leaves its loop and
+    /// is stopped when the emulator has spent the run's budget of
+    /// processor time; one waits for an interrupt nothing raises and is
+    /// stopped after a whole deadline in which the emulator did no work --
+    /// or at its budget, where the emulator keeps a thread of its own busy
+    /// while its guest waits. On a host that gives no reading of the
+    /// emulator's processor time the wall clock stops both at the
+    /// deadline. The budgets are one unit of the host's emulator work over
+    /// small floors, so a slow host's emulator is given the time it needs
+    /// to start.
+    fn run_hang_controls(&mut self) {
+        let unit = host_unit(&self.ctx.qemu, &self.ctx.out, self.ctx.timeout);
+        let deadline = Duration::from_secs(HANG_DEADLINE_S);
+        let spin = Limits { deadline, budget: budget(Duration::from_secs(1), 1, unit) };
+        let wait = Limits { deadline, budget: budget(Duration::from_secs(2), 1, unit) };
+        self.run_hang_control("hang-spin-control", Guest::Spin, true, HANG_SPIN_BROKE, spin);
+        self.run_hang_control("hang-wait-control", Guest::Wait, false, HANG_WAIT_BROKE, wait);
+    }
+
+    fn run_hang_control(&mut self, name: &str, guest: Guest, works: bool, broke: &str, limits: Limits) {
+        println!("== case {name} ==");
+        let run = match run_guest(&self.ctx.qemu, &self.ctx.out, name, guest, limits) {
+            Ok(r) => r,
+            Err(e) => self.ctx.gate_fail(&format!("{name}: {e}")),
+        };
+        say_counted(&run);
+        let sha = match sha256_file(&self.ctx.out.join(format!("{name}.bin"))) {
+            Ok(s) => s,
+            Err(e) => self.ctx.gate_fail(&format!("{name}: cannot hash the generated image: {e}")),
+        };
+        let path_rel = format!("{}/{name}.bin", self.ctx.out_rel);
+        let raw = std::fs::read(self.ctx.out.join(format!("{name}.raw"))).unwrap_or_default();
+        if let Err(why) = hang_refused(run.exit, run.stop, works, &raw) {
+            self.emit_control_timed(name, "fail", broke, run.exit, 124, &sha, &path_rel, Some("icount-shift0"));
+            self.ctx.gate_fail(&format!("{name}: {why} (a guest that never ends must be stopped)"));
+        }
+        self.emit_control_timed(name, "pass", broke, run.exit, 124, &sha, &path_rel, Some("icount-shift0"));
+        let how = match run.stop {
+            Some(Stop::Work) => "stopped when the emulator had spent the run's budget of processor time",
+            Some(Stop::NoWork) => "stopped after a whole deadline in which the emulator did no work",
+            _ => "stopped by the wall clock at the deadline, this host giving no reading of the emulator's processor time",
+        };
+        println!("== control {name}: PASS (the guest never ended and was {how}; nothing printed; recorded as exit 124) ==");
     }
 
     /// The kheap-loud designed death: the corrupted
@@ -557,9 +896,47 @@ impl API {
 /// What the api gate's negative control breaks, for its case record: the
 /// emulation's decoder with the add and subtract operations swapped (the
 /// feature `test-fpemul-doctored`).
+const PWM_DOCTORED_BROKE: &str = "the virtual timer's own reading of the period it runs made one prescaler step long, so the door's achieved period and the timer's disagree (test-pwm-doctored)";
+const ADC_DOCTORED_BROKE: &str = "the virtual loop channel answering the previous conversion's sample, a stale conversion at the second reading (test-adc-doctored)";
+const FP_BAND_DOCTORED_BROKE: &str = "the tick hook pending nothing while the fp-band check runs, so no band exception fires however many of the kernel's ticks pass (test-fp-band-doctored)";
 const GPIO_LATCH_BROKE: &str = "the virtual backend's loopback latch fires the input's event twice per change (test-gpio-doctored-latch)";
-const BUS_DOCTORED_BROKE: &str = "the sensor model refusing the second data byte of a write, the I2C block model never completing a non-last message, the drivers' pumps unbounded against the receive queue's honest overflow, and the SPI driver's first transfer after the claim taking the write order as it once stood (test-bus-doctored)";
+const GPIO_EDGE_BROKE: &str = "the virtual backend makes one event of its own beside the tenth counted edge, an edge the program did not make (test-gpio-doctored-edge)";
+const SUSP_ORDER_BROKE: &str = "the set-context landing pad storing its witness word before its thread id, with a sleep between the two (test-susp-doctored-order)";
+const BUS_RP2350_DOCTORED_BROKE: &str = "over the RP2350's bus drivers: the sensor model refusing the second data byte of a write, the I2C block model never performing a repeated start, and the SPI driver's pump unbounded against the receive queue's honest overrun (test-bus-rp2350 with test-bus-doctored); and the events its check arms one at a time through the models' doctor call (a clock held low 25 ms and released, a data line held after a reset, the paths no honest run reaches)";
+const BUS_DOCTORED_BROKE: &str = "the sensor model refusing the second data byte of a write, the I2C block model never completing a non-last message, the drivers' pumps unbounded against the receive queue's honest overflow, and the SPI driver's first transfer after the claim taking the write order as it once stood (test-bus-doctored); and the events its check arms one at a time through the models' doctor call (a clock held low 25 ms and released, a data line held after a reset, the paths no honest run reaches)";
 const FP_DOCTORED_BROKE: &str = "the emulation decoder with the add and subtract operations swapped, and a form executed from an unregistered code range as the image's last act (the feature test-fpemul-doctored)";
+
+/// The deadline of the two hang controls' runs, in seconds.
+const HANG_DEADLINE_S: u64 = 3;
+
+/// The bus control's work in units of the host's unit of emulator work:
+/// the run's share as measured on the instruction-counted profile, times
+/// four.
+const BUS_CONTROL_WORK: u32 = 54;
+
+const HANG_SPIN_BROKE: &str = "a generated guest that never leaves its loop, where a run must end (hang-spin-control)";
+const HANG_WAIT_BROKE: &str = "a generated guest that waits for an interrupt nothing in the machine raises, where a run must end (hang-wait-control)";
+
+/// The judge of a hang control's run: the runner must have stopped it
+/// (the exit recorded as 124) and the guest must have printed nothing. A
+/// guest that works without end must have been stopped for its work; a
+/// guest that waits may have been stopped for no work, or for work where
+/// the emulator keeps a thread of its own busy while its guest waits. On a
+/// host that gives no reading of the emulator's processor time the wall
+/// clock's stop is the one to expect of both.
+fn hang_refused(exit: i32, stop: Option<Stop>, works: bool, raw: &[u8]) -> Result<(), String> {
+    if exit != 124 {
+        return Err(format!("the run ended by itself with exit {exit}"));
+    }
+    if !raw.is_empty() {
+        return Err("the generated guest printed".to_string());
+    }
+    match stop {
+        None => Err("the run is recorded as stopped and no rule is named".to_string()),
+        Some(Stop::NoWork) if works => Err("a guest that works without end read as doing no work".to_string()),
+        Some(_) => Ok(()),
+    }
+}
 
 /// The fp-double block of a transcript: every line that starts with the
 /// check's tag, in order, without the line ending (the PASS line is not in
@@ -573,9 +950,26 @@ fn fp_block(raw: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// A transcript that died: a fault report or a panic.
-fn run_exit_bad(raw: &[u8]) -> bool {
-    contains_fixed(raw, "EXCEPTION:") || contains_fixed(raw, "KERNEL PANIC")
+/// The judge of an emulated run's ending, beside the transcript's lines: a
+/// run killed at the harness's deadline (recorded as exit 124) is a hang and
+/// never a pass; the exit must be the wanted one; a run wanted to exit clean
+/// must have printed the exit-door line (the machine left by the door, not by
+/// another path); a run wanted to die must not have printed it.
+fn run_ending(exit: i32, want: i32, raw: &[u8]) -> Result<(), String> {
+    if exit == 124 {
+        return Err("the run was killed at its timeout (a hang is observed, never a pass)".to_string());
+    }
+    if exit != want {
+        return Err(format!("exit {exit}, wanted {want}"));
+    }
+    let door = contains_fixed(raw, MARKER_EXIT_DOOR);
+    if want == 0 && !door {
+        return Err("exit 0 without the exit-door line (the machine left by another path)".to_string());
+    }
+    if want != 0 && door {
+        return Err("the exit-door line printed on a run that must die".to_string());
+    }
+    Ok(())
 }
 
 pub fn run(repo: &Path) -> ! {
@@ -618,13 +1012,20 @@ pub fn run(repo: &Path) -> ! {
     api.run_kheap_loud();
     api.run_fp_parity();
     api.run_gpio_latch_control();
+    api.run_gpio_edge_control();
+    api.run_susp_order_control();
     api.run_bus_doctored_control();
+    api.run_bus_rp2350();
+    api.run_pwm_doctored_control();
+    api.run_adc_doctored_control();
+    api.run_fp_band_doctored_control();
+    api.run_hang_controls();
     api.ctx.results.emit_summary(GATE, "pass", 0);
     if !validate_results(repo, api.ctx.results.path()) {
         println!("{DISPLAY}: FAIL -- results file failed schema validation");
         exit(1);
     }
-    println!("{DISPLAY}: PASS (6/6)  [{qemu_v} | {rustc_v}]");
+    println!("{DISPLAY}: PASS (15/15)  [{qemu_v} | {rustc_v}]");
     exit(0);
 }
 
@@ -1100,17 +1501,17 @@ pub fn selfcheck(repo: &Path) -> ! {
     );
 
     let mgone = tmp.join("m-marker-gone.raw");
-    write_fixture(&mgone, format!("{}\r\n{}\r\n", MARKERS_M[0], MARKERS_M[1]).as_bytes());
+    write_fixture(&mgone, format!("{}\r\n{}\r\n{}\r\n", MARKERS_M[0], MARKERS_M[1], MARKERS_M[2]).as_bytes());
     sc.probe(
         "m-marker-gone",
-        "transcript with the fp-band armed and digest lines and no PASS line",
+        "transcript with the fp-band armed, digest and landing lines and no PASS line",
         MARKERS_M.iter().all(|m| contains_fixed(&std::fs::read(&mgone).unwrap_or_default(), m)),
     );
     let mgreen = tmp.join("m-marker-present.raw");
-    write_fixture(&mgreen, format!("{}\r\n{}\r\n{}\r\n", MARKERS_M[0], MARKERS_M[1], MARKERS_M[2]).as_bytes());
+    write_fixture(&mgreen, format!("{}\r\n{}\r\n{}\r\n{}\r\n", MARKERS_M[0], MARKERS_M[1], MARKERS_M[2], MARKERS_M[3]).as_bytes());
     sc.accept_probe(
         "m-marker-present",
-        "genuine fp-band armed, digest and PASS lines accepted by the M sweep",
+        "genuine fp-band armed, digest, landing and PASS lines accepted by the M sweep",
         MARKERS_M.iter().all(|m| contains_fixed(&std::fs::read(&mgreen).unwrap_or_default(), m)),
     );
 
@@ -1127,6 +1528,21 @@ pub fn selfcheck(repo: &Path) -> ! {
         "j-marker-present",
         "genuine entropy-secure and calendar-door PASS markers accepted by the J sweep",
         MARKERS_J.iter().all(|m| contains_fixed(&std::fs::read(&jgreen).unwrap_or_default(), m)),
+    );
+
+    let pgone = tmp.join("p-marker-gone.raw");
+    write_fixture(&pgone, format!("{}\r\n{}\r\n{}\r\n", MARKERS_P[0], MARKERS_P[2], MARKERS_P[4]).as_bytes());
+    sc.probe(
+        "p-marker-gone",
+        "transcript with the three PWM and ADC armed lines and no PASS line",
+        MARKERS_P.iter().all(|m| contains_fixed(&std::fs::read(&pgone).unwrap_or_default(), m)),
+    );
+    let pgreen = tmp.join("p-marker-present.raw");
+    write_fixture(&pgreen, MARKERS_P.iter().map(|m| format!("{m} the rest of the line)\r\n")).collect::<String>().as_bytes());
+    sc.accept_probe(
+        "p-marker-present",
+        "genuine PWM and ADC armed and PASS prefixes accepted by the P sweep",
+        MARKERS_P.iter().all(|m| contains_fixed(&std::fs::read(&pgreen).unwrap_or_default(), m)),
     );
 
     let header_text = std::fs::read_to_string(repo.join("src/kernel/include/rhu.h")).unwrap_or_default();
@@ -1201,6 +1617,74 @@ pub fn selfcheck(repo: &Path) -> ! {
         "records-tls-overrun",
         "layout record whose tls slots run past the TCB stride",
         check_records(&d, &e, abi).is_ok(),
+    );
+
+    let complete = tmp.join("ending-complete.raw");
+    write_fixture(
+        &complete,
+        b"[api] PASS fp-double (the block)\r\n[api] exit-door: handing the machine exit to rhu_exit(0)\r\n[tick] witness: not counted (no cycle counter on this row)\r\n",
+    );
+    let complete_bytes = std::fs::read(&complete).unwrap_or_default();
+    let nodoor = tmp.join("ending-no-door.raw");
+    write_fixture(
+        &nodoor,
+        b"[api] PASS fp-double (the block)\r\n[sched] ALL GOOD (threads + timers + preemption online)\r\n",
+    );
+    let nodoor_bytes = std::fs::read(&nodoor).unwrap_or_default();
+    sc.probe(
+        "ending-hang-after-the-lines",
+        "a complete transcript whose run was killed at the harness's deadline (exit 124)",
+        run_ending(124, 0, &complete_bytes).is_ok(),
+    );
+    sc.probe(
+        "ending-wrong-exit",
+        "a complete transcript whose machine exited 1 where 0 was wanted",
+        run_ending(1, 0, &complete_bytes).is_ok(),
+    );
+    sc.probe(
+        "ending-no-exit-door",
+        "exit 0 on a transcript that never printed the exit-door line",
+        run_ending(0, 0, &nodoor_bytes).is_ok(),
+    );
+    sc.probe(
+        "ending-control-alive",
+        "a control that must die (exit 1 wanted) whose machine exited 0 through the door",
+        run_ending(0, 1, &complete_bytes).is_ok(),
+    );
+    sc.accept_probe(
+        "ending-genuine",
+        "exit 0 with the exit-door line accepted, and a designed death at exit 1 without it",
+        run_ending(0, 0, &complete_bytes).is_ok() && run_ending(1, 1, &nodoor_bytes).is_ok(),
+    );
+
+    sc.probe(
+        "hang-ended-by-itself",
+        "a guest that must never end whose machine exited 0",
+        hang_refused(0, None, true, b"").is_ok(),
+    );
+    sc.probe(
+        "hang-spin-read-as-no-work",
+        "a guest that never leaves its loop stopped for doing no work",
+        hang_refused(124, Some(Stop::NoWork), true, b"").is_ok(),
+    );
+    sc.probe(
+        "hang-printed",
+        "a generated guest whose transcript is not empty",
+        hang_refused(124, Some(Stop::Work), true, b"x").is_ok(),
+    );
+    sc.probe(
+        "hang-no-rule",
+        "a run recorded as stopped with no rule named",
+        hang_refused(124, None, false, b"").is_ok(),
+    );
+    sc.accept_probe(
+        "hang-genuine",
+        "a working guest stopped for its work, a waiting guest stopped for no work or for work, and either stopped by the wall clock on a host with no reading",
+        hang_refused(124, Some(Stop::Work), true, b"").is_ok()
+            && hang_refused(124, Some(Stop::NoWork), false, b"").is_ok()
+            && hang_refused(124, Some(Stop::Work), false, b"").is_ok()
+            && hang_refused(124, Some(Stop::Deadline), true, b"").is_ok()
+            && hang_refused(124, Some(Stop::Deadline), false, b"").is_ok(),
     );
 
     sc.finish("genuine inputs accepted");

@@ -12,22 +12,22 @@ use core::ptr::{read_volatile, write_volatile};
 use super::ring;
 
 /// The crystal on every board built on this chip.
-const XOSC_HZ: u32 = 12_000_000;
+pub(super) const XOSC_HZ: u32 = 12_000_000;
 
-/// Clock posture 1 (default): SYSCLK = the crystal, 12 MHz. `clock_init`
-/// enforces exactly this posture.
-#[cfg(not(rp2350_pll150))]
+/// Clock posture 2 (`<board>-xtal12`): SYSCLK = the crystal, 12 MHz.
+/// `clock_init` enforces exactly this posture.
+#[cfg(rp2350_xtal)]
 pub const SYSCLK_HZ: u32 = 12_000_000;
-/// Clock posture 2 (`<board>-pll150`): the system PLL at 150 MHz off the
+/// Clock posture 1 (default): the system PLL at 150 MHz off the
 /// crystal -- 12 MHz / 1 into the VCO, x125 = 1500 MHz (inside the
 /// 400-1600 MHz window the PLL's control register states), / 5 / 2 lands
 /// SYSCLK at 150 MHz, the chip's rated system clock.
-#[cfg(rp2350_pll150)]
+#[cfg(not(rp2350_xtal))]
 pub const SYSCLK_HZ: u32 = 150_000_000;
 
 /// The peripheral clock: the crystal, in both postures (stated by
 /// `clock_init`, which selects and starts it).
-const PERI_HZ: u32 = XOSC_HZ;
+pub(super) const PERI_HZ: u32 = XOSC_HZ;
 
 /// SysTick rate. The kernel clocks SysTick from the processor clock, so
 /// the chip's tick-generator block is not needed.
@@ -89,7 +89,7 @@ pub static __rhu_rp2350_boot_block: [u32; 5] =
     [0xffff_ded3, 0x1021_0142, 0x0000_01ff, 0x0000_0000, 0xab12_3579];
 
 
-const CLOCKS: usize = 0x4001_0000;
+pub(super) const CLOCKS: usize = 0x4001_0000;
 const CLK_REF_CTRL: *mut u32 = (CLOCKS + 0x30) as *mut u32;
 const CLK_REF_DIV: *mut u32 = (CLOCKS + 0x34) as *mut u32;
 const CLK_REF_SELECTED: *mut u32 = (CLOCKS + 0x38) as *mut u32;
@@ -129,11 +129,11 @@ const XOSC_CTRL_FREQ_RANGE_1_15MHZ: u32 = 0xaa0;
 const XOSC_STATUS_STABLE: u32 = 1 << 31;
 
 const RESETS: usize = 0x4002_0000;
-const RESETS_RESET: *mut u32 = RESETS as *mut u32;
-const RESETS_RESET_DONE: *mut u32 = (RESETS + 0x08) as *mut u32;
-const RESET_IO_BANK0: u32 = 1 << 6;
-const RESET_PADS_BANK0: u32 = 1 << 9;
-#[cfg(rp2350_pll150)]
+pub(super) const RESETS_RESET: *mut u32 = RESETS as *mut u32;
+pub(super) const RESETS_RESET_DONE: *mut u32 = (RESETS + 0x08) as *mut u32;
+pub(super) const RESET_IO_BANK0: u32 = 1 << 6;
+pub(super) const RESET_PADS_BANK0: u32 = 1 << 9;
+#[cfg(not(rp2350_xtal))]
 const RESET_PLL_SYS: u32 = 1 << 14;
 const RESET_SYSINFO: u32 = 1 << 21;
 const RESET_UART0: u32 = 1 << 26;
@@ -151,11 +151,11 @@ const PADS_BANK0_GPIO1: *mut u32 = (PADS_BANK0 + 0x08) as *mut u32;
 /// Pad control: ISO bit 8 (the isolation latch, set at reset and released
 /// once the pad is configured), OD bit 7, IE bit 6, PUE bit 3, PDE bit 2
 /// (set at reset: every pad pulls down until told otherwise).
-const PAD_ISO: u32 = 1 << 8;
-const PAD_OD: u32 = 1 << 7;
-const PAD_IE: u32 = 1 << 6;
-const PAD_PUE: u32 = 1 << 3;
-const PAD_PDE: u32 = 1 << 2;
+pub(super) const PAD_ISO: u32 = 1 << 8;
+pub(super) const PAD_OD: u32 = 1 << 7;
+pub(super) const PAD_IE: u32 = 1 << 6;
+pub(super) const PAD_PUE: u32 = 1 << 3;
+pub(super) const PAD_PDE: u32 = 1 << 2;
 
 const UART0: usize = 0x4007_0000;
 const UART0_DR: *mut u32 = UART0 as *mut u32;
@@ -221,7 +221,7 @@ pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[(UART0_IRQ, __rhu_r
 /// device seam: the driver owns the line; a hook is a tenant of it).
 pub const GPIO_IRQS: &[(usize, unsafe extern "C" fn())] = &[(gpio_backend::IO_IRQ_BANK0, gpio_backend::__rhu_rp2350_io_bank0_irq)];
 
-#[cfg(rp2350_pll150)]
+#[cfg(not(rp2350_xtal))]
 mod pll150 {
     /// CLK_SYS_CTRL's auxiliary path: SRC bit 0 = 1 selects it; AUXSRC
     /// [7:5] names its source (000 the system PLL, 011 the crystal); the
@@ -276,7 +276,7 @@ mod pll150 {
 }
 
 /// Release peripherals from the reset controller and wait for each.
-unsafe fn release_reset(mask: u32) {
+pub(super) unsafe fn release_reset(mask: u32) {
     unsafe {
         write_volatile(RESETS_RESET, read_volatile(RESETS_RESET) & !mask);
         while read_volatile(RESETS_RESET_DONE) & mask != mask {}
@@ -323,8 +323,8 @@ fn clock_init_tail() {
     ring::boot_mark();
 }
 
-/// Enforce the crystal posture, then the shared tail.
-#[cfg(not(rp2350_pll150))]
+/// Enforce the crystal posture (`<board>-xtal12`), then the shared tail.
+#[cfg(rp2350_xtal)]
 pub fn clock_init() {
     unsafe {
         clocks_to_xosc();
@@ -332,14 +332,14 @@ pub fn clock_init() {
     clock_init_tail();
 }
 
-/// Boring posture: no clock line in the banner (the banked transcript
-/// surface stands byte-identical).
-#[cfg(not(rp2350_pll150))]
+/// The crystal posture: no clock line in the banner (the gated posture's
+/// own transcript, as the bring-up runs on hardware read it).
+#[cfg(rp2350_xtal)]
 pub fn clock_readback() -> Option<crate::board::ClockReadback> {
     None
 }
 
-/// Enforce the PLL150 posture, every step on its hardware ready flag.
+/// Enforce the PLL150 posture (the default), every step on its hardware ready flag.
 /// Entry assumes nothing: first the crystal posture (the safe downshift --
 /// the system clock on the crystal before the PLL is touched), then the
 /// PLL released from reset, configured while powered down (its reset
@@ -352,7 +352,7 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
 /// PLL while the glitchless mux still sits on the reference clock (the
 /// auxiliary mux glitches, the glitchless one does not), and the mux
 /// switched and polled. The peripheral clock stays on the crystal.
-#[cfg(rp2350_pll150)]
+#[cfg(not(rp2350_xtal))]
 pub fn clock_init() {
     use pll150::*;
     unsafe {
@@ -385,7 +385,7 @@ pub fn clock_init() {
     clock_init_tail();
 }
 
-/// Gated posture: report the live clock tree for the banner line, every
+/// The default posture: report the live clock tree for the banner line, every
 /// numeric field decoded from registers (a silently-failed switch reads
 /// the reference clock's 12 MHz here, and the kmain assert dies loudly).
 /// Field mapping under the shared banner wording: `pllm` carries REFDIV,
@@ -394,7 +394,7 @@ pub fn clock_init() {
 /// by construction), `flash_ws` the flash interface's clock divisor (this
 /// chip's flash-speed knob: it has no flash wait states), and `boost` reads
 /// "over-drive off" (no voltage lever is pulled for 150 MHz).
-#[cfg(rp2350_pll150)]
+#[cfg(not(rp2350_xtal))]
 pub fn clock_readback() -> Option<crate::board::ClockReadback> {
     use pll150::*;
     unsafe {
@@ -638,9 +638,9 @@ pub mod gpio_backend {
     const SIO: usize = 0xD000_0000;
     const GPIO_IN: usize = 0x004;
     const GPIO_OUT_SET: usize = 0x018;
-    const GPIO_OUT_CLR: usize = 0x020;
+    pub(in crate::board) const GPIO_OUT_CLR: usize = 0x020;
     const GPIO_OE_SET: usize = 0x038;
-    const GPIO_OE_CLR: usize = 0x040;
+    pub(in crate::board) const GPIO_OE_CLR: usize = 0x040;
     /// The twin registers for lines 32 to 47 sit four bytes above each.
     const HI: usize = 0x004;
     const INTR0: usize = 0x230;
@@ -653,15 +653,15 @@ pub mod gpio_backend {
     const NVIC_IPR: *mut u8 = 0xE000_E400 as *mut u8;
     const IRQ_PRIO: u8 = 0xE0;
 
-    fn ctrl(line: u32) -> *mut u32 {
+    pub(in crate::board) fn ctrl(line: u32) -> *mut u32 {
         (IO_BANK0 + 8 * line as usize + 4) as *mut u32
     }
 
-    fn pad(line: u32) -> *mut u32 {
+    pub(in crate::board) fn pad(line: u32) -> *mut u32 {
         (PADS_BANK0 + 4 + 4 * line as usize) as *mut u32
     }
 
-    fn sio(off: usize, line: u32) -> (*mut u32, u32) {
+    pub(in crate::board) fn sio(off: usize, line: u32) -> (*mut u32, u32) {
         let twin = if line >= 32 { HI } else { 0 };
         ((SIO + off + twin) as *mut u32, 1 << (line % 32))
     }
@@ -693,7 +693,9 @@ pub mod gpio_backend {
     /// The pad's pull and input enable, the function select, then the
     /// output's initial LEVEL (SIO OUT) before its direction (SIO OE), so
     /// the pad never shows the wrong level at open. An open-drain output
-    /// at a high initial level is the pad released.
+    /// at a high initial level is the pad released. Then the analog
+    /// channel pad on the line's net, where the row names one, is parked
+    /// unless a program holds the channel (the twin rule).
     pub fn configure(line: u32, mode: u32, pull: u32, initial: bool) {
         release_banks();
         with_cs(|| unsafe {
@@ -715,6 +717,7 @@ pub mod gpio_backend {
             let drive = mode == m::MODE_OUTPUT || (mode == m::MODE_OUTPUT_OPEN_DRAIN && !initial);
             write_volatile(if drive { oe_set } else { oe_clr }, mask);
         });
+        crate::board::rp2350_adc::park_twin_channel(line);
     }
 
     /// Back to a released, function-less pad with its input enabled.
@@ -1155,7 +1158,7 @@ pub fn entropy_draw(buf: &mut [u8], counters: &mut super::DrawCounters) -> Resul
 /// at the IO bank, by the handler and by the program; nothing at the
 /// controller's global level, nothing in the zero-latency band, and the
 /// handler itself runs in the lowest kernel band.
-#[cfg(feature = "unhosted-main")]
+#[cfg(all(feature = "unhosted-main", any(feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2-w")))]
 pub mod wireless_tenant {
     use core::ptr::addr_of_mut;
     use core::sync::atomic::AtomicU32;

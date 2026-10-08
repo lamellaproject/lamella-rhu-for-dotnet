@@ -16,9 +16,14 @@
  * thirty-two bytes with the two buffers as 64-bit words, its mode byte);
  * the code here maps them onto the kernel's bus calls.
  *
- * The I2C node /dev/i2c-<bus>: the open claims the bus at 100 kHz (the
- * one rate the kernel serves; the binding has no clock setting, as Linux
- * exposes none) and hands out a descriptor; the functionality request
+ * The I2C node /dev/i2c-<bus>: the open checks the board has the bus and
+ * hands out a descriptor; the bus is claimed at the first transfer at 100
+ * kHz, or earlier at another served rate by this system's one request on
+ * the node (0x0740, a word in hertz), which the board class issues for a
+ * program that asks a rate -- Linux defines no I2C clock request and the
+ * standard binding sends none, so a program on the standard API alone runs
+ * the bus at 100 kHz, as a device tree would fix it, and sends nothing new;
+ * the functionality request
  * stores the 32-bit ABI's one four-byte word, "plain combined
  * transactions" and nothing else, so the binding always takes its
  * combined-transfer path; the combined-transfer request copies up to
@@ -58,7 +63,9 @@
  * the descriptor is closed from then on, but the entry is given back only
  * when the last running request on it ends: an open in between receives
  * another number, never the entry a request still runs on. An open
- * becomes visible only when its claim has succeeded.
+ * becomes visible only when its claim has succeeded (an I2C node's open
+ * has none: its bus is claimed at the first transfer, or earlier by the
+ * rate request).
  *
  * The limits, plainly: a node's number is the bus's own number on the chip,
  * as the chip's documentation and Linux name it (the block I2C1 is
@@ -171,6 +178,13 @@ static_assert(sizeof(rhu_i2c_msg) == 12, "the kernel's message record is twelve 
 static_assert(sizeof(unsigned long) == 4, "the functionality request's output is one four-byte word on this ABI");
 
 #define BUSDEV_I2C_RATE_HZ 100000u
+/* RHU's one request on the I2C node (in the i2c-dev family's range by
+ * shape, outside Linux's numbers 0x0701 to 0x0720): one 32-bit word in
+ * hertz, in and out -- the bus claimed at that rate for the program's run,
+ * the word read back with the rate the bus runs at. The board class issues
+ * it; the harness ties the two numbers. */
+#define BUSDEV_I2C_RATE 0x0740u
+#define BUSDEV_I2C_BUSES 8u
 #define BUSDEV_DEADLINE_NS NS_PER_S
 
 enum { KIND_I2C = 1, KIND_SPI = 2 };
@@ -198,6 +212,21 @@ struct busdev_node {
 
 static struct busdev_node g_nodes[RHU_SHIM_FD_DEVICE_COUNT];
 static uint8_t g_mutex[24];
+
+/* The buses' rates for the program's run: a bus claimed through this unit
+ * and the rate it runs at, one entry per bus (no board has more than the
+ * table holds). The kernel knows a claimed bus's state but answers one
+ * code for "another rate" and for "a pin held as a GPIO line"; the table
+ * tells them apart and knows the rate to read back. Filled under the
+ * table's mutex WITH the kernel's claim under it, so the two agree at
+ * every moment (a transfer in flight holds no lock, so the kernel's wait
+ * for the bus cannot deadlock a claim). */
+struct busdev_rate {
+    uint32_t bus;
+    uint32_t hz;
+};
+static struct busdev_rate g_rates[BUSDEV_I2C_BUSES];
+static uint32_t g_rate_count;
 
 static int refuse(int32_t err)
 {
@@ -359,6 +388,21 @@ int rhu_busdev_open(const char *path, int flags)
         rhu_shim_log("%s: not a bus node name (ENOENT)", path);
         return refuse(RHU_GERR_ENOENT);
     }
+    if (kind == KIND_I2C) {
+        /* The board has the bus, by the enumeration doors (no claim here:
+         * the bus is claimed at the first transfer, or earlier by the rate
+         * request); a number none of them answers is a missing node. */
+        int32_t count = rhu_i2c_count();
+        int found = 0;
+        for (int32_t i = 0; i < count && !found; i++) {
+            int32_t number = rhu_i2c_bus((uint32_t)i);
+            found = number >= 0 && (uint32_t)number == bus;
+        }
+        if (!found) {
+            rhu_shim_log("%s: no such bus on this board (ENOENT)", path);
+            return refuse(RHU_GERR_ENOENT);
+        }
+    }
     if (!table_lock())
         return -1;
     int slot = -1;
@@ -378,12 +422,14 @@ int rhu_busdev_open(const char *path, int flags)
     n->bus = bus;
     n->select = select;
     table_unlock();
-    /* The claim, with the node's number as the bus number, outside the
-     * lock (it waits for a transfer running on the bus): idempotent by the
-     * kernel's contract (a second claim of a claimed bus answers 0 and
-     * changes nothing), so every open claims; a number naming no bus on
-     * this board is the kernel's ENODEV, which is a missing node here. */
-    int32_t rc = kind == KIND_I2C ? rhu_i2c_claim(bus, BUSDEV_I2C_RATE_HZ) : rhu_spi_claim(bus);
+    /* The SPI node's claim, with the node's number as the bus number,
+     * outside the lock (it waits for a transfer running on the bus):
+     * idempotent by the kernel's contract (a second claim of a claimed bus
+     * answers 0 and changes nothing), so every SPI open claims; a number
+     * naming no bus on this board is the kernel's ENODEV, which is a
+     * missing node here. The I2C node claims nothing at its open: its bus
+     * is claimed at the first transfer, or earlier by the rate request. */
+    int32_t rc = kind == KIND_I2C ? 0 : rhu_spi_claim(bus);
     /* A lock refused HERE would leave this one entry in its opening state
      * for the boot (no request finds it, no open takes it): the lock was
      * taken a moment ago, so only a damaged slot gets here. */
@@ -455,6 +501,104 @@ static int i2c_functionality(void *arg)
     return 0;
 }
 
+/* A bus claimed at a rate for the program's run, through the table and the
+ * kernel under the lock. 0 with *running the rate the bus runs at (the
+ * asked one, now or already; for the first transfer's default claim, the
+ * rate an earlier request set); -1 with errno otherwise -- EBUSY with
+ * *running the table's rate when the bus runs at another rate for this
+ * run, EBUSY with *running 0 when a program holds one of the bus's pins
+ * as a GPIO line (the table has no entry: the kernel's one code told
+ * apart by the table), ENOTSUP for a rate not served at this clock (the
+ * kernel judges it before the bus's state, so on a claimed bus too),
+ * EMFILE for a bus beyond the table, the kernel's other codes as the
+ * transaction maps them. One line on the wire when a claim takes effect,
+ * one for a refusal. */
+static int i2c_rate_claim(uint32_t bus, uint32_t hz, uint32_t *running, int asked)
+{
+    *running = 0;
+    if (!table_lock())
+        return -1;
+    struct busdev_rate *e = NULL;
+    for (uint32_t i = 0; i < g_rate_count && e == NULL; i++) {
+        if (g_rates[i].bus == bus)
+            e = &g_rates[i];
+    }
+    if (e != NULL && (!asked || e->hz == hz)) {
+        /* Claimed earlier for this run: the default meets it as it runs; the
+         * same rate again is the kernel's idempotence, answered here. */
+        *running = e->hz;
+        table_unlock();
+        return 0;
+    }
+    if (e == NULL && g_rate_count == BUSDEV_I2C_BUSES) {
+        table_unlock();
+        rhu_shim_log("/dev/i2c-%u: a bus beyond the rate table's %u refused (EMFILE)", bus, BUSDEV_I2C_BUSES);
+        return refuse(RHU_GERR_EMFILE);
+    }
+    int32_t rc = rhu_i2c_claim(bus, hz);
+    if (rc == 0) {
+        if (e == NULL) {
+            g_rates[g_rate_count].bus = bus;
+            g_rates[g_rate_count].hz = hz;
+            g_rate_count++;
+        } else {
+            e->hz = hz;
+        }
+        table_unlock();
+        *running = hz;
+        if (asked)
+            rhu_shim_log("/dev/i2c-%u: the bus claimed at %u Hz (asked)", bus, hz);
+        else
+            rhu_shim_log("/dev/i2c-%u: the bus claimed at %u Hz (the default, at the first transfer)", bus, hz);
+        return 0;
+    }
+    uint32_t have = e != NULL ? e->hz : 0;
+    table_unlock();
+    switch (rc) {
+    case RHU_EBUSY:
+        if (have != 0) {
+            *running = have;
+            rhu_shim_log("/dev/i2c-%u: a rate of %u Hz refused (EBUSY: the bus runs at %u Hz for this program's run)", bus, hz, have);
+        } else {
+            rhu_shim_log("/dev/i2c-%u: a rate of %u Hz refused (EBUSY: a program holds one of its pins as a GPIO line)", bus, hz);
+        }
+        return refuse(RHU_GERR_EBUSY);
+    case RHU_ENOTSUP:
+        rhu_shim_log("/dev/i2c-%u: a rate of %u Hz refused (ENOTSUP: not served at this image's clock)", bus, hz);
+        return refuse(RHU_GERR_ENOTSUP);
+    case RHU_ENODEV:
+        rhu_shim_log("/dev/i2c-%u: no such bus on this board (ENODEV)", bus);
+        return refuse(RHU_GERR_ENODEV);
+    default:
+        rhu_shim_log("/dev/i2c-%u: the claim answered %d (EIO)", bus, rc);
+        return refuse(RHU_GERR_EIO);
+    }
+}
+
+/* The rate request: the word read once; 0 refused EINVAL; the bus claimed
+ * at the rate for the run and the word written back with the rate the bus
+ * runs at (the asked one on 0; the running one on EBUSY for another rate;
+ * untouched on every other refusal). */
+static int i2c_rate(const struct busdev_node *c, void *arg)
+{
+    uint32_t hz;
+    memcpy(&hz, arg, sizeof hz);
+    if (hz == 0) {
+        rhu_shim_log("/dev/i2c-%u: a rate of 0 Hz refused (EINVAL)", c->bus);
+        return refuse(RHU_GERR_EINVAL);
+    }
+#ifdef RHU_SHIM_BREAK_BUSDEV_RATE_UNJUDGED
+    /* The careless shape: the request answers 0 and claims nothing. */
+    return 0;
+#else
+    uint32_t running;
+    int rc = i2c_rate_claim(c->bus, hz, &running, 1);
+    if (rc == 0 || running != 0)
+        memcpy(arg, &running, sizeof running);
+    return rc;
+#endif
+}
+
 static int i2c_transaction(const struct busdev_node *c, void *arg)
 {
     struct busdev_i2c_rdwr set;
@@ -488,6 +632,14 @@ static int i2c_transaction(const struct busdev_node *c, void *arg)
         msgs[i].reserved = 0;
         msgs[i].buf = m.buf;
     }
+    /* The bus claimed at the default rate at the first transfer, unless the
+     * rate request claimed it earlier: a program that names no rate meets
+     * the bus at 100 kHz, as the open gave it before (its refusal for a pin
+     * a program holds as a GPIO line lands here, where the binding's lazy
+     * open already put it from the program's side). */
+    uint32_t running;
+    if (i2c_rate_claim(c->bus, BUSDEV_I2C_RATE_HZ, &running, 0) != 0)
+        return -1;
     int32_t rc = rhu_i2c_transfer(c->bus, msgs, count, rhu_now_ns() + BUSDEV_DEADLINE_NS);
     if (rc == 0)
         return (int)count;
@@ -518,6 +670,8 @@ static int i2c_request(const struct busdev_node *c, unsigned long request, void 
         return arg == NULL ? refuse(RHU_GERR_EFAULT) : i2c_functionality(arg);
     case BUSDEV_I2C_RDWR:
         return arg == NULL ? refuse(RHU_GERR_EFAULT) : i2c_transaction(c, arg);
+    case BUSDEV_I2C_RATE:
+        return arg == NULL ? refuse(RHU_GERR_EFAULT) : i2c_rate(c, arg);
     default:
         break;
     }

@@ -3,7 +3,7 @@
 //! on the Cortex-M33 and on a Cortex-M7 with a single-precision FPU, as a
 //! coprocessor access denied on the Cortex-M4F (the double-precision
 //! encodings name coprocessor 11, which that FPU does not implement); both
-//! measured on the bench, both UsageFaults with the same frame -- and the
+//! measured on hardware, both UsageFaults with the same frame -- and the
 //! fault funnel hands the UsageFault here. This module decides whether
 //! the fault is such a form, computes it by the architecture's rules
 //! (`soft`), puts the result where the instruction would have, and returns

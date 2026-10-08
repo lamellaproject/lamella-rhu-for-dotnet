@@ -5,7 +5,8 @@
 //! the board-claim refusal is gated here too, and line 5 UNPOPULATED (a
 //! line inside the space with no pad) so the unpopulated refusal is gated
 //! here. Line 1 is marked input-only (a virtual button) so the input-only
-//! refusal is gated here as well. No register, no generated description: these facts are
+//! refusal is gated here as well; lines 0, 2 and 3 also carry timer outputs
+//! and lines 0 to 3 converter inputs, the tables below. No register, no generated description: these facts are
 //! the kernel's own, stated here.
 
 use crate::bus_math;
@@ -70,7 +71,7 @@ pub const I2C_BUSES: &[bus_math::I2cBus] = &[bus_math::I2cBus {
     kernel_hz: 16_000_000,
     pads: &[],
 }];
-#[cfg(feature = "board-mps2-an505")]
+#[cfg(all(feature = "board-mps2-an505", not(feature = "test-bus-rp2350")))]
 pub const I2C_BUSES: &[bus_math::I2cBus] = &[bus_math::I2cBus {
     number: 1,
     base: 0x4000_5400,
@@ -98,7 +99,7 @@ pub const SPI_BUSES: &[bus_math::SpiBus] = &[bus_math::SpiBus {
     select_count: 2,
     ahead: 2,
 }];
-#[cfg(feature = "board-mps2-an505")]
+#[cfg(all(feature = "board-mps2-an505", not(feature = "test-bus-rp2350")))]
 pub const SPI_BUSES: &[bus_math::SpiBus] = &[bus_math::SpiBus {
     number: 1,
     base: 0x4001_3000,
@@ -114,3 +115,60 @@ pub const SPI_BUSES: &[bus_math::SpiBus] = &[bus_math::SpiBus {
     select_count: 2,
     ahead: 8,
 }];
+/// Under the test feature `test-bus-rp2350` the Cortex-M33 twin carries the
+/// RP2350's first I2C block and first SPI block in place of the ST blocks:
+/// register-level models behind the virtual backend, so that chip's bus
+/// drivers are gated here before a board. The rows are the chip's own (bus
+/// 0 of each family, the I2C block at the 12 MHz posture); the models have
+/// no pins, so the pad lists are empty and the selects are the models' two.
+#[cfg(all(feature = "board-mps2-an505", feature = "test-bus-rp2350"))]
+pub const I2C_BUSES: &[bus_math::I2cBus] = &[crate::rp2350_bus_math::i2c_bus(0, 12_000_000, &[])];
+#[cfg(all(feature = "board-mps2-an505", feature = "test-bus-rp2350"))]
+pub const SPI_BUSES: &[bus_math::SpiBus] = &[crate::rp2350_bus_math::spi_bus(0, &[], &[], 2)];
+
+/// The PWM facts of the emulator rows: two VIRTUAL timers of two channels
+/// each on a 1 MHz clock with 16-bit prescaler and period registers (the
+/// ST shape, so the quantization the door reports is measurable here),
+/// driving three of the virtual lines as their alternate function -- lines
+/// 0 and 2 on timer 1 (so the shared-period rule is exercised), line 3 on
+/// timer 2 -- the way a real pin carries a timer output beside its GPIO
+/// function. The models have no pins: the alternate function is 0.
+pub const PWM_TIMERS: &[crate::pwm_math::PwmTimer] = &[
+    crate::pwm_math::PwmTimer { number: 1, clock_hz: 1_000_000, channels: 2, prescaler_max: 65536, period_max: 65536 },
+    crate::pwm_math::PwmTimer { number: 2, clock_hz: 1_000_000, channels: 2, prescaler_max: 65536, period_max: 65536 },
+];
+pub const PWM_LINES: &[crate::pwm_math::PwmLine] = &[
+    crate::pwm_math::PwmLine { line: 0, timer: 0, channel: 0, alternate: 0 },
+    crate::pwm_math::PwmLine { line: 2, timer: 0, channel: 1, alternate: 0 },
+    crate::pwm_math::PwmLine { line: 3, timer: 1, channel: 0, alternate: 0 },
+];
+
+/// The ADC facts of the emulator rows: two VIRTUAL converter blocks on a
+/// 4 MHz clock -- block 1 of 12 bits against a 3300 mV reference with four
+/// pin channels reading lines 0 to 3 (a converter input beside the line's
+/// GPIO function, as a real pin carries it), block 2 of 14 bits against a
+/// 3000 mV reference with the internal reference channel and the LOOP
+/// channel, which reads the first PWM line's duty cycle as the fixture's
+/// resistor-capacitor network will (an internal source of the model; on the
+/// fixture board the analog header pin). A conversion takes the width's
+/// cycles plus three of sampling. The internal reference measures a known
+/// 1212 mV.
+pub const ADC_BLOCKS: &[crate::adc_math::AdcBlock] = &[
+    crate::adc_math::AdcBlock { number: 1, clock_hz: 4_000_000, bits: 12, reference_mv: 3300, conversion_cycles: 15 },
+    crate::adc_math::AdcBlock { number: 2, clock_hz: 4_000_000, bits: 14, reference_mv: 3000, conversion_cycles: 17 },
+];
+pub const ADC_CHANNELS: &[crate::adc_math::AdcChannel] = &[
+    crate::adc_math::AdcChannel { block: 0, channel: 0, line: 0 },
+    crate::adc_math::AdcChannel { block: 0, channel: 1, line: 1 },
+    crate::adc_math::AdcChannel { block: 0, channel: 2, line: 2 },
+    crate::adc_math::AdcChannel { block: 0, channel: 3, line: 3 },
+    crate::adc_math::AdcChannel { block: 1, channel: 0, line: crate::adc_math::NO_LINE },
+    crate::adc_math::AdcChannel { block: 1, channel: 1, line: crate::adc_math::NO_LINE },
+];
+/// The channel table's positions the model reads specially, and the
+/// internal reference's known voltage.
+pub const ADC_REFERENCE: usize = 4;
+pub const ADC_LOOP: usize = 5;
+/// The PWM line table's position the loop channel reads.
+pub const ADC_LOOP_SOURCE: usize = 0;
+pub const ADC_REFERENCE_MV: u32 = 1212;

@@ -6,15 +6,18 @@
        names; RhuRid names the host. -->
   <PropertyGroup>
     <TargetFramework>net11.0</TargetFramework>
-    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">0.1.0-a</RhuSdkVersion>
+    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">1.0.0-alpha.1</RhuSdkVersion>
     <RhuRid Condition="'$(RhuRid)' == ''">linux-x64</RhuRid>
     <PackageId>Lamella.Rhu.Tools.$(RhuRid)</PackageId>
     <Version>$(RhuSdkVersion)</Version>
     <Authors>Lamella LLC</Authors>
     <Company>Lamella LLC</Company>
-    <Copyright>Copyright (c) 2026 Lamella LLC and the Lamella project authors</Copyright>
+    <Copyright>Copyright (c) 2026 Lamella LLC</Copyright>
     <Description>The linker and the object copier the Lamella RHU SDK runs on a $(RhuRid) host: the LLVM release's own binaries, unchanged, with their identity record.</Description>
-    <PackageLicenseExpression>Apache-2.0 WITH LLVM-exception</PackageLicenseExpression>
+    <PackageLicenseExpression>(MIT OR Apache-2.0) AND Apache-2.0 WITH LLVM-exception</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/lamellaproject/lamella-rhu-for-dotnet</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReleaseNotes>First pre-release</PackageReleaseNotes>
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <IncludeSymbols>false</IncludeSymbols>
     <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>

@@ -1,0 +1,14 @@
+{
+  "name": "arm-mps2-an505",
+  "maker": "Arm",
+  "product": "MPS2+ AN505",
+  "chip": "Cortex-M33",
+  "clockHz": 20000000,
+  "posture": "default",
+  "postureName": "the emulator's one posture",
+  "pins": 6,
+  "labels": "none",
+  "functions": "gpio",
+  "i2c": [],
+  "spi": []
+}

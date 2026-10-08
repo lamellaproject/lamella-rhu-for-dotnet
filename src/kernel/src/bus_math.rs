@@ -2,7 +2,7 @@
 //! board's facts state per bus, the I2C message record as the header lays
 //! it out, the partition of a transaction's arguments into served and
 //! refused, the I2C timing word, the SPI divisor ladder and the wire-wait
-//! budget in ticks. Pure, host-tested; the drivers cite the manuals for the
+//! budget in ticks. No hardware access and no state, covered by the host tests; the drivers cite the manuals for the
 //! numbers here.
 #![allow(dead_code)]
 
@@ -51,23 +51,23 @@ pub struct I2cBus {
 }
 
 /// The SPI register file a block carries: the STM32F7's sixteen-bit file
-/// with the four-byte queues, or the STM32U5's file with the sixteen-byte
-/// queues and the transfer-size counter.
+/// with the four-byte queues, the STM32U5's file with the sixteen-byte queues
+/// and the transfer-size counter, or the RP2350's PL022 with eight-entry queues.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpiFile {
     F7,
     U5,
+    Pl022,
 }
 
-/// An SPI bus as a board's facts state it: its NUMBER (the chip's own
-/// block number: SPI2 is bus 2, the name the doors take, as a Linux device
-/// node is named), the block's base and file, its
-/// clock enable, its kernel-clock selection (a register of 0 where the
-/// block follows a bus clock), the block's kernel clock in Hz at this
-/// posture, the three pads, the chip-select lines the bus offers (the list
-/// empty on a row whose model has no pins; `select_count` the number the
-/// door accepts), and the pump's bound -- how many bytes may be sent ahead
-/// of the bytes received, half the receive queue's depth.
+/// An SPI bus as a board's facts state it: its NUMBER (the chip's own block
+/// number: SPI2 is bus 2, the name the doors take, as a Linux device node is
+/// named), the block's base and file, its clock enable, its kernel-clock
+/// selection (a register of 0 where the block follows a bus clock), the
+/// block's kernel clock in Hz at this posture, the three pads, the chip-select
+/// lines the bus offers (the list empty on a row whose model has no pins;
+/// `select_count` the number the door accepts), and the pump's bound -- how
+/// many bytes may be sent ahead of the bytes received, half the receive queue.
 #[derive(Clone, Copy, Debug)]
 pub struct SpiBus {
     pub number: u32,
@@ -212,7 +212,7 @@ pub const fn i2c_timing(kernel_hz: u32, rate_hz: u32) -> Option<u32> {
 }
 
 /// The SPI divisor ladder: eight steps, the kernel clock over 2^(n + 1).
-/// The largest divisor whose rate is at or below the request wins, and the
+/// The smallest divisor whose rate is at or below the request wins, and the
 /// rate it achieves is the answer; None when even the largest divisor's
 /// rate is above the request (or the request is 0).
 pub const fn spi_divisor(kernel_hz: u32, rate_hz: u32) -> Option<(u32, u32)> {
@@ -268,4 +268,42 @@ pub const fn select_class(select: u32, select_count: u32) -> SelectClass {
     } else {
         SelectClass::Invalid
     }
+}
+
+/// The SMBus specification's clock-low limits in milliseconds (its timing
+/// table's row tTIMEOUT: 25 at the least, 35 at the most): a device may hold
+/// the clock low up to the first in a byte and is still served; the recovery
+/// after a timeout holds the clock low for the second, once.
+pub const I2C_CLOCK_LOW_MS: u32 = 25;
+pub const I2C_CLOCK_HOLD_MS: u32 = 35;
+
+/// The I2C rates a claim may name, in the order of the modes the bus
+/// specification defines: standard, fast, fast mode plus. A family serves
+/// the ones its block makes from its clock (the RP2350 rows all three at the
+/// PLL posture and the first two at the crystal; the ST rows the first); the
+/// claims table stores a claimed bus's mode as its index here plus one.
+pub const I2C_RATES_HZ: [u32; 3] = [100_000, 400_000, 1_000_000];
+
+/// A rate's place in the set, or None for a rate outside it.
+pub const fn i2c_mode_index(rate_hz: u32) -> Option<u8> {
+    let mut i = 0;
+    while i < I2C_RATES_HZ.len() {
+        if I2C_RATES_HZ[i] == rate_hz {
+            return Some(i as u8);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// An I2C wire wait's budget in ticks: the wire time of two bytes at the rate
+/// (an address and the byte after it ride one wait), rounded UP to whole
+/// ticks, plus the clock-low limit in ticks, plus one tick for the tick's
+/// phase -- 27 at 100 kHz and a tick of a millisecond. A wait never fails
+/// while its step arrives within the wire time and the limit; it fails within
+/// one tick more. The SPI drivers keep `budget_ticks`.
+pub const fn i2c_wait_ticks(rate_hz: u32, tick_hz: u32) -> u32 {
+    let wire = (2 * I2C_BITS_PER_BYTE as u64 * tick_hz as u64).div_ceil(rate_hz as u64) as u32;
+    let low = (I2C_CLOCK_LOW_MS as u64 * tick_hz as u64).div_ceil(1_000) as u32;
+    wire + low + 1
 }

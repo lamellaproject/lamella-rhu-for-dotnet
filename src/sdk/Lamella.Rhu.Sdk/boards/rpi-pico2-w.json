@@ -1,0 +1,37 @@
+{
+  "name": "rpi-pico2-w",
+  "maker": "Raspberry Pi",
+  "product": "Pico 2 W",
+  "chip": "RP2350A",
+  "clockHz": 150000000,
+  "posture": "default",
+  "postureName": "the PLL posture",
+  "pins": 30,
+  "labels": "gp",
+  "functions": "rp2350a",
+  "i2c": [
+    {
+      "block": 0,
+      "sda": 4,
+      "scl": 5,
+      "rates": [
+        100000,
+        400000,
+        1000000
+      ]
+    }
+  ],
+  "spi": [
+    {
+      "block": 0,
+      "sck": 18,
+      "mosi": 19,
+      "miso": 16,
+      "cs": [
+        17
+      ],
+      "min": 184,
+      "max": 6000000
+    }
+  ]
+}

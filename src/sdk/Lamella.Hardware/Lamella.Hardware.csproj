@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Lamella.Hardware: the board class. One class for every board,
+       built by name: the SDK generates the board's facts into a program
+       that references this package (the board table's row, read from the
+       package's boards/<row>.json at publish), and TargetBoard answers
+       them: the name, the maker, the product, the chip, the clock, the
+       pins by the labels printed on the board, the buses with the rates the
+       image serves. No reflection, no native call: the facts arrive through
+       SetBuildFacts from the generated source, before Main. Its one
+       dependency is the standard GPIO package. -->
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">1.0.0-alpha.1</RhuSdkVersion>
+    <PackageId>Lamella.Hardware</PackageId>
+    <Version>$(RhuSdkVersion)</Version>
+    <AssemblyName>Lamella.Hardware</AssemblyName>
+    <RootNamespace>Lamella.Hardware</RootNamespace>
+    <Authors>Lamella LLC</Authors>
+    <Company>Lamella LLC</Company>
+    <Copyright>Copyright (c) 2026 Lamella LLC</Copyright>
+    <Description>Microcontroller board support for .NET runtimes</Description>
+    <PackageReleaseNotes>First pre-release</PackageReleaseNotes>
+    <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+    <DebugType>none</DebugType>
+    <IsTrimmable>true</IsTrimmable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <IncludeSymbols>false</IncludeSymbols>
+    <PathMap>$(MSBuildProjectDirectory)=/rhu/src/sdk/Lamella.Hardware</PathMap>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Device.Gpio" Version="4.2.0" />
+    <None Include="NOTICE.package" Pack="true" PackagePath="NOTICE" />
+  </ItemGroup>
+
+</Project>

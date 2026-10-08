@@ -131,6 +131,27 @@ SECTIONS
     __exidx_end = .;
   } > CODE
 
+  /* The arena placement: the payload's GC arena and
+   * its start bits (payload.rs: ARENA, STARTBITS) at the HEAD of DATA in
+   * their own NOLOAD section, before .data -- no static the kernel adds
+   * and no .data growth moves the arena, so the collector's count is a
+   * layout figure of an address fixed at ORIGIN(DATA). Outside
+   * [__sdata, __ebss): the collector carves its own heap out of the
+   * statics window it scans, so no root changes; boot.rs zeroes this
+   * bracket beside .bss under the payload feature. The arena's input
+   * first, then the bits (two named inputs fix the order). No KEEP: an
+   * image whose runtime never asks for the kernel arena (the frozen
+   * runtime carves its own heap) carries the section EMPTY, section GC
+   * dropping the statics as it always did, its window unmoved. */
+  .rhu_payload_arena ORIGIN(DATA) (NOLOAD) : ALIGN(8)
+  {
+    __rhu_payload_arena_lo = .;
+    *(.bss.rhu_payload_arena);
+    *(.bss.rhu_payload_startbits);
+    . = ALIGN(8);
+    __rhu_payload_arena_hi = .;
+  } > DATA
+
   .data : ALIGN(8)
   {
     __sdata = .;
@@ -306,3 +327,10 @@ ASSERT(LOADADDR(.got) - ADDR(.got) == LOADADDR(.data) - ADDR(.data),
 /* The rehydrated-data region lies inside the zero-fill window. */
 ASSERT(__rhu_hydrated_lo >= __sbss && __rhu_hydrated_hi <= __ebss,
   "rehydrated-data region outside the zero-fill window");
+
+/* The arena placement: the payload's GC arena and its start bits at the head
+ * of DATA, the section's size the golden contract's 96 KB plus the bits. */
+ASSERT(ADDR(.rhu_payload_arena) == ORIGIN(DATA),
+  "the payload arena is not at the head of DATA (the collector's count follows its address)");
+ASSERT(SIZEOF(.rhu_payload_arena) == 0 || SIZEOF(.rhu_payload_arena) == 99840,
+  "the payload arena section is neither empty (a runtime that never asks for the kernel arena) nor the 96 KB arena plus its 1,536 bytes of start bits");

@@ -160,3 +160,7 @@ pub fn transfer(d: &SpiBus, sel: Option<u32>, cpol: bool, cpha: bool, divisor: u
     }
     0
 }
+
+/// The divisor for a rate at the block's kernel clock, with the rate it
+/// achieves: this family's ladder, asked by the bus doors through the driver.
+pub use crate::bus_math::spi_divisor as divisor;

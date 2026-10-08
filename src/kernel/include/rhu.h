@@ -39,7 +39,7 @@ extern "C" {
  *     [payload] entry REFUSED: the payload was built for hosting-API
  *     contract generation N, outside this kernel's window C..A
  * where C is RHU_ABI_COMPAT and A is RHU_ABI. */
-#define RHU_ABI 34
+#define RHU_ABI 35
 #define RHU_ABI_COMPAT 31
 
 /* Error surface (RHU-owned values, errno-mirroring by convention). */
@@ -518,41 +518,41 @@ int32_t rhu_gpio_edge(uint32_t line, uint32_t kind);
 const uint32_t *rhu_gpio_event_word(uint32_t line);
 int32_t rhu_entropy_is_hardware(void);
 
-/* The I2C doors: a program's I2C driver over one of the kernel's buses. A
- * bus is named by its NUMBER -- the chip's own block number (I2C1 is bus
- * 1), the number a Linux device node carries (/dev/i2c-1) -- never by an
- * index: rhu_i2c_count answers how many buses the board has (0 on a row
- * with none: every other door of this family then answers RHU_ENODEV) and
- * rhu_i2c_bus answers the number of the index-th of them (the index from
- * 0 below the count; RHU_EINVAL past it), so a program enumerates without
- * guessing. A number the board has no bus of answers RHU_ENODEV at every
- * door below.
- * rhu_i2c_claim takes a bus for the program's whole run at a rate in Hz:
- * its two pins become the board's (a program holding one refuses the claim
- * RHU_EBUSY, nothing programmed), the bus is recovered if a device holds
- * the data line low (up to nine clocks, then a stop), the block is enabled
- * -- 100000 is served; another rate is refused RHU_ENOTSUP, judged before
- * the bus's state and so on a claimed bus too; a bus the board has none of
- * RHU_ENODEV. A claimed bus lives for the boot: this generation has no release
- * call, and a second claim of the same bus at the served rate answers 0 and
- * changes nothing. rhu_i2c_transfer runs one combined transaction over a
- * list of message records (the layout below: the address, the flags with
- * bit 0 the read flag, the length, a reserved word that must read 0, the
- * buffer -- twelve bytes, 4-aligned), a repeated start between the
- * messages and a stop after the last: 0 when every byte moved; RHU_ENXIO
- * when the address was not acknowledged; RHU_EIO when a data byte was not
- * acknowledged or the block reported a bus error or arbitration lost;
- * RHU_ETIMEDOUT when a wait on the wire passed its budget (twice a byte's
- * time plus two ticks, never fewer than three: a stuck wire fails within
- * milliseconds wherever it sticks) or the caller's deadline (the block
- * reset first); RHU_EINVAL for a flag other than the read flag, a
- * reserved word not 0, a length over RHU_I2C_LEN_MAX, a count of 0 or over
- * RHU_I2C_MSG_MAX, a NULL buffer with a length, an address over 0x7F, a
- * NULL list, a bus not claimed; RHU_ENODEV for a bus the board has none
- * of. The bus is shared: a
- * transaction that finds the bus busy WAITS for it (bounded by the
- * deadline), never RHU_EBUSY. No transaction runs under the kernel's
- * critical section. A refusal moves no byte. */
+/* The I2C doors: a program's I2C driver over one of the kernel's buses. A bus is named
+ * by its NUMBER -- the chip's own block number (I2C1 is bus 1), the number a Linux
+ * device node carries (/dev/i2c-1) -- never by an index: rhu_i2c_count answers how
+ * many buses the board has (0 on a row with none: every other door of this family then
+ * answers RHU_ENODEV) and rhu_i2c_bus answers the number of the index-th of them (the
+ * index from 0 below the count; RHU_EINVAL past it), so a program enumerates without
+ * guessing. A number the board has no bus of answers RHU_ENODEV at every door below.
+ * rhu_i2c_claim takes a bus for the program's whole run at a rate in Hz, the bus's
+ * mode: its two pins become the board's (a program holding one refuses the claim
+ * RHU_EBUSY, nothing programmed), the bus is recovered if a device holds the data line
+ * low (up to nine clocks, then a stop), the block is enabled -- 100000 is served on
+ * every board; 400000 and 1000000 where the board's block makes them from its clock,
+ * the clock then at the fastest rate at or below the request that keeps the mode's
+ * minimum times; another rate, or one the block cannot make, is refused RHU_ENOTSUP,
+ * judged before the bus's state and so on a claimed bus too; a bus the board has none
+ * of RHU_ENODEV. A claimed bus lives for the boot: this generation has no release
+ * call; a second claim of the same bus at its rate answers 0 and changes nothing, at
+ * another rate RHU_EBUSY. rhu_i2c_transfer runs one combined transaction over a list
+ * of message records (the layout below: the address, the flags with bit 0 the read
+ * flag, the length, a reserved word that must read 0, the buffer -- twelve bytes,
+ * 4-aligned), a repeated start between the messages and a stop after the last: 0 when
+ * every byte moved; RHU_ENXIO when the address was not acknowledged; RHU_EIO when a
+ * data byte was not acknowledged or the block reported a bus error or arbitration
+ * lost; RHU_ETIMEDOUT when the deadline passed while the bus was busy (nothing reset),
+ * or when a wire wait passed its budget (two bytes' time plus SMBus's 25 ms clock-low
+ * limit) or the deadline, or the block did not stop: then the block is reset, a held
+ * data line gets the claim's clocks, then 35 ms of clock low (40 ms more at most);
+ * RHU_EINVAL for a flag other than the read flag, a reserved word not 0, a length over
+ * RHU_I2C_LEN_MAX, a count of 0 or over RHU_I2C_MSG_MAX, a NULL buffer with a length,
+ * an address over 0x7F, a NULL list, a bus not claimed and, where the board's I2C
+ * block addresses one device a transaction and has no address-only frame, a list
+ * naming two addresses, a message of length 0 or an address the block reserves (under
+ * 0x08 or over 0x77); RHU_ENODEV for a bus the board has none of. The bus is shared: a
+ * transaction that finds it busy WAITS (bounded by the deadline), never RHU_EBUSY. No
+ * transaction runs under the kernel's critical section. A refusal moves no byte. */
 #define RHU_ENXIO (-6)      /* the address was not acknowledged            */
 #define RHU_I2C_MSG_READ 1
 #define RHU_I2C_MSG_MAX 8
@@ -569,43 +569,43 @@ int32_t rhu_i2c_bus(uint32_t index);
 int32_t rhu_i2c_claim(uint32_t bus, uint32_t hz);
 int32_t rhu_i2c_transfer(uint32_t bus, const rhu_i2c_msg *msgs, uint32_t count, uint64_t deadline_ns);
 
-/* The SPI doors: a program's SPI driver over one of the kernel's buses,
- * shared by any number of devices, each with its own chip select, mode
- * and clock. A bus is named by its NUMBER, the chip's own block number
- * (SPI2 is bus 2), as /dev/spidev2.0 names it; rhu_spi_count is the
- * board's bus count (0 on a row with none: every other door of this
- * family then answers RHU_ENODEV) and rhu_spi_bus the number of the
- * index-th bus (the index from 0 below the count; RHU_EINVAL past it); a
- * number the board has no bus of answers RHU_ENODEV at every door below.
- * rhu_spi_claim takes a bus for the program's whole run: its three pins
- * become the board's (a program holding one refuses the claim RHU_EBUSY,
- * nothing programmed), the block is enabled; 0 when taken, RHU_ENODEV for
- * a bus the board has none of; a claimed bus lives for the boot (no release verb in this
- * generation) and a second claim answers 0. rhu_spi_transfer runs one
- * full-duplex exchange with THE DEVICE'S OWN SETTINGS: the mode
- * (RHU_SPI_MODE_0 to RHU_SPI_MODE_3) and the rate in Hz are applied to the
- * block for this transfer, the clock at the largest divisor whose rate is
- * at or below the request; the select is one of the bus's chip-select
- * lines (0 or 1), claimed for the board at its first use (RHU_EBUSY when
- * the program holds it as a GPIO line), or RHU_SPI_SELECT_NONE for a
- * program that drives its own chip select through the GPIO doors around
- * the transfer; the select is asserted low before the first clock and
- * released after the last, len bytes are clocked as eight-bit frames, most
- * significant bit first (tx NULL sends 0xFF; rx NULL discards). THE ANSWER
- * IS THE RATE ACHIEVED in Hz, never the request. RHU_ETIMEDOUT when a wait
- * on the wire passed its budget -- twice a byte's time at the achieved rate
- * plus two ticks, never fewer than three, so a stuck wire fails within
- * milliseconds and a transfer of n bytes is bounded by n such waits -- the
- * block reset; RHU_EIO when the block refused its configuration (it fell
+/* The SPI doors: a program's SPI driver over one of the kernel's buses, shared
+ * by any number of devices, each with its own chip select, mode and clock. A
+ * bus is named by its NUMBER, the chip's own block number (SPI2 is bus 2), as
+ * /dev/spidev2.0 names it; rhu_spi_count is the board's bus count (0 on a row
+ * with none: every other door of this family then answers RHU_ENODEV) and
+ * rhu_spi_bus the number of the index-th bus (the index from 0 below the
+ * count; RHU_EINVAL past it); a number the board has no bus of answers
+ * RHU_ENODEV at every door below. rhu_spi_claim takes a bus for the program's
+ * whole run: its three pins become the board's (a program holding one refuses
+ * the claim RHU_EBUSY, nothing programmed), the block is enabled; 0 when
+ * taken, RHU_ENODEV for a bus the board has none of; a claimed bus lives for
+ * the boot (no release verb in this generation) and a second claim answers 0.
+ * rhu_spi_transfer runs one full-duplex exchange with THE DEVICE'S OWN
+ * SETTINGS: the mode (RHU_SPI_MODE_0 to RHU_SPI_MODE_3) and the rate in Hz are
+ * applied to the block for this transfer, the clock at the fastest rate the
+ * block makes at or below the request; the select is one of the bus's
+ * chip-select lines by its index from 0, claimed for the board at its first
+ * use (RHU_EBUSY when the program holds it as a GPIO line), or
+ * RHU_SPI_SELECT_NONE for a program that drives its own chip select through
+ * the GPIO doors around the transfer; the select is asserted low before the
+ * first clock and released after the last, len bytes are clocked as eight-bit
+ * frames, most significant bit first (tx NULL sends 0xFF; rx NULL discards).
+ * THE ANSWER IS THE RATE ACHIEVED in Hz, never the request. RHU_ETIMEDOUT when
+ * a wait on the wire passed its budget -- twice a byte's time at the achieved
+ * rate plus two ticks, never fewer than three, so a stuck wire fails within
+ * milliseconds and a transfer of n bytes is bounded by n such waits -- or,
+ * where the block shows it, when the clock line did not come to rest within
+ * 100 microseconds of the enable or the receiver overran (answered at once),
+ * the block reset; RHU_EIO when the block refused its configuration (it fell
  * out of master mode): answered at once, nothing clocked, the fault flag
- * cleared; RHU_EINVAL
- * for a mode over 3, a rate below the block's slowest, a select the bus
- * does not have, a length of 0 or over RHU_SPI_LEN_MAX, tx and rx both
- * NULL, a bus not claimed (RHU_ENODEV for a bus the board has none of). A
- * transfer that finds the bus
- * busy WAITS for it (every holder's exchange is bounded wait by wait, so
- * the wait is), never RHU_EBUSY. No transaction runs under the kernel's
- * critical section. A refusal moves no byte. */
+ * cleared; RHU_EINVAL for a mode over 3, a rate below the block's slowest, a
+ * select the bus does not have, a length of 0 or over RHU_SPI_LEN_MAX, tx and
+ * rx both NULL, a bus not claimed (RHU_ENODEV for a bus the board has none
+ * of). A transfer that finds the bus busy WAITS for it (every holder's
+ * exchange is bounded wait by wait, so the wait is), never RHU_EBUSY. No
+ * transaction runs under the kernel's critical section. A refusal moves no
+ * byte. */
 #define RHU_SPI_MODE_0 0
 #define RHU_SPI_MODE_1 1
 #define RHU_SPI_MODE_2 2
@@ -616,6 +616,68 @@ int32_t rhu_spi_count(void);
 int32_t rhu_spi_bus(uint32_t index);
 int32_t rhu_spi_claim(uint32_t bus);
 int32_t rhu_spi_transfer(uint32_t bus, uint32_t select, uint32_t mode, uint32_t hz, const void *tx, void *rx, uint32_t len);
+
+/* The PWM doors: a program drives a line as a timer's output. A row's
+ * PWM-capable lines are a TABLE in the board's facts (every pin with a
+ * timer output function, its timer and its channel): rhu_pwm_count answers
+ * how many, rhu_pwm_line the index-th line's number (RHU_EINVAL past the
+ * count), so a program enumerates without guessing; a row with no such
+ * line answers 0 and RHU_ENODEV at every other door. rhu_pwm_claim takes
+ * the line in the claims table AND its timer channel (a channel serves one
+ * line at a time) for the program's run and answers a handle: RHU_EBUSY
+ * when the line or the channel is held (by the board, or by a program
+ * through any door family); RHU_EINVAL for a line no timer drives.
+ * rhu_pwm_set takes the period and the duty in NANOSECONDS (the Linux PWM
+ * class's units) and the polarity (the output high for the duty, or low
+ * for it): the timer's clock and its prescaler quantize the period, and
+ * rhu_pwm_period answers the period the timer runs, exact from its clock
+ * and prescaler (0 before any set). On a timer whose channels share one
+ * period -- every timer served -- a period that disagrees with the period
+ * another held channel of the same timer already runs is refused
+ * RHU_EBUSY; RHU_EINVAL for a duty past the period, a period of 0 or past
+ * the timer's range, a polarity past RHU_PWM_POLARITY_INVERSED, a NULL
+ * pointer, or a handle the program does not hold. rhu_pwm_enable drives
+ * the output (1) or parks it at its inactive level (0): RHU_EINVAL before
+ * any set. rhu_pwm_release parks the output and frees the channel and the
+ * line. rhu_pwm_info answers the timer's number and the channel's index
+ * (the chip-and-channel numbering the device files present) and the
+ * timer's input clock in Hz. A refusal programs nothing. */
+#define RHU_PWM_POLARITY_NORMAL 0
+#define RHU_PWM_POLARITY_INVERSED 1
+int32_t rhu_pwm_count(void);
+int32_t rhu_pwm_line(uint32_t index);
+int32_t rhu_pwm_claim(uint32_t line);
+int32_t rhu_pwm_set(int32_t h, uint64_t period_ns, uint64_t duty_ns, uint32_t polarity);
+int32_t rhu_pwm_period(int32_t h, uint64_t *achieved_ns);
+int32_t rhu_pwm_enable(int32_t h, uint32_t on);
+int32_t rhu_pwm_release(int32_t h);
+int32_t rhu_pwm_info(int32_t h, uint32_t *timer, uint32_t *channel, uint32_t *clock_hz);
+
+/* The ADC doors: a program reads a line as a voltage. A row's channels are
+ * a TABLE in the board's facts (every converter block, every channel, the
+ * pin it reads or the internal source it measures, the sample's width in
+ * bits): rhu_adc_count answers how many across the blocks, rhu_adc_channel
+ * the index-th channel's facts -- the block's number, the channel's
+ * number, the line (RHU_ADC_NO_LINE for an internal source) and the width
+ * (RHU_EINVAL past the count or for a NULL pointer); a row with no channel
+ * answers 0 and RHU_ENODEV at every other door. rhu_adc_claim takes the
+ * channel's line (analog mode) and the channel for the program's run and
+ * answers a handle: RHU_EBUSY when either is held; RHU_EINVAL past the
+ * count. rhu_adc_read runs ONE conversion and answers the raw sample, 0 to
+ * 2^bits - 1, polled against a budget from the block's clock and never
+ * waiting longer: RHU_ETIMEDOUT past the budget with the block reset;
+ * RHU_EINVAL for a handle the program does not hold. rhu_adc_reference
+ * answers a block's reference voltage in millivolts, a fact of the board
+ * (RHU_ENODEV for a block the board has none of; RHU_EINVAL for a NULL
+ * pointer). rhu_adc_release frees the channel and the line. No conversion
+ * runs under the kernel's critical section; a refusal converts nothing. */
+#define RHU_ADC_NO_LINE 0xFFFFFFFFu
+int32_t rhu_adc_count(void);
+int32_t rhu_adc_channel(uint32_t index, uint32_t *block, uint32_t *channel, uint32_t *line, uint32_t *bits);
+int32_t rhu_adc_claim(uint32_t index);
+int32_t rhu_adc_read(int32_t h);
+int32_t rhu_adc_reference(uint32_t block, uint32_t *millivolts);
+int32_t rhu_adc_release(int32_t h);
 
 /* --- The payload entry seam: the one member of this surface the
  * kernel CALLS rather than serves. After the platform is up (the

@@ -1,5 +1,5 @@
 //! The RHU hosting API -- the C-ABI waistline between the kernel and
-//! hosted payloads. Forty-nine functions, `rhu_`-prefixed, mirrored
+//! hosted payloads. Sixty-three functions, `rhu_`-prefixed, mirrored
 //! exactly by `include/rhu.h` (contract generation `ABI`, at the end
 //! of this file); the shim backend is the intended consumer. One rule
 //! binds this surface: no second blocking primitive ever joins it, and
@@ -9,7 +9,7 @@
 use core::ffi::{c_char, c_void};
 
 use crate::registry::ModuleDesc;
-use crate::{arena, bus, calendar, console, entropy, gpio, kheap, registry, sched, semihost};
+use crate::{adc, arena, bus, calendar, console, entropy, gpio, kheap, pwm, registry, sched, semihost};
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.rhu_api")]
@@ -472,13 +472,111 @@ pub extern "C" fn rhu_spi_transfer(bus_index: u32, select: u32, mode: u32, hz: u
     bus::spi_transfer(bus_index, select, mode, hz, tx, rx, len)
 }
 
+/// The PWM doors (the device seam's third peripheral; the eight verbs the
+/// header states): the count of lines a timer can drive, the enumeration
+/// (the index-th line's number), a claim of the line and its timer channel
+/// for the program's run answering a handle, the period and the duty set
+/// in nanoseconds with the polarity, the period the timer runs read back,
+/// the output driven or parked, the release, and the timer-and-channel
+/// numbering with the timer's clock. The codes are the header's; a
+/// refusal programs nothing.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_pwm_count() -> i32 {
+    pwm::count()
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_pwm_line(index: u32) -> i32 {
+    pwm::line(index)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_pwm_claim(line: u32) -> i32 {
+    pwm::claim(line)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_pwm_set(h: i32, period_ns: u64, duty_ns: u64, polarity: u32) -> i32 {
+    pwm::set(h, period_ns, duty_ns, polarity)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_pwm_period(h: i32, achieved_ns: *mut u64) -> i32 {
+    pwm::period(h, achieved_ns)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_pwm_enable(h: i32, on: u32) -> i32 {
+    pwm::enable(h, on)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_pwm_release(h: i32) -> i32 {
+    pwm::release(h)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_pwm_info(h: i32, timer: *mut u32, channel: *mut u32, clock_hz: *mut u32) -> i32 {
+    pwm::info(h, timer, channel, clock_hz)
+}
+
+/// The ADC doors (the device seam's fourth peripheral; the six verbs the
+/// header states): the count of channels across the converter blocks, the
+/// enumeration (the index-th channel's block, number, line and width), a
+/// claim of the channel and its line answering a handle, one conversion
+/// answering the raw sample, a block's reference voltage, and the release.
+/// The codes are the header's; a refusal converts nothing.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_adc_count() -> i32 {
+    adc::count()
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_adc_channel(index: u32, block: *mut u32, channel: *mut u32, line: *mut u32, bits: *mut u32) -> i32 {
+    adc::channel(index, block, channel, line, bits)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_adc_claim(index: u32) -> i32 {
+    adc::claim(index)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_adc_read(h: i32) -> i32 {
+    adc::read(h)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_adc_reference(block: u32, millivolts: *mut u32) -> i32 {
+    adc::reference(block, millivolts)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_adc_release(h: i32) -> i32 {
+    adc::release(h)
+}
+
 /// The hosting-API contract generation this kernel serves: `RHU_ABI`
 /// in `include/rhu.h`, the two moving together or not at all. A
 /// payload that provides its own `rhu_payload_entry` states the
 /// generation it was built against in `rhu_payload_abi`, and the
 /// payload flavor refuses a mismatch before that entry runs
 /// (payload.rs).
-pub const ABI: u32 = 34;
+pub const ABI: u32 = 35;
 /// The window's floor: `RHU_ABI_COMPAT` in `include/rhu.h`, the two
 /// moving together or not at all. A payload built against any
 /// generation from this one through `ABI` runs; only a breaking change

@@ -136,6 +136,48 @@
 #error "MGC_HOST_DRIVE_HANDLES is a windows-world drive (needs MGC_HOST_DRIVE_TUNE)"
 #endif
 #endif
+#ifdef MGC_HOST_DRIVE_MARKOVF
+#ifndef MGC_HOST_DRIVE_TUNE
+#error "MGC_HOST_DRIVE_MARKOVF is a windows-world drive (needs MGC_HOST_DRIVE_TUNE)"
+#endif
+#endif
+#ifdef MGC_HOST_DRIVE_HANDLE_GROWTH
+#ifndef MGC_HOST_DRIVE_TUNE
+#error "MGC_HOST_DRIVE_HANDLE_GROWTH is a windows-world drive (needs MGC_HOST_DRIVE_TUNE)"
+#endif
+#endif
+#ifdef MGC_HOST_DRIVE_ALLOC_BOUND
+#ifndef MGC_HOST_DRIVE_TUNE
+#error "MGC_HOST_DRIVE_ALLOC_BOUND is a windows-world drive (needs MGC_HOST_DRIVE_TUNE)"
+#endif
+#endif
+#ifdef MGC_HOST_DRIVE_TAIL_REJOIN
+#ifndef MGC_HOST_DRIVE_TUNE
+#error "MGC_HOST_DRIVE_TAIL_REJOIN is a windows-world drive (needs MGC_HOST_DRIVE_TUNE)"
+#endif
+#endif
+#ifdef MGC_HOST_DRIVE_FINALIZE_FULL
+#ifndef MGC_HOST_DRIVE_TUNE
+#error "MGC_HOST_DRIVE_FINALIZE_FULL is a windows-world drive (needs MGC_HOST_DRIVE_TUNE)"
+#endif
+#endif
+#ifdef MGC_HOST_DRIVE_WINDOW_KEEP
+#ifndef MGC_HOST_DRIVE_TUNE
+#error "MGC_HOST_DRIVE_WINDOW_KEEP is a windows-world drive (needs MGC_HOST_DRIVE_TUNE)"
+#endif
+#endif
+#ifdef MGC_HOST_DRIVE_FROZEN_BOUND
+#ifndef MGC_HOST_DRIVE_TUNE
+#error "MGC_HOST_DRIVE_FROZEN_BOUND is a windows-world drive (needs MGC_HOST_DRIVE_TUNE)"
+#endif
+#endif
+/* The collector drives past gc.D share the bulk births and the counter
+ * worker. */
+#if defined(MGC_HOST_DRIVE_MARKOVF) || defined(MGC_HOST_DRIVE_HANDLE_GROWTH) \
+    || defined(MGC_HOST_DRIVE_ALLOC_BOUND) || defined(MGC_HOST_DRIVE_TAIL_REJOIN) \
+    || defined(MGC_HOST_DRIVE_FINALIZE_FULL) || defined(MGC_HOST_DRIVE_WINDOW_KEEP)
+#define MGC_HOST_DRIVE_SHARED_BIRTHS
+#endif
 #ifdef MGC_HOST_DRIVE_TUNE
 #ifndef MGC_HOST_DRIVE_SWEEP
 #error "MGC_HOST_DRIVE_TUNE extends the sweep-drive world (pass MGC_HOST_DRIVE_SWEEP too)"
@@ -157,6 +199,8 @@ extern "C" char __rhu_arena_lo[], __rhu_arena_hi[];
  * bridge (region + mark bitmap + mark stack), summed for the
  * window-fit verdict. */
 static unsigned long g_row_drawn;
+static uint32_t      g_row_free_before;   /* system memory free before the collector starts */
+extern "C" uint32_t mgc_collect_tables_bytes(uint32_t heap_bytes, uint32_t page_bytes);
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -391,6 +435,13 @@ extern "C" void abort(void)
  * caller is the collector's busy-guard loser path, which the
  * single-collector drive never takes -- the first-call line makes any
  * surprise contention visible (and the gate forbids it). */
+#ifdef MGC_HOST_DRIVE_FINALIZE_FULL
+/* The finalize-full drive plays the finalizer thread inside the
+ * allocator's wait: one object taken per yield while the flag is up. */
+static volatile int g_ff_finalizer_on_yield;
+static void ff_finalizer_turn(void);
+#endif
+
 extern "C" int sched_yield(void)
 {
     static bool logged;
@@ -398,6 +449,10 @@ extern "C" int sched_yield(void)
         logged = true;
         sh_write0("[gc-host] sched_yield -> rhu_thread_yield (contended path reached)\n");
     }
+#ifdef MGC_HOST_DRIVE_FINALIZE_FULL
+    if (g_ff_finalizer_on_yield)
+        ff_finalizer_turn();
+#endif
     rhu_thread_yield();
     return 0;
 }
@@ -586,6 +641,49 @@ extern "C" void* mmap64(void* addr, size_t len, int prot, int flags,
 #endif
     return p;
 }
+
+#ifdef MGC_HOST_ROW_AN500
+/* sysconf -- the C library's two questions the row's managed heap asks
+ * at boot: the page size, and the pages of system memory still free
+ * (the kernel's headroom, whole pages). Any other name is a contract
+ * change and dies loud. */
+extern "C" long sysconf(int name)
+{
+    if (name == 30)
+        return 4096;
+    if (name == 86)
+        return (long)(rhu_arena_headroom() / 4096u);
+    printf("[gc-host] sysconf: unexpected name %d\n", name);
+    abort();
+    return -1;
+}
+#endif
+
+#ifdef MGC_HOST_DRIVE_TUNE
+/* mincore -- the C library's question for how much of a mapping memory
+ * backs; the windows skeleton asks it of a frozen segment. In this world
+ * every page is backed, except in the frozen-bound drive, whose segment
+ * is backed for its pool's one page only. */
+#ifdef MGC_HOST_DRIVE_FROZEN_BOUND
+#define FB_COMMIT 65536u    /* the runtime's commit unit */
+#define FB_POOL    4096u    /* this world's frozen object heap: one page */
+static uint8_t* g_fb_base;  /* the drive's segment, once it is drawn */
+#endif
+extern "C" int mincore(void* addr, size_t len, unsigned char* vec)
+{
+    size_t pages = (len + 4095u) / 4096u;
+    for (size_t i = 0; i < pages; i++) {
+        unsigned char v = 1;
+#ifdef MGC_HOST_DRIVE_FROZEN_BOUND
+        uint8_t* p = (uint8_t*)addr + i * 4096u;
+        if (g_fb_base && p >= g_fb_base + FB_POOL && p < g_fb_base + FB_COMMIT)
+            v = 0;
+#endif
+        vec[i] = v;
+    }
+    return 0;
+}
+#endif
 #endif /* MGC_HOST_DRIVE_ALLOC */
 
 #ifdef MGC_HOST_DRIVE_COLLECT
@@ -1053,6 +1151,11 @@ static void drive_check(bool ok, const char* what)
 {
     if (!ok) {
         printf("[gc-host] ALLOC DRIVE CHECK FAILED: %s\n", what);
+#ifdef MGC_HOST_DIAG_CONTINUE /* diagnostic knob: every failing check of a
+                               * drive listed in one run; never a plan
+                               * object */
+        return;
+#endif
         abort();
     }
 }
@@ -1271,6 +1374,8 @@ static int32_t drive_free_pad(IGCHeap* heap)
 #ifndef MGC_HANDLES_ITER
 #define MGC_HANDLES_ITER 20000u
 #endif
+/* The skeleton's export for the growth detector: the grown-segment count. */
+extern "C" unsigned mgc_skel_handle_segments(void);
 #define HD_BURST 8u
 #define HD_WORKER_PRIO GC_HOST_WAITER_PRIO
 
@@ -1380,6 +1485,13 @@ static int32_t drive_handles(IGCHeap* heap)
                    k, (void*)w->first_alias, (void*)w->first_seen, (void*)w->obj);
         printf("[gc-host] handle worker %u ran %lu ms\n", k, (unsigned long)(w->ns / 1000000ull));
     }
+    /* The growth detector, before the alias check: the pool must not have
+     * grown under two threads (the plan's live high-water is 16 of 64); a
+     * grown segment means the free list lost entries -- the race the lock
+     * closes -- and this line is the control's death. Silent when it
+     * passes. */
+    drive_check(mgc_skel_handle_segments() == 0,
+                "the pool grew under two threads -- the free list lost entries");
     drive_check(g_hd[0].aliases == 0 && g_hd[1].aliases == 0,
                 "a handle read another thread's object (the pool aliased a slot)");
     drive_check(g_hd[0].creates == MGC_HANDLES_ITER * HD_BURST
@@ -1397,6 +1509,681 @@ static int32_t drive_handles(IGCHeap* heap)
     return 0;
 }
 #endif /* MGC_HOST_DRIVE_HANDLES */
+
+#ifdef MGC_HOST_DRIVE_SHARED_BIRTHS
+/* ------------------------------------------------------------------ */
+/* the two collector drives' shared births (gate cases gc.mark-overflow */
+/* and gc.handle-growth): a pair object born by the EE fast path from   */
+/* the context's window while it has room and by the slow path          */
+/* otherwise (the runtime's own order), checked zero-born either way,   */
+/* the checksum word at +4 and the reference at +8; no line per object  */
+/* -- each drive prints one line per batch with the two path counts.    */
+/* ------------------------------------------------------------------ */
+static uint32_t g_bulk_fast, g_bulk_slow;
+
+static uint32_t bulk_stamp(unsigned i)
+{
+    return 0x5A000000u | i;
+}
+
+static Object* bulk_pair(IGCHeap* heap, gc_alloc_context* acx, uint32_t stamp,
+                         Object* ref)
+{
+    uint8_t* p     = (uint8_t*)acx->alloc_ptr;
+    uint8_t* limit = (uint8_t*)acx->alloc_limit;
+    Object*  o;
+    if (p && limit && (size_t)(limit - p) >= 16u) {
+        const unsigned char* fp = (const unsigned char*)p - 4;
+        for (size_t i = 0; i < 16u; i++)
+            drive_check(fp[i] == 0, "a window byte was not zero at a bulk fast birth");
+        acx->alloc_ptr = p + 16u;
+        o = (Object*)(void*)p;
+        g_bulk_fast++;
+    } else {
+        o = heap->Alloc(acx, 16u, GC_ALLOC_CONTAINS_REF);
+        drive_check(o != nullptr, "a bulk slow-path allocation returned NULL on the live region");
+        const unsigned char* fp = (const unsigned char*)(const void*)o - 4;
+        for (size_t i = 0; i < 16u; i++)
+            drive_check(fp[i] == 0, "a bulk slow-path byte was not zero-born");
+        g_bulk_slow++;
+    }
+    *(MethodTable**)(void*)o = &g_pair_block.mt;
+    *(uint32_t*)((uint8_t*)(void*)o + 4) = stamp;
+    *(Object**)((uint8_t*)(void*)o + 8) = ref;
+    return o;
+}
+
+/* The pair's checksum word read back. */
+static bool pair_holds(Object* o, unsigned i)
+{
+    return *(uint32_t*)((uint8_t*)(void*)o + 4) == bulk_stamp(i);
+}
+
+/* The counter worker every collection drive spawns (the one thread the
+ * stop-the-world stops), parked on `park`; the heap published first for
+ * the EE-side event wiring, the way every windows-world drive does. */
+static void spawn_counter(IGCHeap* heap, Object* park)
+{
+    g_heap_ee = heap;
+    g_worker_tid = rhu_thread_spawn(&gc_worker, (void*)park, 4096u,
+                                    GC_HOST_WORKER_PRIO,
+                                    "gcmut");
+    drive_check(g_worker_tid >= 1, "worker spawn refused");
+    printf("[gc-host] worker spawned: tid=%d prio=" GC_HOST_STR(GC_HOST_WORKER_PRIO)
+           " stack=4096 (runs only while kmain sleeps)\n",
+           (int)g_worker_tid);
+    {
+        unsigned tries = 0;
+        for (; tries < 100 && !g_worker_ready; tries++)
+            rhu_sleep_ns(2000000ull);
+    }
+    drive_check(g_worker_ready == 1, "worker never published its stack slot");
+}
+#endif /* MGC_HOST_DRIVE_SHARED_BIRTHS */
+
+#ifdef MGC_HOST_DRIVE_MARKOVF
+/* ------------------------------------------------------------------ */
+/* the mark-overflow drive (gate case gc.mark-overflow): an array of    */
+/* MO_ARRAY references -- small pairs, and at the last index the head   */
+/* of a chain of MO_CHAIN pairs reachable through the array alone --    */
+/* collected under a collector whose mark stack the plan caps at 64     */
+/* entries; every object read back by checksum and link after the       */
+/* first collection, the even elements dropped, collected again.        */
+/* ------------------------------------------------------------------ */
+#define MO_ARRAY 1000u
+#define MO_CHAIN 300u
+
+/* The object-array MethodTable, mirror-built like the pair's: baseSize
+ * 12 (the header, the table slot, the length), componentSize 4, one
+ * series at offset 8 whose stored size is biased by -baseSize per the
+ * vendored recipe, so the series spans every component (the walk's
+ * stop = obj + 8 - 12 + the exact size). */
+static struct ArrMTBlock {
+    CGCDescSeries series;
+    size_t        nseries;
+    MethodTable   mt;
+} g_arr_block;
+
+static void arr_mt_init(void)
+{
+    g_arr_block.series.SetSeriesSize((size_t)0 - (size_t)12);
+    g_arr_block.series.SetSeriesOffset(8);
+    g_arr_block.nseries = 1;
+    g_arr_block.mt.m_flags = MTFlag_ContainsGCPointers | MTFlag_HasComponentSize
+                           | MTFlag_IsArray;
+    g_arr_block.mt.m_componentSize = 4;
+    g_arr_block.mt.m_baseSize = 12;
+    g_arr_block.mt.m_pRelatedType = nullptr;
+    CGCDesc* d = CGCDesc::GetCGCDescFromMT(&g_arr_block.mt);
+    if (!g_arr_block.mt.ContainsGCPointers()
+        || !g_arr_block.mt.HasComponentSize()
+        || g_arr_block.mt.RawGetComponentSize() != 4
+        || g_arr_block.mt.GetBaseSize() != 12
+        || d->GetNumSeries() != 1
+        || d->GetHighestSeries() != &g_arr_block.series
+        || d->GetLowestSeries() != &g_arr_block.series
+        || d->GetHighestSeries()->GetSeriesOffset() != 8)
+        coll_host_die("array MethodTable GCDesc did not read back through the vendored accessors");
+    printf("[gc-host] array MT built: ContainsGCPointers|HasComponentSize|IsArray baseSize=12 componentSize=4, 1 series (offset 8, every component) -- vendored-accessor readback OK\n");
+}
+
+static Object* g_mo_elem[MO_ARRAY];    /* the drive's own book of the elements */
+static Object* g_mo_chain[MO_CHAIN];
+
+static int32_t drive_mark_overflow(IGCHeap* heap)
+{
+    printf("[gc-host] gc.mark-overflow drive: an array of %u references and a chain of %u pairs under a collector whose mark stack the plan caps at 64 entries; the deferred pushes must come back through the rescan\n",
+           (unsigned)MO_ARRAY, (unsigned)MO_CHAIN);
+    gc_alloc_context* acx = &g_mutator.acx;
+    pair_mt_init();
+    arr_mt_init();
+
+    /* The worker's parked object first (the stop-the-world's witness),
+     * then the array by the slow path (larger than a window), then the
+     * pairs by the bulk births. */
+    Object* park = drive_alloc(heap, acx, 16, 0, 1);
+    const size_t arr_bytes = 12u + 4u * MO_ARRAY;
+    Object* arr = heap->Alloc(acx, arr_bytes, GC_ALLOC_CONTAINS_REF);
+    drive_check(arr != nullptr, "the array allocation returned NULL on the live region");
+    {
+        const unsigned char* fp = (const unsigned char*)(const void*)arr - 4;
+        for (size_t i = 0; i < arr_bytes; i++)
+            drive_check(fp[i] == 0, "an array byte was not zero-born");
+    }
+    *(MethodTable**)(void*)arr = &g_arr_block.mt;
+    *(uint32_t*)((uint8_t*)(void*)arr + 4) = MO_ARRAY;
+    Object** elems = (Object**)((uint8_t*)(void*)arr + 8);
+    printf("[gc-host] alloc #2 the array: %u bytes zero-born, %u components of 4 (the array birth stored)\n",
+           (unsigned)arr_bytes, (unsigned)MO_ARRAY);
+
+    for (unsigned i = 0; i + 1 < MO_ARRAY; i++) {
+        g_mo_elem[i] = bulk_pair(heap, acx, bulk_stamp(i), nullptr);
+        elems[i] = g_mo_elem[i];
+    }
+    /* The chain, built from its tail so each pair's reference is stored
+     * at its birth; the head hung on the array's last element. */
+    Object* next = nullptr;
+    for (unsigned k = MO_CHAIN; k-- > 0; ) {
+        g_mo_chain[k] = bulk_pair(heap, acx, bulk_stamp(10000u + k), next);
+        next = g_mo_chain[k];
+    }
+    g_mo_elem[MO_ARRAY - 1] = g_mo_chain[0];
+    elems[MO_ARRAY - 1] = g_mo_chain[0];
+    printf("[gc-host] births: %u pairs stamped (%u fast-path from the window, %u slow-path); the chain of %u hung on element %u, reachable through the array alone\n",
+           (unsigned)(MO_ARRAY - 1 + MO_CHAIN), g_bulk_fast, g_bulk_slow,
+           (unsigned)MO_CHAIN, (unsigned)(MO_ARRAY - 1));
+
+    g_root_static = arr;
+    g_root_null   = nullptr;
+    g_root_oob    = (Object*)(void*)&g_mutator;
+    g_root_pair   = nullptr;
+    g_root_fin    = nullptr;
+    g_root_big    = nullptr;
+    spawn_counter(heap, park);
+
+    /* Collection #1: the array's one scan overflows the stack; every
+     * element and the whole chain must be alive after it. */
+    drive_check(heap->GarbageCollect(2, false, 0) == 0,
+                "GarbageCollect #1 rc != S_OK");
+    drive_check(heap->CollectionCount(2, 0) == 1,
+                "CollectionCount after #1 is not 1");
+    for (unsigned i = 0; i + 1 < MO_ARRAY; i++)
+        drive_check(elems[i] == g_mo_elem[i] && pair_holds(elems[i], i),
+                    "an array element or its checksum moved across collection #1");
+    for (unsigned k = 0; k < MO_CHAIN; k++) {
+        drive_check(pair_holds(g_mo_chain[k], 10000u + k),
+                    "a chain pair's checksum moved across collection #1");
+        Object* ref = *(Object**)((uint8_t*)(void*)g_mo_chain[k] + 8);
+        drive_check(ref == (k + 1 < MO_CHAIN ? g_mo_chain[k + 1] : nullptr),
+                    "a chain link moved across collection #1");
+    }
+    printf("[gc-host] after #1: %u elements and the chain of %u read back by checksum and link (the deferred pushes were rescanned)\n",
+           (unsigned)(MO_ARRAY - 1), (unsigned)MO_CHAIN);
+
+    /* The even elements dropped: their pairs die in collection #2; the
+     * odd ones (the chain head among them) live on. */
+    unsigned dropped = 0;
+    for (unsigned i = 0; i < MO_ARRAY; i += 2) {
+        elems[i] = nullptr;
+        dropped++;
+    }
+    drive_check(heap->GarbageCollect(2, false, 0) == 0,
+                "GarbageCollect #2 rc != S_OK");
+    drive_check(heap->GetGcCount() == 2, "GetGcCount after #2 is not 2");
+    for (unsigned i = 1; i + 1 < MO_ARRAY; i += 2)
+        drive_check(elems[i] == g_mo_elem[i] && pair_holds(elems[i], i),
+                    "an odd element or its checksum moved across collection #2");
+    for (unsigned k = 0; k < MO_CHAIN; k++)
+        drive_check(pair_holds(g_mo_chain[k], 10000u + k),
+                    "a chain pair's checksum moved across collection #2");
+    printf("[gc-host] after #2: %u elements dropped; the %u kept elements and the chain read back by checksum\n",
+           dropped, (unsigned)(MO_ARRAY - dropped));
+    printf("[gc-host] GC MARK OVERFLOW EXERCISE OK (an array of %u references under a 64-entry mark stack: the deferred pushes rescanned from the window, every element and the %u-pair chain intact after the first collection; %u elements dropped and reclaimed by the second)\n",
+           (unsigned)MO_ARRAY, (unsigned)MO_CHAIN, dropped);
+    return 0;
+}
+#endif /* MGC_HOST_DRIVE_MARKOVF */
+
+#ifdef MGC_HOST_DRIVE_HANDLE_GROWTH
+/* ------------------------------------------------------------------ */
+/* the handle-growth drive (gate case gc.handle-growth): HG_OBJS strong  */
+/* handles on HG_OBJS pairs -- the pool grows past the row's 64 by      */
+/* segments -- every one read back, half destroyed, a hundred created   */
+/* again on the released slots in the free list's order, one collection */
+/* with the live handles as roots, every handle destroyed, the segments */
+/* capped through the test knob and the store asked until it answers    */
+/* no handle (the runtime's out-of-memory).                            */
+/* ------------------------------------------------------------------ */
+#define HG_OBJS    400u
+#define HG_AGAIN   100u
+#define HG_CAP     2u
+#define HG_ASK_MAX 1024u
+extern "C" void     mgc_skel_handle_cap(unsigned segments);
+extern "C" unsigned mgc_skel_handle_segments(void);
+
+static Object*      g_hg_obj[HG_OBJS];
+static OBJECTHANDLE g_hg_h[HG_OBJS];
+static OBJECTHANDLE g_hg_again[HG_AGAIN];
+static OBJECTHANDLE g_hg_ask[HG_ASK_MAX];
+
+static int32_t drive_handle_growth(IGCHeap* heap)
+{
+    printf("[gc-host] gc.handle-growth drive: %u strong handles on %u objects through the store (the row's pool holds 64: it must grow by segments), half destroyed, %u created again, one collection with the live handles as roots, then the segments capped at %u and the store asked until it answers no handle\n",
+           (unsigned)HG_OBJS, (unsigned)HG_OBJS, (unsigned)HG_AGAIN, (unsigned)HG_CAP);
+    gc_alloc_context* acx = &g_mutator.acx;
+    pair_mt_init();
+    Object* park = drive_alloc(heap, acx, 16, 0, 1);
+    for (unsigned i = 0; i < HG_OBJS; i++)
+        g_hg_obj[i] = bulk_pair(heap, acx, bulk_stamp(i), nullptr);
+    printf("[gc-host] births: %u pairs stamped (%u fast-path from the window, %u slow-path)\n",
+           (unsigned)HG_OBJS, g_bulk_fast, g_bulk_slow);
+
+    IGCHandleStore* store = g_handle_mgr->GetGlobalHandleStore();
+    drive_check(store != nullptr, "global handle store missing at the drive");
+    drive_check(mgc_skel_handle_segments() == 0,
+                "the pool had grown before the drive's first handle");
+    for (unsigned i = 0; i < HG_OBJS; i++) {
+        g_hg_h[i] = store->CreateHandleOfType(g_hg_obj[i], HNDTYPE_STRONG);
+        drive_check(g_hg_h[i] != nullptr,
+                    "the store answered no handle while the arena had room");
+    }
+    unsigned segs = mgc_skel_handle_segments();
+    printf("[gc-host] %u handles created; the pool grew %u segment(s) past the row's 64\n",
+           (unsigned)HG_OBJS, segs);
+    drive_check(segs == 2,
+                "the pool did not grow to exactly two segments for 400 handles (64 + 256 + 80)");
+    for (unsigned i = 0; i < HG_OBJS; i++)
+        drive_check(*(Object* volatile*)g_hg_h[i] == g_hg_obj[i],
+                    "a handle did not read back its own object");
+    printf("[gc-host] every handle read back its own object\n");
+
+    /* Every second handle destroyed: the released slots span the three
+     * segments. A hundred created again on the first hundred released
+     * objects: the free list serves the last released first, across the
+     * segments, and grows nothing. */
+    for (unsigned i = 1; i < HG_OBJS; i += 2)
+        g_handle_mgr->DestroyHandleOfType(g_hg_h[i], HNDTYPE_STRONG);
+    for (unsigned k = 0; k < HG_AGAIN; k++) {
+        g_hg_again[k] = store->CreateHandleOfType(g_hg_obj[2u * k + 1u], HNDTYPE_STRONG);
+        drive_check(g_hg_again[k] != nullptr,
+                    "a create on the free list answered no handle");
+        drive_check(g_hg_again[k] == g_hg_h[HG_OBJS - 1u - 2u * k],
+                    "a create did not land on the last released slot (the free list's order across the segments)");
+        drive_check(*(Object* volatile*)g_hg_again[k] == g_hg_obj[2u * k + 1u],
+                    "a re-created handle did not read back its object");
+    }
+    drive_check(mgc_skel_handle_segments() == 2,
+                "the pool grew while the free list held released slots");
+    printf("[gc-host] %u handles destroyed, %u created again on released slots in the free list's order (the last released first, across the segments); no growth\n",
+           (unsigned)(HG_OBJS / 2u), (unsigned)HG_AGAIN);
+
+    /* One collection with the live handles as roots (the mark census
+     * counts them); the counter worker parked on its object. */
+    g_root_static = park;
+    g_root_null   = nullptr;
+    g_root_oob    = (Object*)(void*)&g_mutator;
+    g_root_pair   = nullptr;
+    g_root_fin    = nullptr;
+    g_root_big    = nullptr;
+    spawn_counter(heap, park);
+    drive_check(heap->GarbageCollect(2, false, 0) == 0,
+                "GarbageCollect #1 rc != S_OK");
+    drive_check(heap->CollectionCount(2, 0) == 1,
+                "CollectionCount after #1 is not 1");
+    for (unsigned i = 0; i < HG_OBJS; i += 2)
+        drive_check(*(Object* volatile*)g_hg_h[i] == g_hg_obj[i] && pair_holds(g_hg_obj[i], i),
+                    "a rooted object or its checksum moved across the collection");
+    for (unsigned k = 0; k < HG_AGAIN; k++)
+        drive_check(pair_holds(g_hg_obj[2u * k + 1u], 2u * k + 1u),
+                    "a re-rooted object's checksum moved across the collection");
+    printf("[gc-host] after #1: the %u rooted objects read back by handle and checksum\n",
+           (unsigned)(HG_OBJS / 2u + HG_AGAIN));
+
+    /* Every handle destroyed; the cap; the store asked until it answers
+     * no handle. */
+    for (unsigned i = 0; i < HG_OBJS; i += 2)
+        g_handle_mgr->DestroyHandleOfType(g_hg_h[i], HNDTYPE_STRONG);
+    for (unsigned k = 0; k < HG_AGAIN; k++)
+        g_handle_mgr->DestroyHandleOfType(g_hg_again[k], HNDTYPE_STRONG);
+    mgc_skel_handle_cap(HG_CAP);
+    unsigned served = 0;
+    for (; served < HG_ASK_MAX; served++) {
+        g_hg_ask[served] = store->CreateHandleOfType(park, HNDTYPE_STRONG);
+        if (!g_hg_ask[served])
+            break;
+    }
+    drive_check(served < HG_ASK_MAX, "the store never answered no handle under the cap");
+    printf("[gc-host] under the cap of %u segments the store served %u handles, then answered no handle (the runtime's out-of-memory)\n",
+           (unsigned)HG_CAP, served);
+    drive_check(served == 576u,
+                "the handles served before the refusal are not the 576 the plan predicts (400 released + 176 unused in the second segment)");
+    for (unsigned i = 0; i < served; i++)
+        g_handle_mgr->DestroyHandleOfType(g_hg_ask[i], HNDTYPE_STRONG);
+    drive_check(mgc_skel_handle_segments() == 2, "the segment count moved under the cap");
+    printf("[gc-host] GC HANDLE GROWTH EXERCISE OK (%u handles over three segments, every one read back; the free list served across the segments; %u live handles rooted one collection; the capped store answered no handle after %u)\n",
+           (unsigned)HG_OBJS, (unsigned)(HG_OBJS / 2u + HG_AGAIN), served);
+    return 0;
+}
+#endif /* MGC_HOST_DRIVE_HANDLE_GROWTH */
+
+#if defined(MGC_HOST_DRIVE_ALLOC_BOUND) || defined(MGC_HOST_DRIVE_TAIL_REJOIN) \
+    || defined(MGC_HOST_DRIVE_FINALIZE_FULL) || defined(MGC_HOST_DRIVE_WINDOW_KEEP)
+/* The four allocator drives' common opening: the parked object, the
+ * static roots, the counter worker every collection stops. */
+static Object* drive_open_parked(IGCHeap* heap, gc_alloc_context* acx)
+{
+    Object* park = drive_alloc(heap, acx, 16, 0, 1);
+    g_root_static = park;
+    g_root_null   = nullptr;
+    g_root_oob    = (Object*)(void*)&g_mutator;
+    g_root_pair   = nullptr;
+    g_root_fin    = nullptr;
+    g_root_big    = nullptr;
+    spawn_counter(heap, park);
+    return park;
+}
+#endif
+
+#ifdef MGC_HOST_DRIVE_ALLOC_BOUND
+/* ------------------------------------------------------------------ */
+/* the allocation-bound drive (gate case gc.alloc-bound): a request     */
+/* larger than the managed heap itself, twelve bytes under 4 GB, with   */
+/* the 8-byte alignment flag while the bump mark sits at the parity     */
+/* that needs the 12-byte alignment pad -- pad + size is zero in 32     */
+/* bits -- must be answered with no memory (the runtime's out-of-       */
+/* memory), never served; the next allocation lands where the bump      */
+/* mark stood and one collection walks the heap.                        */
+/* ------------------------------------------------------------------ */
+#define AB_REQUEST 0xFFFFFFF4u
+
+static int32_t drive_alloc_bound(IGCHeap* heap)
+{
+    printf("[gc-host] gc.alloc-bound drive: a request of %lu bytes with the 8-byte alignment flag while the bump mark sits at the parity that needs the 12-byte pad (pad + size is zero in 32 bits); the answer must be no memory\n",
+           (unsigned long)AB_REQUEST);
+    gc_alloc_context* acx = &g_mutator.acx;
+    (void)drive_open_parked(heap, acx);
+
+    /* A 12-byte object served from the bump (the large-object flag
+     * routes it past the thread's window, which it retires) at an
+     * 8-aligned address leaves the bump mark at 4 mod 8, where the next
+     * 8-aligned request needs the pad. */
+    Object* odd = drive_alloc(heap, acx, 12, GC_ALLOC_LARGE_OBJECT_HEAP, 2);
+    drive_check(((uintptr_t)(void*)odd & 7u) == 0, "the parity object is not 8-aligned");
+
+    Object* big = heap->Alloc(acx, AB_REQUEST, GC_ALLOC_ALIGN8);
+    if (big != nullptr)
+        printf("[gc-host] the request of %lu bytes was SERVED at %p, %lu bytes past the parity object %p\n",
+               (unsigned long)AB_REQUEST, (void*)big,
+               (unsigned long)((uint8_t*)(void*)big - (uint8_t*)(void*)odd), (void*)odd);
+    drive_check(big == nullptr, "a request larger than the managed heap was served");
+    printf("[gc-host] the request of %lu bytes was answered no memory\n",
+           (unsigned long)AB_REQUEST);
+
+    Object* next = drive_alloc(heap, acx, 16, GC_ALLOC_ALIGN8, 3);
+    drive_check((uint8_t*)(void*)next == (uint8_t*)(void*)odd + 24,
+                "the allocation after the refusal is not at the parity object + 24 (the pad, then the object): the refused request moved the bump mark");
+    drive_check(heap->GarbageCollect(2, false, 0) == 0, "GarbageCollect #1 rc != S_OK");
+    printf("[gc-host] GC ALLOC BOUND EXERCISE OK (the request of %lu bytes answered no memory; the next allocation landed where the bump mark stood; one collection walked the heap)\n",
+           (unsigned long)AB_REQUEST);
+    return 0;
+}
+#endif /* MGC_HOST_DRIVE_ALLOC_BOUND */
+
+#ifdef MGC_HOST_DRIVE_TAIL_REJOIN
+/* ------------------------------------------------------------------ */
+/* the tail-rejoin drive (gate case gc.tail-rejoin): one live object    */
+/* low, a block above it that dies, then a request that fits neither    */
+/* the dead block nor the untouched tail of the managed heap but fits   */
+/* across both: served after ONE collection, at the place the dead run  */
+/* began, every byte zero.                                              */
+/* ------------------------------------------------------------------ */
+#define TR_BLOCK   1000000u
+#define TR_REQUEST 1500000u
+extern "C" uint32_t mgc_heap_free_bytes(void);
+
+static int32_t drive_tail_rejoin(IGCHeap* heap)
+{
+    printf("[gc-host] gc.tail-rejoin drive: one live object low, a block of %lu bytes above it that dies, then a request of %lu bytes that fits neither the dead block nor the untouched tail of the managed heap but fits across both; it must be served after one collection\n",
+           (unsigned long)TR_BLOCK, (unsigned long)TR_REQUEST);
+    gc_alloc_context* acx = &g_mutator.acx;
+    Object* park = drive_open_parked(heap, acx);
+
+    Object* block = drive_alloc(heap, acx, TR_BLOCK, GC_ALLOC_LARGE_OBJECT_HEAP, 2);
+    drive_check((uint8_t*)(void*)block > (uint8_t*)(void*)park, "the block is not above the live object");
+
+    size_t before = heap->CollectionCount(2, 0);
+    Object* req = heap->Alloc(acx, TR_REQUEST, GC_ALLOC_LARGE_OBJECT_HEAP);
+    unsigned ran = (unsigned)(heap->CollectionCount(2, 0) - before);
+    printf("[gc-host] the request of %lu bytes: %s after %u collection(s); the free list holds %lu bytes\n",
+           (unsigned long)TR_REQUEST, req ? "served" : "NO MEMORY", ran,
+           (unsigned long)mgc_heap_free_bytes());
+    drive_check(req != nullptr, "a request that fits across the dead top block and the untouched tail was answered no memory");
+    drive_check(ran == 1, "the request was not served after exactly one collection");
+    drive_check((uint8_t*)(void*)req == (uint8_t*)(void*)park + 16,
+                "the request was not served where the dead run began (the live object + 16)");
+    const unsigned char* fp = (const unsigned char*)(const void*)req - 4;
+    for (size_t i = 0; i < TR_REQUEST; i++)
+        drive_check(fp[i] == 0, "a byte of the rejoined tail was not zero when handed out");
+    *(MethodTable**)(void*)req = GCToEEInterface::GetFreeObjectMethodTable();
+    *(uint32_t*)((uint8_t*)(void*)req + 4) = TR_REQUEST - 12u;
+    drive_check(heap->GarbageCollect(2, false, 0) == 0, "GarbageCollect after the request rc != S_OK");
+    printf("[gc-host] GC TAIL REJOIN EXERCISE OK (the request of %lu bytes served after one collection where the dead run began, every byte zero; a second collection walked the heap)\n",
+           (unsigned long)TR_REQUEST);
+    return 0;
+}
+#endif /* MGC_HOST_DRIVE_TAIL_REJOIN */
+
+#ifdef MGC_HOST_DRIVE_FINALIZE_FULL
+/* ------------------------------------------------------------------ */
+/* the finalize-full drive (gate case gc.finalize-full): finalizable    */
+/* objects, every one kept alive, fill the finalization table of the    */
+/* heap object the image links; the next finalizable request is         */
+/* answered no memory after one collection -- never handed out          */
+/* unregistered, where its finalizer would never run.                   */
+/* ------------------------------------------------------------------ */
+#ifndef MGC_HOST_FINALIZE_CAP   /* the finalization capacity of the heap object the image links */
+#define MGC_HOST_FINALIZE_CAP 2048u
+#endif
+
+static Object*      g_ff_obj[MGC_HOST_FINALIZE_CAP];
+static OBJECTHANDLE g_ff_h[MGC_HOST_FINALIZE_CAP];
+
+static unsigned g_ff_turns;
+
+static void ff_finalizer_turn(void)
+{
+    if (g_heap_ee->GetNextFinalizable() != nullptr)
+        g_ff_turns++;
+}
+
+static Object* ff_birth(IGCHeap* heap, gc_alloc_context* acx)
+{
+    Object* o = heap->Alloc(acx, 16u, GC_ALLOC_FINALIZE);
+    if (o != nullptr) {
+        const unsigned char* fp = (const unsigned char*)(const void*)o - 4;
+        for (size_t i = 0; i < 16u; i++)
+            drive_check(fp[i] == 0, "a finalizable object's byte was not zero-born");
+        *(MethodTable**)(void*)o = GCToEEInterface::GetFreeObjectMethodTable();
+        *(uint32_t*)((uint8_t*)(void*)o + 4) = 4u;
+    }
+    return o;
+}
+
+static int32_t drive_finalize_full(IGCHeap* heap)
+{
+    printf("[gc-host] gc.finalize-full drive: %u finalizable objects, every one kept alive, fill the finalization table; the next finalizable request must be answered no memory after one collection, never handed out unregistered\n",
+           (unsigned)MGC_HOST_FINALIZE_CAP);
+    gc_alloc_context* acx = &g_mutator.acx;
+    (void)drive_open_parked(heap, acx);
+    IGCHandleStore* store = g_handle_mgr->GetGlobalHandleStore();
+    drive_check(store != nullptr, "global handle store missing at the drive");
+
+    for (unsigned i = 0; i < MGC_HOST_FINALIZE_CAP; i++) {
+        g_ff_obj[i] = ff_birth(heap, acx);
+        drive_check(g_ff_obj[i] != nullptr, "a finalizable allocation returned NULL while the table had room");
+        g_ff_h[i] = store->CreateHandleOfType(g_ff_obj[i], HNDTYPE_STRONG);
+        drive_check(g_ff_h[i] != nullptr, "the store answered no handle for a finalizable object");
+    }
+    printf("[gc-host] %u finalizable objects registered, each held by a strong handle\n",
+           (unsigned)MGC_HOST_FINALIZE_CAP);
+
+    size_t before = heap->CollectionCount(2, 0);
+    Object* over = ff_birth(heap, acx);
+    unsigned ran = (unsigned)(heap->CollectionCount(2, 0) - before);
+    printf("[gc-host] the finalizable request past the table: %s after %u collection(s)\n",
+           over ? "HANDED OUT" : "no memory", ran);
+    drive_check(over == nullptr, "a finalizable object was handed out with no slot in the finalization table (its finalizer would never run)");
+    drive_check(ran == 1, "the refusal did not come after exactly one collection");
+    for (unsigned i = 0; i < MGC_HOST_FINALIZE_CAP; i++)
+        drive_check(*(Object* volatile*)g_ff_h[i] == g_ff_obj[i],
+                    "a held finalizable object moved across the collection");
+    printf("[gc-host] the table full of live objects: the request answered no memory after one collection, every held object in place\n");
+
+    /* The holders dropped, one collection (every object dead: queued for
+     * its finalizer), the finalizer's work done by the drive: every slot
+     * is free again and the same request is served with no collection. */
+    for (unsigned i = 0; i < MGC_HOST_FINALIZE_CAP; i++)
+        g_handle_mgr->DestroyHandleOfType(g_ff_h[i], HNDTYPE_STRONG);
+    drive_check(heap->GarbageCollect(2, false, 0) == 0, "GarbageCollect after the holders dropped rc != S_OK");
+    unsigned drained = 0;
+    while (heap->GetNextFinalizable() != nullptr)
+        drained++;
+    drive_check(drained == MGC_HOST_FINALIZE_CAP, "the finalizer's queue did not hold every dropped object");
+    before = heap->CollectionCount(2, 0);
+    Object* again = ff_birth(heap, acx);
+    ran = (unsigned)(heap->CollectionCount(2, 0) - before);
+    drive_check(again != nullptr && ran == 0, "the request was not served at once after the finalizers ran");
+    printf("[gc-host] the holders dropped and %u finalizers run: the same request served with no collection\n", drained);
+
+    /* The table filled again with objects nobody holds: dead, but not
+     * collected and not finalized. The next request collects once, and
+     * while it waits the finalizer thread takes one object (the yield
+     * hook plays it): served after that one collection. */
+    for (unsigned i = 1; i < MGC_HOST_FINALIZE_CAP; i++)
+        drive_check(ff_birth(heap, acx) != nullptr, "a finalizable allocation returned NULL while the table had room");
+    g_ff_finalizer_on_yield = 1;
+    before = heap->CollectionCount(2, 0);
+    Object* waited = ff_birth(heap, acx);
+    ran = (unsigned)(heap->CollectionCount(2, 0) - before);
+    g_ff_finalizer_on_yield = 0;
+    printf("[gc-host] the table full of dead objects not yet finalized: the request %s after %u collection(s); the finalizer thread took %u object(s) while it waited\n",
+           waited ? "served" : "ANSWERED NO MEMORY", ran, g_ff_turns);
+    drive_check(waited != nullptr, "a finalizable request was refused while dead objects waited for their finalizers");
+    drive_check(ran == 1 && g_ff_turns == 1, "the wait did not end after one collection and one object taken by the finalizer thread");
+    drained = 0;
+    while (heap->GetNextFinalizable() != nullptr)
+        drained++;
+    drive_check(drained == MGC_HOST_FINALIZE_CAP - 1u, "the finalizer's queue did not hold the rest of the dead objects");
+    printf("[gc-host] GC FINALIZE FULL EXERCISE OK (%u live finalizable objects filled the table: no memory after one collection, none handed out unregistered; the holders dropped and the finalizers run: served; the table full of dead objects: served after one collection and one object taken by the finalizer thread)\n",
+           (unsigned)MGC_HOST_FINALIZE_CAP);
+    return 0;
+}
+#endif /* MGC_HOST_DRIVE_FINALIZE_FULL */
+
+#ifdef MGC_HOST_DRIVE_WINDOW_KEEP
+/* ------------------------------------------------------------------ */
+/* the window-keep drive (gate case gc.window-keep): rounds of two      */
+/* ordinary small objects and one 8-byte-aligned small object, every    */
+/* one kept alive, then a request of one page. The aligned objects      */
+/* must be served inside the thread's outstanding allocation window:    */
+/* the managed heap then stays in one piece and the request is served   */
+/* with no collection.                                                  */
+/* ------------------------------------------------------------------ */
+#define WK_ROUNDS  29u
+#define WK_REQUEST 4108u
+extern "C" uint32_t mgc_heap_free_bytes(void);
+
+static Object*      g_wk_obj[3u * WK_ROUNDS];
+static OBJECTHANDLE g_wk_h[3u * WK_ROUNDS];
+
+static int32_t drive_window_keep(IGCHeap* heap)
+{
+    printf("[gc-host] gc.window-keep drive: %u rounds of two ordinary small objects and one 8-byte-aligned small object, every one kept alive, then a request of %u bytes; the aligned objects must be served inside the thread's allocation window, so the request is served with no collection\n",
+           (unsigned)WK_ROUNDS, (unsigned)WK_REQUEST);
+    gc_alloc_context* acx = &g_mutator.acx;
+    pair_mt_init();
+    (void)drive_open_parked(heap, acx);
+    IGCHandleStore* store = g_handle_mgr->GetGlobalHandleStore();
+    drive_check(store != nullptr, "global handle store missing at the drive");
+
+    unsigned n = 0, inside = 0;
+    for (unsigned r = 0; r < WK_ROUNDS; r++) {
+        for (unsigned k = 0; k < 2u; k++, n++) {
+            g_wk_obj[n] = bulk_pair(heap, acx, bulk_stamp(n), nullptr);
+            g_wk_h[n]   = store->CreateHandleOfType(g_wk_obj[n], HNDTYPE_STRONG);
+            drive_check(g_wk_h[n] != nullptr, "the store answered no handle for an ordinary object");
+        }
+        uint8_t* wlo = (uint8_t*)acx->alloc_ptr;
+        uint8_t* whi = (uint8_t*)acx->alloc_limit;
+        Object* a = heap->Alloc(acx, 16u, GC_ALLOC_ALIGN8);
+        drive_check(a != nullptr, "an aligned small allocation returned NULL on the live region");
+        drive_check(((uintptr_t)(void*)a & 7u) == 0, "an aligned small object is not 8-aligned");
+        const unsigned char* fp = (const unsigned char*)(const void*)a - 4;
+        for (size_t i = 0; i < 16u; i++)
+            drive_check(fp[i] == 0, "an aligned small object's byte was not zero-born");
+        *(MethodTable**)(void*)a = &g_pair_block.mt;
+        *(uint32_t*)((uint8_t*)(void*)a + 4) = bulk_stamp(n);
+        *(Object**)((uint8_t*)(void*)a + 8) = nullptr;
+        if (wlo != nullptr && (uint8_t*)(void*)a >= wlo && (uint8_t*)(void*)a < whi)
+            inside++;
+        g_wk_obj[n] = a;
+        g_wk_h[n]   = store->CreateHandleOfType(a, HNDTYPE_STRONG);
+        drive_check(g_wk_h[n] != nullptr, "the store answered no handle for an aligned object");
+        n++;
+    }
+    printf("[gc-host] births: %u objects in %u rounds (%u ordinary from the window, %u ordinary through the interface; %u of %u aligned served inside the outstanding window)\n",
+           n, (unsigned)WK_ROUNDS, g_bulk_fast, g_bulk_slow, inside, (unsigned)WK_ROUNDS);
+
+    size_t before = heap->CollectionCount(2, 0);
+    Object* req = heap->Alloc(acx, WK_REQUEST, 0);
+    unsigned ran = (unsigned)(heap->CollectionCount(2, 0) - before);
+    printf("[gc-host] the request of %u bytes: %s after %u collection(s); the free list holds %lu bytes\n",
+           (unsigned)WK_REQUEST, req ? "served" : "NO MEMORY", ran,
+           (unsigned long)mgc_heap_free_bytes());
+    drive_check(req != nullptr, "a request of one page was answered no memory while the managed heap held many times that free");
+    drive_check(ran == 0, "the request needed a collection: the small objects had cut the heap up");
+    drive_check(inside == WK_ROUNDS, "an aligned small object was not served inside the outstanding window");
+    const unsigned char* rp = (const unsigned char*)(const void*)req - 4;
+    for (size_t i = 0; i < WK_REQUEST; i++)
+        drive_check(rp[i] == 0, "a byte of the request was not zero when handed out");
+    *(MethodTable**)(void*)req = GCToEEInterface::GetFreeObjectMethodTable();
+    *(uint32_t*)((uint8_t*)(void*)req + 4) = WK_REQUEST - 12u;
+
+    drive_check(heap->GarbageCollect(2, false, 0) == 0, "GarbageCollect #1 rc != S_OK");
+    for (unsigned i = 0; i < n; i++)
+        drive_check(*(Object* volatile*)g_wk_h[i] == g_wk_obj[i] && pair_holds(g_wk_obj[i], i),
+                    "a kept object or its checksum moved across the collection");
+    printf("[gc-host] GC WINDOW KEEP EXERCISE OK (%u objects kept, every aligned one served inside the window; the request of %u bytes served with no collection; one collection, every object read back by handle and checksum)\n",
+           n, (unsigned)WK_REQUEST);
+    return 0;
+}
+#endif /* MGC_HOST_DRIVE_WINDOW_KEEP */
+
+#ifdef MGC_HOST_DRIVE_FROZEN_BOUND
+/* ------------------------------------------------------------------ */
+/* the frozen-bound drive (gate case gc.frozen-bound): a frozen segment */
+/* the runtime believes committed for 64 KB over a pool of one page;    */
+/* 16-byte objects written one by one, the collector told the fill      */
+/* after each, until it stops the program -- at the object that leaves  */
+/* no room for one more, before a byte is written past the pool. The    */
+/* drive never reaches its end: the stop is the collector's fail-fast.  */
+/* ------------------------------------------------------------------ */
+#define FB_FIRST   4u
+#define FB_OBJECT 16u
+
+static int32_t drive_frozen_bound(IGCHeap* heap)
+{
+    printf("[gc-host] gc.frozen-bound drive: a frozen segment committed for %u bytes over a frozen object heap of %u; objects of %u bytes written until the collector stops the program -- at the object that leaves no room for one more, before a byte is written past the pool\n",
+           (unsigned)FB_COMMIT, (unsigned)FB_POOL, (unsigned)FB_OBJECT);
+    uint8_t* base = (uint8_t*)mmap64(nullptr, FB_COMMIT, HOST_PROT_RW,
+                                     HOST_MAP_ANON_PRIV, -1, 0);
+    drive_check(base != nullptr && base != (uint8_t*)-1, "the segment's memory was not served");
+    g_fb_base = base;
+    segment_info si;
+    si.pvMem         = base;
+    si.ibFirstObject = FB_FIRST;
+    si.ibAllocated   = FB_FIRST;
+    si.ibCommit      = FB_COMMIT;
+    si.ibReserved    = FB_COMMIT;
+    segment_handle seg = heap->RegisterFrozenSegment(&si);
+    drive_check(seg != nullptr, "the frozen segment was not registered");
+    unsigned n = 0;
+    for (uint32_t off = FB_FIRST; off + FB_OBJECT <= FB_COMMIT; off += FB_OBJECT) {
+        if (off + FB_OBJECT > FB_POOL)
+            printf("[gc-host] object %u would end at %u, past the pool's %u: the collector did not stop the program\n",
+                   n + 1u, (unsigned)(off + FB_OBJECT), (unsigned)FB_POOL);
+        drive_check(off + FB_OBJECT <= FB_POOL,
+                    "an object was about to be written past the frozen object heap's pool");
+        *(MethodTable**)(void*)(base + off) = GCToEEInterface::GetFreeObjectMethodTable();
+        *(uint32_t*)(base + off + 4) = FB_OBJECT - 12u;
+        n++;
+        heap->UpdateFrozenSegment(seg, base + off + FB_OBJECT, base + FB_COMMIT);
+    }
+    printf("[gc-host] the drive filled the whole commit with %u objects and was never stopped\n", n);
+    drive_check(false, "the frozen-bound drive reached its end");
+    return 0;
+}
+#endif /* MGC_HOST_DRIVE_FROZEN_BOUND */
 
 #ifdef MGC_HOST_DRIVE_NOGC
 /* ------------------------------------------------------------------ */
@@ -1431,6 +2218,27 @@ static int32_t drive_allocator(IGCHeap* heap)
 #endif
 #ifdef MGC_HOST_DRIVE_HANDLES
     return drive_handles(heap);
+#endif
+#ifdef MGC_HOST_DRIVE_MARKOVF
+    return drive_mark_overflow(heap);
+#endif
+#ifdef MGC_HOST_DRIVE_HANDLE_GROWTH
+    return drive_handle_growth(heap);
+#endif
+#ifdef MGC_HOST_DRIVE_ALLOC_BOUND
+    return drive_alloc_bound(heap);
+#endif
+#ifdef MGC_HOST_DRIVE_TAIL_REJOIN
+    return drive_tail_rejoin(heap);
+#endif
+#ifdef MGC_HOST_DRIVE_FINALIZE_FULL
+    return drive_finalize_full(heap);
+#endif
+#ifdef MGC_HOST_DRIVE_WINDOW_KEEP
+    return drive_window_keep(heap);
+#endif
+#ifdef MGC_HOST_DRIVE_FROZEN_BOUND
+    return drive_frozen_bound(heap);
 #endif
 #ifdef MGC_HOST_DRIVE_NOGC
     return drive_no_gc_region(heap);
@@ -1794,19 +2602,31 @@ static int32_t drive_allocator(IGCHeap* heap)
     g_root_big = nullptr;
     Object* bigB = drive_alloc_reuse(heap, acx, 1900000, 0, 20);
     drive_check((void*)bigB == (void*)bigA,
-                "the wall retry did not serve the freed big run exact-fit");
-    printf("[gc-host] THE MARK-ONLY WALL IS RETIRED: the 1.9 MB ask collected-and-retried to an exact-fit serve at the dead object's address\n");
+                "the wall retry did not serve the ask at the dead object's address");
+    printf("[gc-host] THE MARK-ONLY WALL IS RETIRED: the 1.9 MB ask collected-and-retried to a serve at the dead object's address (its run rejoined the untouched tail)\n");
 
-    /* The honest NULL: an unfittable ask exhausts the bounded retries
-     * and reports OOM with the reserve intact (grace opens); a small
-     * allocation still succeeds; the next sweep closes grace. */
-    drive_check(heap->Alloc(acx, 4u * 1024u * 1024u, 0) == nullptr,
+    /* The honest NULL: an ask the managed heap could hold, but not
+     * beside the live 1.9 MB object, exhausts the bounded retries and
+     * reports OOM with the reserve intact (grace opens); a small
+     * allocation still succeeds; the object dropped, the next sweep
+     * closes grace. (An ask larger than the managed heap itself is
+     * answered by the bound, with no collection: gate case
+     * gc.alloc-bound.) */
+    g_root_big = bigB;
+    drive_check(heap->Alloc(acx, 1000000u, 0) == nullptr,
                 "an unfittable ask did not return NULL through the retry path");
-    printf("[gc-host] oversize ask -> NULL after bounded retries (managed protocol; grace open)\n");
+    g_root_big = nullptr;
+    printf("[gc-host] unfittable ask -> NULL after bounded retries (managed protocol; grace open)\n");
     Object* o21 = drive_alloc_reuse(heap, acx, 24, 0, 21);
     (void)o21;
     drive_check(heap->GarbageCollect(2, false, 0) == 0,
                 "GarbageCollect #9 rc != S_OK");
+#ifdef MGC_HOST_DIAG_CONTINUE
+    printf("[gc-host] diag: GetGcCount=%lu in_use=%lu allocated=%lu alloc_count=%lu alloc_bytes=%lu\n",
+           (unsigned long)heap->GetGcCount(), (unsigned long)heap->GetTotalBytesInUse(),
+           (unsigned long)heap->GetTotalAllocatedBytes(), (unsigned long)acx->alloc_count,
+           (unsigned long)acx->alloc_bytes);
+#endif
     drive_check(heap->GetGcCount() == 9, "GetGcCount at the drive's end is not 9");
     /* GetTotalBytesInUse under the free-list allocator answers the bump
      * extent minus the free list -- GC.GetTotalMemory honesty: 132 B of
@@ -1849,8 +2669,12 @@ static int32_t drive_allocator(IGCHeap* heap)
     /* A window from a FREE RUN (adaptive whole-run, zeroed at
      * handout) and its fast consumption. */
     Object* o19t = drive_alloc(heap, acx, 16, 0, 19);
-    drive_check((unsigned char*)o19t == (unsigned char*)o2 + 28,
-                "the free-run window did not land at the first fitting run (alloc #2's end)");
+    /* The first fitting run begins at alloc #5's address: the flag-routed
+     * #3, #4 and #5 were served inside the first window behind #2, #5
+     * died at the second collection, and the window's remainder lies
+     * behind it. */
+    drive_check((void*)o19t == (void*)o5,
+                "the free-run window did not land at the first fitting run (alloc #5's address)");
     printf("[gc-host] alloc #19 served from a FREE-RUN window (adaptive size, zeroed at handout)\n");
     Object* o20t = drive_alloc_win(acx, 24, 20);
     (void)o20t;
@@ -1872,15 +2696,24 @@ static int32_t drive_allocator(IGCHeap* heap)
      * with its one fast birth counted into the walk model. */
     drive_check(heap->GarbageCollect(2, false, 0) == 0,
                 "GarbageCollect #3 rc != S_OK");
+#ifdef MGC_HOST_DIAG_CONTINUE
+    printf("[gc-host] diag: o2=%p o5=%p o8=%p o19=%p o21=%p GetGcCount=%lu in_use=%lu allocated=%lu kmain alloc_count=%lu alloc_bytes=%lu detach alloc_count=%lu\n",
+           (void*)o2, (void*)o5, (void*)o8, (void*)o19t, (void*)o21t,
+           (unsigned long)heap->GetGcCount(), (unsigned long)heap->GetTotalBytesInUse(),
+           (unsigned long)heap->GetTotalAllocatedBytes(), (unsigned long)acx->alloc_count,
+           (unsigned long)acx->alloc_bytes, (unsigned long)g_detach_mutator.acx.alloc_count);
+#endif
     drive_check(heap->GetGcCount() == 3, "GetGcCount at the drive's end is not 3");
-    /* the same two 12-byte dead spaces as the sweep world's: pads, in use */
-    drive_check(heap->GetTotalBytesInUse() == 160, "final in_use is not 160 (live bytes + two 12-byte pads)");
+    /* one 12-byte dead space between live objects (the parity pad before
+     * #4): a pad, in use; #5's 12 bytes lie against the first window's
+     * remainder and are free with it */
+    drive_check(heap->GetTotalBytesInUse() == 148, "final in_use is not 148 (live bytes + one 12-byte pad)");
     drive_check(heap->GetTotalAllocatedBytes() == 376, "final allocated is not 376");
     drive_check(acx->alloc_count == 13, "final kmain alloc_count is not 13");
     drive_check(acx->alloc_bytes == 360, "final kmain alloc_bytes is not 360");
     drive_check(g_detach_mutator.acx.alloc_count == 1,
                 "the detach context's alloc_count is not 1");
-    printf("[gc-host] final books: kmain alloc_count=13 alloc_bytes=360, detach alloc_count=1; in_use=160 (132 live + 4 skew + 2 pads x 12) allocated=376 OK\n");
+    printf("[gc-host] final books: kmain alloc_count=13 alloc_bytes=360, detach alloc_count=1; in_use=148 (132 live + 4 skew + 1 pad x 12) allocated=376 OK\n");
 
     printf("[gc-host] GC WINDOWS+EVENT EXERCISE OK (windows both sources, three fix sites, refunds exact; the GC-done event slept and woke over the kernel futex; an activation broke a blocked wait -- the RHU_EINTR contract; handle slots reused)\n");
     return 0;
@@ -1905,13 +2738,14 @@ extern "C" int32_t __managed__Main(int32_t argc, const uint8_t* const* argv)
      * These are the compiled constants themselves; the knob ties are
      * on the wire (the cover line's buffer total, the census region
      * size, the handle census's slot count). */
-    printf("[gc-row] board=%s profile=%s basis=%s region=%u cover=%u kheap=%u stack=%u/%u handles=%u foh=%u\n",
+    printf("[gc-row] board=%s profile=%s basis=%s managed_heap_min_guaranteed=%u cover=%u native_heap=%u thread_stack=%u/%u handles=%u frozen_object_heap=%u system_memory_unallocated=%u\n",
            MGC_ROW_BOARD, MGC_ROW_PROFILE, MGC_ROW_BASIS,
-           (unsigned)MGC_ROW_REGION_BYTES, (unsigned)MGC_ROW_COVER_BYTES,
+           (unsigned)MGC_ROW_HEAP_MIN_GUARANTEED_BYTES, (unsigned)MGC_ROW_COVER_BYTES,
            (unsigned)MGC_ROW_KHEAP_BYTES, (unsigned)MGC_ROW_STACK_DEFAULT,
            (unsigned)MGC_ROW_STACK_CLAMP, (unsigned)MGC_ROW_HANDLE_SLOTS,
-           (unsigned)MGC_ROW_FOH_POOL_BYTES);
-    printf("[gc-row] sizing: markstack=%u finq=%u reserve=%u window=%u/%u retries=%u frozen=%u\n",
+           (unsigned)MGC_ROW_FOH_POOL_BYTES,
+           (unsigned)MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES);
+    printf("[gc-row] sizing: markstack=%u finq=%u out_of_memory_reserve=%u window=%u/%u retries=%u frozen=%u\n",
            (unsigned)MGC_ROW_MARKSTACK_ENTRIES, (unsigned)MGC_ROW_FINQ_CAP,
            (unsigned)MGC_ROW_OOM_RESERVE, (unsigned)MGC_ROW_WINDOW_BYTES,
            (unsigned)MGC_ROW_WINDOW_FLOOR, (unsigned)MGC_ROW_WALL_RETRIES,
@@ -1967,6 +2801,9 @@ extern "C" int32_t __managed__Main(int32_t argc, const uint8_t* const* argv)
     IGCHeap* heap = nullptr;
     IGCHandleManager* mgr = nullptr;
     GcDacVars dac;
+#ifdef MGC_HOST_ROW_AN500
+    g_row_free_before = rhu_arena_headroom();
+#endif
     HRESULT rc = init_fn((IGCToCLR*)(void*)&clr_cookie, &heap, &mgr, &dac);
     if (rc != 0 || !heap || !mgr) {
         printf("[gc-host] GC_Initialize failed (rc=%d heap=%p mgr=%p)\n",
@@ -2024,15 +2861,37 @@ extern "C" int32_t __managed__Main(int32_t argc, const uint8_t* const* argv)
         }
         printf("[gc-row] containment VERDICT: INSIDE (statics + arena window inside the cover granule -- every legal bulk-move destination covered)\n");
 
-        unsigned long win = (unsigned long)
-            ((uintptr_t)__rhu_arena_hi - (uintptr_t)__rhu_arena_lo);
-        printf("[gc-row] window fit: drawn=%lu kheap=%lu window=%lu\n",
-               g_row_drawn, (unsigned long)MGC_ROW_KHEAP_BYTES, win);
-        if (g_row_drawn + (unsigned long)MGC_ROW_KHEAP_BYTES > win) {
-            printf("[gc-row] window REFUSED: the row's region + aux + kheap overflow the link window\n");
-            abort();
+        /* System memory: the row's managed heap is sized at boot, so
+         * the rule is recomputed here, independently of the heap, from
+         * the system memory that was free before the collector started
+         * (whole pages) and the row's own two numbers; what is free now
+         * must be exactly what the rule leaves. */
+        {
+            uint32_t page  = 4096u;
+            uint32_t free0 = g_row_free_before / page * page;
+            uint32_t keep  = (uint32_t)MGC_ROW_FOH_POOL_BYTES
+                           + (uint32_t)MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES;
+            uint32_t h = 0, tables = 0;
+            if (free0 > keep) {
+                uint32_t room = free0 - keep;
+                for (h = room / page * page; h; h -= page) {
+                    tables = mgc_collect_tables_bytes(h, page);
+                    if (tables <= room && h <= room - tables)
+                        break;
+                }
+            }
+            uint32_t after = rhu_arena_headroom();
+            printf("[gc-row] system memory: free before the collector %lu B, free after init %lu B, the row keeps %lu B (the rule: managed heap %lu B, collector tables %lu B; drawn %lu B)\n",
+                   (unsigned long)free0, (unsigned long)after, (unsigned long)keep,
+                   (unsigned long)h, (unsigned long)tables, g_row_drawn);
+            if (!h || h < (uint32_t)MGC_ROW_HEAP_MIN_GUARANTEED_BYTES
+                || after != free0 - h - tables || after < keep) {
+                printf("[gc-row] system memory REFUSED: what is free after the collector's start is not what the rule leaves (the managed heap did not take what the rule gives)\n");
+                abort();
+            }
+            printf("[gc-row] system memory VERDICT: FILLED (the managed heap took all the rule gives; %lu B stay free, %lu B over what the row keeps)\n",
+                   (unsigned long)after, (unsigned long)(after - keep));
         }
-        printf("[gc-row] window VERDICT: FITS (row region + aux + kheap inside the link window)\n");
     }
 #endif
 

@@ -9,7 +9,7 @@ use std::process::{exit, Command};
 /// The chain verdict line: gate count, gate names, and the declared
 /// absence of every frozen-input tier whose inputs are not present
 /// (payload, gc, shim, rt-m7 and rt-m33), in leg order. Byte-identical to the chain of
-/// record's line -- the drop pipeline parses it into the manifest --
+/// record's line -- the release pipeline parses it into the manifest --
 /// and byte-identical to the pre-generalization rendering for the
 /// zero- and payload-declared shapes (the core selfcheck pins all
 /// three shapes).

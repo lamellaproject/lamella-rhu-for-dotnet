@@ -2,6 +2,7 @@ shimtest-busdev: the bus device nodes from a native caller's side, on the row's 
 PASS shim-busdev-init (the row's buses by their own numbers)
 PASS shim-busdev-names (malformed names, the no-select value as a select's name and a bus the row lacks refused ENOENT)
 PASS shim-busdev-funcs (one four-byte word, the word after it untouched; NULL refused EFAULT)
+PASS shim-busdev-rate (the one RHU request on the I2C node: a served rate claims the bus for the run and reads back, the same rate again 0, an unserved rate ENOTSUP before the state with the word untouched, NULL EFAULT, 0 EINVAL, the SPI node ENOTTY; this row serves one rate, so a second served rate's EBUSY with the running rate read back is the bench's, by the kernel's contract)
 PASS shim-busdev-i2c (the identity through one combined transaction, a header at an odd address served, the limits and the nested NULLs by their errnos, a request not served ENOTTY whatever its argument)
 PASS shim-busdev-spi-settings (the mode and the no-select bit one byte, the refused bits and sizes EINVAL with the node unchanged, the rate read back, NULL refused EFAULT)
 PASS shim-busdev-spi-transfer (ones with no select asserted, the memory's identity under select 0, an empty message 0, the refusals by their errnos)

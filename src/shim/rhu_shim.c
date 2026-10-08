@@ -254,12 +254,19 @@ void __stack_chk_fail(void)
 /* ------------------------------------------------------------------ */
 
 /* The rows the runtime reads. The collector's aggregate hard limit is
- * generated from the board row's managed region at initialization, so the
- * row header is the one declaration site; the rest are constants of this
+ * generated at initialization: the system memory free at that moment,
+ * less what the board row keeps for later draws (the frozen object heap
+ * and the system memory left unallocated), in whole pages. It is the most
+ * any collector on this board can be given, and it is a bound for a stock
+ * collector only: this image's own collector sizes the managed heap at
+ * its start and takes less than the row says, by the collector tables and
+ * by whatever the runtime maps first. The rest are constants of this
  * hosting. The two collector rows name this image's own collector: the
  * runtime loads a collector by the path row directly, through the loader
  * seam below, and the name row is stated beside it because the runtime
  * reads both. */
+#define ROW_KEEP_BYTES ((uint32_t)MGC_ROW_FOH_POOL_BYTES + (uint32_t)MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES)
+
 static char g_env_hard_limit[48];
 static char *g_env[] = {
     g_env_hard_limit,
@@ -273,12 +280,14 @@ static char *g_env[] = {
 
 static void env_build(void)
 {
+    uint32_t free_now = rhu_arena_headroom();
+    uint32_t limit = free_now > ROW_KEEP_BYTES ? (free_now - ROW_KEEP_BYTES) & ~4095u : 0u;
     fmt_sink l;
     l.buf = g_env_hard_limit;
     l.cap = (uint32_t)sizeof g_env_hard_limit;
     l.n = 0;
     line_puts(&l, "DOTNET_GCHeapHardLimit=0x");
-    line_num(&l, (unsigned long long)MGC_ROW_REGION_BYTES, 16u, 0u, 0);
+    line_num(&l, (unsigned long long)limit, 16u, 0u, 0);
     g_env_hard_limit[l.n < sizeof g_env_hard_limit - 1u ? l.n : sizeof g_env_hard_limit - 1u] = 0;
 }
 

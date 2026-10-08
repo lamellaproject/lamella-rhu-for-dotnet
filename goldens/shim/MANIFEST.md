@@ -1,6 +1,6 @@
 # goldens/shim -- the shim gate's frozen world objects and goldens (MANIFEST)
 
-Copyright (c) 2026 Lamella LLC and the Lamella project authors.
+Copyright (c) 2026 Lamella LLC.
 SPDX-License-Identifier: MIT OR Apache-2.0
 
 The shim gate's images link from these FROZEN COMMITTED OBJECTS, and its
@@ -25,8 +25,8 @@ the positive image, wire bytes kept), never edited.
 Compiler of record: clang version 22.1.8 (the LLVM project's 22.1.8
 release; the version the runtime archives at the pin were built with),
 targeting arm-none-eabi for the Cortex-M7 with hard-float FPv5-D16 -- and,
-for the mps2-an505 row's objects and the st-nucleo-u5a5zj-q row's core
-object, the Cortex-M33 with the
+for the mps2-an505 row's objects and the RP2350 rows' core and
+system-call objects, the Cortex-M33 with the
 single-precision FPv5 under the same flag set but the core and FPU words
 (the class flag set beside the Cortex-M7's in shim.rs) -- the
 kit's C-library headers as its sysroot, driving the C front end (-x c
@@ -87,7 +87,12 @@ open, ioctl and close dispatching to it and bound at link time by the
 SDK's direct P/Invoke of the three C-library entry points, so the
 drivers run unchanged: the functionality request answered as plain
 combined transactions, the combined-transfer request carried into one
-kernel transaction with a one-second deadline, the SPI mode, word-size
+kernel transaction with a one-second deadline, the I2C bus claimed at the
+first transfer at 100 kHz or earlier at a served rate by this system's one
+rate request on the node (0x0740, a word in hertz read back with the rate
+the bus runs at; an unserved rate refused ENOTSUP before the bus's state, a
+second rate EBUSY with the running rate read back, the one departure from
+the Linux surface, which has no clock setting), the SPI mode, word-size
 and rate requests kept per node and carried into every transfer with
 the achieved rate stated once per change, every other path and request
 refused with its errno and one line, and one negative control built
@@ -113,7 +118,7 @@ does; the core adopts a zero-filled mutex or condition slot by one
 compare-and-swap, so two first users at once are both served; each
 unit's ladder runs in this gate from a native caller's side, on the
 emulator row's bus models and virtual lines, with one negative control
-per restored defect (the core's one, the bus unit's four, the GPIO
+per restored defect (the core's one, the bus unit's five, the GPIO
 unit's eight), the four whose defect is a race holding the restored
 window open, blocked on the kernel's futex, until the second thread's
 step is seen (that thread runs one step below the ladder's, so it
@@ -122,15 +127,30 @@ of its own on every run on any host, and every ladder line one console
 write, so no verdict line can be torn; the core reads the program's
 thread stack size as a weak link-time symbol, the row's default when
 absent; the host states hosting-API contract
-generation 34, the generation of the kernel's bus calls; the mps2-an505 row's five link objects are the an500 row's
+generation 35, the generation of the kernel's PWM and ADC calls; the mps2-an505 row's five link objects are the an500 row's
 sources and defines compiled for the Cortex-M33 (the row's fields equal
 the an500's, so the class flag set is the one variable), each carrying no
-double-precision instruction; the st-nucleo-u5a5zj-q row's core object is
-the core's source under that row's own selector (the core writes the
-runtime's hard-limit row from the row's managed region, which differs from
-the mps2-an505 row's; the row shares that row's other objects, which no
-differing field reaches, and the rederive leg ties every board-table row's
-objects to the row's own declaration by bytes); the shim answers the pinned runtime pack's
+double-precision instruction; the core writes the runtime's
+hard-limit row at initialization from the system memory free then, less
+what the board row keeps for later draws (the frozen object heap and the
+system memory left unallocated), and the system-call unit serves the
+runtime's frozen-object reservation from the row's pool, accepts a
+commit that starts inside the pool, refuses one that starts at or past
+its end, and answers the C library's question of what memory backs a
+mapping with the pool's pages and none of the reservation past them, so
+the collector stops a program before a byte is written past a pool
+smaller than the runtime's commit; the two objects a differing row
+field reaches are frozen per row class -- the st-stm32f769i-disco row's
+core and system-call objects for the Cortex-M7, and for the Cortex-M33
+one pair for the four RP2350 rows (the Raspberry Pi Pico 2 and Pico 2
+W, the Pimoroni Pico Plus 2 and Pico Plus 2 W declare one mini row each
+with the same fields), frozen under the Pico 2's selector and named for
+the chip -- while the st-nucleo-u5a5zj-q row keeps what the mps2-an505
+row keeps and names that row's objects throughout, and the rederive leg
+ties every board-table row's objects to the row's own declaration by
+bytes; the frozen object heap's ladder runs in this gate on the small
+row's objects, with one negative control built from the system-call
+unit whose backing answer says every page is memory; the shim answers the pinned runtime pack's
 whole P/Invoke-facing native surface (the five class-library families'
 export tables, 757 names at this pin): the names the hand-written units
 serve over the RAM file store, the kernel's calendar and its secure entropy
@@ -141,86 +161,86 @@ convention is errno-style) in the surface object beside the five link
 objects, with its Cortex-M33 twin for the an505 row; the expectation the
 gate's surface case reads -- generated from the pack's archives and the
 runtime's headers at the pin, never typed -- is the tier's text record,
-tied to the pin and to every family name the objects define; 61
-objects, 7 goldens and 1 record, byte-tied by the rederive
+tied to the pin and to every family name the objects define; 66
+objects, 8 goldens and 1 record, byte-tied by the rederive
 leg at the freeze.
 
 Records (repo-relative path, sha256; source and defines per object):
 
 - `goldens/shim/shim-core.o`
-  `5ba30b8bd8b9d112011adf4fe1917af331147b0290d2ec5a4950e991ab6b273d`
+  `3c02455e773d89d35455cf1ac36d37972d917c73fadbf5eaeef20c517bf21628`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500)
 - `goldens/shim/shim-core-break-sipid.o`
-  `1b2c09f9319e0f62123152516d81bc6ef6f161fe993b7c82d8eb6c87e098186a`
+  `da3e1baf5c1aa008d4d365443a4d875365964532a64968e0b818be114c7e48bf`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_SIPID)
 - `goldens/shim/shim-core-break-ctxpc.o`
-  `a2b0bfcdb02786ae63aa05f08599a0a0c67e270f99a304bbbbbba41952368107`
+  `e93413d1bb4575c7b5306110f80f9c3ed357eef64c7dc381469c8a7dd66f0dd3`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_CTXPC)
 - `goldens/shim/shim-core-break-tlsoff.o`
-  `27e2db56511990dca507b9ae0e13a6074af8c32feb83df43706371e60451493d`
+  `dc010f294088cfb7be281b456086d2265761a0ac50bbee067841ee9da7988275`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_TLSOFF)
 - `goldens/shim/shim-core-break-tlscache.o`
-  `efd4c764c9872c8d6b1caf43a9ce163dad1def27cd8c175a75aa757c5e0145df`
+  `9348006e551a353992063e57003556708d92d1f02913a4d8159064358df7c61d`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_TLSCACHE)
 - `goldens/shim/shim-core-break-realtime-wait.o`
-  `61e6410de90c25b5133e1a3188070b47d5fb56412f94f001a6e74fe5281e4f5d`
+  `9366f43d0f3db565e133b04ba2662598ca1650954fe2a4105242a562bab022af`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_REALTIME_WAIT)
 - `goldens/shim/shim-sysnative.o`
-  `ed2ec3ec11d820b6ae8b6b2b39afce46c41d021f1990374700dbe65667be3d52`
+  `a424a822c6b9acbfbb6d2a2df1b24c706491b9377711cca8511785366cf4a118`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500)
 - `goldens/shim/shim-sysnative-break-fdbase.o`
-  `7a0e17ff8cac4d7b01a769e5d757446facf118e3e8f4fd6bf9da74d37e19ec54`
+  `4bc7a2e7762cd408f78338e725a29f6162a226b0b45d158f390f9167c23f08dc`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_FD_BASE)
 - `goldens/shim/shim-sysnative-break-store-bounds.o`
-  `815282f3c2223ce81f77ed60165bce2677a9b55014531ca20967f49526477edf`
+  `080f8a83dae5dc4b94ccf12c3c36a232d7d302485bf84b4b1c40a5e2af54cb3e`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_BOUNDS)
 - `goldens/shim/shim-sysnative-break-store-lifetime.o`
-  `f8719b6a75b16847561b1d27ac662810931efdcb57fa1def853b4d33280031d8`
+  `a30104ddd49dcc70f589928588a5baabb1570b6c5f41f945ab902c58b9364874`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_LIFETIME)
 - `goldens/shim/shim-sysnative-break-store-lock.o`
-  `62e6466abb6e63cdfde6a174ac6badfcafdcad0fa8ffbe83991b3fe95baf165a`
+  `269f6f49b0f154cc9ec3a98bc906d5f1bca53758e3d4b9dbddb835afaab9a636`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_LOCK)
 - `goldens/shim/shim-sysnative-break-store-open-order.o`
-  `22561f4e2302e0da231e94c94960d57e986428c9c599326c607203199fc70d9b`
+  `95dd22d5fe1ec8807efd979f26f9752228b27d907ac80a4ba73f8d72c4c53c81`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_OPEN_ORDER)
 - `goldens/shim/shim-sysnative-break-store-access.o`
-  `05103017674da49cfb436500f8b478c6d0a6789737085077a596b559f47c25d7`
+  `d039f9cc8f862af92e2fd02ef1ae0363494015941e95dca22bd918b6f8012144`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_ACCESS)
 - `goldens/shim/shim-sysnative-break-store-flock.o`
-  `e06a3bb83eca308521ebeba42d918ccb6c772dc99ddfd50c3c55709294d3d57f`
+  `f55148b0bedbf909422cce8f673c4cde27fcfac7a8120c315856b896b2686009`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_FLOCK)
 - `goldens/shim/shim-sysnative-break-store-slash.o`
-  `bdb593cdf9fd60cd5fd8a6f77827065eadd83e285efddf0827686bb41efe801d`
+  `0f6ca6ad1e241cf5c6e32fc539eae057e8076aefa35b75a3953d8273321f1746`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_SLASH)
 - `goldens/shim/shim-sysnative-break-store-times.o`
-  `ff758422aed213ed39dde7d0f5abeaa7bdf366d6434360e463ba1e53b23ab77b`
+  `dc2392365b926670cd66a4573a6ec307eec4875219ebdc068b861e94e464e5ec`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_TIMES)
 - `goldens/shim/shim-sysnative-break-entropy-refusal.o`
-  `309b028e69e49355ca41107ef534b8f6ad97177df6aad84c63494a8a4c1534d9`
+  `445688618f696bb7e4a57ef44ce5b137c4439462fb05d56ead7417f5139b3ecb`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_ENTROPY_REFUSAL)
 - `goldens/shim/shim-sysnative-break-calendar-clock.o`
-  `11ee203db125ddb115ddd75715c330d37bf6ae127b2671ff83c5cf74424c439c`
+  `ec4d246a4c195b3ca6c9d2947ca9a8f77fd4560d623f471143dab84d260fdf14`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_CALENDAR_CLOCK)
 - `goldens/shim/shim-libc-glue.o`
   `8ffb50ca37ba98ee58a69b71156472609af785bb1dacd5e68bb2103b59ebe267`
   (src/shim/rhu_libc_glue.c; no extra defines)
 - `goldens/shim/shim-host.o`
-  `9ced37a77463646fed7e5f49205f969017e322394a2aa1bab6bbd075fbca55d8`
+  `dbf0b8c2ca89abc8156a223cafc588902ff76aebafc8de40528817e29ae48508`
   (src/shim/rhu_host.c; -DMGC_HOST_ROW_AN500)
 - `goldens/shim/shim-host-break-dataverify.o`
-  `ae2935849b2e8c5ca26629b6784637052e28fb29f12c6e2065511d0152e72a6a`
+  `d959c3265c78415734de806e69bb9f0f5679b9ce0212cc17ed378aee2b6d3656`
   (src/shim/rhu_host.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_DATAVERIFY)
 - `goldens/shim/shim-stdio-sym.o`
   `8428ce33a5f364f458b0ccaa949e3398470a9b05500810c6a62109731033a28d`
   (src/shim/rhu_stdio_sym.c; no extra defines)
 - `goldens/shim/shimtest-core.o`
-  `2a556e250c5a7ff87aa8ce17e2840ba649fad0df30502c70f64e0f812bcf0336`
+  `93aa630e35e2f091e006c2d17d34733ab85c7d28a90625258aa218072518be35`
   (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_CORE)
 - `goldens/shim/shimtest-core-break-errno.o`
-  `0d66220fe58d41762bd5826dd55203a80e0d7bc4b56193633f6791e59181b9e1`
+  `2bcd0f8c71c41a40985dc17aed7a1146dd17ac0f0a430a1a2010882dc81740dc`
   (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_CORE -DRHU_SHIMTEST_BREAK_ERRNO)
 - `goldens/shim/shimtest-core-break-canary.o`
-  `418c6023278b2621bf23438a51da67f5eb45d4590b8195d357d150e6b280b6cd`
+  `e32bd3ac87cea42c11d43afc72ff0cb8b44e1f91b52200653372d85b951ee4dd`
   (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_CORE -DRHU_SHIMTEST_BREAK_CANARY)
 - `goldens/shim/shimtest-fdmap.o`
   `0153ae74383bbde1ff5f504191459053f8d38e9c246306847f3e27d20f3e7ebd`
@@ -235,26 +255,26 @@ Records (repo-relative path, sha256; source and defines per object):
   `e5cd2e077173cfb26f7751b465e2660595162a03b1971de06ca13879411a8152`
   (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_HOST)
 - `goldens/shim/shim-core-f769.o`
-  `f371b02b04e39d0ef6096405a6a497cfaf57f8dbf7f7b87b303fd222f3bbb9c2`
+  `20004cb9cca22b7708fc00a6b1eeda4e02c9f7fcb09e92612200298a3f13f3ac`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_F769)
 - `goldens/shim/shim-core-an505.o`
-  `a69a0c11cf45340049942bd9caac2816707313a8e000f8648a7665f4b2ab7804`
+  `6b02e2e57cd04350c22d0d3ff009c5664ae8c6fc9816cf410d49513004fbd6b4`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
 - `goldens/shim/shim-sysnative-an505.o`
-  `c15da32c842616ae2db9910c2a1723ed28f9dc0e9d498fe9b8a7637c36a3ade1`
+  `aee9475dbfdb3c728ef148d82ff6543f671e8ff21219432a44e7df7f51197f83`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
 - `goldens/shim/shim-libc-glue-an505.o`
   `586fde3e983c35ec2d724ee0b5b692ba61a64552e917a9c6b7d519e69fe609da`
   (src/shim/rhu_libc_glue.c; no extra defines; the Cortex-M33 class flag set)
 - `goldens/shim/shim-host-an505.o`
-  `593fa6340dda50858309b081d2ca4c24b426ad6cc290f3994dd39ff2c7aa5b5c`
+  `c624c24c79b30375f334965aec4cd7ac01f818f5e3c0c5c555988858f72b9cea`
   (src/shim/rhu_host.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
 - `goldens/shim/shim-stdio-sym-an505.o`
   `49a42ffaf600fe1315997337de4e9457f6454072c823f8ce3be0d7e4abfb3bb9`
   (src/shim/rhu_stdio_sym.c; no extra defines; the Cortex-M33 class flag set)
-- `goldens/shim/shim-core-u5a5.o`
-  `e213aec445b89ef41901403f17ee4935d56c7c67362f3344915b6d770c8d8268`
-  (src/shim/rhu_shim.c; -DMGC_HOST_ROW_U5A5; the Cortex-M33 class flag set)
+- `goldens/shim/shim-core-rp2350.o`
+  `c15a8f346b81df925b72b0bfe959884f334c39aa779f5908fed5f403bd1f4566`
+  (src/shim/rhu_shim.c; -DMGC_HOST_ROW_PICO2; the Cortex-M33 class flag set)
 - `goldens/shim/shim-pal-surface.o`
   `ba588dc52d48b2df933c27836f398783917a371933d62be18c10927f3842750c`
   (src/shim/rhu_pal_surface_net11_rc1.c; -DMGC_HOST_ROW_AN500)
@@ -274,38 +294,41 @@ Records (repo-relative path, sha256; source and defines per object):
   `3306e3a6edc944168b99322d99e7378cd830ebef1757e1e5020a905e00f5cf75`
   (src/shim/rhu_gpiod.c; -DMGC_HOST_ROW_AN505 -DRHU_SHIM_BREAK_GPIOD_VERSION; the Cortex-M33 class flag set)
 - `goldens/shim/shim-busdev.o`
-  `6fe2cd3d9757cb2c579a36cb491f555552cf6ad7aa9b3dcc120beec10de979af`
+  `57f0a9ab681955b88b66721a26da8fde0394fedd8fb1b0f579566046b84797b7`
   (src/shim/rhu_busdev.c; -DMGC_HOST_ROW_AN500)
 - `goldens/shim/shim-busdev-an505.o`
-  `54e28680cc19f8ead34e059a9077ef7cce3b607a96019fb6a69b6204afc78332`
+  `424f64d67d4a862977432bb9266ff9de1bc942721422c17ab18620f6f3d8dea3`
   (src/shim/rhu_busdev.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
 - `goldens/shim/shim-busdev-break-funcs.o`
-  `78dce953acac45c12555e2ec1c5d6ea5b23d0857b07f93b9f5dfa056095e82e7`
+  `fd7852276728892d43057b6a59a614c9f633b0bb598697befa484e7ff5c6769a`
   (src/shim/rhu_busdev.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_BUSDEV_FUNCS)
 - `goldens/shim/shim-busdev-break-funcs-an505.o`
-  `99995d427f4d35d677e01788f2a3bd3dc497710ecd569d1c5ff2e9e2bff984af`
+  `da0ac99ef13dccb7ff7f23a976310275aaedd7ab439bf0913f585a82413de8f6`
   (src/shim/rhu_busdev.c; -DMGC_HOST_ROW_AN505 -DRHU_SHIM_BREAK_BUSDEV_FUNCS; the Cortex-M33 class flag set)
 - `goldens/shim/shimtest-busdev.o`
-  `0bb0427ce76989edeb53a6fdbc719c985188bfebdd6dc88db08b98e609c5be45`
+  `fef5775565d37675a20d4dd8852978cac9598997bec2b86f9b84f8e29d5ce051`
   (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_BUSDEV)
 - `goldens/shim/shimtest-gpiod.o`
   `f53f2e0a740b4d56e1d1066c581005d32195d28297093a6a9ea77aed053fbbd0`
   (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_GPIOD)
 - `goldens/shim/shim-core-break-mutex-adopt.o`
-  `5078ed46c9b9c56538fa96e668af4b2267471473bbe03dc208e4bdb41c490f4a`
+  `4857f68e1bd503e0a56129d00951a9dd7dc942b80eb4a109b12f1bbab9e5fc1a`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_MUTEX_ADOPT)
 - `goldens/shim/shim-busdev-break-select-name.o`
-  `b785c54c7a385ba21d14ce6486bc983fcb818f37b89821853acb72cfdb12412a`
+  `767c9eca1e954d9242a8853e1a882fecfc576186854e11fabfe54449568f7b06`
   (src/shim/rhu_busdev.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_BUSDEV_SELECT_NAME)
 - `goldens/shim/shim-busdev-break-funcs-wide.o`
-  `bd5e6a059e5cdb1b788cd874347340edbede2ad481efa6592cb5f2f0d5ad8359`
+  `d6c7577701bd6931d2f8126243f72e4bf195bec4636c0c25d93b6e2eb787e47f`
   (src/shim/rhu_busdev.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_BUSDEV_FUNCS_WIDE)
 - `goldens/shim/shim-busdev-break-reread.o`
-  `982cdf9d4c63be44bc8945eaa7d4a287a997374d47335d87d47496c5fabe54d3`
+  `0c98600db58aa28353837f11af37170f4997c3ba5b91e3944eb7ea994ba71b8c`
   (src/shim/rhu_busdev.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_BUSDEV_REREAD)
 - `goldens/shim/shim-busdev-break-unowned.o`
-  `86acc978090802ada911d8a06a3d4c0d64362bab3812c3899c6f95dc88de57f8`
+  `85ecb82122f1f93eb75cf329cae5554ef9c2709f7551e01690ef9bb561487965`
   (src/shim/rhu_busdev.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_BUSDEV_UNOWNED)
+- `goldens/shim/shim-busdev-break-rate-unjudged.o`
+  `597ef260b522287d29f4641669cce15377b218ed0118642e165f27922f1362f7`
+  (src/shim/rhu_busdev.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_BUSDEV_RATE_UNJUDGED)
 - `goldens/shim/shim-gpiod-break-open-unlocked.o`
   `4a1266d9e5800025bd1f24a9841f4fc7c365a84bc87d29b0d92f35ef45158fcc`
   (src/shim/rhu_gpiod.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_GPIOD_OPEN_UNLOCKED)
@@ -330,8 +353,20 @@ Records (repo-relative path, sha256; source and defines per object):
 - `goldens/shim/shim-gpiod-break-kind-order.o`
   `623cd413e365415086a549d7405201512f1ae6b0719b1fc94efbf00d13cb9d9e`
   (src/shim/rhu_gpiod.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_GPIOD_KIND_ORDER)
+- `goldens/shim/shim-sysnative-f769.o`
+  `14cbfbbdcd4940f56c3040f1ed13e65002b349974a49bf4d656bd6dc8c0ad29f`
+  (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_F769)
+- `goldens/shim/shim-sysnative-rp2350.o`
+  `d46e6754fefdb25261e1c050a89861ce124061c2a7f091da2370ed8a40740163`
+  (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_PICO2; the Cortex-M33 class flag set)
+- `goldens/shim/shim-sysnative-f769-break-frozen-backed.o`
+  `14a55eaf8222aa2da211916b2e11335465c0d8c5b41b12c012fbcf6ec3f97728`
+  (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_F769 -DRHU_SHIM_BREAK_FROZEN_BACKED)
+- `goldens/shim/shimtest-frozen.o`
+  `e65c9dc47bc0d2c73995958f22287a0b203a35f2fecd0a0af6bbf72e0f9e0bd1`
+  (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_FROZEN)
 - `goldens/shim/shimtest-core.golden.txt`
-  `c0f7f0970ef2739421472e21986887c87214476037adfe7082c63dbc21ac07d8`
+  `a17c22635ea7ce7f65b6ed209ad8c72025af8604597420ac183387ad37dd8ab0`
   (the payload stream of the shim.core image (class bytes))
 - `goldens/shim/shimtest-fdmap.golden.txt`
   `28b974465329510b6aa029d59e62511f9502c7b30d10e4c4e088d967aec15195`
@@ -346,11 +381,14 @@ Records (repo-relative path, sha256; source and defines per object):
   `aeb710f3cdc677e9c5ba29a1c4a432fe2389fda884b05a54dfcd2d910191cfb5`
   (the payload stream of the shim.host image (class bytes))
 - `goldens/shim/shimtest-busdev.golden.txt`
-  `299f9040e8ce2767f981a0dae2dc74021e2e86cbf7bbc6b503888aec4d48cd35`
+  `30ae1b223fb12627bfa0b7db8775148ace656108829ae21f13da434cf797230f`
   (the payload stream of the shim.busdev image (class bytes))
 - `goldens/shim/shimtest-gpiod.golden.txt`
   `b3dc58194fa5e29f608a4520e2dd1cb81af86931f6ac8aeffe6ff6d0c241e70d`
   (the payload stream of the shim.gpiod image (class bytes))
+- `goldens/shim/shimtest-frozen.golden.txt`
+  `5e0510fc153b7a6a62c57dd88e581a1f9ff89365cbddc213a20995b79893725c`
+  (the payload stream of the shim.frozen-pool image (class bytes))
 - `goldens/shim/pal-surface.txt`
   `1835f4cb31b605811c3d8e17356510a5e79a200849352ad540ce9fcf14a4020e`
   (the P/Invoke-facing surface expectation the shim.pal-surface case reads: the pin, the pack's five archives with their sha256s, one line per surface name with its family and class; GENERATED from the pack's archives and the runtime's headers at the pin, regenerated at a re-pin, never edited)

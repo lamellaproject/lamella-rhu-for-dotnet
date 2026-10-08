@@ -50,8 +50,8 @@ In the tree today:
   tooling against the `Lamella.Rhu.Sdk` package and deployed to a board --
   opens at the launch, when the SDK and tools packages publish; today a
   checkout builds the kernel and runs the verification chain, and the
-  SDK's board table carries the two emulator rows and the first two
-  physical boards' rows; the other boards' rows follow
+  SDK's board table carries a row for each emulator machine and each
+  supported board
 - The standard GPIO package: a program's `new GpioController()` from
   `System.Device.Gpio` runs unchanged -- the package's own Linux driver
   binds the libgpiod v1 API, which the hosting layer presents over the
@@ -97,7 +97,7 @@ In the tree today:
   and clock under its own chip select, every wait on the wire a bounded
   poll and nothing under the kernel's critical section, on the emulator
   rows' block models (the hosting-api gate's three bus cases and a doctored
-  control) and on the silicon of the ST rows whose facts carry a bus; a row
+  control) and on the silicon of the ST and RP2350 rows whose facts carry a bus; a row
   whose facts carry no bus answers a bus count of zero
 - Supported boards: Pimoroni Pico Plus 2, Pimoroni Pico Plus 2 W, Raspberry Pi
   Pico 2, Raspberry Pi Pico 2 W, ST NUCLEO-U5A5ZJ-Q, ST STM32F769I-DISCO
@@ -116,6 +116,11 @@ automatically by rustup.
 
 Each supported board's build, what it produces and how a program is hosted
 are documented in [docs/BUILDING.md](docs/BUILDING.md).
+
+A program may ask which board it was built for: `new Lamella.Hardware.TargetBoard()`
+answers the board's name, chip and clock, its pins by the labels printed on the
+board, and its buses with the rates the image serves; the package `Lamella.Hardware`
+will come from the same feed as the SDK.
 
 ## Verifying (optional)
 

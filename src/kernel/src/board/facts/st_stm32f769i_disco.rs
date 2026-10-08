@@ -175,3 +175,14 @@ pub const SPI_BUSES: &[crate::bus_math::SpiBus] = &[crate::bus_math::SpiBus {
 }];
 const _: () = assert!(populated(16 + 8) && populated(16 + 9) && populated(12) && populated(16 + 14) && populated(16 + 15) && populated(11) && populated(7 * 16 + 6), "a bus pad is not a pin of the package");
 const _: () = assert!(SPI_BUSES[0].kernel_hz == crate::board::SYSCLK_HZ || SPI_BUSES[0].kernel_hz * 4 == crate::board::SYSCLK_HZ, "SPI2's clock is not this clock configuration's APB1 clock");
+
+/// The PWM and ADC tables of this row: empty in this generation, so the
+/// count doors answer 0, the enumeration doors refuse every index, and
+/// every other door of the two families answers RHU_ENODEV. The tables
+/// are shaped for a board's every timer output and every converter
+/// channel (one entry per line and per channel, the blocks named by the
+/// chip's own numbers).
+pub const PWM_TIMERS: &[crate::pwm_math::PwmTimer] = &[];
+pub const PWM_LINES: &[crate::pwm_math::PwmLine] = &[];
+pub const ADC_BLOCKS: &[crate::adc_math::AdcBlock] = &[];
+pub const ADC_CHANNELS: &[crate::adc_math::AdcChannel] = &[];

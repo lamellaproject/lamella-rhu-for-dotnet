@@ -390,6 +390,440 @@ pub fn run_captured(
     }
 }
 
+/// The limits of an instruction-counted run. Such a run is a fixed amount
+/// of emulator work whatever the host's load: its wall time follows the
+/// share of a processor the host gives the emulator, so the wall clock
+/// alone cannot tell a run that works on a busy host from a run that
+/// never ends. The run is judged by the processor time the host has
+/// accounted to the emulator.
+#[derive(Clone, Copy)]
+pub struct Limits {
+    /// The longest stretch of wall time a live run may go without working.
+    pub deadline: Duration,
+    /// The most processor time the run may use.
+    pub budget: Duration,
+}
+
+/// The rule that stopped a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// The emulator's processor time reached the budget: a guest that
+    /// works without end, or a guest that waits without end in an
+    /// emulator that keeps a thread of its own busy meanwhile.
+    Work,
+    /// A whole deadline passed in which the emulator did no work: an
+    /// emulator that stands still, its guest waiting for an event that
+    /// does not come.
+    NoWork,
+    /// The host gives no reading of the emulator's processor time, and
+    /// the wall clock passed the deadline.
+    Deadline,
+}
+
+/// The judge of a run in progress: a pure function of the wall time since
+/// the run began and of the host's reading of the emulator's processor
+/// time, fed at every poll. A window of wall time opens at the start and
+/// opens again whenever the reading has advanced by one sixtieth of the
+/// deadline since it opened; a window that reaches the deadline's length
+/// stops the run. With no reading the first window stays open, so the
+/// wall clock alone stops the run at the deadline. A launcher standing in
+/// front of the emulator reads as a process that does no work, and its
+/// run is judged the same way.
+pub struct Watch {
+    limits: Limits,
+    opened_wall: Duration,
+    opened_spent: Duration,
+    read: bool,
+}
+
+impl Watch {
+    pub fn new(limits: Limits) -> Watch {
+        Watch {
+            limits,
+            opened_wall: Duration::ZERO,
+            opened_spent: Duration::ZERO,
+            read: false,
+        }
+    }
+
+    /// One poll: the wall time since the run began and the host's reading,
+    /// when it gave one. The answer is the rule that stops the run, or
+    /// `None` while the run may go on.
+    pub fn observe(&mut self, wall: Duration, spent: Option<Duration>) -> Option<Stop> {
+        if let Some(spent) = spent {
+            self.read = true;
+            if spent >= self.limits.budget {
+                return Some(Stop::Work);
+            }
+            if spent.saturating_sub(self.opened_spent) >= self.limits.deadline / 60 {
+                self.opened_wall = wall;
+                self.opened_spent = spent;
+            }
+        }
+        if wall.saturating_sub(self.opened_wall) >= self.limits.deadline {
+            return Some(if self.read { Stop::NoWork } else { Stop::Deadline });
+        }
+        None
+    }
+}
+
+/// The processor time a Linux `stat` line states: its fourteenth and
+/// fifteenth fields, the user and kernel time in clock ticks. The fields
+/// are counted from the end of the process name, the one field that may
+/// hold spaces and parentheses; the name ends at the line's last closing
+/// parenthesis.
+pub fn stat_line_time(line: &str, ticks_per_second: u64) -> Option<Duration> {
+    if ticks_per_second == 0 {
+        return None;
+    }
+    let after_name = &line[line.rfind(')')? + 1..];
+    let mut fields = after_name.split_ascii_whitespace();
+    let user: u64 = fields.nth(11)?.parse().ok()?;
+    let kernel: u64 = fields.next()?.parse().ok()?;
+    let ticks = u128::from(user.checked_add(kernel)?);
+    let nanos = ticks * 1_000_000_000 / u128::from(ticks_per_second);
+    Some(Duration::from_nanos(u64::try_from(nanos).ok()?))
+}
+
+#[cfg(windows)]
+mod host {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+    use std::time::Duration;
+
+    /// A count of 100 ns steps in two halves, the layout the host writes.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Steps {
+        low: u32,
+        high: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetProcessTimes(
+            process: *mut core::ffi::c_void,
+            creation: *mut Steps,
+            exit: *mut Steps,
+            kernel: *mut Steps,
+            user: *mut Steps,
+        ) -> i32;
+    }
+
+    pub fn processor_time(child: &Child) -> Option<Duration> {
+        let mut creation = Steps::default();
+        let mut exit = Steps::default();
+        let mut kernel = Steps::default();
+        let mut user = Steps::default();
+        let answered = unsafe {
+            GetProcessTimes(child.as_raw_handle(), &mut creation, &mut exit, &mut kernel, &mut user)
+        };
+        if answered == 0 {
+            return None;
+        }
+        let count = |s: Steps| (u64::from(s.high) << 32) | u64::from(s.low);
+        Some(Duration::from_nanos(count(kernel).saturating_add(count(user)).saturating_mul(100)))
+    }
+
+    /// The handle answers after the child's exit: the reading at the end.
+    pub fn processor_time_at_end(child: &Child) -> Option<Duration> {
+        processor_time(child)
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod host {
+    use std::process::Child;
+    use std::time::Duration;
+
+    /// The clock tick's name in the host's configuration.
+    const CLOCK_TICK: core::ffi::c_int = 2;
+
+    unsafe extern "C" {
+        fn sysconf(name: core::ffi::c_int) -> core::ffi::c_long;
+    }
+
+    pub fn processor_time(child: &Child) -> Option<Duration> {
+        let line = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).ok()?;
+        let tick = unsafe { sysconf(CLOCK_TICK) };
+        super::stat_line_time(&line, u64::try_from(tick).ok()?)
+    }
+
+    /// The process's entry is gone once the child is reaped: the last
+    /// poll's reading stands.
+    pub fn processor_time_at_end(_child: &Child) -> Option<Duration> {
+        None
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+mod host {
+    use std::process::Child;
+    use std::time::Duration;
+
+    pub fn processor_time(_child: &Child) -> Option<Duration> {
+        None
+    }
+
+    pub fn processor_time_at_end(_child: &Child) -> Option<Duration> {
+        None
+    }
+}
+
+/// The host's reading of the processor time a child has used, kernel and
+/// user together, or `None` on a host the runner takes no reading from.
+/// Windows answers through `GetProcessTimes` on the child's own handle;
+/// Linux through the process's `stat` line under `/proc`, whose time
+/// fields count clock ticks of the length `sysconf` states. The crate
+/// takes no dependency, so the two foreign functions are declared here.
+pub fn processor_time(child: &std::process::Child) -> Option<Duration> {
+    host::processor_time(child)
+}
+
+/// The outcome of an instruction-counted run.
+pub struct CountedRun {
+    /// The observed exit code; 124 for a run the runner stopped.
+    pub exit: i32,
+    /// The rule that stopped the run, when one did.
+    pub stop: Option<Stop>,
+    /// The last reading of the emulator's processor time.
+    pub spent: Option<Duration>,
+    /// The run ended by itself after more wall time than its deadline.
+    pub outlived: bool,
+    /// The run ended by itself with more than half of its budget spent.
+    pub past_half: bool,
+}
+
+/// `run_captured` for an instruction-counted run: the same spawn and the
+/// same byte-true capture, the run judged at every poll by `Watch` and
+/// stopped by the rule it names. A stopped run is recorded as exit 124,
+/// which never satisfies an expected-exit check of a run that must end.
+pub fn run_counted(
+    program: &Path,
+    args: &[&str],
+    stdout_path: &Path,
+    stderr_path: &Path,
+    limits: Limits,
+) -> Result<CountedRun, String> {
+    let stdout = File::create(stdout_path)
+        .map_err(|e| format!("cannot create {}: {e}", stdout_path.display()))?;
+    let stderr = File::create(stderr_path)
+        .map_err(|e| format!("cannot create {}: {e}", stderr_path.display()))?;
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|e| format!("failed to spawn {}: {e}", program.display()))?;
+    let began = Instant::now();
+    let mut watch = Watch::new(limits);
+    let mut spent: Option<Duration> = None;
+    loop {
+        if let Some(reading) = processor_time(&child) {
+            spent = Some(reading);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if let Some(reading) = host::processor_time_at_end(&child) {
+                    spent = Some(reading);
+                }
+                return Ok(CountedRun {
+                    exit: status.code().unwrap_or(1),
+                    stop: None,
+                    spent,
+                    outlived: began.elapsed() > limits.deadline,
+                    past_half: spent.is_some_and(|s| s > limits.budget / 2),
+                });
+            }
+            Ok(None) => {
+                if let Some(stop) = watch.observe(began.elapsed(), spent) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Ok(CountedRun {
+                        exit: 124,
+                        stop: Some(stop),
+                        spent,
+                        outlived: false,
+                        past_half: false,
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("wait on {} failed: {e}", program.display())),
+        }
+    }
+}
+
+/// The lines an instruction-counted run is reported with: the rule that
+/// stopped it, or what its ending says of the host and of its budget. The
+/// two notes are printed only when their condition holds.
+pub fn say_counted(run: &CountedRun) {
+    match run.stop {
+        Some(Stop::Work) => println!(
+            "  (run stopped: its budget of processor time is spent; exit recorded as 124 -- a hang is observed, never a pass)"
+        ),
+        Some(Stop::NoWork) => println!(
+            "  (run stopped: a whole deadline passed in which the emulator did no work; exit recorded as 124 -- a hang is observed, never a pass)"
+        ),
+        Some(Stop::Deadline) => println!(
+            "  (run killed at its timeout; exit recorded as 124 -- a hang is observed, never a pass)"
+        ),
+        None => {
+            if run.outlived {
+                println!("  (the run outlived its wall deadline while the emulator kept working: the host is busy)");
+            }
+            if run.past_half {
+                println!("  (the run spent more than half of its budget of processor time)");
+            }
+        }
+    }
+}
+
+/// A generated guest of the mps2-an500 machine: a raw image the emulator
+/// loads at the machine's reset base. Its first eight bytes are the vector
+/// table -- the initial stack pointer 0x20001000, then the reset handler's
+/// address 8 with the Thumb bit set -- and the handler follows, in 16-bit
+/// Thumb instructions stored low byte first.
+#[derive(Clone, Copy)]
+pub enum Guest {
+    /// Counts the given turns of a two-instruction loop down to zero, then
+    /// leaves through the machine's semihosting door with status 0:
+    /// `ldr r0, [pc, #12]` (the turns), `subs r0, #1`, `bne` back to the
+    /// `subs`, `movs r0, #0x18` (the exit call), `ldr r1, [pc, #8]` (the
+    /// reason 0x20026, the program ended), `bkpt 0xAB`, `b .`, `nop`, then
+    /// the two literal words. 32 bytes; the turns must not be zero.
+    Work(u32),
+    /// Never leaves its loop: `b .`, `nop`. 12 bytes.
+    Spin,
+    /// Waits for an interrupt, and nothing in the machine is set up to
+    /// raise one: `wfi`, `b` back to the `wfi`. 12 bytes. An emulator that
+    /// rests while its guest waits does no work; one that keeps a thread
+    /// of its own busy meanwhile reads as working.
+    Wait,
+}
+
+/// The bytes of a generated guest.
+pub fn guest_image(guest: Guest) -> Vec<u8> {
+    const WORK: [u16; 8] = [0x4803, 0x3801, 0xD1FD, 0x2018, 0x4902, 0xBEAB, 0xE7FE, 0xBF00];
+    const SPIN: [u16; 2] = [0xE7FE, 0xBF00];
+    const WAIT: [u16; 2] = [0xBF30, 0xE7FD];
+    let (code, literals): (&[u16], Vec<u32>) = match guest {
+        Guest::Work(turns) => (&WORK[..], vec![turns, 0x0002_0026]),
+        Guest::Spin => (&SPIN[..], Vec::new()),
+        Guest::Wait => (&WAIT[..], Vec::new()),
+    };
+    let mut image = Vec::new();
+    for word in [0x2000_1000u32, 0x0000_0009] {
+        image.extend_from_slice(&word.to_le_bytes());
+    }
+    for half in code {
+        image.extend_from_slice(&half.to_le_bytes());
+    }
+    for word in literals {
+        image.extend_from_slice(&word.to_le_bytes());
+    }
+    image
+}
+
+/// Run a generated guest on the mps2-an500 machine, on the
+/// instruction-counted profile, under the given limits. The image is
+/// written into `scratch` as `<name>.bin`, its transcript beside it as
+/// `<name>.raw`.
+pub fn run_guest(
+    qemu: &Path,
+    scratch: &Path,
+    name: &str,
+    guest: Guest,
+    limits: Limits,
+) -> Result<CountedRun, String> {
+    let image = scratch.join(format!("{name}.bin"));
+    std::fs::write(&image, guest_image(guest))
+        .map_err(|e| format!("cannot write {}: {e}", image.display()))?;
+    let image_arg = image.to_string_lossy().into_owned();
+    let mut args: Vec<&str> = vec![
+        "-M",
+        "mps2-an500",
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-serial",
+        "stdio",
+        "-semihosting",
+    ];
+    args.extend_from_slice(ExecProfile::Deterministic.qemu_args());
+    args.push("-kernel");
+    args.push(&image_arg);
+    run_counted(
+        qemu,
+        &args,
+        &scratch.join(format!("{name}.raw")),
+        &scratch.join(format!("{name}.stderr")),
+        limits,
+    )
+}
+
+/// The turns of the unit's guest: twice this many instructions are the
+/// unit of emulator work.
+pub const UNIT_TURNS: u32 = 0x1000_0000;
+
+/// The least reading accepted as the unit. An emulator that ran the
+/// unit's guest used many times this; a smaller reading belongs to a
+/// process that did not do the work itself.
+const UNIT_LEAST: Duration = Duration::from_millis(100);
+
+static UNIT: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+
+/// The host's unit of emulator work: the processor time the emulator
+/// uses on this host, as the host reads it, to run the unit's guest on the
+/// instruction-counted profile and leave. It is measured once per process,
+/// before the first instruction-counted case, under `floor` on both
+/// clocks, and one line reports it. The measure is refused -- `None`, the
+/// line saying why -- when the guest did not leave through its door with
+/// status 0, when the host gives no reading, or when the reading is under
+/// `UNIT_LEAST`.
+pub fn host_unit(qemu: &Path, scratch: &Path, floor: Duration) -> Option<Duration> {
+    *UNIT.get_or_init(|| match measure_unit(qemu, scratch, floor) {
+        Ok(unit) => {
+            println!("== the host's unit of emulator work is measured: the budgets of the instruction-counted runs follow it ==");
+            Some(unit)
+        }
+        Err(why) => {
+            println!("== the host's unit of emulator work is NOT measured ({why}): the budgets of the instruction-counted runs stay at their floors ==");
+            None
+        }
+    })
+}
+
+fn measure_unit(qemu: &Path, scratch: &Path, floor: Duration) -> Result<Duration, String> {
+    let limits = Limits { deadline: floor, budget: floor };
+    let run = run_guest(qemu, scratch, "unit", Guest::Work(UNIT_TURNS), limits)?;
+    if run.stop.is_some() {
+        return Err("the unit's guest was stopped before it left".to_string());
+    }
+    if run.exit != 0 {
+        return Err(format!("the unit's guest left with status {}", run.exit));
+    }
+    match run.spent {
+        None => Err("this host gives no reading of the emulator's processor time".to_string()),
+        Some(spent) if spent < UNIT_LEAST => {
+            Err("the reading does not follow the emulator's work".to_string())
+        }
+        Some(spent) => Ok(spent),
+    }
+}
+
+/// The budget of an instruction-counted case: the case's work, in units,
+/// times the host's unit, and never under the case's floor. With no unit
+/// the floor stands.
+pub fn budget(floor: Duration, work: u32, unit: Option<Duration>) -> Duration {
+    match unit {
+        Some(unit) => floor.max(unit.saturating_mul(work)),
+        None => floor,
+    }
+}
+
 /// Spawn a pre-configured command (the caller sets stdio -- file handles,
 /// never pipes) and wait with a deadline: Ok(Some(status)) when the child
 /// exits, Ok(None) when the deadline expired and the child was killed,

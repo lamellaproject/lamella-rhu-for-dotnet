@@ -35,7 +35,7 @@ pub const BOARD_CLAIM_BITS: [u32; claims::BANKS] = claims::fold_board(BOARD_CLAI
 pub const BANNER: &str = "144 lines, 4 claimed by the board (the console PG7/PG8, the debug pins PA13/PA14)";
 
 /// The board's rows: the green user LED on PC7, lit when high (the two
-/// other user LEDs on PB7 and PB14, the same way, for the flights); the
+/// other user LEDs on PB7 and PB14, the same way, for hardware runs); the
 /// user button on PC13, high when pressed -- the part's own pull-down is
 /// applied beside whatever the board carries, so the line never floats.
 #[allow(dead_code)]
@@ -107,3 +107,14 @@ const _: () = assert!(!populated(7 * 16 + 2) && populated(13) && populated(14) &
 /// every bus (one entry per block, named by the chip's own block number).
 pub const I2C_BUSES: &[crate::bus_math::I2cBus] = &[];
 pub const SPI_BUSES: &[crate::bus_math::SpiBus] = &[];
+
+/// The PWM and ADC tables of this row: empty in this generation, so the
+/// count doors answer 0, the enumeration doors refuse every index, and
+/// every other door of the two families answers RHU_ENODEV. The tables
+/// are shaped for a board's every timer output and every converter
+/// channel (one entry per line and per channel, the blocks named by the
+/// chip's own numbers).
+pub const PWM_TIMERS: &[crate::pwm_math::PwmTimer] = &[];
+pub const PWM_LINES: &[crate::pwm_math::PwmLine] = &[];
+pub const ADC_BLOCKS: &[crate::adc_math::AdcBlock] = &[];
+pub const ADC_CHANNELS: &[crate::adc_math::AdcChannel] = &[];

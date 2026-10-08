@@ -42,37 +42,37 @@ board-mps2-an505 = ["fpemul"]
 # Pimoroni Pico Plus 2 (RP2350B; the same chip module as the Pico 2; no
 # wireless module): the same build shape as the Pico 2's.
 board-pimoroni-pico-plus-2 = ["fpemul"]
-# Pico Plus 2 clock posture 2: the same PLL150 posture on that board;
+# Pico Plus 2 clock posture 2: the same crystal posture on that board;
 # requires board-pimoroni-pico-plus-2.
-pimoroni-pico-plus-2-pll150 = []
+pimoroni-pico-plus-2-xtal12 = []
 # Pimoroni Pico Plus 2 W (RP2350B; the same chip module as the Pico 2;
 # the wireless module's lines are the wifi driver's): the same build
 # shape as the Pico 2's.
 board-pimoroni-pico-plus-2-w = ["fpemul"]
-# Pico Plus 2 W clock posture 2: the same PLL150 posture on that board;
+# Pico Plus 2 W clock posture 2: the same crystal posture on that board;
 # requires board-pimoroni-pico-plus-2-w.
-pimoroni-pico-plus-2-w-pll150 = []
+pimoroni-pico-plus-2-w-xtal12 = []
 # Raspberry Pi Pico 2 (RP2350A, Cortex-M33 silicon, execute-in-place from
 # the QSPI flash at 0x10000000): build with --no-default-features (no
-# semihosting exits off the bench) and --target thumbv8m.main-none-eabihf.
+# semihosting exits on hardware) and --target thumbv8m.main-none-eabihf.
 board-rpi-pico2 = ["fpemul"]
-# Pico 2 clock posture 2: the system PLL at 150 MHz (the chip's rated
-# clock). A gated posture -- own image names, own goldens, banner line
-# from register read-back; requires board-rpi-pico2 (src/board/mod.rs
-# refuses otherwise). Without it the board runs the boring 12 MHz
-# crystal default.
-rpi-pico2-pll150 = []
+# Pico 2 clock posture 2: the 12 MHz crystal alone, the PLL off (the
+# bring-up posture). A gated posture -- own feature, own image names, no
+# clock line in the banner; requires board-rpi-pico2 (src/board/mod.rs
+# refuses otherwise). Without it the board runs the chip's rated 150 MHz
+# system PLL, which the boot banner reads back.
+rpi-pico2-xtal12 = []
 # Raspberry Pi Pico 2 W (the Pico 2 with a wireless module fitted, whose
 # lines are the wifi driver's; the same chip and flash): the same build
 # shape as the Pico 2's.
 board-rpi-pico2-w = ["fpemul"]
-# Pico 2 W clock posture 2: the same PLL150 posture on that board;
+# Pico 2 W clock posture 2: the same crystal posture on that board;
 # requires board-rpi-pico2-w.
-rpi-pico2-w-pll150 = []
+rpi-pico2-w-xtal12 = []
 # NUCLEO-L4R5ZI (STM32L4R5ZI, Cortex-M4 silicon with a single-precision
 # FPU, flash-boot at 0x08000000; the STM32L4+ family's first board,
 # hosting the kernel alone): build with --no-default-features (no
-# semihosting exits off the bench) and --target thumbv7em-none-eabihf.
+# semihosting exits on hardware) and --target thumbv7em-none-eabihf.
 board-st-nucleo-l4r5zi = ["fpemul"]
 # L4R5ZI clock posture 2: the main PLL at 120 MHz (the part's ceiling,
 # under the regulator's boost mode). A gated posture -- own image names,
@@ -82,7 +82,7 @@ board-st-nucleo-l4r5zi = ["fpemul"]
 st-nucleo-l4r5zi-pll120 = []
 # NUCLEO-U5A5ZJ-Q (STM32U5A5ZJ, Cortex-M33 silicon, flash-boot at
 # 0x08000000, TrustZone option bit off): build with
-# --no-default-features (no semihosting exits off the bench) and
+# --no-default-features (no semihosting exits on hardware) and
 # --target thumbv8m.main-none-eabihf.
 board-st-nucleo-u5a5zj-q = ["fpemul"]
 # U5A5 clock posture 2: PLL1 at 160 MHz (the range-1 ceiling posture). A
@@ -92,14 +92,14 @@ board-st-nucleo-u5a5zj-q = ["fpemul"]
 st-nucleo-u5a5zj-q-pll160 = []
 # STM32F746G-DISCO (Cortex-M7 silicon, flash-boot at 0x08000000; the F7
 # family's second board, hosting the kernel alone): build with
-# --no-default-features (no semihosting exits off the bench).
+# --no-default-features (no semihosting exits on hardware).
 board-st-stm32f746g-disco = ["fpemul"]
 # F746 clock posture 2: PLL at 216 MHz (the production clock), the same
 # recipe as the F769's; requires board-st-stm32f746g-disco (src/board/mod.rs
 # refuses otherwise). Without it the board runs the boring HSI-16 default.
 st-stm32f746g-disco-pll216 = []
 # STM32F769I-DISCO (Cortex-M7 silicon, flash-boot at 0x08000000): build
-# with --no-default-features (no semihosting exits off the bench).
+# with --no-default-features (no semihosting exits on hardware).
 board-st-stm32f769i-disco = []
 # F769 clock posture 2: PLL at 216 MHz (the production clock). A gated
 # posture -- own image names, own goldens, banner line from register
@@ -145,13 +145,13 @@ payload = []
 # program. The Cortex-M33 boards imply it.
 fpemul = []
 # The emulation's decoder with the add and subtract operations swapped: the
-# api gate's negative control, never a shipped image.
+# api gate's negative control, built into no board image.
 test-fpemul-doctored = []
 # The cost of one double-precision form on a row with a cycle counter, printed by
 # the api flavor's fp-cost check: a measurement image for a board flight, never a
 # chain row.
 fp-cost = []
-# The GPIO doors' two doctored controls (the device seam), never a shipped image:
+# The GPIO doors' two doctored controls (the device seam), built into no board image:
 # on the emulator rows the virtual loopback latch fires the input's event twice
 # per change; on a board the family handler's pending-mask clear is removed.
 test-gpio-doctored-latch = []
@@ -161,7 +161,30 @@ test-gpio-doctored-mask = []
 # block model never completes a non-last message, and the drivers' pumps
 # run unbounded so the receive queue's honest overflow loses bytes.
 test-bus-doctored = []
-# The GPIO acceptance flight's image on the boards with a button row (never a shipped image):
+# The RP2350's bus blocks on the Cortex-M33 emulator row (never a shipped
+# image): register-level models of the chip's I2C and SPI blocks take the
+# place of the ST blocks' models, so the api gate proves the chip's bus
+# drivers before a board; `test-bus-doctored` beside it arms the same
+# controls over those drivers.
+test-bus-rp2350 = []
+# The edge check's doctored control (the emulator rows only), never a shipped
+# image: the virtual backend makes one event of its own beside the tenth
+# counted edge, which the check's total must refuse.
+test-gpio-doctored-edge = []
+# The set-context check's doctored control (the api flavor, never a shipped
+# image): the landing pad stores its witness before its thread id and sleeps
+# between the two, so the check must refuse at its off-thread assert.
+test-susp-doctored-order = []
+# The PWM and ADC doors' doctored controls (the emulator rows only), never a
+# shipped image: the virtual timer reads its own period one prescaler step
+# long; the virtual loop channel answers the previous conversion's sample.
+test-pwm-doctored = []
+test-adc-doctored = []
+# The band-interrupt control's doctored control (the api flavor, never a shipped
+# image): the tick hook pends nothing while the fp-band check runs, so the check
+# must refuse at its own assert once its bound of the kernel's ticks was observed.
+test-fp-band-doctored = []
+# The GPIO acceptance run's image on the boards with a button row (a test image, not a product image):
 # the LED row blinked for the eye, then a bounded wait for a press that lights it.
 test-gpio-button = []
 # The unhosted-main flavor: an image whose kmain thread, after the selftests,

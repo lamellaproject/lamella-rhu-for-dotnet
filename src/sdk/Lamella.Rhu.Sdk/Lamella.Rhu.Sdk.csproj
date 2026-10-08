@@ -6,14 +6,17 @@
        the directory RhuStage names. -->
   <PropertyGroup>
     <TargetFramework>net11.0</TargetFramework>
-    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">0.1.0-a</RhuSdkVersion>
+    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">1.0.0-alpha.1</RhuSdkVersion>
     <PackageId>Lamella.Rhu.Sdk</PackageId>
     <Version>$(RhuSdkVersion)</Version>
     <Authors>Lamella LLC</Authors>
     <Company>Lamella LLC</Company>
-    <Copyright>Copyright (c) 2026 Lamella LLC and the Lamella project authors</Copyright>
-    <Description>The MSBuild SDK that builds a .NET program into a Lamella RHU image for a named board: the targets, the board table, the payload maps, the prebuilt kernels, the frozen host tier and the runtime's native archives at the tested build.</Description>
+    <Copyright>Copyright (c) 2026 Lamella LLC</Copyright>
+    <Description>Builds a .NET program into a Lamella RHU image for a microcontroller board</Description>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/lamellaproject/lamella-rhu-for-dotnet</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReleaseNotes>First pre-release</PackageReleaseNotes>
     <PackageType>MSBuildSdk</PackageType>
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <IncludeSymbols>false</IncludeSymbols>

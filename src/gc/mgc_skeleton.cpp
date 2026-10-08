@@ -186,7 +186,8 @@ static void mgc_failfast(const char* what)
 /* absent, which is fine -- the first allocation dies before any      */
 /* collection could matter. The bare skeleton hands slots out         */
 /* monotonically (slot reuse belongs to the windows surface,          */
-/* MGC_TUNE_LIVE); exhaustion fails fast rather than wrapping.        */
+/* MGC_TUNE_LIVE, where the pool also GROWS by segments -- below);    */
+/* the bare pool's exhaustion fails fast rather than wrapping.        */
 /* ------------------------------------------------------------------ */
 
 /* 4096 by default: a managed payload's statics spines, weak
@@ -253,34 +254,172 @@ static void pool_unlock(void)
 #endif
 }
 #ifdef MGC_TUNE_LIVE
-static unsigned g_slot_free;        /* free list: index+1, 0 = empty
-                                     * (threaded through g_slot_extra
-                                     * of dead slots) */
+static unsigned g_slot_free;        /* free list: GLOBAL index+1, 0 = empty
+                                     * (threaded through the dead slot's
+                                     * extra word, across the segments) */
 static unsigned g_slot_created;     /* monotonic (census) */
 static unsigned g_slot_reused;
 static unsigned g_slot_live_now, g_slot_live_hw;  /* the knob-table sizing number */
 static int      g_slot_selftest;    /* suppress per-create logs during
                                      * the init reuse self-test */
 
-/* The pool lock held by the caller. */
-static void slot_release_locked(unsigned i)
+/* THE POOL GROWS BY SEGMENTS. Segment 0 is the row's static arrays
+ * above (MGC_HANDLE_SLOTS slots; no page drawn at boot). When its cursor
+ * and the free list are both spent, a segment of MGC_SEG_SLOTS slots is
+ * drawn from the shim's mmap -- one anonymous page, zero-filled by that
+ * surface's contract, as the mark stack and the bitmaps are drawn -- and
+ * never returned; a handle's global index is its segment's base plus its
+ * slot; one free list threads every segment. When the mmap refuses, or
+ * the test cap below is reached, the store answers NO HANDLE -- the
+ * runtime's out-of-memory contract (RhHandleAlloc throws) -- and the fixed
+ * pool's fail-fast is gone from this surface. The knob
+ * MGC_BREAK_HANDLE_GROWTH compiles the growth out and the fail-fast back
+ * in (the negative control). */
+#define MGC_SEG_SLOTS 256u
+struct HandleSeg {
+    Object*    slot[MGC_SEG_SLOTS];
+    Object*    secondary[MGC_SEG_SLOTS];
+    void*      extra[MGC_SEG_SLOTS];
+    uint8_t    type[MGC_SEG_SLOTS];
+    uint8_t    live[MGC_SEG_SLOTS];
+    unsigned   next;              /* the segment's cursor */
+    unsigned   base;              /* the global index of its slot 0 */
+    HandleSeg* link;              /* the next segment, or null */
+};
+static_assert(sizeof(HandleSeg) <= 4096u, "a handle segment is one page");
+static HandleSeg* g_seg_head;
+static HandleSeg* g_seg_tail;
+static unsigned   g_seg_count;    /* grown segments (0 = the row's alone) */
+static unsigned   g_seg_cap;      /* the test knob: 0 = no cap */
+#ifndef MGC_BREAK_HANDLE_GROWTH
+extern "C" void* mmap64(void* addr, size_t len, int prot, int flags,
+                        int fd, uint64_t off);
+#define MGC_SKEL_PROT_RW       0x3
+#define MGC_SKEL_MAP_ANON_PRIV 0x22
+#endif
+
+/* A slot's five words and its global index, wherever its segment lives. */
+struct SlotRef {
+    Object**  slot;
+    Object**  secondary;
+    void**    extra;
+    uint8_t*  type;
+    uint8_t*  live;
+    unsigned  idx;
+};
+
+static SlotRef slot_ref_static(unsigned i)
 {
-    g_slot_live[i] = 0;
-    g_slot[i] = nullptr;
-    g_slot_secondary[i] = nullptr;
-    g_slot_extra[i] = (void*)(uintptr_t)g_slot_free;
-    g_slot_free = i + 1;
+    SlotRef r;
+    r.slot = &g_slot[i];
+    r.secondary = &g_slot_secondary[i];
+    r.extra = &g_slot_extra[i];
+    r.type = &g_slot_type[i];
+    r.live = &g_slot_live[i];
+    r.idx = i;
+    return r;
+}
+
+static SlotRef slot_ref_seg(HandleSeg* s, unsigned i)
+{
+    SlotRef r;
+    r.slot = &s->slot[i];
+    r.secondary = &s->secondary[i];
+    r.extra = &s->extra[i];
+    r.type = &s->type[i];
+    r.live = &s->live[i];
+    r.idx = s->base + i;
+    return r;
+}
+
+/* The slot at a global index (the free list's currency). */
+static SlotRef slot_at(unsigned gi)
+{
+    if (gi < (unsigned)MGC_HANDLE_SLOTS)
+        return slot_ref_static(gi);
+    for (HandleSeg* s = g_seg_head; s; s = s->link)
+        if (gi >= s->base && gi < s->base + MGC_SEG_SLOTS)
+            return slot_ref_seg(s, gi - s->base);
+    mgc_failfast("a free-list index outside every segment");
+    return slot_ref_static(0);   /* unreachable */
+}
+
+/* The pool lock held by the caller. */
+static void slot_release_locked(SlotRef r)
+{
+    *r.live = 0;
+    *r.slot = nullptr;
+    *r.secondary = nullptr;
+    *r.extra = (void*)(uintptr_t)g_slot_free;
+    g_slot_free = r.idx + 1;
     g_slot_live_now--;
 }
 
-static void slot_release(unsigned i)
+static void slot_release(SlotRef r)
 {
     pool_lock();
-    slot_release_locked(i);
+    slot_release_locked(r);
     pool_unlock();
 }
-#endif
 
+/* Grow: one page from the shim's mmap, or nothing (the cap, or the arena
+ * spent -- the store then answers no handle). The pool lock held by the
+ * caller. */
+static HandleSeg* seg_grow(void)
+{
+#ifdef MGC_BREAK_HANDLE_GROWTH
+    return nullptr;
+#else
+    if (g_seg_cap && g_seg_count >= g_seg_cap) {
+        SKLOG("handle pool: no room for a new segment (the test cap of %u segments; the store answers no handle; the runtime throws out of memory)",
+              g_seg_cap);
+        return nullptr;
+    }
+    void* p = mmap64(nullptr, 4096u, MGC_SKEL_PROT_RW, MGC_SKEL_MAP_ANON_PRIV, -1, 0);
+    if (p == (void*)-1 || p == nullptr) {
+        SKLOG("handle pool: no room for a new segment (the shim's mmap refused; the store answers no handle; the runtime throws out of memory)");
+        return nullptr;
+    }
+    HandleSeg* s = (HandleSeg*)p;      /* zero-filled: every slot dead */
+    s->next = 0;
+    s->base = (unsigned)MGC_HANDLE_SLOTS + g_seg_count * MGC_SEG_SLOTS;
+    s->link = nullptr;
+    if (g_seg_tail) g_seg_tail->link = s; else g_seg_head = s;
+    g_seg_tail = s;
+    g_seg_count++;
+    SKLOG("handle pool grew: segment %u of %u slots (%u live; the row's %u full)",
+          g_seg_count, (unsigned)MGC_SEG_SLOTS, g_slot_live_now,
+          (unsigned)MGC_HANDLE_SLOTS);
+    return s;
+#endif
+}
+
+/* The drives' two doors, never a runtime import: the grown-segment count,
+ * and a cap on it so the refusal is exercised without spending the
+ * arena. An image that names neither drops both at the link. */
+extern "C" unsigned mgc_skel_handle_segments(void)
+{
+    return g_seg_count;
+}
+
+extern "C" void mgc_skel_handle_cap(unsigned segments)
+{
+    g_seg_cap = segments;
+}
+
+static SlotRef slot_of(OBJECTHANDLE h, const char* via)
+{
+    Object** p = (Object**)h;
+    if (p >= &g_slot[0] && p < &g_slot[MGC_HANDLE_SLOTS])
+        return slot_ref_static((unsigned)(p - &g_slot[0]));
+    for (HandleSeg* s = g_seg_head; s; s = s->link)
+        if (p >= &s->slot[0] && p < &s->slot[MGC_SEG_SLOTS])
+            return slot_ref_seg(s, (unsigned)(p - &s->slot[0]));
+    SKLOG("%s: foreign OBJECTHANDLE %p (outside the slot pool)", via, (void*)h);
+    mgc_failfast("foreign OBJECTHANDLE");
+    return slot_ref_static(0);   /* unreachable */
+}
+#else
 static unsigned slot_of(OBJECTHANDLE h, const char* via)
 {
     Object** p = (Object**)h;
@@ -290,31 +429,68 @@ static unsigned slot_of(OBJECTHANDLE h, const char* via)
     }
     return (unsigned)(p - &g_slot[0]);
 }
+#endif
 
 static OBJECTHANDLE mk_handle(Object* obj, int type, void* extra,
                               Object* secondary, const char* via)
 {
     pool_lock();
 #ifdef MGC_TUNE_LIVE
-    unsigned i;
+#ifdef MGC_BREAK_HANDLE_GROWTH
+    {
+        static int said;
+        if (!said) {
+            said = 1;
+            SKLOG("BREAK_HANDLE_GROWTH: the pool's growth is compiled out -- a full pool fail-fasts (the negative control's knob)");
+        }
+    }
+#endif
+    /* Reuse first (the free list, across the segments), then the row's
+     * cursor, then the last segment's cursor, then a new segment. */
+    SlotRef r;
     if (g_slot_free) {
-        i = g_slot_free - 1;
-        g_slot_free = (unsigned)(uintptr_t)g_slot_extra[i];
+        r = slot_at(g_slot_free - 1);
+        g_slot_free = (unsigned)(uintptr_t)*r.extra;
         g_slot_reused++;
+    } else if (g_slot_next < MGC_HANDLE_SLOTS) {
+        r = slot_ref_static(g_slot_next++);
     } else {
-        if (g_slot_next >= MGC_HANDLE_SLOTS)
+        HandleSeg* s = g_seg_tail;
+        if (!s || s->next >= MGC_SEG_SLOTS)
+            s = seg_grow();
+        if (!s) {
+#ifdef MGC_BREAK_HANDLE_GROWTH
             mgc_failfast("handle slot pool exhausted (raise MGC_HANDLE_SLOTS)");
-        i = g_slot_next++;
+#endif
+            pool_unlock();
+            return nullptr;
+        }
+        r = slot_ref_seg(s, s->next++);
     }
     g_slot_created++;
     g_slot_live_now++;
     if (g_slot_live_now > g_slot_live_hw) g_slot_live_hw = g_slot_live_now;
     unsigned created = g_slot_created;
+    unsigned i = r.idx;
+    *r.slot      = obj;
+    *r.secondary = secondary;
+    *r.extra     = extra;
+    *r.type      = (uint8_t)type;
+    *r.live      = 1;
+    pool_unlock();
+    /* full detail for the first 24 creates (init-era evidence), then every
+     * 65536th -- allocation-era handle traffic would otherwise flood the
+     * transcript; the census carries the totals */
+    if (!g_slot_selftest
+        && (created <= 24 || (created & 65535u) == 0))
+        SKLOG("handle[%u] created via %s: type=%d obj=%p secondary=%p extra=%p (create #%u)",
+              i, via, type, (void*)obj, (void*)secondary, extra,
+              created);
+    return (OBJECTHANDLE)r.slot;
 #else
     if (g_slot_next >= MGC_HANDLE_SLOTS)
         mgc_failfast("handle slot pool exhausted (raise MGC_HANDLE_SLOTS)");
     unsigned i = g_slot_next++;
-#endif
     g_slot[i]           = obj;
     g_slot_secondary[i] = secondary;
     g_slot_extra[i]     = extra;
@@ -324,18 +500,11 @@ static OBJECTHANDLE mk_handle(Object* obj, int type, void* extra,
     /* full detail for the first 16 (init-era evidence), then every
      * 65536th -- allocation-era handle traffic would otherwise flood the
      * transcript; the census carries the totals */
-#ifdef MGC_TUNE_LIVE
-    if (!g_slot_selftest
-        && (created <= 24 || (created & 65535u) == 0))
-        SKLOG("handle[%u] created via %s: type=%d obj=%p secondary=%p extra=%p (create #%u)",
-              i, via, type, (void*)obj, (void*)secondary, extra,
-              created);
-#else
     if (i < 16 || ((i + 1) & 65535u) == 0)
         SKLOG("handle[%u] created via %s: type=%d obj=%p secondary=%p extra=%p",
               i, via, type, (void*)obj, (void*)secondary, extra);
-#endif
     return (OBJECTHANDLE)&g_slot[i];
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -352,11 +521,43 @@ struct FrozenSeg {
     size_t   committed; /* ibCommit */
     size_t   reserved;  /* ibReserved */
     uint8_t  live;
+#ifdef MGC_TUNE_LIVE
+    size_t   backed;    /* bytes from base that memory really backs */
+    size_t   probed;    /* the commit the last probe covered */
+#endif
 };
 
 #define MGC_FROZEN_SEGS 8
 static FrozenSeg g_frozen[MGC_FROZEN_SEGS];
 static unsigned  g_frozen_next;
+
+#ifdef MGC_TUNE_LIVE
+/* The C library's own question for how much of a mapping memory backs.
+ * The shim answers it from the board's frozen object heap: the runtime
+ * commits a frozen segment 64 KB at a time, and a board whose pool is
+ * smaller backs only the pool's pages. */
+extern "C" int mincore(void* addr, size_t length, unsigned char* vec);
+#define MGC_FROZEN_GUARD 64u    /* the stop trips while one more object
+                                 * (16 bytes; the runtime's only client is
+                                 * the type object) still fits */
+
+/* How many bytes from the segment's base are backed, page by page, up
+ * to its commit. An unanswered question counts the whole commit as
+ * backed: a world without a pool, where a commit is all memory. */
+static size_t frozen_backed(const FrozenSeg* s)
+{
+    size_t backed = 0;
+    for (size_t off = 0; off < s->committed; off += 4096u) {
+        unsigned char v = 0;
+        if (mincore(s->base + off, 4096u, &v) != 0)
+            return s->committed;
+        if (!(v & 1u))
+            break;
+        backed = off + 4096u;
+    }
+    return backed < s->committed ? backed : s->committed;
+}
+#endif
 
 static FrozenSeg* frozen_of(segment_handle h, const char* via)
 {
@@ -390,12 +591,31 @@ extern "C" void mgc_skel_census(void)
         if (g_slot_type[i] < 12) by_type[g_slot_type[i]]++;
     }
 #ifdef MGC_TUNE_LIVE
-    SKLOG("handles: created=%u live=%u of %u (reused=%u live_hw=%u) (types: ws=%u wl=%u strong=%u pinned=%u var=%u rc=%u dep=%u ap=%u sr=%u com=%u wip=%u xref=%u)",
-          g_slot_created, live, (unsigned)MGC_HANDLE_SLOTS,
-          g_slot_reused, g_slot_live_hw,
-          by_type[0], by_type[1], by_type[2], by_type[3], by_type[4],
-          by_type[5], by_type[6], by_type[7], by_type[8], by_type[9],
-          by_type[10], by_type[11]);
+    for (HandleSeg* s = g_seg_head; s; s = s->link)
+        for (unsigned i = 0; i < s->next; i++) {
+            if (s->live[i]) live++;
+            if (s->type[i] < 12) by_type[s->type[i]]++;
+        }
+    /* One call per branch: the line's bytes as before when no segment was
+     * grown (the old SKLOG's text), the suffix naming the grown segments
+     * otherwise. (A separate print of the newline alone became a putchar
+     * import under the compiler's rewrite.) */
+    if (g_seg_count)
+        printf("[mgc-skel] handles: created=%u live=%u of %u (reused=%u live_hw=%u) (types: ws=%u wl=%u strong=%u pinned=%u var=%u rc=%u dep=%u ap=%u sr=%u com=%u wip=%u xref=%u) (+%u grown segments of %u slots)\n",
+           g_slot_created, live, (unsigned)MGC_HANDLE_SLOTS,
+           g_slot_reused, g_slot_live_hw,
+           by_type[0], by_type[1], by_type[2], by_type[3], by_type[4],
+           by_type[5], by_type[6], by_type[7], by_type[8], by_type[9],
+           by_type[10], by_type[11],
+               g_seg_count, (unsigned)MGC_SEG_SLOTS);
+    else
+        printf("[mgc-skel] handles: created=%u live=%u of %u (reused=%u live_hw=%u) (types: ws=%u wl=%u strong=%u pinned=%u var=%u rc=%u dep=%u ap=%u sr=%u com=%u wip=%u xref=%u)\n",
+           g_slot_created, live, (unsigned)MGC_HANDLE_SLOTS,
+           g_slot_reused, g_slot_live_hw,
+           by_type[0], by_type[1], by_type[2], by_type[3], by_type[4],
+           by_type[5], by_type[6], by_type[7], by_type[8], by_type[9],
+           by_type[10], by_type[11]);
+    fflush(stdout);
 #else
     SKLOG("handles: created=%u live=%u of %u (types: ws=%u wl=%u strong=%u pinned=%u var=%u rc=%u dep=%u ap=%u sr=%u com=%u wip=%u xref=%u)",
           g_slot_next, live, (unsigned)MGC_HANDLE_SLOTS,
@@ -426,6 +646,14 @@ extern "C" void mgc_skel_handles_foreach(
             continue;
         fn(i, &g_slot[i], &g_slot_secondary[i], (int)g_slot_type[i], arg);
     }
+#ifdef MGC_TUNE_LIVE
+    for (HandleSeg* s = g_seg_head; s; s = s->link)
+        for (unsigned i = 0; i < s->next; i++) {
+            if (!s->live[i])
+                continue;
+            fn(s->base + i, &s->slot[i], &s->secondary[i], (int)s->type[i], arg);
+        }
+#endif
 }
 
 extern "C" int mgc_skel_frozen_get(unsigned i, uint8_t** base,
@@ -456,6 +684,10 @@ public:
     {
         Object** p = (Object**)handle;
         bool in = (p >= &g_slot[0] && p < &g_slot[MGC_HANDLE_SLOTS]);
+#ifdef MGC_TUNE_LIVE
+        for (HandleSeg* s = g_seg_head; s && !in; s = s->link)
+            in = (p >= &s->slot[0] && p < &s->slot[MGC_SEG_SLOTS]);
+#endif
         SKCALL("IGCHandleStore::ContainsHandle(%p) -> %d", (void*)handle, (int)in);
         return in;
     }
@@ -540,78 +772,125 @@ public:
 
     OBJECTHANDLE CreateDuplicateHandle(OBJECTHANDLE handle) override
     {
+#ifdef MGC_TUNE_LIVE
+        SlotRef r = slot_of(handle, "CreateDuplicateHandle");
+        SKCALL_H(hm_create_duplicate, "IGCHandleManager::CreateDuplicateHandle(handle[%u])", r.idx);
+        return mk_handle(*r.slot, (int)*r.type, *r.extra,
+                         *r.secondary, "manager/duplicate");
+#else
         unsigned i = slot_of(handle, "CreateDuplicateHandle");
         SKCALL_H(hm_create_duplicate, "IGCHandleManager::CreateDuplicateHandle(handle[%u])", i);
         return mk_handle(g_slot[i], (int)g_slot_type[i], g_slot_extra[i],
                          g_slot_secondary[i], "manager/duplicate");
+#endif
     }
 
     void DestroyHandleOfType(OBJECTHANDLE handle, HandleType type) override
     {
+#ifdef MGC_TUNE_LIVE
+        SlotRef r = slot_of(handle, "DestroyHandleOfType");
+        SKCALL_H(hm_destroy, "IGCHandleManager::DestroyHandleOfType(handle[%u] type=%d)",
+                 r.idx, (int)type);
+        pool_lock();
+        if (!*r.live) {
+            pool_unlock();
+            SKLOG("DestroyHandleOfType: handle[%u] already dead (double destroy ignored)", r.idx);
+            return;
+        }
+        slot_release_locked(r);
+        pool_unlock();
+#else
         unsigned i = slot_of(handle, "DestroyHandleOfType");
         SKCALL_H(hm_destroy, "IGCHandleManager::DestroyHandleOfType(handle[%u] type=%d)",
                  i, (int)type);
         pool_lock();
-#ifdef MGC_TUNE_LIVE
-        if (!g_slot_live[i]) {
-            pool_unlock();
-            SKLOG("DestroyHandleOfType: handle[%u] already dead (double destroy ignored)", i);
-            return;
-        }
-        slot_release_locked(i);
-#else
         g_slot_live[i] = 0;
         g_slot[i] = nullptr;
-#endif
         pool_unlock();
+#endif
     }
 
     void DestroyHandleOfUnknownType(OBJECTHANDLE handle) override
     {
+#ifdef MGC_TUNE_LIVE
+        SlotRef r = slot_of(handle, "DestroyHandleOfUnknownType");
+        SKCALL_H(hm_destroy_unknown, "IGCHandleManager::DestroyHandleOfUnknownType(handle[%u])", r.idx);
+        pool_lock();
+        if (!*r.live) {
+            pool_unlock();
+            SKLOG("DestroyHandleOfUnknownType: handle[%u] already dead (double destroy ignored)", r.idx);
+            return;
+        }
+        slot_release_locked(r);
+        pool_unlock();
+#else
         unsigned i = slot_of(handle, "DestroyHandleOfUnknownType");
         SKCALL_H(hm_destroy_unknown, "IGCHandleManager::DestroyHandleOfUnknownType(handle[%u])", i);
         pool_lock();
-#ifdef MGC_TUNE_LIVE
-        if (!g_slot_live[i]) {
-            pool_unlock();
-            SKLOG("DestroyHandleOfUnknownType: handle[%u] already dead (double destroy ignored)", i);
-            return;
-        }
-        slot_release_locked(i);
-#else
         g_slot_live[i] = 0;
         g_slot[i] = nullptr;
-#endif
         pool_unlock();
+#endif
     }
 
     void SetExtraInfoForHandle(OBJECTHANDLE handle, HandleType type,
                                void* pExtraInfo) override
     {
+#ifdef MGC_TUNE_LIVE
+        SlotRef r = slot_of(handle, "SetExtraInfoForHandle");
+        SKCALL("IGCHandleManager::SetExtraInfoForHandle(handle[%u] type=%d extra=%p)",
+               r.idx, (int)type, pExtraInfo);
+        *r.extra = pExtraInfo;
+#else
         unsigned i = slot_of(handle, "SetExtraInfoForHandle");
         SKCALL("IGCHandleManager::SetExtraInfoForHandle(handle[%u] type=%d extra=%p)",
                i, (int)type, pExtraInfo);
         g_slot_extra[i] = pExtraInfo;
+#endif
     }
 
     void* GetExtraInfoFromHandle(OBJECTHANDLE handle) override
     {
+#ifdef MGC_TUNE_LIVE
+        SlotRef r = slot_of(handle, "GetExtraInfoFromHandle");
+        SKCALL("IGCHandleManager::GetExtraInfoFromHandle(handle[%u]) -> %p",
+               r.idx, *r.extra);
+        return *r.extra;
+#else
         unsigned i = slot_of(handle, "GetExtraInfoFromHandle");
         SKCALL("IGCHandleManager::GetExtraInfoFromHandle(handle[%u]) -> %p",
                i, g_slot_extra[i]);
         return g_slot_extra[i];
+#endif
     }
 
     void StoreObjectInHandle(OBJECTHANDLE handle, Object* object) override
     {
+#ifdef MGC_TUNE_LIVE
+        SlotRef r = slot_of(handle, "StoreObjectInHandle");
+        SKCALL("IGCHandleManager::StoreObjectInHandle(handle[%u] obj=%p)",
+               r.idx, (void*)object);
+        *r.slot = object;
+#else
         unsigned i = slot_of(handle, "StoreObjectInHandle");
         SKCALL("IGCHandleManager::StoreObjectInHandle(handle[%u] obj=%p)",
                i, (void*)object);
         g_slot[i] = object;
+#endif
     }
 
     bool StoreObjectInHandleIfNull(OBJECTHANDLE handle, Object* object) override
     {
+#ifdef MGC_TUNE_LIVE
+        SlotRef r = slot_of(handle, "StoreObjectInHandleIfNull");
+        Object* expected = nullptr;
+        bool stored = __atomic_compare_exchange_n(r.slot, &expected, object,
+                                                  false, __ATOMIC_SEQ_CST,
+                                                  __ATOMIC_SEQ_CST);
+        SKCALL("IGCHandleManager::StoreObjectInHandleIfNull(handle[%u] obj=%p) -> %d",
+               r.idx, (void*)object, (int)stored);
+        return stored;
+#else
         unsigned i = slot_of(handle, "StoreObjectInHandleIfNull");
         Object* expected = nullptr;
         bool stored = __atomic_compare_exchange_n(&g_slot[i], &expected, object,
@@ -620,28 +899,52 @@ public:
         SKCALL("IGCHandleManager::StoreObjectInHandleIfNull(handle[%u] obj=%p) -> %d",
                i, (void*)object, (int)stored);
         return stored;
+#endif
     }
 
     void SetDependentHandleSecondary(OBJECTHANDLE handle, Object* object) override
     {
+#ifdef MGC_TUNE_LIVE
+        SlotRef r = slot_of(handle, "SetDependentHandleSecondary");
+        SKCALL("IGCHandleManager::SetDependentHandleSecondary(handle[%u] obj=%p)",
+               r.idx, (void*)object);
+        *r.secondary = object;
+#else
         unsigned i = slot_of(handle, "SetDependentHandleSecondary");
         SKCALL("IGCHandleManager::SetDependentHandleSecondary(handle[%u] obj=%p)",
                i, (void*)object);
         g_slot_secondary[i] = object;
+#endif
     }
 
     Object* GetDependentHandleSecondary(OBJECTHANDLE handle) override
     {
+#ifdef MGC_TUNE_LIVE
+        SlotRef r = slot_of(handle, "GetDependentHandleSecondary");
+        SKCALL("IGCHandleManager::GetDependentHandleSecondary(handle[%u]) -> %p",
+               r.idx, (void*)*r.secondary);
+        return *r.secondary;
+#else
         unsigned i = slot_of(handle, "GetDependentHandleSecondary");
         SKCALL("IGCHandleManager::GetDependentHandleSecondary(handle[%u]) -> %p",
                i, (void*)g_slot_secondary[i]);
         return g_slot_secondary[i];
+#endif
     }
 
     Object* InterlockedCompareExchangeObjectInHandle(OBJECTHANDLE handle,
                                                      Object* object,
                                                      Object* comparandObject) override
     {
+#ifdef MGC_TUNE_LIVE
+        SlotRef r = slot_of(handle, "InterlockedCompareExchangeObjectInHandle");
+        Object* expected = comparandObject;
+        __atomic_compare_exchange_n(r.slot, &expected, object, false,
+                                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        SKCALL("IGCHandleManager::InterlockedCompareExchangeObjectInHandle(handle[%u]) -> %p",
+               r.idx, (void*)expected);
+        return expected; /* prior value, CAS convention */
+#else
         unsigned i = slot_of(handle, "InterlockedCompareExchangeObjectInHandle");
         Object* expected = comparandObject;
         __atomic_compare_exchange_n(&g_slot[i], &expected, object, false,
@@ -649,14 +952,22 @@ public:
         SKCALL("IGCHandleManager::InterlockedCompareExchangeObjectInHandle(handle[%u]) -> %p",
                i, (void*)expected);
         return expected; /* prior value, CAS convention */
+#endif
     }
 
     HandleType HandleFetchType(OBJECTHANDLE handle) override
     {
+#ifdef MGC_TUNE_LIVE
+        SlotRef r = slot_of(handle, "HandleFetchType");
+        SKCALL("IGCHandleManager::HandleFetchType(handle[%u]) -> %d",
+               r.idx, (int)*r.type);
+        return (HandleType)*r.type;
+#else
         unsigned i = slot_of(handle, "HandleFetchType");
         SKCALL("IGCHandleManager::HandleFetchType(handle[%u]) -> %d",
                i, (int)g_slot_type[i]);
         return (HandleType)g_slot_type[i];
+#endif
     }
 
     void TraceRefCountedHandles(HANDLESCANPROC callback, uintptr_t param1,
@@ -1381,6 +1692,13 @@ public:
         g_frozen[i].committed = pseginfo->ibCommit;
         g_frozen[i].reserved  = pseginfo->ibReserved;
         g_frozen[i].live      = 1;
+#ifdef MGC_TUNE_LIVE
+        g_frozen[i].backed    = 0;
+        g_frozen[i].probed    = (size_t)-1;     /* probed at the first update */
+#ifdef MGC_BREAK_FROZEN_BOUND
+        SKLOG("BREAK_FROZEN_BOUND: a frozen segment's backed bytes are never asked and the stop is compiled out (the negative control)");
+#endif
+#endif
         SKCALL("IGCHeap::RegisterFrozenSegment[%u](mem=%p firstObj=+%lu allocated=%lu commit=%lu reserved=%lu)",
                i, pseginfo->pvMem,
                (unsigned long)pseginfo->ibFirstObject,
@@ -1497,6 +1815,30 @@ public:
                (unsigned)(s - &g_frozen[0]), (void*)allocated, (void*)committed);
         s->allocated = (size_t)(allocated - s->base);
         s->committed = (size_t)(committed - s->base);
+#if defined(MGC_TUNE_LIVE) && !defined(MGC_BREAK_FROZEN_BOUND)
+        /* The frozen object heap's bound. The runtime's manager believes
+         * its whole commit is memory; on a board whose pool is smaller
+         * the collector, told the segment's fill at every allocation,
+         * stops the program the moment the pool has no room for one
+         * more object -- before any byte is written outside it. */
+        if (s->probed != s->committed) {
+            s->backed = frozen_backed(s);
+            s->probed = s->committed;
+            if (s->backed < s->committed)
+                SKLOG("frozen object heap: %lu of the %lu bytes the runtime committed are backed by the board's pool; the program is stopped before an object is written past them",
+                      (unsigned long)s->backed, (unsigned long)s->committed);
+        }
+        if (s->backed < s->committed
+            && s->allocated + MGC_FROZEN_GUARD > s->backed) {
+            SKLOG("frozen object heap FULL: %lu bytes used of the pool's %lu; no room is left for one more object",
+                  (unsigned long)s->allocated, (unsigned long)s->backed);
+            /* its own last line: the skeleton's fail-fast words speak of
+             * an interface with no collector behind it, which this is not */
+            printf("[mgc-skel] FAIL-FAST: frozen object heap full (the board's pool is smaller than the runtime's commit)\n");
+            fflush(stdout);
+            abort();
+        }
+#endif
     }
 
     int RefreshMemoryLimit() override

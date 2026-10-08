@@ -24,10 +24,12 @@ const TIMEOUT_S: u64 = 900;
 /// The cases pinned, in the order cargo's single-threaded runner reports
 /// them (alphabetical by name). A case added to the host crate joins this
 /// list in the same change, or the gate refuses the run.
-pub const CASES: [&str; 25] = [
+pub const CASES: [&str; 32] = [
     "tests::abi_window_judges_the_window",
+    "tests::adc_math_budget_mask_and_channels",
     "tests::arena_overflow_refused_headroom_intact",
     "tests::bus_math_budget_divisor_and_messages",
+    "tests::bus_math_i2c_wait_covers_the_clock_low_limit",
     "tests::calendar_bcd_packs_both_ways",
     "tests::calendar_century_bound_refuses_1999_and_2100",
     "tests::calendar_civil_from_days_at_the_maximum",
@@ -46,6 +48,11 @@ pub const CASES: [&str; 25] = [
     "tests::kheap_largest_fits_and_one_more_byte_does_not",
     "tests::kheap_rounding_wraps_refused",
     "tests::kheap_wrapping_request_refused_null_heap_intact",
+    "tests::pwm_math_quantization_and_shared_period",
+    "tests::rp2350_bus_math_counts_and_ladder",
+    "tests::rp2350_bus_math_i2c_modes",
+    "tests::rp2350_bus_math_reserved_addresses",
+    "tests::rp2350_bus_math_rows_roles_and_aborts",
     "tests::wake_arm_across_the_32bit_wrap",
     "tests::wake_arm_beyond_window_clamps_and_rearms",
     "tests::wake_arm_inside_window_is_exact",

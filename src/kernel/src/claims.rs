@@ -7,7 +7,9 @@
 //! number on the ST families, the same number on every port); and the
 //! tenancy a board hook takes on an interrupt bit (a register, a bit, a
 //! wake word), so the family handler that owns the bank's one interrupt
-//! line dispatches that bit to that word. The record `__rhu_claims` is
+//! line dispatches that bit to that word. Beside the lines, a bitmap of
+//! timer channels (a PWM output serves one line at a time) and a bitmap
+//! of converter channels per block. The record `__rhu_claims` is
 //! read by symbol (a debugger, the api flavor); nothing in a program
 //! reads it.
 
@@ -22,6 +24,14 @@ pub const SLOTS: usize = 32;
 pub const NO_OWNER: u16 = u16::MAX;
 /// Tenants of a family handler's interrupt line (a hook's register and bit).
 pub const MAX_TENANTS: usize = 4;
+/// The timer channels: sixteen timers of eight channels, one bit each;
+/// the converter channels: four blocks of thirty-two, one bit each.
+pub const PWM_TIMERS_MAX: usize = 16;
+pub const PWM_CHANNELS_MAX: usize = 8;
+pub const PWM_BANKS: usize = PWM_TIMERS_MAX * PWM_CHANNELS_MAX / 32;
+pub const ADC_BLOCKS_MAX: usize = 4;
+pub const ADC_CHANNELS_MAX: usize = 32;
+pub const ADC_BANKS: usize = ADC_BLOCKS_MAX * ADC_CHANNELS_MAX / 32;
 
 /// The refusals, in the hosting API's codes.
 pub const REFUSED_BUSY: i32 = -16;
@@ -56,6 +66,8 @@ pub struct Claims {
     pub refused_busy: u32,
     pub refused_inval: u32,
     pub last_refused_line: u32,
+    pub pwm_channels: [u32; PWM_BANKS],
+    pub adc_channels: [u32; ADC_BANKS],
 }
 
 pub const EMPTY: Claims = Claims {
@@ -71,6 +83,8 @@ pub const EMPTY: Claims = Claims {
     refused_busy: 0,
     refused_inval: 0,
     last_refused_line: 0,
+    pwm_channels: [0; PWM_BANKS],
+    adc_channels: [0; ADC_BANKS],
 };
 
 /// The board's claim list folded into bitmaps AT COMPILE TIME: a line
@@ -247,4 +261,95 @@ pub fn tenant_for(c: &Claims, reg: u32, bit: u32) -> Option<Tenant> {
         i += 1;
     }
     None
+}
+
+/// A refusal on a timer channel or a converter channel: counted, the line
+/// record untouched (a channel is not a line).
+fn refuse_channel(c: &mut Claims, code: i32) -> i32 {
+    if code == REFUSED_BUSY {
+        c.refused_busy += 1;
+    } else {
+        c.refused_inval += 1;
+    }
+    code
+}
+
+const fn channel_split(bit: usize) -> (usize, u32) {
+    (bit / 32, 1u32 << (bit % 32))
+}
+
+/// A program's claim of a timer channel (a PWM output): refused
+/// `REFUSED_INVAL` past the bitmap's reach, `REFUSED_BUSY` when held.
+#[allow(dead_code)]
+pub fn pwm_channel_claim(c: &mut Claims, timer: u32, channel: u32) -> i32 {
+    if timer as usize >= PWM_TIMERS_MAX || channel as usize >= PWM_CHANNELS_MAX {
+        return refuse_channel(c, REFUSED_INVAL);
+    }
+    let (bank, mask) = channel_split(timer as usize * PWM_CHANNELS_MAX + channel as usize);
+    if c.pwm_channels[bank] & mask != 0 {
+        return refuse_channel(c, REFUSED_BUSY);
+    }
+    c.pwm_channels[bank] |= mask;
+    0
+}
+
+/// The release of a timer channel: refused `REFUSED_INVAL` when it is not held.
+#[allow(dead_code)]
+pub fn pwm_channel_release(c: &mut Claims, timer: u32, channel: u32) -> i32 {
+    if timer as usize >= PWM_TIMERS_MAX || channel as usize >= PWM_CHANNELS_MAX {
+        return refuse_channel(c, REFUSED_INVAL);
+    }
+    let (bank, mask) = channel_split(timer as usize * PWM_CHANNELS_MAX + channel as usize);
+    if c.pwm_channels[bank] & mask == 0 {
+        return refuse_channel(c, REFUSED_INVAL);
+    }
+    c.pwm_channels[bank] &= !mask;
+    0
+}
+
+#[allow(dead_code)]
+pub fn pwm_channel_held(c: &Claims, timer: u32, channel: u32) -> bool {
+    if timer as usize >= PWM_TIMERS_MAX || channel as usize >= PWM_CHANNELS_MAX {
+        return false;
+    }
+    let (bank, mask) = channel_split(timer as usize * PWM_CHANNELS_MAX + channel as usize);
+    c.pwm_channels[bank] & mask != 0
+}
+
+/// A program's claim of a converter channel: refused `REFUSED_INVAL` past
+/// the bitmap's reach, `REFUSED_BUSY` when held.
+#[allow(dead_code)]
+pub fn adc_channel_claim(c: &mut Claims, block: u32, channel: u32) -> i32 {
+    if block as usize >= ADC_BLOCKS_MAX || channel as usize >= ADC_CHANNELS_MAX {
+        return refuse_channel(c, REFUSED_INVAL);
+    }
+    let (bank, mask) = channel_split(block as usize * ADC_CHANNELS_MAX + channel as usize);
+    if c.adc_channels[bank] & mask != 0 {
+        return refuse_channel(c, REFUSED_BUSY);
+    }
+    c.adc_channels[bank] |= mask;
+    0
+}
+
+/// The release of a converter channel: refused `REFUSED_INVAL` when it is not held.
+#[allow(dead_code)]
+pub fn adc_channel_release(c: &mut Claims, block: u32, channel: u32) -> i32 {
+    if block as usize >= ADC_BLOCKS_MAX || channel as usize >= ADC_CHANNELS_MAX {
+        return refuse_channel(c, REFUSED_INVAL);
+    }
+    let (bank, mask) = channel_split(block as usize * ADC_CHANNELS_MAX + channel as usize);
+    if c.adc_channels[bank] & mask == 0 {
+        return refuse_channel(c, REFUSED_INVAL);
+    }
+    c.adc_channels[bank] &= !mask;
+    0
+}
+
+#[allow(dead_code)]
+pub fn adc_channel_held(c: &Claims, block: u32, channel: u32) -> bool {
+    if block as usize >= ADC_BLOCKS_MAX || channel as usize >= ADC_CHANNELS_MAX {
+        return false;
+    }
+    let (bank, mask) = channel_split(block as usize * ADC_CHANNELS_MAX + channel as usize);
+    c.adc_channels[bank] & mask != 0
 }

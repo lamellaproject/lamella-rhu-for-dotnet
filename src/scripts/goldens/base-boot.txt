@@ -5,6 +5,7 @@ rhu 0.2.0 -- Lamella RHU: runtime-hosting unikernel for .NET on Cortex-M
 [boot] calendar: no calendar source on this row; the base is the epoch until set
 [boot] fpu: double precision in hardware
 [boot] gpio: 6 virtual lines (5 populated), 1 claimed by the board (the virtual console)
+[boot] pwm: 3 lines on 2 timers; adc: 6 channels on 2 blocks
 [sched] online: 16 slots | SysTick 1000 Hz | BASEPRI ceiling 0x40 | zero-latency band below 0x40 never masked
 [selftest] .data copied from code-region LMA: OK
 [selftest] .bss zeroed, RAM readback: OK

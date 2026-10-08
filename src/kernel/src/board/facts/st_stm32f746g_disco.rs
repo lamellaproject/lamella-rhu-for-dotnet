@@ -130,3 +130,14 @@ pub const RCC_SYSCFG_EN_BIT: u32 = 1 << 14;
 /// every bus (one entry per block, named by the chip's own block number).
 pub const I2C_BUSES: &[crate::bus_math::I2cBus] = &[];
 pub const SPI_BUSES: &[crate::bus_math::SpiBus] = &[];
+
+/// The PWM and ADC tables of this row: empty in this generation, so the
+/// count doors answer 0, the enumeration doors refuse every index, and
+/// every other door of the two families answers RHU_ENODEV. The tables
+/// are shaped for a board's every timer output and every converter
+/// channel (one entry per line and per channel, the blocks named by the
+/// chip's own numbers).
+pub const PWM_TIMERS: &[crate::pwm_math::PwmTimer] = &[];
+pub const PWM_LINES: &[crate::pwm_math::PwmLine] = &[];
+pub const ADC_BLOCKS: &[crate::adc_math::AdcBlock] = &[];
+pub const ADC_CHANNELS: &[crate::adc_math::AdcChannel] = &[];

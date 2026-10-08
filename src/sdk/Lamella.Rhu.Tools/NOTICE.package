@@ -1,5 +1,5 @@
 Lamella RHU for .NET -- the tools package
-Copyright (c) 2026 Lamella LLC and the Lamella project authors
+Copyright (c) 2026 Lamella LLC
 
 This package is licensed under your choice of the MIT license or the Apache
 License, Version 2.0.
@@ -11,7 +11,6 @@ text under licenses/:
   copier, taken unchanged from the release TOOLS.txt names, licensed under
   the Apache License, Version 2.0, with LLVM exceptions: the text is
   licenses/llvm-LICENSE.txt.
-- TOOLS.txt and build/ are this product's own.
 
 The bin/ binaries, TOOLS.txt, build/ and the licence text named above are
 placed in the package when it is built; a source checkout carries this

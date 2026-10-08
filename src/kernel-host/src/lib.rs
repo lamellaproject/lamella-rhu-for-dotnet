@@ -35,13 +35,18 @@ mod gpio_math;
 /// The bus doors' pure half: the descriptors, the message partition, the timing word, the divisor ladder and the budget.
 #[path = "../../kernel/src/bus_math.rs"]
 mod bus_math;
+#[path = "../../kernel/src/rp2350_bus_math.rs"]
+mod rp2350_bus_math;
+/// The PWM and ADC doors' pure halves: the quantization and the conversion budget.
+#[path = "../../kernel/src/pwm_math.rs"]
+mod pwm_math;
+#[path = "../../kernel/src/adc_math.rs"]
+mod adc_math;
+/// The RP2350's slice mapping, pure: the line to slice-and-output rule and the shared-output twin.
+#[path = "../../kernel/src/board/rp2350_map.rs"]
+mod rp2350_map;
 /// The double-precision emulation's pure halves: the arithmetic and the decoder.
-mod fpemul {
-    #[path = "../../../kernel/src/fpemul/soft.rs"]
-    pub mod soft;
-    #[path = "../../../kernel/src/fpemul/decode.rs"]
-    pub mod decode;
-}
+mod fpemul;
 /// The decoder's vectors: the assembler's encodings of every form (a generated table).
 mod fpemul_vectors;
 

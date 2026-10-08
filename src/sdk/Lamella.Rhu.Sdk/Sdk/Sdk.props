@@ -9,10 +9,10 @@
 
   <PropertyGroup>
     <UsingLamellaRhuSdk>true</UsingLamellaRhuSdk>
-    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">0.1.0-a</RhuSdkVersion>
+    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">1.0.0-alpha.1</RhuSdkVersion>
     <!-- The runtime build this SDK version was tested against: the
-         ILCompiler pack and the runtime pack are pinned at it, whatever
-         .NET SDK is installed. -->
+         ILCompiler pack, the runtime pack and the reference assemblies'
+         package are pinned at it, whatever .NET SDK is installed. -->
     <RhuRuntimeVersion Condition="'$(RhuRuntimeVersion)' == ''">11.0.0-rc.1.26425.128</RhuRuntimeVersion>
     <RhuSdkRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..'))</RhuSdkRoot>
     <RhuHostRid Condition="'$(RhuHostRid)' == ''">$(NETCoreSdkPortableRuntimeIdentifier)</RhuHostRid>
@@ -49,7 +49,21 @@
        with or without it; the runtime's own default-stack knob is never
        set, because it cannot express a size inside a row's range. The
        fixed posture of every image follows: invariant culture, no event
-       source, no metrics, no debugger support, size over speed. -->
+       source, no metrics, no debugger support, size over speed, and no
+       symbol stripping by the compiler pack: its strip belongs to the link
+       this SDK replaces (Sdk.targets), and its probe for a stripping tool on
+       the PATH refuses a host that has none. The group's last three lines
+       take the compile's reference assemblies from the package
+       Microsoft.NETCore.App.Ref, never from the copy the installed .NET
+       SDK bundles: the bundled copies of the .NET SDK's host builds differ
+       in the identities of their facade assemblies, a program's symbol
+       file records those identities and the compiled object follows them,
+       so with the package one .NET SDK version compiles one object on
+       every host. The pack root names a folder this package does not
+       carry, so the .NET SDK finds no bundled pack there and restores the
+       package; the package-pruning data is still read from the .NET SDK's
+       own folder; and the reference packs of the other shared frameworks,
+       which the moved root would otherwise download as well, stay out. -->
   <PropertyGroup>
     <RhuDiag Condition="'$(RhuDiag)' == ''">min</RhuDiag>
     <RhuReflection Condition="'$(RhuReflection)' == ''">on</RhuReflection>
@@ -62,6 +76,10 @@
     <MetricsSupport>false</MetricsSupport>
     <DebuggerSupport>false</DebuggerSupport>
     <OptimizationPreference>Size</OptimizationPreference>
+    <StripSymbols>false</StripSymbols>
+    <NetCoreTargetingPackRoot>$(RhuSdkRoot)packs</NetCoreTargetingPackRoot>
+    <PrunePackageTargetingPackRoots>$(NetCoreRoot)packs</PrunePackageTargetingPackRoots>
+    <DisableTransitiveFrameworkReferenceDownloads>true</DisableTransitiveFrameworkReferenceDownloads>
   </PropertyGroup>
 
   <!-- The build is deterministic and the project's directory is mapped to
@@ -91,10 +109,11 @@
     <IlcArg Include="--reflectiondata:none" />
   </ItemGroup>
 
-  <!-- The ILCompiler pack at the tested runtime build, and the tools
-       package for this host (the linker and the object copier the link
-       step runs); the tools package contributes its build properties and
-       nothing else. -->
+  <!-- The ILCompiler pack and the reference assemblies' package at the
+       tested runtime build, whatever version the installed .NET SDK names
+       for them, and the tools package for this host (the linker and the
+       object copier the link step runs); the tools package contributes
+       its build properties and nothing else. -->
   <!-- The standard GPIO package's Linux driver binds the libgpiod v1 C
        API by this library name; on RHU the shim's frozen GPIO API object
        defines those entry points over the kernel's GPIO doors, so the name
@@ -116,6 +135,7 @@
 
   <ItemGroup>
     <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler" ILCompilerPackVersion="$(RhuRuntimeVersion)" />
+    <KnownFrameworkReference Update="Microsoft.NETCore.App" TargetingPackVersion="$(RhuRuntimeVersion)" />
     <PackageReference Include="$(RhuToolsPackageId)" Version="$(RhuSdkVersion)" PrivateAssets="all" ExcludeAssets="compile;runtime;native;contentFiles;analyzers" />
   </ItemGroup>
 

@@ -148,7 +148,7 @@ pub(crate) const WORLD_M7: RtWorld = RtWorld {
 /// v8-M donor, links under the an505 map with the an505 row's shim and
 /// collector objects and the class's staticlib, and closes over the
 /// kit's v8-M C and math libraries. No board rider: the class's boards
-/// are the payload gate's rows and the kernel's flights.
+/// are the payload gate's rows and the kernel's hardware runs.
 pub(crate) const WORLD_M33: RtWorld = RtWorld {
     gate: "rt-m33",
     display: "RT-M33 GATE",
@@ -245,12 +245,12 @@ fn resolve_kit_dir(repo: &Path, w: &RtWorld) -> Option<String> {
 /// goldens/rt-m7/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates the objects, the lists, the manifest
 /// and this pin together in one reviewed commit.
-pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "056aa8ec4908a3b0a5ef98071e778d725adf4e127ddb9db7c17e9dcc2a6f2abb";
+pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "661c622cc98c90ad5a22995014fb8fd79584e96d97b8a5650fc7b127302d7a02";
 
 /// goldens/rt-m33/MANIFEST.md's own sha256: the Cortex-M33 world's pin,
 /// beside its manifest the way the Cortex-M7 world's is; a re-freeze of
 /// that tier moves this line and nothing of the other world's.
-pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "f7549fd256857dd144fd2ba78236862ae280087ba90520e28afc0586d7c4e083";
+pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "406db1706a56acc08dbd8e1853516b3f14f6577a6edeb3678ec10b295938fa69";
 
 /// The archive set the frozen merge consumed. The manifest's `archives:`
 /// line and the frozen set file must both name it; a merge recorded under
@@ -461,7 +461,7 @@ const FLAVOUR_MARK: &str = "Object reference not set to an instance";
 /// entry, the program's start, one collection, the verdict, the host's
 /// exit line, the kernel's return.
 const BOOT_MARKERS: [&str; 24] = [
-    "[payload] entry: payload-provided, built for hosting-API contract generation 34 (this kernel: 34)",
+    "[payload] entry: payload-provided, built for hosting-API contract generation 35 (this kernel: 35)",
     "[shim] init: per-thread block registered as module 1 (48 bytes)",
     "[host] stdio: standard error bound to the C library's stream",
     "[host] stdio: standard output line buffered",
@@ -498,7 +498,7 @@ const PENDING: [&str; 0] = [];
 /// worker and the activation section's worker at the row's default),
 /// every section's verdict line, the summary last.
 const SUITE_MARKERS_M7: [&str; 42] = [
-    "[payload] entry: payload-provided, built for hosting-API contract generation 34 (this kernel: 34)",
+    "[payload] entry: payload-provided, built for hosting-API contract generation 35 (this kernel: 35)",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
     "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
     "[host] entering managed entry",
@@ -542,7 +542,7 @@ const SUITE_MARKERS_M7: [&str; 42] = [
     "RTSUITE: ALL GOOD",
 ];
 const SUITE_MARKERS_M33: [&str; 42] = [
-    "[payload] entry: payload-provided, built for hosting-API contract generation 34 (this kernel: 34)",
+    "[payload] entry: payload-provided, built for hosting-API contract generation 35 (this kernel: 35)",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
     "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
     "[host] entering managed entry",
@@ -603,9 +603,9 @@ const ACTIVATIONS_FLOOR: u32 = 3;
 
 /// The F769 rider's world: the board's payload map and staticlib (built
 /// as the payload gate builds it), and the row's tier objects -- the
-/// shim's core object under the F769 selector, the collector's heap and
-/// collect objects under the row's defines; the rest shared with the
-/// an500 line.
+/// shim's core and system-call objects under the F769 selector, the
+/// collector's heap and collect objects under the row's defines; the
+/// rest shared with the an500 line.
 const F769_BOARD: &str = "st-stm32f769i-disco";
 const F769_TARGET: &str = "thumbv7em-none-eabihf";
 const F769_FEATURES: &str = "board-st-stm32f769i-disco,payload";
@@ -613,7 +613,7 @@ const F769_MAP: &str = "src/kernel/payload-st-stm32f769i-disco.x";
 const F769_LIB: &str = "src/kernel/target/payload-gate/rt/st-stm32f769i-disco/thumbv7em-none-eabihf/release/librhu_kernel.a";
 const F769_SHIM_OBJECTS: [&str; 8] = [
     "goldens/shim/shim-core-f769.o",
-    "goldens/shim/shim-sysnative.o",
+    "goldens/shim/shim-sysnative-f769.o",
     "goldens/shim/shim-libc-glue.o",
     "goldens/shim/shim-stdio-sym.o",
     "goldens/shim/shim-host.o",
@@ -3635,10 +3635,550 @@ fn xml_value(text: &str, name: &str) -> Option<String> {
     Some(text[start..end].trim().to_string())
 }
 
+/// A JSON value of the flat shape the facts files use: objects, arrays,
+/// strings, whole numbers and null. The reader is the harness's own (the
+/// harness carries no dependency); anything outside that shape -- a fraction,
+/// an exponent, a boolean, a negative number, a \u escape, a trailing comma,
+/// a member named twice, text after the value -- is refused with a sentence
+/// naming the file and the byte.
+#[derive(Clone, Debug, PartialEq)]
+enum Json {
+    Object(Vec<(String, Json)>),
+    Array(Vec<Json>),
+    Str(String),
+    Int(u64),
+    Null,
+}
+
+struct JsonReader<'a> {
+    b: &'a [u8],
+    i: usize,
+    where_: &'a str,
+}
+
+impl<'a> JsonReader<'a> {
+    fn err(&self, what: &str) -> String {
+        format!("{}: {what} at byte {}", self.where_, self.i)
+    }
+    fn skip_ws(&mut self) {
+        while self.i < self.b.len() && matches!(self.b[self.i], b' ' | b'\t' | b'\n' | b'\r') {
+            self.i += 1;
+        }
+    }
+    fn peek(&self) -> Option<u8> {
+        self.b.get(self.i).copied()
+    }
+    fn expect(&mut self, c: u8) -> Result<(), String> {
+        if self.peek() == Some(c) {
+            self.i += 1;
+            Ok(())
+        } else {
+            Err(self.err(&format!("'{}' expected", c as char)))
+        }
+    }
+    fn value(&mut self) -> Result<Json, String> {
+        self.skip_ws();
+        match self.peek() {
+            Some(b'{') => self.object(),
+            Some(b'[') => self.array(),
+            Some(b'"') => Ok(Json::Str(self.string()?)),
+            Some(b'n') if self.b[self.i..].starts_with(b"null") => {
+                self.i += 4;
+                Ok(Json::Null)
+            }
+            Some(c) if c.is_ascii_digit() => self.integer(),
+            Some(b'-') => Err(self.err("a negative number is not in the facts' shape")),
+            Some(b't') | Some(b'f') => Err(self.err("a boolean is not in the facts' shape")),
+            Some(_) => Err(self.err("a value of the facts' shape expected (an object, an array, a string, a whole number or null)")),
+            None => Err(self.err("the text ends before a value")),
+        }
+    }
+    fn object(&mut self) -> Result<Json, String> {
+        self.expect(b'{')?;
+        let mut members: Vec<(String, Json)> = Vec::new();
+        self.skip_ws();
+        if self.peek() == Some(b'}') {
+            self.i += 1;
+            return Ok(Json::Object(members));
+        }
+        loop {
+            self.skip_ws();
+            if self.peek() != Some(b'"') {
+                return Err(self.err("a member's name (a string) expected"));
+            }
+            let key = self.string()?;
+            if members.iter().any(|(k, _)| *k == key) {
+                return Err(self.err(&format!("the member '{key}' appears twice")));
+            }
+            self.skip_ws();
+            self.expect(b':')?;
+            let v = self.value()?;
+            members.push((key, v));
+            self.skip_ws();
+            match self.peek() {
+                Some(b',') => {
+                    self.i += 1;
+                    self.skip_ws();
+                    if self.peek() == Some(b'}') {
+                        return Err(self.err("a trailing comma"));
+                    }
+                }
+                Some(b'}') => {
+                    self.i += 1;
+                    return Ok(Json::Object(members));
+                }
+                _ => return Err(self.err("',' or '}' expected")),
+            }
+        }
+    }
+    fn array(&mut self) -> Result<Json, String> {
+        self.expect(b'[')?;
+        let mut items = Vec::new();
+        self.skip_ws();
+        if self.peek() == Some(b']') {
+            self.i += 1;
+            return Ok(Json::Array(items));
+        }
+        loop {
+            items.push(self.value()?);
+            self.skip_ws();
+            match self.peek() {
+                Some(b',') => {
+                    self.i += 1;
+                    self.skip_ws();
+                    if self.peek() == Some(b']') {
+                        return Err(self.err("a trailing comma"));
+                    }
+                }
+                Some(b']') => {
+                    self.i += 1;
+                    return Ok(Json::Array(items));
+                }
+                _ => return Err(self.err("',' or ']' expected")),
+            }
+        }
+    }
+    fn string(&mut self) -> Result<String, String> {
+        self.expect(b'"')?;
+        let mut out = Vec::new();
+        loop {
+            let c = match self.peek() {
+                Some(c) => c,
+                None => return Err(self.err("the text ends inside a string")),
+            };
+            self.i += 1;
+            match c {
+                b'"' => break,
+                b'\\' => {
+                    let e = match self.peek() {
+                        Some(e) => e,
+                        None => return Err(self.err("the text ends inside an escape")),
+                    };
+                    self.i += 1;
+                    out.push(match e {
+                        b'"' => b'"',
+                        b'\\' => b'\\',
+                        b'/' => b'/',
+                        b'b' => 8,
+                        b'f' => 12,
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        b'u' => return Err(self.err("a \\u escape is not in the facts' shape (the files are ASCII)")),
+                        _ => return Err(self.err("an unknown escape")),
+                    });
+                }
+                c if c < 0x20 => return Err(self.err("a control byte inside a string")),
+                c => out.push(c),
+            }
+        }
+        String::from_utf8(out).map_err(|_| self.err("a string that is not UTF-8"))
+    }
+    fn integer(&mut self) -> Result<Json, String> {
+        let start = self.i;
+        while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+            self.i += 1;
+        }
+        if matches!(self.peek(), Some(b'.') | Some(b'e') | Some(b'E')) {
+            return Err(self.err("a fraction or an exponent is not in the facts' shape"));
+        }
+        let text = std::str::from_utf8(&self.b[start..self.i]).unwrap_or("");
+        if text.len() > 1 && text.starts_with('0') {
+            return Err(self.err("a number with a leading zero"));
+        }
+        text.parse::<u64>().map(Json::Int).map_err(|_| self.err("a whole number too large"))
+    }
+}
+
+/// The whole text as one value, nothing but whitespace after it.
+fn json_parse(text: &[u8], where_: &str) -> Result<Json, String> {
+    let mut r = JsonReader { b: text, i: 0, where_ };
+    let v = r.value()?;
+    r.skip_ws();
+    if r.i != r.b.len() {
+        return Err(r.err("text after the value"));
+    }
+    Ok(v)
+}
+
+impl Json {
+    fn member<'a>(&'a self, key: &str, where_: &str) -> Result<&'a Json, String> {
+        match self {
+            Json::Object(m) => m.iter().find(|(k, _)| k == key).map(|(_, v)| v).ok_or(format!("{where_}: no '{key}' member")),
+            _ => Err(format!("{where_}: not an object")),
+        }
+    }
+    fn str(&self, key: &str, where_: &str) -> Result<String, String> {
+        match self.member(key, where_)? {
+            Json::Str(s) => Ok(s.clone()),
+            _ => Err(format!("{where_}: '{key}' is not a string")),
+        }
+    }
+    fn int(&self, key: &str, where_: &str) -> Result<u64, String> {
+        match self.member(key, where_)? {
+            Json::Int(n) => Ok(*n),
+            _ => Err(format!("{where_}: '{key}' is not a whole number")),
+        }
+    }
+    fn ints(&self, key: &str, where_: &str) -> Result<Vec<u64>, String> {
+        match self.member(key, where_)? {
+            Json::Array(a) => a
+                .iter()
+                .map(|v| match v {
+                    Json::Int(n) => Ok(*n),
+                    _ => Err(format!("{where_}: '{key}' holds something that is not a whole number")),
+                })
+                .collect(),
+            _ => Err(format!("{where_}: '{key}' is not an array")),
+        }
+    }
+    fn objects<'a>(&'a self, key: &str, where_: &str) -> Result<Vec<&'a Json>, String> {
+        match self.member(key, where_)? {
+            Json::Array(a) => a
+                .iter()
+                .map(|v| if matches!(v, Json::Object(_)) { Ok(v) } else { Err(format!("{where_}: '{key}' holds something that is not an object")) })
+                .collect(),
+            _ => Err(format!("{where_}: '{key}' is not an array")),
+        }
+    }
+}
+
+/// One boards/<row>.json file of the SDK package (the board class's
+/// source of facts): the pin table's rules, the buses, the clock and the
+/// posture -- the members the tie and the board class's markers read.
+#[derive(Clone, Default)]
+struct FactsFile {
+    name: String,
+    maker: String,
+    product: String,
+    chip: String,
+    clock_hz: u64,
+    posture: String,
+    pins: u64,
+    labels: String,
+    i2c: Vec<(u64, u64, u64, Vec<u64>)>,
+    spi: Vec<(u64, u64, u64, u64, Vec<u64>, u64, u64)>,
+}
+
+fn read_facts_file(path: &Path) -> Result<FactsFile, String> {
+    let text = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let where_ = path.display().to_string();
+    let j = json_parse(&text, &where_)?;
+    let w = where_.as_str();
+    let mut f = FactsFile {
+        name: j.str("name", w)?,
+        maker: j.str("maker", w)?,
+        product: j.str("product", w)?,
+        chip: j.str("chip", w)?,
+        clock_hz: j.int("clockHz", w)?,
+        posture: j.str("posture", w)?,
+        pins: j.int("pins", w)?,
+        labels: j.str("labels", w)?,
+        ..FactsFile::default()
+    };
+    for b in j.objects("i2c", w)? {
+        f.i2c.push((b.int("block", w)?, b.int("sda", w)?, b.int("scl", w)?, b.ints("rates", w)?));
+    }
+    for b in j.objects("spi", w)? {
+        f.spi.push((b.int("block", w)?, b.int("sck", w)?, b.int("mosi", w)?, b.int("miso", w)?, b.ints("cs", w)?, b.int("min", w)?, b.int("max", w)?));
+    }
+    if f.name.is_empty() || f.pins == 0 || f.clock_hz == 0 || f.posture.is_empty() {
+        return Err(format!("{where_}: an empty name, pins, clockHz or posture"));
+    }
+    Ok(f)
+}
+
+/// `pub const NAME: <type> = <value>;` in a kernel source: the value's text.
+fn rust_const(text: &str, name: &str) -> Option<String> {
+    let key = format!("pub const {name}: ");
+    let start = text.find(&key)? + key.len();
+    let eq = text[start..].find('=')? + start + 1;
+    let end = text[eq..].find(';')? + eq;
+    Some(text[eq..end].trim().to_string())
+}
+
+fn rust_number(s: &str) -> Option<u64> {
+    s.trim().replace('_', "").parse().ok()
+}
+
+/// SYSCLK_HZ under a posture: the definition whose `#[cfg(...)]` line (the
+/// nearest above it) says `not(` for the default posture, or names the
+/// posture; a module with one definition and no cfg serves every posture.
+fn kernel_sysclk(text: &str, posture: &str) -> Option<u64> {
+    let key = "pub const SYSCLK_HZ: u32 = ";
+    let mut best = None;
+    for (i, _) in text.match_indices(key) {
+        let rest = &text[i + key.len()..];
+        let value = rust_number(&rest[..rest.find(';')?])?;
+        let cfg = text[..i].lines().rev().take(4).find(|l| l.trim().starts_with("#[cfg(")).map(|l| l.to_string());
+        let fits = match &cfg {
+            None => true,
+            Some(c) if posture == "default" => c.contains("not("),
+            Some(c) => !c.contains("not(") && c.contains(posture),
+        };
+        if fits {
+            best = Some(value);
+        }
+    }
+    best
+}
+
+/// The `line: <n>` numbers of a pad row, or the numbers of a select list.
+fn pad_lines(text: &str, name: &str) -> Option<Vec<u64>> {
+    let key = format!("pub const {name}: ");
+    let start = text.find(&key)?;
+    let end = text[start..].find("];")? + start;
+    let block = &text[start..end];
+    let mut out = Vec::new();
+    if block.contains("line:") {
+        for (i, _) in block.match_indices("line:") {
+            let rest = block[i + 5..].trim_start();
+            let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            out.push(n.parse().ok()?);
+        }
+    } else {
+        let open = block.rfind('[')? + 1;
+        for n in block[open..].split(',') {
+            out.push(n.trim().parse().ok()?);
+        }
+    }
+    Some(out)
+}
+
+/// One row's facts file beside the kernel's facts.
+#[derive(Clone)]
+struct BoardFactsRow {
+    board: String,
+    lines: u64,
+    kernel_lines: u64,
+    clock_hz: u64,
+    kernel_clock_hz: u64,
+    ties: Vec<(String, u64, u64)>,
+    /// The facts file's I2C rates and the kernel's modes whose floor the row's clock reaches, in order (the rate tie).
+    rates: Vec<u64>,
+    kernel_rates: Vec<u64>,
+    /// Per SPI bus: the facts file's slowest and fastest rate, and the block's ladder's at its clock.
+    ladder: Vec<(u64, u64, u64, u64)>,
+    kernel_spi_hz: u64,
+}
+
+/// Every row of the board table has a facts file naming it; its pin count,
+/// its clock at the row's posture and the bus pads are read against the
+/// kernel's facts (`src/kernel/src/board/facts/<row>.rs`, the emulator rows
+/// sharing `mps2.rs`; the chip's bus rows in `rp2350_bus_math.rs`). Nothing
+/// of LEDs or buttons is in the facts files: the board pages' matter.
+fn read_board_facts(repo: &Path) -> Result<Vec<BoardFactsRow>, String> {
+    let sdk = repo.join("src").join("sdk").join("Lamella.Rhu.Sdk");
+    let boards = std::fs::read_to_string(sdk.join("Sdk").join("boards.props")).map_err(|e| format!("boards.props: {e}"))?;
+    let kboard = repo.join("src").join("kernel").join("src").join("board");
+    let mut rows = Vec::new();
+    for (i, _) in boards.match_indices("<LamellaTargetBoardRow Include=\"") {
+        let end = boards[i..].find("/>").ok_or("a board row without its end")? + i;
+        let board = row_attr_text(&boards[i..end], "Include").ok_or("a board row without a name")?;
+        let facts = read_facts_file(&sdk.join("boards").join(format!("{board}.json")))?;
+        if facts.name != board {
+            return Err(format!("boards/{board}.json names '{}', not its row", facts.name));
+        }
+        let name = board.strip_prefix("arm-").unwrap_or(&board).replace('-', "_");
+        let mut kfile = kboard.join("facts").join(format!("{name}.rs"));
+        if !kfile.is_file() {
+            let shared = name.rsplit_once('_').map(|(a, _)| a.to_string()).unwrap_or(name.clone());
+            kfile = kboard.join("facts").join(format!("{shared}.rs"));
+        }
+        let ktext = std::fs::read_to_string(&kfile).map_err(|e| format!("{}: {e}", kfile.display()))?;
+        let kernel_lines = rust_const(&ktext, "LINE_COUNT").and_then(|v| rust_number(&v)).ok_or(format!("{}: no LINE_COUNT", kfile.display()))?;
+        let bfile = kboard.join(format!("{name}.rs"));
+        let btext = std::fs::read_to_string(&bfile).map_err(|e| format!("{}: {e}", bfile.display()))?;
+        let kernel_clock_hz = match kernel_sysclk(&btext, &facts.posture) {
+            Some(v) => v,
+            None => {
+                let chip = btext
+                    .lines()
+                    .find_map(|l| l.trim().strip_prefix("pub use super::").and_then(|r| r.strip_suffix("::*;")))
+                    .ok_or(format!("{}: no SYSCLK_HZ at the posture '{}' and no chip module re-export", bfile.display(), facts.posture))?;
+                let ctext = std::fs::read_to_string(kboard.join(format!("{chip}.rs"))).map_err(|e| format!("{chip}.rs: {e}"))?;
+                kernel_sysclk(&ctext, &facts.posture).ok_or(format!("{chip}.rs: no SYSCLK_HZ at the posture '{}'", facts.posture))?
+            }
+        };
+        let mut ties = Vec::new();
+        let mut rates = Vec::new();
+        let mut kernel_rates = Vec::new();
+        let mut ladder = Vec::new();
+        let mut kernel_spi_hz = 0;
+        if !facts.i2c.is_empty() || !facts.spi.is_empty() {
+            if !ktext.contains("rp2350_bus_math::i2c_buses") {
+                return Err(format!("{board}: the facts file carries buses but the tie knows the kernel's bus rows for the RP2350 alone"));
+            }
+            let bus = std::fs::read_to_string(repo.join("src").join("kernel").join("src").join("rp2350_bus_math.rs")).map_err(|e| format!("rp2350_bus_math.rs: {e}"))?;
+            let i2c_pads = pad_lines(&bus, "I2C0_PADS").ok_or("rp2350_bus_math.rs: no I2C0_PADS")?;
+            let spi_pads = pad_lines(&bus, "SPI0_PADS").ok_or("rp2350_bus_math.rs: no SPI0_PADS")?;
+            let selects = pad_lines(&bus, "SPI0_SELECTS").ok_or("rp2350_bus_math.rs: no SPI0_SELECTS")?;
+            let modes = kernel_i2c_modes(&bus).ok_or("rp2350_bus_math.rs: no I2C_MODES rows with rate_hz and floor_hz")?;
+            kernel_spi_hz = rust_const(&bus, "SPI_CLOCK_HZ").and_then(|v| rust_number(&v)).ok_or("rp2350_bus_math.rs: no SPI_CLOCK_HZ")?;
+            kernel_rates = modes.iter().filter(|(_, floor)| *floor <= kernel_clock_hz).map(|(rate, _)| *rate).collect();
+            for (block, sda, scl, r) in &facts.i2c {
+                if *block != 0 || i2c_pads.len() != 2 {
+                    return Err(format!("{board}: the kernel's bus rows carry I2C block 0 alone (two pads)"));
+                }
+                ties.push(("I2C0's data pad".to_string(), *sda, i2c_pads[0]));
+                ties.push(("I2C0's clock pad".to_string(), *scl, i2c_pads[1]));
+                rates = r.clone();
+            }
+            for (block, sck, mosi, miso, cs, min, max) in &facts.spi {
+                if *block != 0 || spi_pads.len() != 3 || cs.len() != selects.len() {
+                    return Err(format!("{board}: the kernel's bus rows carry SPI block 0 alone (three pads, {} select)", selects.len()));
+                }
+                ties.push(("SPI0's clock pad".to_string(), *sck, spi_pads[0]));
+                ties.push(("SPI0's out pad".to_string(), *mosi, spi_pads[1]));
+                ties.push(("SPI0's in pad".to_string(), *miso, spi_pads[2]));
+                for (k, c) in cs.iter().enumerate() {
+                    ties.push((format!("SPI0's select {k}"), *c, selects[k]));
+                }
+                ladder.push((*min, *max, kernel_spi_hz / (254 * 256), kernel_spi_hz / 2));
+            }
+        }
+        rows.push(BoardFactsRow { board, lines: facts.pins, kernel_lines, clock_hz: facts.clock_hz, kernel_clock_hz, ties, rates, kernel_rates, ladder, kernel_spi_hz });
+    }
+    Ok(rows)
+}
+
+fn board_facts_fault(rows: &[BoardFactsRow]) -> Option<String> {
+    if rows.is_empty() {
+        return Some("the board table has no rows with facts files".to_string());
+    }
+    for r in rows {
+        if r.lines != r.kernel_lines {
+            return Some(format!("{}: the facts file's pins {} != the kernel's LINE_COUNT {}", r.board, r.lines, r.kernel_lines));
+        }
+        if r.clock_hz != r.kernel_clock_hz {
+            return Some(format!("{}: the facts file's clockHz {} != the kernel's SYSCLK_HZ {} at the row's posture", r.board, r.clock_hz, r.kernel_clock_hz));
+        }
+        if r.rates != r.kernel_rates {
+            return Some(format!("{}: the facts file's I2C rates {} != the kernel's modes at {} Hz: {}", r.board, number_list(&r.rates), r.kernel_clock_hz, number_list(&r.kernel_rates)));
+        }
+        for (min, max, kmin, kmax) in &r.ladder {
+            if min != kmin || max != kmax {
+                return Some(format!("{}: the facts file's SPI range {min} to {max} != the block's ladder {kmin} to {kmax} at {} Hz", r.board, r.kernel_spi_hz));
+            }
+        }
+        for (what, ours, theirs) in &r.ties {
+            if ours != theirs {
+                return Some(format!("{}: {what} {ours} != the kernel's {theirs}", r.board));
+            }
+        }
+    }
+    None
+}
+
+/// Numbers joined with commas; "none" for an empty list.
+fn number_list(v: &[u64]) -> String {
+    if v.is_empty() {
+        "none".to_string()
+    } else {
+        v.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
+    }
+}
+
+/// The kernel's I2C modes as (rate, floor) pairs in the set's order: the
+/// `rate_hz:` and `floor_hz:` numbers of each row of `pub const I2C_MODES`.
+fn kernel_i2c_modes(text: &str) -> Option<Vec<(u64, u64)>> {
+    let start = text.find("pub const I2C_MODES: ")?;
+    let end = text[start..].find("];")? + start;
+    let block = &text[start..end];
+    let mut out = Vec::new();
+    for row in block.split("I2cMode {").skip(1) {
+        out.push((field_number(row, "rate_hz:")?, field_number(row, "floor_hz:")?));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// The number after `key` in a struct row (`rate_hz: 100_000`), underscores allowed.
+fn field_number(row: &str, key: &str) -> Option<u64> {
+    let i = row.find(key)? + key.len();
+    let n: String = row[i..].trim_start().chars().take_while(|c| c.is_ascii_digit() || *c == '_').collect();
+    rust_number(&n)
+}
+
+/// The one RHU request on the I2C node (the rate request): the shim's `#define BUSDEV_I2C_RATE 0x...u`
+/// and the board class's private constant `BusRateRequest = 0x...` carry the same number,
+/// read as text as the pads are; the number as the shim writes it.
+fn request_tie(repo: &Path) -> Result<String, String> {
+    let shim = std::fs::read_to_string(repo.join("src").join("shim").join("rhu_busdev.c")).map_err(|e| format!("rhu_busdev.c: {e}"))?;
+    let class = std::fs::read_to_string(repo.join("src").join("sdk").join("Lamella.Hardware").join("TargetBoard.cs")).map_err(|e| format!("TargetBoard.cs: {e}"))?;
+    let shim_n = hex_after(&shim, "#define BUSDEV_I2C_RATE 0x").ok_or("rhu_busdev.c: no '#define BUSDEV_I2C_RATE 0x...'")?;
+    let class_n = hex_after(&class, "BusRateRequest = 0x").ok_or("TargetBoard.cs: no 'BusRateRequest = 0x...'")?;
+    if shim_n != class_n {
+        return Err(format!("the rate request's number differs: the shim's define 0x{shim_n}, the board class's constant 0x{class_n}"));
+    }
+    Ok(format!("0x{shim_n}"))
+}
+
+fn hex_after(text: &str, key: &str) -> Option<String> {
+    let i = text.find(key)? + key.len();
+    let n: String = text[i..].chars().take_while(|c| c.is_ascii_hexdigit()).map(|c| c.to_ascii_lowercase()).collect();
+    if n.is_empty() {
+        None
+    } else {
+        Some(n)
+    }
+}
+
+/// The board class's four lines as the row's facts file predicts them, in order.
+fn board_class_markers(repo: &Path, board: &str) -> Result<Vec<String>, String> {
+    let f = read_facts_file(&repo.join("src").join("sdk").join("Lamella.Rhu.Sdk").join("boards").join(format!("{board}.json")))?;
+    let list = |v: Vec<u64>| if v.is_empty() { "none".to_string() } else { v.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ") };
+    let i2c: Vec<u64> = f.i2c.iter().map(|b| b.0).collect();
+    let spi: Vec<u64> = f.spi.iter().map(|b| b.0).collect();
+    let who = format!("{} {} ({})", f.maker, f.product, f.name);
+    let label0 = match f.labels.as_str() {
+        "gp" => "GP0".to_string(),
+        "port" => "PA0".to_string(),
+        _ => "none".to_string(),
+    };
+    let third = if i2c.contains(&0) {
+        "TBHELLO: I2C bus 0 at 100000 Hz: device created".to_string()
+    } else if i2c.is_empty() {
+        format!("TBHELLO: NotSupportedException: {who} has no I2C bus 0; the row carries no I2C bus")
+    } else {
+        format!("TBHELLO: NotSupportedException: {who} has no I2C bus 0; its buses: {}", list(i2c.clone()))
+    };
+    Ok(vec![
+        format!("TBHELLO: {who}, {} at {} Hz, {} pins, I2C {}, SPI {}", f.chip, f.clock_hz, f.pins, list(i2c), list(spi)),
+        format!("TBHELLO: pins {}; pin 0: labels {label0}", f.pins),
+        third,
+        "TBHELLO: end".to_string(),
+    ])
+}
+
 /// The board table's stack facts beside the tree's constants: a row's
 /// kernel file is its name without the `arm-` prefix, hyphens as
-/// underscores, under src/kernel/src/board; its hosting-layer block names
-/// the same name in MGC_ROW_BOARD.
+/// underscores, under src/kernel/src/board (a file that carries no pool
+/// of its own re-exports its chip module's, and the pool is read there);
+/// its hosting-layer block names the same name in MGC_ROW_BOARD.
 fn read_stack_facts(repo: &Path) -> Result<StackFacts, String> {
     let sdk = repo.join("src").join("sdk").join("Lamella.Rhu.Sdk").join("Sdk");
     let boards = std::fs::read_to_string(sdk.join("boards.props")).map_err(|e| format!("boards.props: {e}"))?;
@@ -3646,7 +4186,7 @@ fn read_stack_facts(repo: &Path) -> Result<StackFacts, String> {
     let host = std::fs::read_to_string(repo.join("src").join("gc").join("host").join("mgc_board_rows.h")).map_err(|e| format!("mgc_board_rows.h: {e}"))?;
     let header = std::fs::read_to_string(repo.join("src").join("kernel").join("include").join("rhu.h")).map_err(|e| format!("rhu.h: {e}"))?;
     let mut rows = Vec::new();
-    for (i, _) in boards.match_indices("<RhuBoardRow Include=\"") {
+    for (i, _) in boards.match_indices("<LamellaTargetBoardRow Include=\"") {
         let end = boards[i..].find("/>").ok_or("a board row without its end")? + i;
         let row = &boards[i..end];
         let board = row_attr_text(row, "Include").ok_or("a board row without a name")?;
@@ -3656,7 +4196,18 @@ fn read_stack_facts(repo: &Path) -> Result<StackFacts, String> {
         let name = board.strip_prefix("arm-").unwrap_or(&board).to_string();
         let file = repo.join("src").join("kernel").join("src").join("board").join(format!("{}.rs", name.replace('-', "_")));
         let ktext = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-        let kernel_pool = kernel_pool_bytes(&ktext).ok_or(format!("{}: no STACK_POOL_BYTES", file.display()))?;
+        let kernel_pool = match kernel_pool_bytes(&ktext) {
+            Some(v) => v,
+            None => {
+                let chip = ktext
+                    .lines()
+                    .find_map(|l| l.trim().strip_prefix("pub use super::").and_then(|r| r.strip_suffix("::*;")))
+                    .ok_or(format!("{}: no STACK_POOL_BYTES and no chip module re-export", file.display()))?;
+                let cfile = repo.join("src").join("kernel").join("src").join("board").join(format!("{chip}.rs"));
+                let ctext = std::fs::read_to_string(&cfile).map_err(|e| format!("{}: {e}", cfile.display()))?;
+                kernel_pool_bytes(&ctext).ok_or(format!("{}: no STACK_POOL_BYTES (the chip module {} re-exports)", cfile.display(), file.display()))?
+            }
+        };
         let block = host_row_block(&host, &name).ok_or(format!("mgc_board_rows.h: no row block names {name}"))?;
         let host_default = c_define(block, "MGC_ROW_STACK_DEFAULT").ok_or(format!("mgc_board_rows.h: the {name} block has no MGC_ROW_STACK_DEFAULT"))?;
         let host_clamp = c_define(block, "MGC_ROW_STACK_CLAMP").ok_or(format!("mgc_board_rows.h: the {name} block has no MGC_ROW_STACK_CLAMP"))?;
@@ -3891,14 +4442,17 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     let controls = std::fs::read_to_string(out.join("controls.txt")).unwrap_or_default();
     for (name, broke, needle, what) in [
         ("frozen", "frozen-byte", "does not tie its record", "one byte of a frozen tier object changed"),
-        ("board-missing", "board-missing", "RhuBoard is not set", "no board named"),
+        ("board-missing", "board-missing", "LamellaTargetBoard is not set", "no board named"),
         ("board-unknown", "board-unknown", "is not in the table", "a board not in the table"),
         ("tool", "tool-byte", "does not tie its record", "one byte of the object copier changed"),
         ("posture", "posture", "InvariantGlobalization", "the fixed posture moved"),
+        ("pack-root", "pack-root", "NetCoreTargetingPackRoot", "the reference assemblies' pack root moved back to the .NET SDK's own folder"),
         ("stack-clamp", "stack-clamp", "above the row's clamp", "a thread stack above the row's clamp"),
         ("stack-min", "stack-min", "below the kernel's minimum", "a thread stack below the kernel's minimum"),
         ("stack-nan", "stack-nan", "not a whole number", "a thread stack that is not a whole number"),
         ("stack-budget", "stack-budget", "fewer than three stacks", "a thread stack the row's pool cannot hold three of (the package's table in the cache doctored to a 64 KiB pool)"),
+        ("facts-missing", "facts-missing", "no board facts for", "the board class's program with the row's facts file deleted from the package in the cache (the generation must refuse before anything is compiled)"),
+        ("facts-byte", "facts-byte", "does not tie its record", "the board class's program with one byte of the row's facts file changed in the package in the cache (the frozen record must refuse at the link)"),
     ] {
         let case = format!("rt.sdk-parity-control-{name}");
         println!("== case {case}: {what} -- the publish must refuse, nothing linked ==");
@@ -3960,17 +4514,57 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         println!("  {}: pool {} B, default {} B, clamp {} B -- the kernel's pool {}, the hosting layer's default {} and clamp {}", r.board, r.pool, r.default, r.clamp, r.kernel_pool, r.host_default, r.host_clamp);
     }
     println!("  the targets' minimum {} B = the header's RHU_THREAD_STACK_MIN {}", stack_facts.sdk_min, stack_facts.kernel_min);
-    rt.pass(case, "positive", "", &format!("{{\"rows\":{}}}", stack_facts.rows.len()));
+    let board_facts = match read_board_facts(repo) {
+        Ok(f) => f,
+        Err(e) => rt.fail(case, &e),
+    };
+    if let Some(f) = board_facts_fault(&board_facts) {
+        rt.fail(case, &f);
+    }
+    for r in &board_facts {
+        if r.ties.is_empty() {
+            println!("  {}: the facts file's {} pins and {} Hz = the kernel's LINE_COUNT and SYSCLK_HZ at the row's posture; {} bus pins tied", r.board, r.lines, r.clock_hz, r.ties.len());
+        } else {
+            let ranges: Vec<String> = r.ladder.iter().map(|(min, max, _, _)| format!("{min} to {max}")).collect();
+            println!("  {}: the facts file's {} pins and {} Hz = the kernel's LINE_COUNT and SYSCLK_HZ at the row's posture; {} bus pins tied; the I2C rates {} = the kernel's modes at that clock; the SPI range {} = the block's ladder at {} Hz", r.board, r.lines, r.clock_hz, r.ties.len(), number_list(&r.rates), ranges.join(" and "), r.kernel_spi_hz);
+        }
+    }
+    match request_tie(repo) {
+        Ok(n) => println!("  the rate request's number {n}: the shim's define and the board class's constant carry the same number"),
+        Err(e) => rt.fail(case, &e),
+    }
+    rt.pass(case, "positive", "", &format!("{{\"rows\":{},\"facts_files\":{}}}", stack_facts.rows.len(), board_facts.len()));
     println!("  PASS");
     let case = "rt.sdk-parity-control-row-facts";
-    println!("== case {case}: the same facts with the first row's pool moved by one byte -- the tie must refuse ==");
+    println!("== case {case}: the same facts with the first row's pool moved by one byte, and the first facts file's line count moved by one -- the tie must refuse both ==");
     let mut doctored = stack_facts.clone();
     doctored.rows[0].pool += 1;
     match stack_facts_fault(&doctored) {
         Some(f) => println!("  refused: {f}"),
         None => rt.fail_control(case, "row-facts", "a doctored pool was accepted by the tie"),
     }
+    let mut doctored_facts = board_facts.clone();
+    doctored_facts[0].lines += 1;
+    match board_facts_fault(&doctored_facts) {
+        Some(f) => println!("  refused: {f}"),
+        None => rt.fail_control(case, "row-facts", "a doctored line count was accepted by the tie"),
+    }
     rt.pass(case, "negative", "row-facts", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-rates";
+    println!("== case {case}: the first row with buses, its facts file's I2C rates doctored to list 250000 among them -- the tie must refuse ==");
+    let mut doctored_rates = board_facts.clone();
+    let Some(row) = doctored_rates.iter_mut().find(|r| !r.rates.is_empty()) else {
+        rt.fail_control(case, "rates", "no row with buses to doctor");
+    };
+    row.rates.push(250_000);
+    row.rates.sort_unstable();
+    match board_facts_fault(&doctored_rates) {
+        Some(f) if f.contains("the facts file's I2C rates") => println!("  refused: {f}"),
+        Some(f) => rt.fail_control(case, "rates", &format!("the tie refused for another reason: {f}")),
+        None => rt.fail_control(case, "rates", "a doctored rates list was accepted by the tie"),
+    }
+    rt.pass(case, "negative", "rates", "");
     println!("  PASS");
 
     let case = "rt.sdk-parity-stack-knob";
@@ -4097,11 +4691,63 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "negative", "source-control-queries", "");
     println!("  PASS");
 
+    let case = "rt.sdk-parity-board-class";
+    println!("== case {case}: the board class's program published through the SDK with the row's facts generated into it, its image booted on the emulator -- the class's four lines in order, exit 0 ==");
+    let Some(line) = control_line(&controls, "board-class") else {
+        rt.fail(case, "the publish-side script left no summary line for the board class's publish");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "generated") != "1" {
+        rt.fail(case, &format!("the board class's publish did not run as registered (rc 0, the image present, the facts generated once): {line}"));
+    }
+    let class_markers = match board_class_markers(repo, w.sdk_board) {
+        Ok(m) => m,
+        Err(e) => rt.fail(case, &e),
+    };
+    let class_elf = out.join("control-board-class").join("tbhello.elf");
+    let class_elf_arg = class_elf.to_string_lossy().into_owned();
+    let raw_path = out.join("board-class-boot.raw");
+    let stderr_path = out.join("board-class-boot.stderr");
+    let mut qargs: Vec<&str> = vec!["-M", w.machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+    qargs.extend_from_slice(ExecProfile::Parity.qemu_args());
+    qargs.push("-kernel");
+    qargs.push(&class_elf_arg);
+    let outcome = match run_captured(&qemu, &qargs, &raw_path, &stderr_path, Duration::from_secs(RUN_TIMEOUT_S)) {
+        Ok(o) => o,
+        Err(e) => rt.fail(case, &e),
+    };
+    let raw = std::fs::read(&raw_path).unwrap_or_default();
+    echo_file(&raw_path, "  | ");
+    if outcome.timed_out {
+        rt.fail(case, "the board class's boot hung (killed at its timeout)");
+    }
+    if cr_count(&raw) == 0 {
+        rt.fail(case, "no CR bytes in raw capture (wire discipline lost)");
+    }
+    let class_marker_refs: Vec<&str> = class_markers.iter().map(String::as_str).collect();
+    if let Some(fault) = markers_out_of_order(&raw, &class_marker_refs) {
+        rt.fail(case, &format!("the board class's lines, as the row's facts file predicts them: {fault}"));
+    }
+    if !contains_fixed(&raw, BOOT_RETURN_LINE) {
+        rt.fail(case, &format!("the kernel's return line '{BOOT_RETURN_LINE}' not found"));
+    }
+    for m in FORBIDDEN_PATTERNS {
+        if contains_fixed(&raw, m) {
+            rt.fail(case, &format!("forbidden pattern '{m}' present"));
+        }
+    }
+    if outcome.exit != 0 {
+        rt.fail(case, &format!("exit {}, wanted 0", outcome.exit));
+    }
+    let class_sha = sha256_file(&class_elf).unwrap_or_default();
+    let class_rel = format!("{out_rel}/control-board-class/tbhello.elf");
+    rt.pass_image(case, 0, &class_rel, &class_sha, None, &format!("{{\"markers\":{},\"board\":\"{}\"}}", class_markers.len(), w.sdk_board));
+    println!("  PASS (the class's {} lines in the facts file's order; the image {}...; {qemu_version})", class_markers.len(), &class_sha[..16.min(class_sha.len())]);
+
     rt.results.emit_summary(w.sdk_gate, "pass", 0);
     if !validate_results(repo, rt.results.path()) {
         println!("{}: FAIL -- results file failed schema validation", w.sdk_display);
         exit(1);
     }
-    println!("{}: PASS (8 positive cases -- 5 ties byte for byte, the fifth the same project at another directory under the SDK's path map; the board table's stack facts tied to the tree; the stack knob's image booted with the row's default moved; a real git checkout at another path tying the record -- + 12 negative controls through the real tool; the Linux environment's transcript under {out_rel})  [{} | {}]", w.sdk_display, facts.version, ld.version);
+    println!("{}: PASS (9 positive cases -- 5 ties byte for byte, the fifth the same project at another directory under the SDK's path map; the board table's stack facts and the boards' facts files tied to the tree; the stack knob's image booted with the row's default moved; a real git checkout at another path tying the record; the board class's program booted with the row's facts generated into it -- + 16 negative controls through the real tool; the Linux environment's transcript under {out_rel})  [{} | {}]", w.sdk_display, facts.version, ld.version);
     exit(0);
 }

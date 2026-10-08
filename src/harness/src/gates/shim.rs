@@ -1,7 +1,7 @@
 //! The shim gate on the runner: the hosting shim's gate family, running
 //! on FROZEN world objects and goldens (goldens/shim) -- the consumer
 //! story is Rust + QEMU only; the shim's C compile happens once, on the
-//! maintainer's re-derivation leg ('rhu-gate shim rederive'), and its
+//! re-derivation leg ('rhu-gate shim rederive'), and its
 //! objects are committed.
 
 use crate::gate::{class_flag_sets_tie, write_fixture, Class, Selfcheck};
@@ -93,7 +93,7 @@ fn cc_flags(class: Class) -> &'static [&'static str] {
 /// goldens/shim/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest. A re-freeze updates objects + goldens + manifest + this pin
 /// together in one reviewed commit.
-const SHA_FROZEN_MANIFEST: &str = "569867314e529ea32f0ea6bad14b5773ffd8ad6969ecd9218b49454ff835144f";
+const SHA_FROZEN_MANIFEST: &str = "091dce3f82910d715e8a5f2aee5b108121cd6065e8dbb028b2b665ca18cf669a";
 
 /// The frozen-object plan of record: file name under goldens/shim/,
 /// source TU, extra defines beyond the class's flag set, and the class
@@ -102,7 +102,7 @@ const SHA_FROZEN_MANIFEST: &str = "569867314e529ea32f0ea6bad14b5773ffd8ad6969ecd
 /// name both directions; 'rhu-gate shim rederive' recompiles every row
 /// under its class's flag set and byte-asserts the output against the
 /// frozen bytes.
-const FROZEN_PLAN: [(&str, &str, &[&str], Class); 61] = [
+const FROZEN_PLAN: [(&str, &str, &[&str], Class); 66] = [
     ("shim-core.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
     ("shim-core-break-sipid.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SIPID"], Class::CortexM7),
     ("shim-core-break-ctxpc.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_CTXPC"], Class::CortexM7),
@@ -138,7 +138,7 @@ const FROZEN_PLAN: [(&str, &str, &[&str], Class); 61] = [
     ("shim-libc-glue-an505.o", "src/shim/rhu_libc_glue.c", &[], Class::CortexM33),
     ("shim-host-an505.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
     ("shim-stdio-sym-an505.o", "src/shim/rhu_stdio_sym.c", &[], Class::CortexM33),
-    ("shim-core-u5a5.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_U5A5"], Class::CortexM33),
+    ("shim-core-rp2350.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_PICO2"], Class::CortexM33),
     ("shim-pal-surface.o", "src/shim/rhu_pal_surface_net11_rc1.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
     ("shim-pal-surface-an505.o", "src/shim/rhu_pal_surface_net11_rc1.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
     ("shim-gpiod.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
@@ -156,6 +156,7 @@ const FROZEN_PLAN: [(&str, &str, &[&str], Class); 61] = [
     ("shim-busdev-break-funcs-wide.o", "src/shim/rhu_busdev.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_BUSDEV_FUNCS_WIDE"], Class::CortexM7),
     ("shim-busdev-break-reread.o", "src/shim/rhu_busdev.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_BUSDEV_REREAD"], Class::CortexM7),
     ("shim-busdev-break-unowned.o", "src/shim/rhu_busdev.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_BUSDEV_UNOWNED"], Class::CortexM7),
+    ("shim-busdev-break-rate-unjudged.o", "src/shim/rhu_busdev.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_BUSDEV_RATE_UNJUDGED"], Class::CortexM7),
     ("shim-gpiod-break-open-unlocked.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_OPEN_UNLOCKED"], Class::CortexM7),
     ("shim-gpiod-break-close-keeps.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_CLOSE_KEEPS"], Class::CortexM7),
     ("shim-gpiod-break-iter-shared.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_ITER_SHARED"], Class::CortexM7),
@@ -164,6 +165,10 @@ const FROZEN_PLAN: [(&str, &str, &[&str], Class); 61] = [
     ("shim-gpiod-break-timeout-fields.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_TIMEOUT_FIELDS"], Class::CortexM7),
     ("shim-gpiod-break-arm-order.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_ARM_ORDER"], Class::CortexM7),
     ("shim-gpiod-break-kind-order.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_KIND_ORDER"], Class::CortexM7),
+    ("shim-sysnative-f769.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_F769"], Class::CortexM7),
+    ("shim-sysnative-rp2350.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_PICO2"], Class::CortexM33),
+    ("shim-sysnative-f769-break-frozen-backed.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_F769", "-DRHU_SHIM_BREAK_FROZEN_BACKED"], Class::CortexM7),
+    ("shimtest-frozen.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_FROZEN"], Class::CortexM7),
 ];
 
 /// The tier's text records beside the objects and goldens: the surface
@@ -174,7 +179,7 @@ const FROZEN_RECORDS: [&str; 1] = ["pal-surface.txt"];
 
 /// The frozen goldens: the payload stream of each positive image, class
 /// bytes. Recorded in the manifest beside the objects.
-const GOLDENS: [&str; 7] = [
+const GOLDENS: [&str; 8] = [
     "shimtest-core.golden.txt",
     "shimtest-fdmap.golden.txt",
     "shimtest-activation.golden.txt",
@@ -182,6 +187,7 @@ const GOLDENS: [&str; 7] = [
     "shimtest-host.golden.txt",
     "shimtest-busdev.golden.txt",
     "shimtest-gpiod.golden.txt",
+    "shimtest-frozen.golden.txt",
 ];
 
 /// The core object's EXACT import closure: the kernel verbs it consumes
@@ -316,13 +322,15 @@ const IMPORTS_GPIOD: [&str; 19] = [
 /// through as the bus number), the clock, the core's errno, diagnostics
 /// and mutex pair, and the C library's three (every record a request names
 /// is copied once before it is checked).
-const IMPORTS_BUSDEV: [&str; 12] = [
+const IMPORTS_BUSDEV: [&str; 14] = [
     "__errno_location",
     "memcpy",
     "memset",
     "pthread_mutex_lock",
     "pthread_mutex_unlock",
+    "rhu_i2c_bus",
     "rhu_i2c_claim",
+    "rhu_i2c_count",
     "rhu_i2c_transfer",
     "rhu_now_ns",
     "rhu_shim_log",
@@ -439,12 +447,13 @@ const MAP_SYMBOLS: [&str; 19] = [
 const FORBIDDEN_IMPORT_FAMILIES: [&str; 6] = ["_Unwind", "__cxa", "_ZSt", "__aeabi_f", "__aeabi_d", "__emutls"];
 
 /// The diagnostic lines the core run must carry (fixed strings).
-const PINNED_CORE_LINES: [&str; 11] = [
+const PINNED_CORE_LINES: [&str; 12] = [
     "[shim] init: per-thread block registered as module 1 (48 bytes)",
     "[shim] pthread_create: stack 96 KB clamped to 24 KB (the row's clamp)",
     "[shim] mmap: MAP_FIXED re-zero in place (decommit; further requests counted silently)",
     "[shim] frozen-object reserve 4096 KB -> pool 64 KB (commit guard armed)",
-    "[shim] frozen-object commit refused beyond the pool (managed allocation failure, never a wild write)",
+    "[shim] frozen object heap: a commit of 64 KB refused, it starts past the board's pool of 64 KB (the runtime reports out of memory)",
+    "[shim] frozen object heap: a second reservation of 4096 KB refused, the board's one pool of 64 KB is already reserved (the runtime reports out of memory)",
     "[shim] entropy: cryptographic draws through the kernel's secure entropy call; hardware source: no",
     "[shim] entropy: the kernel's secure entropy call refused a cryptographic draw (an invalid argument); the draw fails and nothing is served (further refusals counted silently)",
     "[shim] calendar: the kernel's calendar serves the wall clock; source: unset (the epoch plus the elapsed clock)",
@@ -457,7 +466,18 @@ const CORE_ALL_GOOD: &str = "SHIMTEST: ALL GOOD (glibc personality + PAL on the 
 const FDMAP_ALL_GOOD: &str = "SHIMTEST-FDMAP: ALL GOOD (explicit descriptor bands; the console never answers for a file)";
 const BUSDEV_ALL_GOOD: &str = "SHIMTEST-BUSDEV: ALL GOOD (the bus device nodes from a native caller's side)";
 const GPIOD_ALL_GOOD: &str = "SHIMTEST-GPIOD: ALL GOOD (the GPIO library surface from a native caller's side)";
+const FROZEN_ALL_GOOD: &str = "SHIMTEST-FROZEN: ALL GOOD (the frozen object heap on a small board's pool)";
 const CANARY_LINE: &str = "[shim] free: corrupt block header (canary)";
+
+/// The diagnostic lines the frozen-pool run must carry (fixed strings):
+/// the per-thread block, the reservation served from the small row's pool,
+/// and the two refusals with the pool's size in them.
+const PINNED_FROZEN_LINES: [&str; 4] = [
+    "[shim] init: per-thread block registered as module 1 (48 bytes)",
+    "[shim] frozen-object reserve 4096 KB -> pool 16 KB (commit guard armed)",
+    "[shim] frozen object heap: a commit of 64 KB refused, it starts past the board's pool of 16 KB (the runtime reports out of memory)",
+    "[shim] frozen object heap: a second reservation of 4096 KB refused, the board's one pool of 16 KB is already reserved (the runtime reports out of memory)",
+];
 
 /// The diagnostic lines the activation run must carry (fixed strings):
 /// the per-thread block, the two refusals before any registration, the
@@ -613,7 +633,7 @@ const PENDING: [&str; 0] = [];
 /// no instruction outside the Cortex-M7 decoder's reach, so one decoder
 /// censuses the whole tier. A moved count means the source, a flag or the
 /// compiler changed.
-const FP_CENSUS: [(&str, u32); 61] = [
+const FP_CENSUS: [(&str, u32); 66] = [
     ("shim-core.o", 0),
     ("shim-core-break-sipid.o", 0),
     ("shim-core-break-ctxpc.o", 0),
@@ -649,7 +669,7 @@ const FP_CENSUS: [(&str, u32); 61] = [
     ("shim-libc-glue-an505.o", 0),
     ("shim-host-an505.o", 0),
     ("shim-stdio-sym-an505.o", 0),
-    ("shim-core-u5a5.o", 0),
+    ("shim-core-rp2350.o", 0),
     ("shim-pal-surface.o", 0),
     ("shim-pal-surface-an505.o", 0),
     ("shim-gpiod.o", 0),
@@ -667,6 +687,7 @@ const FP_CENSUS: [(&str, u32); 61] = [
     ("shim-busdev-break-funcs-wide.o", 0),
     ("shim-busdev-break-reread.o", 0),
     ("shim-busdev-break-unowned.o", 0),
+    ("shim-busdev-break-rate-unjudged.o", 0),
     ("shim-gpiod-break-open-unlocked.o", 0),
     ("shim-gpiod-break-close-keeps.o", 0),
     ("shim-gpiod-break-iter-shared.o", 0),
@@ -675,6 +696,10 @@ const FP_CENSUS: [(&str, u32); 61] = [
     ("shim-gpiod-break-timeout-fields.o", 0),
     ("shim-gpiod-break-arm-order.o", 0),
     ("shim-gpiod-break-kind-order.o", 0),
+    ("shim-sysnative-f769.o", 1),
+    ("shim-sysnative-rp2350.o", 1),
+    ("shim-sysnative-f769-break-frozen-backed.o", 1),
+    ("shimtest-frozen.o", 0),
 ];
 
 /// Count the floating-point instructions in a decoded listing: every line whose
@@ -736,11 +761,11 @@ const INTERNAL_CASES: [&str; 9] = [
     "shim.newlib-header-ties-kit -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the generated C-library layout header against the kit's own headers",
     "shim.classlib-order-ties-pin -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the host's copy tying the frozen host object apart from the producer stamp, then the same compile against a copy of the generated runtime-entry header with one class-library slot shifted, refused at the assertion that names the slot",
     "shim.newlib-retarget -- link-tier; runs under 'rhu-gate shim rederive' when the kit's C library is resolved",
-    "shim.f769-shared-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the sysnative and host objects under the F769 selector tie the frozen an500 objects apart from the producer stamp, the F769 core differs from the an500 core",
+    "shim.f769-shared-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the host and surface objects under the F769 selector tie the frozen an500 objects apart from the producer stamp, the F769 core and system-call objects differ from the an500 row's",
     "shim.fp-census-instrument -- compile-tier; runs under 'rhu-gate shim rederive': a compiled double multiply-add must be counted by the census the shim.fp-census case runs over the frozen tier",
     "shim.pal-surface-survey -- survey-tier; runs under 'rhu-gate shim rederive' when the pinned runtime pack's native directory is resolved (RHU_NET_PACK or tools/toolchains/netpack.local): the pack's five class-library archives re-read for their sha256s and exported family names against the frozen expectation goldens/shim/pal-surface.txt",
     "shim.an505-row-ties-an500 -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: the core, sysnative and host sources under the an505 selector with the Cortex-M7 flag set tie the frozen an500 objects apart from the producer stamp, so the class flag set is the one variable behind the row's Cortex-M33 objects",
-    "shim.sdk-rows-tie-their-row -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: every row of the SDK's board table names shim objects that tie their sources compiled under that row's own selector apart from the producer stamp; the table with the U5A5 row's core object put back to the emulator row's is refused",
+    "shim.sdk-rows-tie-their-row -- compile-tier; runs under 'rhu-gate shim rederive' with the compiler of record: every row of the SDK's board table names shim objects that tie their sources compiled under that row's own selector apart from the producer stamp; the table with the F769 row's system-call object put back to the emulator row's is refused",
 ];
 
 /// The module-root template brackets, read from a linked artifact: the
@@ -1544,8 +1569,13 @@ impl Shim {
         let surface = self.pin_closure(facts, "shim.core", "shim-pal-surface.o", &IMPORTS_PAL_SURFACE);
         println!("   shim-pal-surface.o: import closure pinned exactly ({} names: {})", IMPORTS_PAL_SURFACE.len(), surface.join(" "));
         let core_an505 = self.pin_closure(facts, "shim.core", "shim-core-an505.o", &IMPORTS_CORE);
-        let _core_u5a5 = self.pin_closure(facts, "shim.core", "shim-core-u5a5.o", &IMPORTS_CORE);
+        let _core_f769 = self.pin_closure(facts, "shim.core", "shim-core-f769.o", &IMPORTS_CORE);
+        let _core_pico2 = self.pin_closure(facts, "shim.core", "shim-core-rp2350.o", &IMPORTS_CORE);
         let sysn_an505 = self.pin_closure(facts, "shim.core", "shim-sysnative-an505.o", &IMPORTS_SYSNATIVE);
+        for small in ["shim-sysnative-f769.o", "shim-sysnative-rp2350.o", "shim-sysnative-f769-break-frozen-backed.o"] {
+            self.pin_closure(facts, "shim.core", small, &IMPORTS_SYSNATIVE);
+        }
+        println!("   the small rows' objects: the F769 and RP2350 cores pinned against the core's closure, their system-call objects and the frozen-pool control against the unit's ({} names)", IMPORTS_SYSNATIVE.len());
         let glue_an505 = self.pin_closure(facts, "shim.core", "shim-libc-glue-an505.o", &IMPORTS_GLUE);
         let surface_an505 = self.pin_closure(facts, "shim.core", "shim-pal-surface-an505.o", &IMPORTS_PAL_SURFACE);
         if surface_an505 != surface {
@@ -1564,15 +1594,15 @@ impl Shim {
             self.fail("shim.core", "shim-gpiod-an505.o's, shim-gpiod-break-version.o's or shim-gpiod-break-version-an505.o's closure differs from shim-gpiod.o's: the class or a control moved an import");
         }
         let busdev = self.pin_closure(facts, "shim.core", "shim-busdev.o", &IMPORTS_BUSDEV);
-        println!("   shim-busdev.o: import closure pinned exactly ({} names: the four bus doors it calls, the clock and the mutex pair among them)", IMPORTS_BUSDEV.len());
+        println!("   shim-busdev.o: import closure pinned exactly ({} names: the six bus doors it calls -- the two I2C enumeration doors among them since the rate request -- the clock and the mutex pair)", IMPORTS_BUSDEV.len());
         let busdev_an505 = self.pin_closure(facts, "shim.core", "shim-busdev-an505.o", &IMPORTS_BUSDEV);
         let busdev_break = self.pin_closure(facts, "shim.core", "shim-busdev-break-funcs.o", &IMPORTS_BUSDEV);
         let busdev_break_an505 = self.pin_closure(facts, "shim.core", "shim-busdev-break-funcs-an505.o", &IMPORTS_BUSDEV);
-        for knob in ["select-name", "funcs-wide", "reread", "unowned"] {
+        for knob in ["select-name", "funcs-wide", "reread", "unowned", "rate-unjudged"] {
             self.pin_closure(facts, "shim.core", &format!("shim-busdev-break-{knob}.o"), &IMPORTS_BUSDEV);
         }
         self.pin_closure(facts, "shim.core", "shim-core-break-mutex-adopt.o", &IMPORTS_CORE);
-        println!("   the bus unit's four control objects and the core's adoption control: pinned against their units' closures");
+        println!("   the bus unit's five control objects and the core's adoption control: pinned against their units' closures");
         if busdev_an505 != busdev || busdev_break != busdev || busdev_break_an505 != busdev {
             self.fail("shim.core", "shim-busdev-an505.o's, shim-busdev-break-funcs.o's or shim-busdev-break-funcs-an505.o's closure differs from shim-busdev.o's: the class or a control moved an import");
         }
@@ -1694,13 +1724,48 @@ impl Shim {
     /// control per restored defect, the unit's control object linked in the
     /// unit's place under the same tenant, refused by the ladder's own check
     /// at a line of its own.
+    /// The frozen object heap on a small row's pool: the F769 row's core
+    /// and system-call objects under the frozen ladder's tenant, booted on
+    /// the gate's machine. The tenant reads the runtime's hard-limit row
+    /// against the system memory free at its start, the draw the
+    /// reservation makes, what memory backs the reservation and the commit
+    /// rule; the control's system-call object answers every page as backed,
+    /// and the tenant's own read refuses it.
+    fn run_frozen_pool(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
+        const CASE: &str = "shim.frozen-pool";
+        const CONTROL: &str = "shim.frozen-pool-break-backed";
+        println!("== case {CASE} ==");
+        let tenant = parse_undefined(&self.nm_dump(facts, CASE, "goldens/shim/shimtest-frozen.o", true));
+        if let Some(hit) = forbidden_import(&tenant) {
+            self.fail(CASE, &format!("the tenant imports forbidden family symbol '{hit}'"));
+        }
+        let world = ["goldens/shim/shim-core-f769.o", "goldens/shim/shim-sysnative-f769.o", "goldens/shim/shim-libc-glue.o", "goldens/shim/shim-busdev.o"];
+        self.sweep_strong(facts, CASE, &[world[0], world[1], world[2], world[3], "goldens/shim/shimtest-frozen.o"]);
+        println!("   the small row's world: the F769 row's core and system-call objects, the shared glue and bus objects, the tenant ({} names imported, forbidden families absent); one strong definition per symbol", tenant.len());
+        let (sha, rel) = self.link_image(ld, CASE, &[world[0], world[1], world[2], world[3], "goldens/shim/shimtest-frozen.o"], "shim-frozen-pool");
+        self.artifact_contract(facts, CASE, &rel, &["SystemNative_GetErrNo", "__errno_location"], NO_TEMPLATE);
+        let (raw, code) = self.run_qemu(qemu, CASE, &rel);
+        self.assert_positive(CASE, &raw, code, &sha, &rel, GOLDENS[7], &PINNED_FROZEN_LINES, FROZEN_ALL_GOOD);
+        self.emit_pass(CASE, 0, "positive", "", &sha, &rel, Some(GOLDENS[7]));
+        println!("== case {CASE}: PASS (exit 0; the payload stream equals its golden; {} pinned diagnostic lines; the verdict line last) ==", PINNED_FROZEN_LINES.len());
+
+        println!("== case {CONTROL} (negative control) ==");
+        let broke = "every page of the frozen object heap's reservation answered as backed by memory (RHU_SHIM_BREAK_FROZEN_BACKED)";
+        let (sha_b, rel_b) = self.link_image(ld, CONTROL, &[world[0], "goldens/shim/shim-sysnative-f769-break-frozen-backed.o", world[2], world[3], "goldens/shim/shimtest-frozen.o"], "shim-frozen-pool-break-backed");
+        let (raw_b, code_b) = self.run_qemu(qemu, CONTROL, &rel_b);
+        self.assert_control(CONTROL, &raw_b, code_b, 1, broke, &sha_b, &rel_b, GOLDENS[7], "FAIL shim-frozen-backing (a page past the pool was answered as backed)", FROZEN_ALL_GOOD);
+        self.emit_pass(CONTROL, 1, "negative", broke, &sha_b, &rel_b, None);
+        println!("== case {CONTROL}: PASS (exit 1; the tenant's own read refused a page past the pool answered as backed) ==");
+    }
+
     fn run_devnodes(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
         const CORE3: [&str; 3] = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o"];
-        const BUSDEV_CONTROLS: [(&str, &str, &str); 4] = [
+        const BUSDEV_CONTROLS: [(&str, &str, &str); 5] = [
             ("select-name", "the kernel's no-select value accepted as a select's name (RHU_SHIM_BREAK_BUSDEV_SELECT_NAME)", "FAIL shim-busdev-names (the no-select value opened as a select's name)"),
             ("funcs-wide", "the functionality word stored eight bytes wide (RHU_SHIM_BREAK_BUSDEV_FUNCS_WIDE)", "FAIL shim-busdev-funcs (the functionality request stored past its four-byte output)"),
             ("reread", "a transfer's count re-read from the caller's memory after the receive write (RHU_SHIM_BREAK_BUSDEV_REREAD)", "FAIL shim-busdev-spi-overlay (a receive buffer over the record's length word changed the count returned)"),
             ("unowned", "a closed node's entry handed out while a request still runs on it (RHU_SHIM_BREAK_BUSDEV_UNOWNED)", "FAIL shim-busdev-close-under-request (the reopen received the entry a request still ran on)"),
+            ("rate-unjudged", "the rate request answering 0 and claiming nothing (RHU_SHIM_BREAK_BUSDEV_RATE_UNJUDGED)", "FAIL shim-busdev-rate (an unserved rate was not refused ENOTSUP with the word untouched)"),
         ];
         const GPIOD_CONTROLS: [(&str, &str, &str); 8] = [
             ("open-unlocked", "the list of open chips joined with no lock, the window held open, blocked, until another opener has moved its head (RHU_SHIM_BREAK_GPIOD_OPEN_UNLOCKED)", "FAIL shim-gpiod-open-race (a chip opened while another thread opened is not a live chip)"),
@@ -2293,14 +2358,16 @@ impl Shim {
     }
 
     /// The compile-tier control for the F769 rider's shared objects: the
-    /// sysnative and host translation units compiled under the F769 row
+    /// host and surface translation units compiled under the F769 row
     /// selector must tie the frozen an500 objects apart from the producer
     /// stamp, through the leg's helper (neither
     /// consumes a field that differs between the rows), which is the fact
     /// that lets the rider link them from the an500 line; and the frozen
-    /// F769 core object must differ from the an500 core (the core consumes
-    /// the row's region), which is why the tier carries it as its own
-    /// object rather than a second copy of the same bytes.
+    /// F769 core and system-call objects must each differ from the an500
+    /// row's (the core consumes what the row keeps out of the managed
+    /// heap, the system-call unit the frozen object heap's pool), which is
+    /// why the tier carries them as their own objects rather than second
+    /// copies of the same bytes.
     fn run_f769_shared_control(&mut self, gxx: &ToolCmd) {
         const CASE: &str = "shim.f769-shared-ties-an500";
         println!("== case {CASE} (compile-tier control) ==");
@@ -2309,11 +2376,7 @@ impl Shim {
             Err(e) => self.fail(CASE, &e),
         };
         let stripped = self.out.join("obj").join("stripped");
-        for (src, frozen, tag) in [
-            ("src/shim/rhu_sysnative.c", "shim-sysnative.o", "sysnative"),
-            ("src/shim/rhu_host.c", "shim-host.o", "host"),
-            ("src/shim/rhu_pal_surface_net11_rc1.c", "shim-pal-surface.o", "pal-surface"),
-        ] {
+        for (src, frozen, tag) in [("src/shim/rhu_host.c", "shim-host.o", "host"), ("src/shim/rhu_pal_surface_net11_rc1.c", "shim-pal-surface.o", "pal-surface")] {
             let out_rel = format!("src/kernel/target/shim-gate/obj/{tag}-f769-control.o");
             let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
             let _ = std::fs::remove_file(&out_abs);
@@ -2343,13 +2406,25 @@ impl Shim {
         if core == core_f769 {
             self.fail(CASE, "shim-core-f769.o ties shim-core.o apart from the producer stamp: the F769 row moves nothing in the core object, so a separate frozen object is unfounded");
         }
-        println!("   shim-core.o ({}) and shim-core-f769.o ({}) differ apart from the producer stamp: the row's region reaches the core, and the tier carries both", &core[..16], &core_f769[..16]);
+        println!("   shim-core.o ({}) and shim-core-f769.o ({}) differ apart from the producer stamp: what the row keeps reaches the core, and the tier carries both", &core[..16], &core_f769[..16]);
+        let sysn = match sha256_without_stamp(&facts, &self.repo.join("goldens").join("shim").join("shim-sysnative.o"), &stripped.join("f769-shared-sysnative.o")) {
+            Ok(s) => s,
+            Err(e) => self.fail(CASE, &format!("goldens/shim/shim-sysnative.o unreadable, or its copy failed: {e}")),
+        };
+        let sysn_f769 = match sha256_without_stamp(&facts, &self.repo.join("goldens").join("shim").join("shim-sysnative-f769.o"), &stripped.join("f769-shared-sysnative-f769.o")) {
+            Ok(s) => s,
+            Err(e) => self.fail(CASE, &format!("goldens/shim/shim-sysnative-f769.o unreadable, or its copy failed: {e}")),
+        };
+        if sysn == sysn_f769 {
+            self.fail(CASE, "shim-sysnative-f769.o ties shim-sysnative.o apart from the producer stamp: the F769 row moves nothing in the system-call object, so a separate frozen object is unfounded");
+        }
+        println!("   shim-sysnative.o ({}) and shim-sysnative-f769.o ({}) differ apart from the producer stamp: the frozen object heap's pool reaches the system-call object, and the tier carries both", &sysn[..16], &sysn_f769[..16]);
         self.results.emit(&format!(
             "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"shared\":2}}}}",
             self.gate_id
         ));
         self.results.tally("pass", "positive");
-        println!("== case {CASE}: PASS (two objects shared with the an500 line tie under the F769 selector; the core object differs and is frozen for the row) ==");
+        println!("== case {CASE}: PASS (two objects shared with the an500 line tie under the F769 selector; the core and system-call objects differ and are frozen for the row) ==");
     }
 
     /// The compile-tier control for the mps2-an505 row: its three
@@ -2408,9 +2483,9 @@ impl Shim {
     /// tying the frozen object the row names apart from the producer stamp.
     /// A row may share another row's object only where the bytes agree (no
     /// field that differs reaches that source). The doctored table -- the
-    /// U5A5 row naming the emulator row's core object again, the defect
-    /// this case was written after -- must be refused by the same routine,
-    /// naming the row and the object.
+    /// F769 row naming the emulator row's system-call object, whose frozen
+    /// object heap is larger than everything the small row keeps -- must be
+    /// refused by the same routine, naming the row and the object.
     fn run_sdk_row_tie(&mut self, gxx: &ToolCmd) {
         const CASE: &str = "shim.sdk-rows-tie-their-row";
         const CONTROL: &str = "shim.sdk-rows-tie-control-borrowed-object";
@@ -2442,25 +2517,25 @@ impl Shim {
         println!("== case {CASE}: PASS ({ties} shim objects over the board table's rows tie their own row's selector apart from the producer stamp; {} compiles) ==", memo.len());
 
         println!("== case {CONTROL} (negative control) ==");
-        let doctored = table.replace("shim-core-u5a5.o", "shim-core-an505.o");
+        let doctored = table.replace("shim-sysnative-f769.o", "shim-sysnative.o");
         if doctored == table {
-            self.fail(CONTROL, "the board table names no shim-core-u5a5.o: the doctored table cannot be built");
+            self.fail(CONTROL, "the board table names no shim-sysnative-f769.o: the doctored table cannot be built");
         }
         match self.sdk_row_tie_pass(gxx, CONTROL, &facts, &stripped, &doctored, &header, &mut memo) {
-            Ok(_) => self.fail(CONTROL, "the board table with the U5A5 row's core object put back to the emulator row's was ACCEPTED: the tie cannot see a row that links another row's object"),
+            Ok(_) => self.fail(CONTROL, "the board table with the F769 row's system-call object put back to the emulator row's was ACCEPTED: the tie cannot see a row that links another row's object"),
             Err(f) => {
-                if !(f.contains("st-nucleo-u5a5zj-q") && f.contains("shim-core-an505.o")) {
+                if !(f.contains("st-stm32f769i-disco") && f.contains("shim-sysnative.o")) {
                     self.fail(CONTROL, &format!("the doctored table was refused for another reason: {f}"));
                 }
                 println!("   refused: {f}");
             }
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CONTROL}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"negative\",\"image\":null,\"broke\":\"the board table with the U5A5 row's core object put back to the emulator row's\"}}",
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CONTROL}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"negative\",\"image\":null,\"broke\":\"the board table with the F769 row's system-call object put back to the emulator row's\"}}",
             self.gate_id
         ));
         self.results.tally("pass", "negative");
-        println!("== case {CONTROL}: PASS (the board table with the U5A5 row's core object put back to the emulator row's refused, naming the row and the object) ==");
+        println!("== case {CONTROL}: PASS (the board table with the F769 row's system-call object put back to the emulator row's refused, naming the row and the object) ==");
     }
 
     /// One pass of the row tie over a board table's text: the ties made, or
@@ -2725,6 +2800,7 @@ pub fn run(repo: &Path) -> ! {
     shim.run_tls(&facts, &ld, &qemu);
     shim.run_host(&facts, &ld, &qemu);
     shim.run_devnodes(&facts, &ld, &qemu);
+    shim.run_frozen_pool(&facts, &ld, &qemu);
     shim.run_fp_census(&facts);
     shim.run_pal_surface(&facts);
     for p in PENDING {
@@ -2739,7 +2815,7 @@ pub fn run(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "{DISPLAY}: PASS (41/41 cases incl. 31 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        "{DISPLAY}: PASS (44/44 cases incl. 33 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
         PENDING.len(),
         INTERNAL_CASES.len(),
         qemu_v,
@@ -2749,7 +2825,7 @@ pub fn run(repo: &Path) -> ! {
     exit(0);
 }
 
-/// The maintainer's re-derivation leg: the only place the C compiler is needed.
+/// The re-derivation leg: the only place the C compiler is needed.
 /// Recompiles the frozen plan, byte-asserts it against goldens/shim apart
 /// from the producer stamp each object carries (a frozen object stating
 /// another hosting-API contract generation than include/rhu.h is named
@@ -2843,7 +2919,7 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; foreign-errno control refused at compile; C-library layout header ties the kit; class-library order ties the pin; the F769 row's shared objects tie the an500 bytes; the an505 row's objects tie the an500 bytes under the Cortex-M7 flag set apart from the producer stamp; every row of the SDK's board table names shim objects that tie their own row's selector, the table with a borrowed core object refused; the floating-point census instrument counts a compiled double multiply-add; C-library retarget {}; the surface survey {})  [{}]",
+        "SHIM REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; foreign-errno control refused at compile; C-library layout header ties the kit; class-library order ties the pin; the F769 row's shared objects tie the an500 bytes; the an505 row's objects tie the an500 bytes under the Cortex-M7 flag set apart from the producer stamp; every row of the SDK's board table names shim objects that tie their own row's selector, the table with a borrowed system-call object refused; the floating-point census instrument counts a compiled double multiply-add; C-library retarget {}; the surface survey {})  [{}]",
         FROZEN_PLAN.len(),
         FROZEN_PLAN.len(),
         retarget,

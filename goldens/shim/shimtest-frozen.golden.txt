@@ -1,0 +1,10 @@
+shimtest-frozen: the frozen object heap on a small board's pool
+PASS shim-frozen-init (per-thread block registered; no system memory drawn)
+PASS shim-frozen-env (the hard limit is the system memory free at the start less the 24 KB the row keeps)
+PASS shim-frozen-plain (an ordinary mapping's page is answered as backed)
+PASS shim-frozen-reserve (a reservation of 4 MB drew the row's pool of 16 KB and nothing more)
+PASS shim-frozen-backing (the pool's four pages answered as backed; the twelve past it in the first commit's span and the page after that span not)
+PASS shim-frozen-commit (a commit that starts inside the pool accepted; the answers unchanged; the pool's first and last bytes hold what is written)
+PASS shim-frozen-refusals (a commit that starts at or past the pool's end refused with no memory; a second reservation NULL; nothing more drawn)
+PASS shim-frozen-arguments (an address off a page boundary and a missing answer refused, each with its errno)
+SHIMTEST-FROZEN: ALL GOOD (the frozen object heap on a small board's pool)

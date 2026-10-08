@@ -88,25 +88,48 @@ pub use stm32_gpio as gpio_backend;
 /// silicon backend (`stm32_bus`: volatile register accesses, the pads
 /// through the family GPIO driver). A row whose facts carry no bus compiles
 /// none of them; its bus calls answer the count 0 and refuse the rest.
-#[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
+#[cfg(all(any(feature = "board-mps2-an500", feature = "board-mps2-an505"), not(rhu_bus_rp2350)))]
 pub mod virt_bus;
-#[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
+#[cfg(all(any(feature = "board-mps2-an500", feature = "board-mps2-an505"), not(rhu_bus_rp2350)))]
 pub use virt_bus as bus_backend;
+
+/// The PWM and ADC backends (`crate::board::pwm_backend` and
+/// `crate::board::adc_backend`): the emulator rows' virtual models in
+/// kernel memory; the RP2350's slices and converter on the Pico rows. A row
+/// whose facts carry no table compiles none.
+#[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
+pub mod virt_pwm;
+#[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
+pub use virt_pwm as pwm_backend;
+#[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
+pub mod virt_adc;
+#[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
+pub use virt_adc as adc_backend;
+#[cfg(any(feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+pub mod rp2350_map;
+#[cfg(any(feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+pub mod rp2350_pwm;
+#[cfg(any(feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+pub use rp2350_pwm as pwm_backend;
+#[cfg(any(feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+pub mod rp2350_adc;
+#[cfg(any(feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+pub use rp2350_adc as adc_backend;
 #[cfg(any(feature = "board-st-nucleo-u5a5zj-q", feature = "board-st-stm32f769i-disco"))]
 pub mod stm32_bus;
 #[cfg(any(feature = "board-st-nucleo-u5a5zj-q", feature = "board-st-stm32f769i-disco"))]
 pub use stm32_bus as bus_backend;
-#[cfg(rhu_bus_rows)]
+#[cfg(all(rhu_bus_rows, not(rhu_bus_rp2350)))]
 pub mod stm32_i2c;
-#[cfg(rhu_bus_rows)]
+#[cfg(all(rhu_bus_rows, not(rhu_bus_rp2350)))]
 pub use stm32_i2c as i2c_driver;
 #[cfg(any(feature = "board-mps2-an500", feature = "board-st-stm32f769i-disco"))]
 pub mod stm32f7_spi;
 #[cfg(any(feature = "board-mps2-an500", feature = "board-st-stm32f769i-disco"))]
 pub use stm32f7_spi as spi_driver;
-#[cfg(any(feature = "board-mps2-an505", feature = "board-st-nucleo-u5a5zj-q"))]
+#[cfg(all(any(feature = "board-mps2-an505", feature = "board-st-nucleo-u5a5zj-q"), not(rhu_bus_rp2350)))]
 pub mod stm32u5_spi;
-#[cfg(any(feature = "board-mps2-an505", feature = "board-st-nucleo-u5a5zj-q"))]
+#[cfg(all(any(feature = "board-mps2-an505", feature = "board-st-nucleo-u5a5zj-q"), not(rhu_bus_rp2350)))]
 pub use stm32u5_spi as spi_driver;
 
 #[cfg(feature = "board-mps2-an500")]
@@ -195,17 +218,17 @@ const SELECTED_BOARDS: usize = cfg!(feature = "board-mps2-an500") as usize
     + cfg!(feature = "board-st-stm32f769i-disco") as usize;
 const _: () = assert!(SELECTED_BOARDS == 1, "select exactly one board-* feature");
 
-#[cfg(all(feature = "pimoroni-pico-plus-2-pll150", not(feature = "board-pimoroni-pico-plus-2")))]
-compile_error!("pimoroni-pico-plus-2-pll150 is a posture of board-pimoroni-pico-plus-2 -- select that board");
+#[cfg(all(feature = "pimoroni-pico-plus-2-xtal12", not(feature = "board-pimoroni-pico-plus-2")))]
+compile_error!("pimoroni-pico-plus-2-xtal12 is a posture of board-pimoroni-pico-plus-2 -- select that board");
 
-#[cfg(all(feature = "pimoroni-pico-plus-2-w-pll150", not(feature = "board-pimoroni-pico-plus-2-w")))]
-compile_error!("pimoroni-pico-plus-2-w-pll150 is a posture of board-pimoroni-pico-plus-2-w -- select that board");
+#[cfg(all(feature = "pimoroni-pico-plus-2-w-xtal12", not(feature = "board-pimoroni-pico-plus-2-w")))]
+compile_error!("pimoroni-pico-plus-2-w-xtal12 is a posture of board-pimoroni-pico-plus-2-w -- select that board");
 
-#[cfg(all(feature = "rpi-pico2-pll150", not(feature = "board-rpi-pico2")))]
-compile_error!("rpi-pico2-pll150 is a posture of board-rpi-pico2 -- select that board");
+#[cfg(all(feature = "rpi-pico2-xtal12", not(feature = "board-rpi-pico2")))]
+compile_error!("rpi-pico2-xtal12 is a posture of board-rpi-pico2 -- select that board");
 
-#[cfg(all(feature = "rpi-pico2-w-pll150", not(feature = "board-rpi-pico2-w")))]
-compile_error!("rpi-pico2-w-pll150 is a posture of board-rpi-pico2-w -- select that board");
+#[cfg(all(feature = "rpi-pico2-w-xtal12", not(feature = "board-rpi-pico2-w")))]
+compile_error!("rpi-pico2-w-xtal12 is a posture of board-rpi-pico2-w -- select that board");
 
 #[cfg(all(feature = "st-nucleo-l4r5zi-pll120", not(feature = "board-st-nucleo-l4r5zi")))]
 compile_error!("st-nucleo-l4r5zi-pll120 is a posture of board-st-nucleo-l4r5zi -- select that board");
@@ -358,3 +381,30 @@ pub fn unhosted_tenant_init() -> i32 {
 pub fn unhosted_tenant_init() -> i32 {
     0
 }
+
+/// The RP2350's bus backend and drivers: the chip's Synopsys I2C block and
+/// Arm PL022 SPI block, on the four boards of the chip over the silicon
+/// backend (`rp2350_bus`: volatile register accesses, a block taken by
+/// cycling it through the reset controller, the pads through the chip's
+/// GPIO backend). Under the test feature `test-bus-rp2350` the Cortex-M33
+/// emulator row carries register-level models of the two blocks
+/// (`virt_bus_rp2350`) in place of the ST blocks' models, so the same
+/// drivers are gated on QEMU; the feature names that row alone.
+#[cfg(any(feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+pub mod rp2350_bus;
+#[cfg(any(feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+pub use rp2350_bus as bus_backend;
+#[cfg(all(feature = "board-mps2-an505", feature = "test-bus-rp2350"))]
+pub mod virt_bus_rp2350;
+#[cfg(all(feature = "board-mps2-an505", feature = "test-bus-rp2350"))]
+pub use virt_bus_rp2350 as bus_backend;
+#[cfg(rhu_bus_rp2350)]
+pub mod rp2350_i2c;
+#[cfg(rhu_bus_rp2350)]
+pub use rp2350_i2c as i2c_driver;
+#[cfg(rhu_bus_rp2350)]
+pub mod rp2350_spi;
+#[cfg(rhu_bus_rp2350)]
+pub use rp2350_spi as spi_driver;
+#[cfg(all(feature = "test-bus-rp2350", not(feature = "board-mps2-an505")))]
+compile_error!("feature `test-bus-rp2350` requires `board-mps2-an505`: the RP2350's bus models stand in on the Cortex-M33 emulator row alone");

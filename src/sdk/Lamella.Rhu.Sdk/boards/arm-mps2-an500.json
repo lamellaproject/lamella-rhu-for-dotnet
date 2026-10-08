@@ -1,0 +1,14 @@
+{
+  "name": "arm-mps2-an500",
+  "maker": "Arm",
+  "product": "MPS2+ AN500",
+  "chip": "Cortex-M7",
+  "clockHz": 25000000,
+  "posture": "default",
+  "postureName": "the emulator's one posture",
+  "pins": 6,
+  "labels": "none",
+  "functions": "gpio",
+  "i2c": [],
+  "spi": []
+}

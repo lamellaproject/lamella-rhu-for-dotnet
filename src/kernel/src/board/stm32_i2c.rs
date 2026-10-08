@@ -6,18 +6,23 @@
 //! seam so the same code runs against the emulator rows' model and the
 //! boards' blocks. A transaction is one combined transfer: every message
 //! its own address phase, a repeated start between messages, a stop after
-//! the last. Every wait is a poll of the status register against its own
-//! budget and the caller's deadline; a budget passed asserts
+//! the last. Every wait is a poll of the status register, a byte at a time,
+//! against its own budget (two bytes' wire time plus the 25 ms the SMBus
+//! specification lets a device hold the clock low) and the caller's
+//! deadline; a budget passed asserts
 //! a stop, clears the flags and resets the block by its enable bit -- the
 //! manuals' sequence (RM0410 33.4.6, RM0456 65.4.6): the enable written 0,
 //! read back until it reads 0 (the block needs it low for three cycles of
-//! its bus clock), then written 1. Nothing of a transfer runs under the
+//! its bus clock), then written 1 -- and, while the enable is 0 and the
+//! block is off its lines, the bus is recovered as at the claim: a device
+//! left holding the data line low is clocked free, or failing that reset by
+//! the clock held low 35 ms. Nothing of a transfer runs under the
 //! kernel critical section; the claim's two clock writes are
 //! read-modify-writes of registers other blocks share, so the seam takes
 //! the section for those few instructions.
 
 use crate::board::bus_backend as hw;
-use crate::bus::{wait_until, Fault, Outcome};
+use crate::bus::{i2c_recover, wait_until, Fault, Outcome, Recovery};
 use crate::bus_math::{I2cBus, I2cMsg, MSG_READ};
 use crate::sched;
 
@@ -55,17 +60,7 @@ const SPIN_NS: u64 = 2 * 9 * 10_000;
 pub fn claim(d: &I2cBus, timing: u32) -> bool {
     hw::rmw(d.enable_reg, 0, 1 << d.enable_bit);
     hw::rmw(d.mux_reg, 0b11 << d.mux_shift, d.mux_value << d.mux_shift);
-    let mut recovered = false;
-    if hw::i2c_sda_low(d) {
-        for _ in 0..9 {
-            hw::i2c_scl_pulse(d);
-            if !hw::i2c_sda_low(d) {
-                break;
-            }
-        }
-        hw::i2c_stop(d);
-        recovered = true;
-    }
+    let recovered = i2c_recover(d, false) != Recovery::None;
     for p in d.pads {
         hw::pad_take(p);
     }
@@ -88,12 +83,20 @@ fn disable(d: &I2cBus) {
 }
 
 /// The block reset after a wait passed its budget: a stop asserted, the
-/// flags cleared, the enable bit dropped and raised (the state machine's reset).
-fn reset(d: &I2cBus) {
+/// flags cleared, the enable bit dropped (the state machine's reset; the
+/// block is off its lines while it is 0), the bus recovered through the pads
+/// as plain lines, the pads handed back, the enable raised. Returns what the
+/// recovery found.
+fn reset(d: &I2cBus) -> Recovery {
     hw::wr(d.base + CR2, CR2_STOP);
     hw::wr(d.base + ICR, ICR_ALL);
     disable(d);
+    let recovery = i2c_recover(d, true);
+    for p in d.pads {
+        hw::pad_take(p);
+    }
     hw::wr(d.base + CR1, CR1_PE);
+    recovery
 }
 
 /// A fault read off the status register: the acknowledge missing, a bus
@@ -117,9 +120,11 @@ fn fault(d: &I2cBus, isr: u32, budget: u32, deadline_ns: u64, i: u32, done: u32,
     sched::ERR_IO
 }
 
-/// One combined transaction. `budget_ticks` is each wire wait's budget;
-/// `deadline_ns` the caller's bound on the whole transaction.
-pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], budget_ticks: u32, deadline_ns: u64, out: &mut Outcome) -> i32 {
+/// One combined transaction. `_hz` is the claimed rate, which this family
+/// takes and ignores (its one rate is its timing word); `budget_ticks` each
+/// wire wait's budget; `deadline_ns` the caller's bound on the whole
+/// transaction.
+pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], _hz: u32, budget_ticks: u32, deadline_ns: u64, out: &mut Outcome) -> i32 {
     let base = d.base;
     let n = msgs.len();
     for (i, msg) in msgs.iter().enumerate() {
@@ -138,7 +143,7 @@ pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], budget_ticks: u32, deadline_ns: u64
         while done < len {
             let want = if read { ISR_RXNE } else { ISR_TXIS };
             if !wait_until(budget_ticks, deadline_ns, SPIN_NS, || hw::rd(base + ISR) & (want | ISR_FAULTS) != 0) {
-                reset(d);
+                out.recovery = reset(d);
                 out.message = i as u32;
                 out.byte = done;
                 out.kind = Fault::Budget;
@@ -157,7 +162,7 @@ pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], budget_ticks: u32, deadline_ns: u64
         }
         let end = if last { ISR_STOPF } else { ISR_TC };
         if !wait_until(budget_ticks, deadline_ns, SPIN_NS, || hw::rd(base + ISR) & (end | ISR_FAULTS) != 0) {
-            reset(d);
+            out.recovery = reset(d);
             out.message = i as u32;
             out.byte = done;
             out.kind = Fault::Budget;
@@ -173,3 +178,7 @@ pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], budget_ticks: u32, deadline_ns: u64
     }
     0
 }
+
+/// The timing word for a rate at the block's kernel clock: this family's row
+/// of the bus arithmetic, asked by the bus doors through the driver.
+pub use crate::bus_math::i2c_timing as timing;

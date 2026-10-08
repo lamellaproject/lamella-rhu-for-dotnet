@@ -1,7 +1,7 @@
 //! The hosting-API contract generation window: which stated generation a
 //! payload's own entry may carry and still run on this kernel. Pure -- no
 //! I/O, no state -- so the payload flavor judges with it before the entry
-//! runs and the host tier tests it on the desk toolchain.
+//! runs and the host tier tests it on the host toolchain.
 
 /// The judgement over the handshake's four facts: whether the payload
 /// provided its own entry, the generation it states, this kernel's

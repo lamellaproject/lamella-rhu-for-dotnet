@@ -15,12 +15,17 @@ const ARENA_BYTES: usize = 96 * 1024;
 
 #[repr(align(8))]
 struct Arena([u8; ARENA_BYTES]);
-/// .bss (zero at boot); 8-aligned because the payload allocates in
-/// 8-byte granules.
+/// Its own NOLOAD section at the head of DATA (the payload link scripts'
+/// `.rhu_payload_arena`, zeroed by boot.rs under this feature): no static
+/// added before it moves the arena, so the collector's count is a layout
+/// figure of an address fixed at ORIGIN(DATA). 8-aligned because
+/// the payload allocates in 8-byte granules.
+#[unsafe(link_section = ".bss.rhu_payload_arena")]
 static mut ARENA: Arena = Arena([0; ARENA_BYTES]);
 
 /// Object-start bitmap for the conservative GC: one mark bit per
 /// 8-byte arena granule, so bytes = ARENA_BYTES / 8 / 8.
+#[unsafe(link_section = ".bss.rhu_payload_startbits")]
 static mut STARTBITS: [u8; ARENA_BYTES / 64] = [0; ARENA_BYTES / 64];
 
 

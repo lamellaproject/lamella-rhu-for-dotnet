@@ -32,13 +32,36 @@
 
   <UsingTask TaskName="Lamella.Rhu.Build.ArchiveMember" AssemblyFile="$(RhuTasksAssembly)" />
   <UsingTask TaskName="Lamella.Rhu.Build.AttrsUpdate" AssemblyFile="$(RhuTasksAssembly)" />
+  <UsingTask TaskName="Lamella.Rhu.Build.BoardFactsSource" AssemblyFile="$(RhuTasksAssembly)" />
+
+  <!-- The board's facts generated into a program that references the shared
+       board class (the package Lamella.Hardware, or its project in this
+       tree): one source file, from the package's boards/<row>.json for the
+       row the project named, added to the compile before anything is
+       compiled. A program without the reference is compiled exactly as
+       before. The facts files are frozen bytes of the package (a changed one
+       is refused at the link like any other); a missing one is refused here. -->
+  <Target Name="RhuBoardFacts" DependsOnTargets="RhuResolveBoard" BeforeTargets="CoreCompile"
+          Condition="'@(PackageReference->WithMetadataValue('Identity', 'Lamella.Hardware'))' != '' or '@(ProjectReference->WithMetadataValue('Filename', 'Lamella.Hardware'))' != ''">
+    <PropertyGroup>
+      <_RhuFacts>$(RhuSdkRoot)boards/$(LamellaTargetBoard).json</_RhuFacts>
+      <_RhuFactsSource>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', 'LamellaTargetBoard.g.cs'))</_RhuFactsSource>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(_RhuFacts)')" Text="REFUSE: no board facts for $(LamellaTargetBoard) (boards/$(LamellaTargetBoard).json is not in the package)" />
+    <BoardFactsSource FactsFile="$(_RhuFacts)" Board="$(LamellaTargetBoard)" Output="$(_RhuFactsSource)" />
+    <ItemGroup>
+      <Compile Include="$(_RhuFactsSource)" />
+      <FileWrites Include="$(_RhuFactsSource)" />
+    </ItemGroup>
+    <Message Importance="high" Text="Lamella RHU: the board's facts for $(LamellaTargetBoard) generated into the program (boards/$(LamellaTargetBoard).json)" />
+  </Target>
 
   <!-- The refusals a project meets before anything is compiled: a knob
        outside its set, no board named, a posture the contract fixes moved. -->
   <Target Name="RhuValidate" BeforeTargets="Build">
     <Error Condition="'$(RhuDiag)' != 'min' and '$(RhuDiag)' != 'rich'" Text="REFUSE: RhuDiag='$(RhuDiag)' is not one of: min, rich" />
     <Error Condition="'$(RhuReflection)' != 'on' and '$(RhuReflection)' != 'off'" Text="REFUSE: RhuReflection='$(RhuReflection)' is not one of: on, off" />
-    <Error Condition="'$(RhuBoard)' == ''" Text="REFUSE: RhuBoard is not set (a board is named, never inferred); the table: @(RhuBoardRow, ' ')" />
+    <Error Condition="'$(LamellaTargetBoard)' == ''" Text="REFUSE: LamellaTargetBoard is not set (a board is named, never inferred); the table: @(LamellaTargetBoardRow, ' ')" />
     <Error Condition="'$(TargetFramework)' != 'net11.0'" Text="REFUSE: TargetFramework '$(TargetFramework)' is not net11.0" />
     <Error Condition="'$(PublishAot)' != 'true'" Text="REFUSE: PublishAot is '$(PublishAot)', not true" />
     <Error Condition="'$(RuntimeIdentifier)' != 'linux-arm'" Text="REFUSE: RuntimeIdentifier '$(RuntimeIdentifier)' is not linux-arm" />
@@ -48,6 +71,7 @@
     <Error Condition="'$(MetricsSupport)' != 'false'" Text="REFUSE: MetricsSupport is '$(MetricsSupport)', not false" />
     <Error Condition="'$(DebuggerSupport)' != 'false'" Text="REFUSE: DebuggerSupport is '$(DebuggerSupport)', not false" />
     <Error Condition="'$(OptimizationPreference)' != 'Size'" Text="REFUSE: OptimizationPreference is '$(OptimizationPreference)', not Size" />
+    <Error Condition="'$(NetCoreTargetingPackRoot)' != '$(RhuSdkRoot)packs'" Text="REFUSE: NetCoreTargetingPackRoot is '$(NetCoreTargetingPackRoot)', not '$(RhuSdkRoot)packs' (the reference assemblies come from the package at the tested runtime build, the same bytes on every host)" />
     <Error Condition="'$(Deterministic)' != 'true'" Text="REFUSE: Deterministic is '$(Deterministic)', not true (a program's image is byte-identical across desks)" />
     <Error Condition="'$(PathMap)' == ''" Text="REFUSE: PathMap is empty (the project directory is mapped to one fixed string; set another map, never none)" />
   </Target>
@@ -57,9 +81,9 @@
        image links, in the link's order. -->
   <Target Name="RhuResolveBoard" DependsOnTargets="RhuValidate">
     <ItemGroup>
-      <_RhuRow Include="@(RhuBoardRow)" Condition="'%(Identity)' == '$(RhuBoard)'" />
+      <_RhuRow Include="@(LamellaTargetBoardRow)" Condition="'%(Identity)' == '$(LamellaTargetBoard)'" />
     </ItemGroup>
-    <Error Condition="'@(_RhuRow)' == ''" Text="REFUSE: RhuBoard '$(RhuBoard)' is not in the table: @(RhuBoardRow, ' ')" />
+    <Error Condition="'@(_RhuRow)' == ''" Text="REFUSE: LamellaTargetBoard '$(LamellaTargetBoard)' is not in the table: @(LamellaTargetBoardRow, ' ')" />
     <PropertyGroup>
       <RhuClass>@(_RhuRow->'%(Class)')</RhuClass>
       <RhuMap>@(_RhuRow->'%(Map)')</RhuMap>
@@ -73,7 +97,7 @@
       <RhuStackDefault>@(_RhuRow->'%(StackDefault)')</RhuStackDefault>
       <RhuStackClamp>@(_RhuRow->'%(StackClamp)')</RhuStackClamp>
     </PropertyGroup>
-    <Message Importance="high" Text="Lamella RHU: board $(RhuBoard) (class $(RhuClass); map $(RhuMap); kernel $(RhuKernel); base $(RhuBase))" />
+    <Message Importance="high" Text="Lamella RHU: board $(LamellaTargetBoard) (class $(RhuClass); map $(RhuMap); kernel $(RhuKernel); base $(RhuBase))" />
   </Target>
 
   <!-- The thread stack budget. The row's pool, default and clamp are
@@ -95,13 +119,13 @@
     </PropertyGroup>
     <Error Condition="'$(RhuThreadStack)' != '' and '$(_RhuThreadStackNumeric)' != 'True'" Text="REFUSE: RhuThreadStack='$(RhuThreadStack)' is not a whole number of bytes" />
     <Error Condition="'$(_RhuThreadStackNumeric)' == 'True' and '$(_RhuThreadStack)' &lt; '$(RhuThreadStackMin)'" Text="REFUSE: RhuThreadStack=$(RhuThreadStack) is below the kernel's minimum stack of $(RhuThreadStackMin) bytes" />
-    <Error Condition="'$(_RhuThreadStackNumeric)' == 'True' and '$(_RhuThreadStack)' &gt; '$(RhuStackClamp)'" Text="REFUSE: RhuThreadStack=$(RhuThreadStack) is above the row's clamp of $(RhuStackClamp) bytes for $(RhuBoard)" />
+    <Error Condition="'$(_RhuThreadStackNumeric)' == 'True' and '$(_RhuThreadStack)' &gt; '$(RhuStackClamp)'" Text="REFUSE: RhuThreadStack=$(RhuThreadStack) is above the row's clamp of $(RhuStackClamp) bytes for $(LamellaTargetBoard)" />
     <PropertyGroup>
       <_RhuStackBudgetNeed>$([MSBuild]::Add($([MSBuild]::Multiply(3, $(_RhuThreadStack))), 1024))</_RhuStackBudgetNeed>
       <_RhuStacksFit>$([System.Math]::Floor($([MSBuild]::Divide($([MSBuild]::Subtract($(RhuStackPool), 1024)), $(_RhuThreadStack)))))</_RhuStacksFit>
       <_RhuStackDefsym Condition="'$(RhuThreadStack)' != ''">--defsym=__rhu_thread_stack_default=$(RhuThreadStack)</_RhuStackDefsym>
     </PropertyGroup>
-    <Error Condition="'$(_RhuStackBudgetNeed)' &gt; '$(RhuStackPool)'" Text="REFUSE: RhuThreadStack=$(_RhuThreadStack) leaves fewer than three stacks in the row's pool of $(RhuStackPool) bytes beside the idle thread's (three stacks need $(_RhuStackBudgetNeed)) for $(RhuBoard)" />
+    <Error Condition="'$(_RhuStackBudgetNeed)' &gt; '$(RhuStackPool)'" Text="REFUSE: RhuThreadStack=$(_RhuThreadStack) leaves fewer than three stacks in the row's pool of $(RhuStackPool) bytes beside the idle thread's (three stacks need $(_RhuStackBudgetNeed)) for $(LamellaTargetBoard)" />
     <Message Importance="high" Text="Lamella RHU: the thread stack pool $(RhuStackPool) B; the default managed stack $(_RhuThreadStack) B (the row's clamp $(RhuStackClamp) B): $(_RhuStacksFit) hosted stacks fit beside the idle thread's" />
   </Target>
 
@@ -159,7 +183,7 @@
       <Output TaskParameter="ConsoleOutput" ItemName="_RhuLdOut" />
     </Exec>
     <Error Condition="'$(_RhuLdRc)' != '0' or '@(_RhuLdOut)' != ''" Text="REFUSE: the link printed a diagnostic or failed (rc $(_RhuLdRc)): @(_RhuLdOut, ' | ')" />
-    <Message Importance="high" Text="Lamella RHU: $(NativeBinary) linked for $(RhuBoard) under $(RhuMap)" />
+    <Message Importance="high" Text="Lamella RHU: $(NativeBinary) linked for $(LamellaTargetBoard) under $(RhuMap)" />
   </Target>
 
 </Project>

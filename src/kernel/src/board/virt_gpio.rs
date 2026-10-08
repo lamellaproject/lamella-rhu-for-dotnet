@@ -8,7 +8,7 @@
 //! control `test-gpio-doctored-latch` fires the event twice per change --
 //! the emulator rows' control, which the api flavor's edge check must
 //! refuse (the silicon control is the removed pending-mask clear, a
-//! flight-side control).
+//! hardware-side control).
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -44,8 +44,8 @@ pub fn write(line: u32, _mode: u32, high: bool) {
         let old = LEVEL[facts::LOOP_IN as usize].swap(v, Ordering::AcqRel);
         if old != v {
             gpio::fire(facts::LOOP_IN, high);
-            #[cfg(feature = "test-gpio-doctored-latch")]
-            gpio::fire(facts::LOOP_IN, high);
+            #[cfg(any(feature = "test-gpio-doctored-latch", feature = "test-gpio-doctored-edge"))]
+            doctored(high);
         }
     }
 }
@@ -63,4 +63,21 @@ pub fn disarm(_line: u32) {}
 /// No software trigger on the virtual backend: the loop is the trigger.
 pub fn software_edge(_line: u32) -> bool {
     false
+}
+
+/// The latch control's extra event: every change of the loop fires twice.
+#[cfg(feature = "test-gpio-doctored-latch")]
+fn doctored(high: bool) {
+    gpio::fire(facts::LOOP_IN, high);
+}
+
+/// The edge control's extra event: ONE event of the backend's own, beside the
+/// tenth edge the doors counted and no other -- an edge the program did not
+/// make, which a check's total must refuse.
+#[cfg(all(feature = "test-gpio-doctored-edge", not(feature = "test-gpio-doctored-latch")))]
+fn doctored(high: bool) {
+    let counted = unsafe { (*core::ptr::addr_of!(gpio::WITNESS)).edges_counted };
+    if counted == 10 {
+        gpio::fire(facts::LOOP_IN, high);
+    }
 }

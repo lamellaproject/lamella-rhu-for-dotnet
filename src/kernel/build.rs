@@ -33,14 +33,14 @@ fn main() {
     if std::env::var("TARGET").map(|t| t.starts_with("thumbv8m")).unwrap_or(false) {
         println!("cargo:rustc-cfg=armv8m");
     }
-    println!("cargo:rustc-check-cfg=cfg(rp2350_pll150)");
+    println!("cargo:rustc-check-cfg=cfg(rp2350_xtal)");
     if cfg!(any(
-        feature = "pimoroni-pico-plus-2-pll150",
-        feature = "pimoroni-pico-plus-2-w-pll150",
-        feature = "rpi-pico2-pll150",
-        feature = "rpi-pico2-w-pll150"
+        feature = "pimoroni-pico-plus-2-xtal12",
+        feature = "pimoroni-pico-plus-2-w-xtal12",
+        feature = "rpi-pico2-xtal12",
+        feature = "rpi-pico2-w-xtal12"
     )) {
-        println!("cargo:rustc-cfg=rp2350_pll150");
+        println!("cargo:rustc-cfg=rp2350_xtal");
     }
     println!("cargo:rustc-check-cfg=cfg(stm32f7_pll216)");
     if cfg!(any(feature = "st-stm32f746g-disco-pll216", feature = "st-stm32f769i-disco-pll216")) {
@@ -58,5 +58,32 @@ fn main() {
     }
     if cfg!(any(feature = "board-st-nucleo-u5a5zj-q", feature = "board-st-stm32f769i-disco")) {
         println!("cargo:rustc-cfg=rhu_bus_rows");
+    }
+    println!("cargo:rustc-check-cfg=cfg(rhu_bus_rp2350)");
+    if cfg!(any(
+        feature = "board-pimoroni-pico-plus-2",
+        feature = "board-pimoroni-pico-plus-2-w",
+        feature = "board-rpi-pico2",
+        feature = "board-rpi-pico2-w"
+    )) {
+        println!("cargo:rustc-cfg=rhu_bus_rows");
+        println!("cargo:rustc-cfg=rhu_bus_rp2350");
+    }
+    if cfg!(all(feature = "board-mps2-an505", feature = "test-bus-rp2350")) {
+        println!("cargo:rustc-cfg=rhu_bus_rp2350");
+    }
+    println!("cargo:rustc-check-cfg=cfg(rhu_pwm_adc_rows)");
+    println!("cargo:rustc-check-cfg=cfg(rhu_pwm_adc_models)");
+    if cfg!(any(feature = "board-mps2-an500", feature = "board-mps2-an505")) {
+        println!("cargo:rustc-cfg=rhu_pwm_adc_rows");
+        println!("cargo:rustc-cfg=rhu_pwm_adc_models");
+    }
+    if cfg!(any(
+        feature = "board-pimoroni-pico-plus-2",
+        feature = "board-pimoroni-pico-plus-2-w",
+        feature = "board-rpi-pico2",
+        feature = "board-rpi-pico2-w"
+    )) {
+        println!("cargo:rustc-cfg=rhu_pwm_adc_rows");
     }
 }

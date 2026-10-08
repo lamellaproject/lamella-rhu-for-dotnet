@@ -81,8 +81,8 @@ fn port_reg(line: u32, off: usize) -> usize {
     facts::GPIO_BASE + port as usize * 0x400 + off
 }
 
-/// A spin by the kernel's clock, interrupts free: once per claim, never in
-/// a transfer.
+/// A spin by the kernel's clock, interrupts free: in a recovery (at a claim,
+/// or after a transfer timed out), never while a transfer moves.
 fn spin(ns: u64) {
     let t0 = sched::now_ns();
     while sched::now_ns().wrapping_sub(t0) < ns {}
@@ -141,6 +141,20 @@ pub fn i2c_scl_pulse(d: &I2cBus) {
     spin(HALF_BIT_NS);
     pins::write(scl, g::MODE_OUTPUT_OPEN_DRAIN, true);
     spin(HALF_BIT_NS);
+}
+
+/// The recovery's long clock: the clock pad an open-drain output driven low,
+/// or released; the caller times the hold between the two.
+pub fn i2c_scl_hold(d: &I2cBus, low: bool) {
+    let Some(scl) = line_of(d, PadRole::I2cClock) else {
+        return;
+    };
+    if low {
+        pins::configure(scl, g::MODE_OUTPUT_OPEN_DRAIN, g::PULL_UP, false);
+    } else {
+        pins::write(scl, g::MODE_OUTPUT_OPEN_DRAIN, true);
+        spin(HALF_BIT_NS);
+    }
 }
 
 /// The recovery's stop: the data pad low while the clock is released, then

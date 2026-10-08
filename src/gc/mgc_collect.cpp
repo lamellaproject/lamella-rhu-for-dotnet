@@ -311,6 +311,19 @@ static uint8_t* range_walk_end(uint32_t i)
 static Object** g_stk;          /* explicit mark stack */
 static uint32_t g_stk_cap, g_sp, g_sp_hw;
 
+/* THE OVERFLOW PROTOCOL: a full mark stack DEFERS the push. The object is marked (its bit
+ * was set by the caller) and its references wait for the rescan of the
+ * window [g_ovf_lo, g_ovf_hi) the deferred objects span; the drain
+ * rescans the window's marked objects -- the mark bitmap is the index of
+ * marked object starts -- round by round until nothing is deferred.
+ * Nothing grows; the counters are the census's and reset per
+ * collection. MGC_BREAK_MARK_OVERFLOW compiles the recovery out and the
+ * fail-fast back in (the negative control's knob). */
+static unsigned char g_ovf_flag;
+static uint8_t* g_ovf_lo;
+static uint8_t* g_ovf_hi;
+static uint32_t g_ovf_deferred, g_ovf_rounds, g_ovf_rescanned;
+
 static volatile unsigned char g_gc_busy;   /* concurrent-entry guard */
 
 static uint32_t g_count[3];     /* per-generation collection counts */
@@ -536,9 +549,22 @@ static inline int is_marked(Object* o)
 static void mark_push(Object* o)
 {
     if (g_sp == g_stk_cap) {
+#ifdef MGC_BREAK_MARK_OVERFLOW
         CLLOG("mark stack OVERFLOW at %lu entries (raise MGC_MARK_STACK_ENTRIES)",
               (unsigned long)g_stk_cap);
         coll_failfast("mark stack overflow");
+#else
+        /* Deferred (the overflow protocol): the caller set the object's mark bit; the
+         * window widens to cover the object and the drain rescans the
+         * window's marked objects. */
+        uint8_t* lo = (uint8_t*)o;
+        uint8_t* hi = lo + obj_step(o);
+        if (!g_ovf_flag || lo < g_ovf_lo) g_ovf_lo = lo;
+        if (!g_ovf_flag || hi > g_ovf_hi) g_ovf_hi = hi;
+        g_ovf_flag = 1;
+        g_ovf_deferred++;
+        return;
+#endif
     }
     g_stk[g_sp++] = o;
     if (g_sp > g_sp_hw) g_sp_hw = g_sp;
@@ -611,12 +637,66 @@ static void scan_refs(Object* o)
     }
 }
 
+#ifndef MGC_BREAK_MARK_OVERFLOW
+/* One rescan round over one range's bitmap: every set bit inside [lo, hi)
+ * is a marked object start (mark_test_set has one caller, mark_edge, and
+ * every edge is an object start); its references are scanned -- an
+ * already-marked child returns at mark_test_set, an unmarked one is
+ * marked and pushed, or deferred into the next window. */
+static void rescan_bitmap(const uint8_t* bm, uint8_t* base, uint8_t* end,
+                          uint8_t* lo, uint8_t* hi)
+{
+    if (lo < base) lo = base;
+    if (hi > end) hi = end;
+    if (lo >= hi) return;
+    uint32_t i0 = (uint32_t)(lo - base) >> 2;
+    uint32_t i1 = (uint32_t)(hi - base + 3u) >> 2;     /* exclusive */
+    for (uint32_t byte = i0 >> 3; byte < ((i1 + 7u) >> 3); byte++) {
+        uint8_t bits = bm[byte];
+        if (!bits) continue;
+        for (uint32_t b = 0; b < 8u; b++) {
+            if (!(bits & (uint8_t)(1u << b))) continue;
+            uint32_t idx = (byte << 3) | b;
+            if (idx < i0 || idx >= i1) continue;
+            g_ovf_rescanned++;
+            scan_refs((Object*)(base + (idx << 2)));
+        }
+    }
+}
+
+static void rescan_window(uint8_t* lo, uint8_t* hi)
+{
+    rescan_bitmap(g_bm, g_lo, g_hi, lo, hi);
+#ifdef MGC_MULTIRANGE
+    rescan_bitmap(g_r1bm, g_r1base, g_r1end, lo, hi);
+#endif
+}
+#endif /* !MGC_BREAK_MARK_OVERFLOW */
+
 static void mark_drain(void)
 {
     Phase saved = g_phase;
     g_phase = PH_TRACE;
-    while (g_sp)
-        scan_refs(g_stk[--g_sp]);
+    for (;;) {
+        while (g_sp)
+            scan_refs(g_stk[--g_sp]);
+#ifdef MGC_BREAK_MARK_OVERFLOW
+        break;
+#else
+        if (!g_ovf_flag)
+            break;
+        /* A round (the overflow protocol): the window taken and reset, its marked objects
+         * rescanned (pushing, or deferring into the next window), then
+         * the stack drained again. Every round marks new objects or
+         * defers none, so the rounds end. */
+        uint8_t* lo = g_ovf_lo;
+        uint8_t* hi = g_ovf_hi;
+        g_ovf_flag = 0;
+        g_ovf_lo = g_ovf_hi = nullptr;
+        g_ovf_rounds++;
+        rescan_window(lo, hi);
+#endif
+    }
     g_phase = saved;
 }
 
@@ -977,12 +1057,15 @@ static void death_scan_for_finalization(void)
     mark_drain();
 }
 
+extern "C" void mgc_heap_bump_set(uint8_t* p);
+
 /* Sweep: one pass over the walkable heap; maximal runs of unmarked
  * objects (dead allocations, old pads, old free runs -- pads and runs
  * are never marked, so stale free space re-coalesces every cycle)
  * become single free objects on the allocator's address-ordered list.
- * Runs are always >=12 (min object) and ==0 mod 4. g_ptr is NEVER
- * retracted -- the virgin bump tail must stay pre-zeroed. */
+ * Runs are always >=12 (min object) and ==0 mod 4. The one run the bump
+ * mark is set back over is the dead run at the top, which is zeroed
+ * first -- the virgin bump tail stays pre-zeroed. */
 static void death_sweep(void)
 {
     mgc_heap_free_reset();
@@ -1056,9 +1139,24 @@ static void death_sweep(void)
         p += step;
     }
     if (run) {
+#ifndef MGC_BREAK_TAIL_REJOIN
+        /* The dead run at the top of the used part rejoins the untouched
+         * tail: zeroed with the header word before it (the tail's
+         * zero-born promise) and the bump mark set back to its start.
+         * Every thread's window was retired before the sweep, so no
+         * allocation context points into it. A request that fits only
+         * across this run and the tail is then served after one
+         * collection. */
+        memset(run - 4, 0, (size_t)(end - run) + 4u);
+        mgc_heap_bump_set(run);
+        g_dc.swept_bytes += (uint32_t)(end - run);
+        CLLOG("sweep: the dead run at the top (%lu B) rejoined the untouched tail of the managed heap (zeroed, the bump mark set back)",
+              (unsigned long)(end - run));
+#else
         mgc_heap_free_add(run, (uint32_t)(end - run));
         g_dc.runs++;
         g_dc.swept_bytes += (uint32_t)(end - run);
+#endif
     }
 #endif /* MGC_MULTIRANGE */
     mgc_heap_free_done(g_dc.live_objs);
@@ -2212,11 +2310,30 @@ extern "C" void mgc_collect_init(void)
         coll_failfast("mark stack mmap failed");
     g_stk = (Object**)stk;
 
+#ifdef MGC_BREAK_TAIL_REJOIN
+    CLLOG("BREAK_TAIL_REJOIN: a dead run at the top joins the free list and the bump mark stays (the negative control)");
+#endif
     CLLOG("init: mark bitmap %lu KB @%p (region/32), mark stack %lu entries (%lu KB) @%p -- both shim mmap, zero static RAM",
           (unsigned long)(g_bm_bytes / 1024u), (void*)g_bm,
           (unsigned long)g_stk_cap,
           (unsigned long)(g_stk_cap * sizeof(Object*) / 1024u), (void*)g_stk);
 }
+
+#ifdef MGC_TUNE_LIVE
+/* What the collector tables cost in system memory for a managed heap of
+ * the given size, each draw rounded up to the page the bridge draws in:
+ * the mark bitmap (the heap / 32) and the mark stack -- the same two
+ * expressions as the init's draws above. The heap's rule at boot sizes
+ * itself with this, so the two sizes are stated in this file alone. */
+extern "C" uint32_t mgc_collect_tables_bytes(uint32_t heap_bytes,
+                                             uint32_t page_bytes)
+{
+    uint32_t mask = page_bytes - 1u;
+    uint32_t bm   = (heap_bytes / 32u + mask) & ~mask;
+    uint32_t stk  = ((uint32_t)(MGC_MARK_STACK_ENTRIES * sizeof(Object*)) + mask) & ~mask;
+    return bm + stk;
+}
+#endif
 
 /* counters for the skeleton's BCL surface */
 extern "C" uint32_t mgc_collect_count(int gen)
@@ -2289,6 +2406,12 @@ extern "C" int mgc_heap_collect(int generation, int low_memory_p, int mode)
     memset(&g_mc, 0, sizeof(g_mc));
     g_roots_total = 0;
     g_sp = 0; g_sp_hw = 0;
+    g_ovf_flag = 0; g_ovf_lo = g_ovf_hi = nullptr;
+    g_ovf_deferred = g_ovf_rounds = g_ovf_rescanned = 0;
+#ifdef MGC_BREAK_MARK_OVERFLOW
+    if (index == 1)
+        CLLOG("BREAK_MARK_OVERFLOW: the overflow recovery is compiled out -- a full mark stack fail-fasts (negative control)");
+#endif
 
     GCToEEInterface::GcEnumAllocContexts(&mgc_fix_alloc_context, nullptr);
     GCToEEInterface::DiagGCStart(condemned, /*isInduced*/ true);
@@ -2383,6 +2506,12 @@ extern "C" int mgc_heap_collect(int generation, int low_memory_p, int mode)
     }
 #endif
 
+#ifndef MGC_BREAK_MARK_OVERFLOW
+    /* Every root phase drains; a window still set here is a structural
+     * break (a deferred push whose references were never rescanned). */
+    if (g_ovf_flag)
+        coll_failfast("a deferred push was never rescanned (the mark phase ended with the window set)");
+#endif
     GCToEEInterface::AfterGcScanRoots(condemned, /*max_gen*/ 2, &sc);
 
 #ifdef MGC_SWEEP_LIVE
@@ -2499,6 +2628,10 @@ extern "C" int mgc_heap_collect(int generation, int low_memory_p, int mode)
               (unsigned long)used,
               (unsigned long)(used ? (uint64_t)g_mc.marked_bytes * 100u / used : 0),
               (unsigned long)g_sp_hw, (unsigned long)g_stk_cap);
+        if (g_ovf_rounds)
+            CLLOG("mark stack full: %lu pushes deferred at cap %lu; %lu rescan round(s) over the window; %lu objects re-scanned",
+                  (unsigned long)g_ovf_deferred, (unsigned long)g_stk_cap,
+                  (unsigned long)g_ovf_rounds, (unsigned long)g_ovf_rescanned);
     }
     if (g_mc.marked_bytes > used)
         coll_failfast("marked_bytes exceeds used_bytes (tracer escaped the heap)");

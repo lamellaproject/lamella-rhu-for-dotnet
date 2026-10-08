@@ -11,9 +11,13 @@ use crate::text::{
     contains_fixed, cr_count, eq_lf_normalized, final_free, final_gcs, payload_stream,
     wake_order, word_sym_present,
 };
-use crate::tools::{command_words, qemu_ladder, rustc_facts, ExecProfile, QemuSource, QEMU_POINTER};
+use crate::tools::{
+    budget, command_words, guest_image, qemu_ladder, rustc_facts, stat_line_time, ExecProfile, Guest,
+    Limits, QemuSource, Stop, Watch, QEMU_POINTER,
+};
 use std::path::{Path, PathBuf};
 use std::process::exit;
+use std::time::Duration;
 
 const GATE: &str = "rhu-gate-selfcheck";
 const DISPLAY: &str = "RHU-GATE SELFCHECK";
@@ -21,6 +25,20 @@ const DISPLAY: &str = "RHU-GATE SELFCHECK";
 const SHA_EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const SHA_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 const SHA_TWO_BLOCK: &str = "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1";
+
+/// Feed the judge of an instruction-counted run one poll a second for
+/// `seconds`, the reading of each second from `spent_at`: the rule that
+/// stopped the run and its second, or `None` for a run that went on to the
+/// end.
+fn watch_run(limits: Limits, seconds: u64, spent_at: impl Fn(u64) -> Option<Duration>) -> Option<(Stop, u64)> {
+    let mut watch = Watch::new(limits);
+    for second in 0..=seconds {
+        if let Some(stop) = watch.observe(Duration::from_secs(second), spent_at(second)) {
+            return Some((stop, second));
+        }
+    }
+    None
+}
 
 pub fn run(repo: &Path) -> ! {
     let rustc_v = match rustc_facts() {
@@ -281,6 +299,72 @@ pub fn run(repo: &Path) -> ! {
         "command-unbalanced-quote",
         "a command with an unbalanced double quote",
         command_words("\"tool dir/clang.exe --version").is_ok(),
+    );
+
+    let minute = Limits { deadline: Duration::from_secs(60), budget: Duration::from_secs(60) };
+    sc.accept_probe(
+        "watch-busy-host",
+        "a run given a fifth of a processor goes on past its wall deadline, its budget unspent",
+        watch_run(minute, 250, |s| Some(Duration::from_secs(s) / 5)).is_none(),
+    );
+    sc.accept_probe(
+        "watch-slow-worker",
+        "a run that shows a sixtieth of the deadline in work inside every window goes on",
+        watch_run(minute, 600, |s| Some(Duration::from_secs(s) / 59)).is_none(),
+    );
+    sc.probe(
+        "watch-works-without-end",
+        "a run that works without end (it must be stopped for work when its budget is spent)",
+        watch_run(minute, 100, |s| Some(Duration::from_secs(s))) != Some((Stop::Work, 60)),
+    );
+    sc.probe(
+        "watch-stands-still",
+        "a run that worked ten seconds and then stands still (it must be stopped for no work one deadline later)",
+        watch_run(minute, 100, |s| Some(Duration::from_secs(s.min(10)))) != Some((Stop::NoWork, 70)),
+    );
+    sc.probe(
+        "watch-launcher",
+        "a process whose reading never moves (it must be stopped for no work at the deadline)",
+        watch_run(minute, 100, |_| Some(Duration::from_millis(10))) != Some((Stop::NoWork, 60)),
+    );
+    sc.probe(
+        "watch-no-reading",
+        "a run on a host that gives no reading (the wall clock must stop it at the deadline)",
+        watch_run(minute, 100, |_| None) != Some((Stop::Deadline, 60)),
+    );
+    sc.accept_probe(
+        "budget-floor-and-unit",
+        "the budget is the work times the unit, the floor when that is less, and the floor with no unit",
+        budget(Duration::from_secs(60), 80, Some(Duration::from_secs(1))) == Duration::from_secs(80)
+            && budget(Duration::from_secs(60), 80, Some(Duration::from_millis(500))) == Duration::from_secs(60)
+            && budget(Duration::from_secs(60), 80, None) == Duration::from_secs(60),
+    );
+    let stat_fields = "S 1 77 77 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 5 0 100 1000000 200 18446744073709551615";
+    sc.accept_probe(
+        "stat-line-genuine",
+        "a process's stat line read for its user and kernel time, in the host's clock ticks",
+        stat_line_time(&format!("77 (qemu-system-arm) {stat_fields}"), 100) == Some(Duration::from_secs(3)),
+    );
+    sc.accept_probe(
+        "stat-line-name",
+        "a process name that holds spaces and parentheses leaves the fields where they are",
+        stat_line_time(&format!("77 (a (b) c) {stat_fields}"), 100) == Some(Duration::from_secs(3)),
+    );
+    sc.probe(
+        "stat-line-cut-short",
+        "a stat line cut short of its time fields",
+        stat_line_time("77 (qemu-system-arm) S 1 77 77 0 -1 4194560 100 0 0 0 250", 100).is_some(),
+    );
+    sc.accept_probe(
+        "guest-images",
+        "the three generated guests, byte for byte",
+        guest_image(Guest::Work(1))
+            == [
+                0x00, 0x10, 0x00, 0x20, 0x09, 0x00, 0x00, 0x00, 0x03, 0x48, 0x01, 0x38, 0xFD, 0xD1, 0x18, 0x20,
+                0x02, 0x49, 0xAB, 0xBE, 0xFE, 0xE7, 0x00, 0xBF, 0x01, 0x00, 0x00, 0x00, 0x26, 0x00, 0x02, 0x00,
+            ]
+            && guest_image(Guest::Spin) == [0x00, 0x10, 0x00, 0x20, 0x09, 0x00, 0x00, 0x00, 0xFE, 0xE7, 0x00, 0xBF]
+            && guest_image(Guest::Wait) == [0x00, 0x10, 0x00, 0x20, 0x09, 0x00, 0x00, 0x00, 0x30, 0xBF, 0xFD, 0xE7],
     );
 
     sc.finish("genuine inputs accepted");

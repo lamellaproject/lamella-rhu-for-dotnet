@@ -27,10 +27,10 @@ the two hosted-runtime tiers it links are present:
 | --- | --- | --- |
 | QEMU mps2-an500 (Cortex-M7) | `thumbv7em-none-eabihf` | `qemu-exit,board-mps2-an500` (the default) |
 | QEMU mps2-an505 (Cortex-M33) | `thumbv8m.main-none-eabihf` | `qemu-exit,board-mps2-an505` |
-| Pimoroni Pico Plus 2 (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-pimoroni-pico-plus-2` (`pimoroni-pico-plus-2-pll150` for the 150 MHz clock) |
-| Pimoroni Pico Plus 2 W (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-pimoroni-pico-plus-2-w` (`pimoroni-pico-plus-2-w-pll150` for the 150 MHz clock) |
-| Raspberry Pi Pico 2 (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-rpi-pico2` (`rpi-pico2-pll150` for the 150 MHz clock) |
-| Raspberry Pi Pico 2 W (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-rpi-pico2-w` (`rpi-pico2-w-pll150` for the 150 MHz clock) |
+| Pimoroni Pico Plus 2 (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-pimoroni-pico-plus-2` (`pimoroni-pico-plus-2-xtal12` for the 12 MHz crystal clock) |
+| Pimoroni Pico Plus 2 W (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-pimoroni-pico-plus-2-w` (`pimoroni-pico-plus-2-w-xtal12` for the 12 MHz crystal clock) |
+| Raspberry Pi Pico 2 (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-rpi-pico2` (`rpi-pico2-xtal12` for the 12 MHz crystal clock) |
+| Raspberry Pi Pico 2 W (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-rpi-pico2-w` (`rpi-pico2-w-xtal12` for the 12 MHz crystal clock) |
 | ST NUCLEO-L4R5ZI (Cortex-M4) | `thumbv7em-none-eabihf` | `board-st-nucleo-l4r5zi` (`st-nucleo-l4r5zi-pll120` for the 120 MHz clock) |
 | ST NUCLEO-U5A5ZJ-Q (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-st-nucleo-u5a5zj-q` (`st-nucleo-u5a5zj-q-pll160` for the 160 MHz clock) |
 | ST STM32F746G-DISCO (Cortex-M7) | `thumbv7em-none-eabihf` | `board-st-stm32f746g-disco` (`st-stm32f746g-disco-pll216` for the 216 MHz clock) |
@@ -42,9 +42,11 @@ hosted-runtime link family. The NUCLEO-L4R5ZI row hosts the kernel alone:
 no hosted-runtime tier exists for its Cortex-M4 core, so it has no payload
 map.
 
-A board's default clock is the part's reset clock (16 MHz on the ST boards,
-the 12 MHz crystal on the RP2350 boards); the clock feature beside its board
-feature selects the production clock, which the boot banner reads back. The
+A board's default clock is the part's reset clock on the ST boards (16 MHz)
+and the chip's rated 150 MHz system PLL on the RP2350 boards, which the boot
+banner reads back; the clock feature beside its board feature selects the
+other posture: the production clock on the ST boards (read back in the
+banner), the 12 MHz crystal on the RP2350 boards (no clock line). The
 STM32F769I-DISCO's hardware random source needs the 48 MHz PLL output, so it
 serves under `st-stm32f769i-disco-pll216` only: on the default clock the boot
 banner says the source is absent, cryptographic draws are refused and the
@@ -75,11 +77,10 @@ verdict line; see [docs/VERIFYING.md](./VERIFYING.md).
 A program of your own takes the hosted runtime through the
 `Lamella.Rhu.Sdk` package, whose runtime archives carry every runtime
 helper; that path opens at the launch, when the SDK and tools packages
-publish, and the SDK's board table carries the two emulator rows and the
-first two physical boards' rows today; the other boards' rows follow. A
-program's `new GpioController()` from the standard
-`System.Device.Gpio` package runs unchanged: the package's Linux driver
-binds the libgpiod v1 API, which the hosting layer presents over the
+publish, and the SDK's board table carries a row for each emulator machine
+and each supported board. A program's `new GpioController()` from the
+standard `System.Device.Gpio` package runs unchanged: the package's Linux
+driver binds the libgpiod v1 API, which the hosting layer presents over the
 kernel's GPIO doors. Two controllers in one program are two owners, as on
 Linux: a pin opened through one is refused through the other until it is
 closed, and the two may be used from separate threads. The same package's
