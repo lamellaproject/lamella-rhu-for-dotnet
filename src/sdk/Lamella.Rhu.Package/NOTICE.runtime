@@ -1,0 +1,27 @@
+Lamella RHU for .NET -- a runtime package
+Copyright (c) 2026 Lamella LLC
+
+This package is licensed under your choice of the MIT license or the Apache
+License, Version 2.0.
+
+Third-party components distributed in this package, with their license
+texts under licenses/:
+
+- archives/ -- the .NET runtime's native archives, built by Lamella from the
+  dotnet/runtime source at the tag named in the class's identity file under
+  tier/, Copyright (c) .NET Foundation and Contributors, MIT license: the
+  text is licenses/dotnet-runtime-LICENSE.txt, and the runtime's own
+  third-party notices are licenses/dotnet-runtime-THIRD-PARTY-NOTICES.txt.
+- tier/*/rt-libc.o -- the C and math library closure the images link,
+  merged from the newlib C library's members as distributed with the Arm GNU
+  Toolchain; newlib is distributed under a collection of BSD-style licenses
+  whose texts are licenses/newlib-COPYING.NEWLIB.txt.
+- kernels/*/librhu_core.a -- the Rust standard library's core and
+  compiler_builtins members the kernel archives of this class link against,
+  as the pinned Rust toolchain ships them, distributed under the Rust
+  project's terms: your choice of the MIT license or the Apache License,
+  Version 2.0, the same terms as this package's own files.
+
+The archives, the tier objects, the core archive and the license texts named
+above are placed in the package when it is built; a source checkout carries
+this notice and the project file alone.

@@ -14,9 +14,9 @@
  * Two families of constants appear below. The glibc ABI facts (slot
  * sizes, clock ids, the sysconf and mmap flag numbers, the syscall number
  * for the thread id, the structure layouts) belong to the glibc arm32
- * personality and do not move with a runtime re-pin. The runtime-side
+ * personality and do not change with the runtime's version. The runtime-side
  * facts (errno identities, the board row's values) come from the generated
- * PAL headers and the board rows header and move with theirs. */
+ * PAL headers and the board rows header and change with theirs. */
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -26,7 +26,7 @@
 #include "mgc_board_rows.h"
 #include "rhu.h"
 #include "rhu_glibc_arm32.h"
-#include "rhu_pal_errno_net11_rc1.h"
+#include "rhu_pal_errno_net11_rc2.h"
 
 void *memcpy(void *dst, const void *src, size_t n);
 void *memset(void *dst, int c, size_t n);
@@ -143,16 +143,20 @@ static void line_format(fmt_sink *l, const char *fmt, va_list ap)
         }
         default: {
             const char *msg = "[shim] diagnostic line: unsupported conversion in ";
-            rhu_console_write(msg, (uint32_t)strlen(msg));
-            rhu_console_write(fmt, (uint32_t)strlen(fmt));
-            rhu_console_write("\n", 1u);
-            rhu_exit(134);
+            rhu_log_write(RHU_LOG_SILENT, msg, (uint32_t)strlen(msg));
+            rhu_log_write(RHU_LOG_SILENT, fmt, (uint32_t)strlen(fmt));
+            rhu_log_write(RHU_LOG_SILENT, "\n", 1u);
+            rhu_abort(134);
         }
         }
     }
 }
 
-void rhu_shim_log(const char *fmt, ...)
+/* One diagnostic line of this layer on the kernel's LOG stream at a level
+ * (the log-door stage): "[shim] ", the formatted text and the newline as
+ * ONE write through rhu_log_write, which prints the line when the image's
+ * output level reaches the line's and drops it otherwise. */
+static void shim_line(uint32_t level, const char *fmt, va_list ap)
 {
     char line[LOG_LINE_BYTES];
     fmt_sink l;
@@ -160,12 +164,25 @@ void rhu_shim_log(const char *fmt, ...)
     l.cap = LOG_LINE_BYTES;
     l.n = 0;
     line_puts(&l, "[shim] ");
+    line_format(&l, fmt, ap);
+    line_put(&l, '\n');
+    rhu_log_write(level, line, l.n < LOG_LINE_BYTES - 1u ? l.n : LOG_LINE_BYTES - 1u);
+}
+
+void rhu_shim_log(const char *fmt, ...)
+{
     va_list ap;
     va_start(ap, fmt);
-    line_format(&l, fmt, ap);
+    shim_line(RHU_LOG_VERBOSE, fmt, ap);
     va_end(ap);
-    line_put(&l, '\n');
-    rhu_console_write(line, l.n < LOG_LINE_BYTES - 1u ? l.n : LOG_LINE_BYTES - 1u);
+}
+
+void rhu_shim_last_words(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    shim_line(RHU_LOG_SILENT, fmt, ap);
+    va_end(ap);
 }
 
 int32_t rhu_shim_vformat(char *buf, uint32_t cap, const char *fmt, va_list ap)
@@ -214,7 +231,7 @@ static int32_t g_block_module = -1;
 static shim_block *block(void)
 {
     if (g_block_module < 0) {
-        rhu_shim_log("the per-thread block is not registered: rhu_shim_init must run first");
+        rhu_shim_last_words("the per-thread block is not registered: rhu_shim_init must run first");
         rhu_exit(120);
     }
     return (shim_block *)rhu_tls_get(g_block_module);
@@ -246,7 +263,75 @@ void __stack_chk_fail(void) __attribute__((noreturn));
 void __stack_chk_fail(void)
 {
     rhu_shim_log("stack protector: a frame's guard word was overwritten on thread %d", rhu_thread_self());
-    rhu_shim_exit(134);
+    rhu_abort(134);
+    __builtin_unreachable();
+}
+
+/* ------------------------------------------------------------------ */
+/* the managed heap's window                                           */
+/* ------------------------------------------------------------------ */
+
+/* The window of the kernel's system memory the managed heap lives in,
+ * read once at initialization. The kernel serves one range of RAM on
+ * every row -- range 0, the chip's own SRAM, whose arena is window 0,
+ * the memory every mapping below draws from -- and a second where the
+ * board has an external RAM the image brought up and proved at boot
+ * (range 1, whose arena is window 1). The heap goes where the runtime's
+ * rehydrated type data went: the link map places that data between the
+ * brackets __rhu_hydrated_lo and __rhu_hydrated_hi, and when the
+ * brackets lie inside range 1's physical range the managed heap, the
+ * collector's mark bitmap and its mark stack are served from window 1
+ * through the collector's own entry (rhu_shim_collector_mmap below);
+ * when they lie elsewhere (inside the SRAM's statics, or in an image
+ * whose map defines no brackets), or the image serves one range, the
+ * heap is window 0's as every other mapping. The brackets are weak
+ * references: an image whose map leaves them undefined reads them as
+ * NULL. The page counts sysconf answers and the runtime's hard-limit
+ * row are the heap window's. */
+extern char __rhu_hydrated_lo[] __attribute__((weak));
+extern char __rhu_hydrated_hi[] __attribute__((weak));
+extern char __rhu_arena_lo[];
+extern char __rhu_arena_hi[];
+
+static uint32_t g_heap_window;
+
+static void heap_window_choose(void)
+{
+    g_heap_window = 0u;
+    if (rhu_ram_count() < 2)
+        return;
+    rhu_ram_desc r;
+    if (rhu_ram_range(1u, &r) != 0)
+        return;
+    if (__rhu_hydrated_lo == NULL || __rhu_hydrated_hi == NULL)
+        return;
+    uint32_t lo = (uint32_t)(uintptr_t)__rhu_hydrated_lo;
+    uint32_t hi = (uint32_t)(uintptr_t)__rhu_hydrated_hi;
+    if (lo <= hi && lo >= r.base && hi - r.base <= r.bytes)
+        g_heap_window = 1u;
+}
+
+/* The heap window's size in bytes, and its headroom at the call: window
+ * 1 by the kernel's range record, window 0 by the arena's link brackets
+ * and its headroom. */
+static uint32_t heap_window_bytes(void)
+{
+    if (g_heap_window == 1u) {
+        rhu_ram_desc r;
+        if (rhu_ram_range(1u, &r) == 0)
+            return r.hi - r.lo;
+    }
+    return (uint32_t)((uintptr_t)__rhu_arena_hi - (uintptr_t)__rhu_arena_lo);
+}
+
+static uint32_t heap_window_free(void)
+{
+    if (g_heap_window == 1u) {
+        rhu_ram_desc r;
+        if (rhu_ram_range(1u, &r) == 0)
+            return r.free;
+    }
+    return rhu_arena_headroom();
 }
 
 /* ------------------------------------------------------------------ */
@@ -254,9 +339,11 @@ void __stack_chk_fail(void)
 /* ------------------------------------------------------------------ */
 
 /* The rows the runtime reads. The collector's aggregate hard limit is
- * generated at initialization: the system memory free at that moment,
- * less what the board row keeps for later draws (the frozen object heap
- * and the system memory left unallocated), in whole pages. It is the most
+ * generated at initialization: the managed heap window's free memory at
+ * that moment, less what the board row keeps for later draws (the frozen
+ * object heap and the system memory left unallocated) when that window
+ * is window 0, where those draws are made (window 1 serves the heap and
+ * the collector's tables alone), in whole pages. It is the most
  * any collector on this board can be given, and it is a bound for a stock
  * collector only: this image's own collector sizes the managed heap at
  * its start and takes less than the row says, by the collector tables and
@@ -267,11 +354,40 @@ void __stack_chk_fail(void)
  * reads both. */
 #define ROW_KEEP_BYTES ((uint32_t)MGC_ROW_FOH_POOL_BYTES + (uint32_t)MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES)
 
+/* The thread pool's idle-worker timeout row. The runtime's pool worker
+ * threads exit after this many milliseconds without work, and the kernel
+ * takes each exited worker's stack back into the row's stack pool; the
+ * runtime reads the row as DOTNET_ThreadPool_ThreadTimeoutMs (its own
+ * default, 20000 ms, keeps an idle worker's stack for twenty seconds on a
+ * pool of a few stacks). The row's default here is 100 ms: an idle worker
+ * returns its stack after 100 ms, inside the window in which a refused
+ * thread creation is asked again (SPAWN_RETRY_TRIES tries of
+ * SPAWN_RETRY_STEP_NS: 100 tries of 1 ms, in spawn_thread below), so a
+ * program's thread refused while idle workers still hold their stacks is
+ * served once they go; the timeout must stay under the window, and the
+ * assertion keeps it there. The runtime reads this environment row before
+ * its own runtimeconfig switch (the pool's reader takes the environment
+ * variable first and falls back to the switch), so a program's
+ * runtimeconfig value never overrides the row: a program sets its own
+ * value through the link word __rhu_threadpool_thread_timeout_ms, an
+ * absolute symbol whose address IS the value, defined by the SDK's link
+ * line from the project's property as __rhu_thread_stack_default is --
+ * a positive word is the timeout in milliseconds, a negative word is the
+ * runtime's own never (-1), and no word is the row's default. */
+#define ROW_POOL_THREAD_TIMEOUT_MS 100u
+#define SPAWN_RETRY_TRIES 100u
+#define SPAWN_RETRY_STEP_NS 1000000ull
+_Static_assert((unsigned long long)ROW_POOL_THREAD_TIMEOUT_MS * 1000000ull <= (unsigned long long)SPAWN_RETRY_TRIES * SPAWN_RETRY_STEP_NS,
+               "the pool's idle-worker timeout must stay inside the thread-creation retry window");
+extern const char __rhu_threadpool_thread_timeout_ms[] __attribute__((weak));
+
 static char g_env_hard_limit[48];
+static char g_env_pool_timeout[48];
 static char *g_env[] = {
     g_env_hard_limit,
     "DOTNET_gcServer=0",
     "DOTNET_gcConcurrent=0",
+    g_env_pool_timeout,
     "DOTNET_GCName=rhu-mgc",
     "DOTNET_GCPath=rhu-mgc",
     "HOME=/tmp",
@@ -280,8 +396,9 @@ static char *g_env[] = {
 
 static void env_build(void)
 {
-    uint32_t free_now = rhu_arena_headroom();
-    uint32_t limit = free_now > ROW_KEEP_BYTES ? (free_now - ROW_KEEP_BYTES) & ~4095u : 0u;
+    uint32_t free_now = heap_window_free();
+    uint32_t keep = g_heap_window == 1u ? 0u : ROW_KEEP_BYTES;
+    uint32_t limit = free_now > keep ? (free_now - keep) & ~4095u : 0u;
     fmt_sink l;
     l.buf = g_env_hard_limit;
     l.cap = (uint32_t)sizeof g_env_hard_limit;
@@ -289,6 +406,17 @@ static void env_build(void)
     line_puts(&l, "DOTNET_GCHeapHardLimit=0x");
     line_num(&l, (unsigned long long)limit, 16u, 0u, 0);
     g_env_hard_limit[l.n < sizeof g_env_hard_limit - 1u ? l.n : sizeof g_env_hard_limit - 1u] = 0;
+    l.buf = g_env_pool_timeout;
+    l.cap = (uint32_t)sizeof g_env_pool_timeout;
+    l.n = 0;
+    line_puts(&l, "DOTNET_ThreadPool_ThreadTimeoutMs=");
+    if (__rhu_threadpool_thread_timeout_ms == NULL)
+        line_num(&l, (unsigned long long)ROW_POOL_THREAD_TIMEOUT_MS, 10u, 0u, 0);
+    else if ((int32_t)(uintptr_t)__rhu_threadpool_thread_timeout_ms < 0)
+        line_puts(&l, "-1");
+    else
+        line_num(&l, (unsigned long long)(uintptr_t)__rhu_threadpool_thread_timeout_ms, 10u, 0u, 0);
+    g_env_pool_timeout[l.n < sizeof g_env_pool_timeout - 1u ? l.n : sizeof g_env_pool_timeout - 1u] = 0;
 }
 
 char **rhu_shim_environ(void)
@@ -316,17 +444,21 @@ int rhu_shim_init(void)
     d.name = "shim";
     int32_t h = rhu_module_register(&d);
     if (h < 0) {
-        rhu_shim_log("init: the kernel refused the per-thread block module (%d)", h);
+        rhu_shim_last_words("init: the kernel refused the per-thread block module (%d)", h);
         rhu_exit(120);
     }
     g_block_module = h;
+    heap_window_choose();
     env_build();
     if (rhu_entropy(&__stack_chk_guard, (uint32_t)sizeof __stack_chk_guard) != 0) {
-        rhu_shim_log("init: the kernel's entropy call refused the stack guard's seed");
+        rhu_shim_last_words("init: the kernel's entropy call refused the stack guard's seed");
         rhu_exit(120);
     }
     rhu_shim_log("init: per-thread block registered as module %d (%u bytes)", h,
                  (unsigned)sizeof(shim_block));
+    rhu_shim_log("init: the managed heap's window is %u (%s)", (unsigned)g_heap_window,
+                 g_heap_window == 1u ? "external: the rehydrated-data brackets lie inside range 1"
+                                     : "internal: one range served, or the brackets lie outside range 1");
     return 0;
 }
 
@@ -340,7 +472,9 @@ int rhu_shim_init(void)
 
 static uint32_t g_fixed_rezeros;
 
-/* Anonymous mappings are arena allocations attributed to the caller;
+/* Anonymous mappings are window 0 arena allocations attributed to the
+ * caller (the collector's region and tables are asked for through the
+ * entry below, and go where the managed heap lives);
  * a fixed mapping over owned space is the decommit contract, delivered as
  * an in-place re-zero at the same address with no address space consumed;
  * file-backed mappings do not exist on this platform. */
@@ -377,6 +511,37 @@ void *mmap64(void *addr, size_t len, int prot, int flags, int fd, int64_t off)
     }
     rhu_shim_log("mmap: anonymous %u KB served from the kernel arena (page-aligned, zero-born)",
                  (unsigned)(rounded / 1024u));
+    return p;
+}
+
+/* The collector's own mapping entry: the managed heap's one region, its
+ * mark bitmap and its mark stack are asked for through this name and
+ * served from the managed heap's window -- window 1 through the kernel's
+ * named-range door when the heap lives in the external RAM, window 0 as
+ * mmap64 above otherwise. Page-rounded, page-aligned, zero-born and
+ * attributed to the caller as mmap64's mappings are; (void *)-1 with
+ * ENOMEM when that window is exhausted, so a heap that does not fit is
+ * refused at the collector's start without a byte drawn from the other
+ * window; EINVAL for a zero length. Every other mapping of the runtime
+ * -- the handle pages, the frozen object heap's pool, the small
+ * anonymous mappings -- keeps mmap64 and window 0. */
+void *rhu_shim_collector_mmap(size_t len)
+{
+    uint32_t site = (uint32_t)(uintptr_t)__builtin_return_address(0);
+    if (len == 0u || len > (size_t)(0xFFFFFFFFu - PAGE_BYTES)) {
+        SET_ERRNO(RHU_GERR_EINVAL);
+        return MMAP_FAILED;
+    }
+    uint32_t rounded = ((uint32_t)len + PAGE_BYTES - 1u) & ~(PAGE_BYTES - 1u);
+    void *p = g_heap_window == 1u ? rhu_arena_alloc_from(1u, rounded, PAGE_BYTES, site)
+                                  : rhu_arena_alloc_at(rounded, PAGE_BYTES, site);
+    if (p == NULL) {
+        rhu_shim_log("collector mmap: window %u is exhausted (ENOMEM)", (unsigned)g_heap_window);
+        SET_ERRNO(RHU_GERR_ENOMEM);
+        return MMAP_FAILED;
+    }
+    rhu_shim_log("collector mmap: %u KB served from window %u (page-aligned, zero-born)",
+                 (unsigned)(rounded / 1024u), (unsigned)g_heap_window);
     return p;
 }
 
@@ -458,8 +623,9 @@ static int clock_is_realtime(int id)
 static int wait_clock_is_realtime(int id)
 {
 #ifdef RHU_SHIM_BREAK_REALTIME_WAIT
-    /* A test knob: the clock a timed wait names discarded, a real-time
-     * timestamp read as a boot-relative one. Never set in a hosted image. */
+    /* Built with this define, the clock a timed wait names is discarded and a
+     * real-time timestamp is read as a boot-relative one. Never set in a
+     * hosted image. */
     (void)id;
     return 0;
 #else
@@ -836,11 +1002,12 @@ static void cond_wake(shim_cond *c, uint32_t n)
  * the slot no longer zero reads the magic again before it refuses -- the
  * other thread's adoption, and perhaps its lock, is what it found. */
 #ifdef RHU_SHIM_BREAK_MUTEX_ADOPT
-/* The control's window: held open, blocked in the kernel's sleep, until
- * another first user has adopted the slot; a first user alone gives up at
- * this deadline of the kernel's clock, the only way the deadline is
- * reached (the core ladder runs its second first user one step below the
- * ladder's thread, so it runs only while the first is blocked here). */
+/* The window of the build below: held open, blocked in the kernel's sleep,
+ * until another first user has adopted the slot; a first user alone gives
+ * up at this deadline of the kernel's clock, the only way the deadline is
+ * reached (the core section of gate/rhu_shimtest.c runs its second first
+ * user one step below its own thread, so it runs only while the first is
+ * blocked here). */
 #define SHIM_CONTROL_WINDOW_NS 500000000ull
 static uint32_t g_control_inside;
 #endif
@@ -849,13 +1016,13 @@ static shim_mutex *mutex_of(void *slot)
 {
     mutex_slot *s = (mutex_slot *)slot;
 #ifdef RHU_SHIM_BREAK_MUTEX_ADOPT
-    /* The control's fault: the adoption as a read, a check and a store,
+    /* Built with this define, the adoption is a read, a check and a store,
      * the window between the read and the check held open, blocked, until
      * another first user has adopted the slot (the first user inside holds
      * the window; a second one, arriving while it waits, adopts at once).
      * With two first users inside together the second adopts and the
-     * first is refused, every time -- the core ladder's two-thread
-     * adoption check must refuse. */
+     * first is refused, every time, and the two-thread adoption check in
+     * gate/rhu_shimtest.c fails. */
     if (s->magic != MAGIC_MUTEX) {
         static const mutex_slot zero;
         if (__atomic_fetch_add(&g_control_inside, 1u, __ATOMIC_ACQ_REL) == 0u) {
@@ -1157,7 +1324,9 @@ static int spawn_thread(uint32_t stack_bytes, void *(*fn)(void *), void *arg, ui
      * joined has not yet given its stack back (the join returns before the
      * thread's last instruction); the retry story is this caller's, so a
      * refused spawn is asked again for a bounded while before it becomes
-     * the caller's error. */
+     * the caller's error -- SPAWN_RETRY_TRIES tries of SPAWN_RETRY_STEP_NS,
+     * the window the pool's idle-worker timeout row above sits inside, so
+     * a stack an idle pool worker is about to give back is waited for. */
     int32_t tid = rhu_thread_spawn(thread_entry, s, stack_bytes, RHU_SHIM_PRIO_FLAT, NULL);
     /* A clamped ask the pool cannot serve (the kernel serves an ask from
      * its never-carved remainder or a retired stack of exactly that size)
@@ -1171,8 +1340,8 @@ static int spawn_thread(uint32_t stack_bytes, void *(*fn)(void *), void *arg, ui
         tid = rhu_thread_spawn(thread_entry, s, stack_bytes, RHU_SHIM_PRIO_FLAT, NULL);
     }
     unsigned retries = 0u;
-    while (tid == RHU_EAGAIN && retries < 100u) {
-        rhu_sleep_ns(1000000ull);
+    while (tid == RHU_EAGAIN && retries < SPAWN_RETRY_TRIES) {
+        rhu_sleep_ns(SPAWN_RETRY_STEP_NS);
         retries++;
         tid = rhu_thread_spawn(thread_entry, s, stack_bytes, RHU_SHIM_PRIO_FLAT, NULL);
     }
@@ -1303,18 +1472,17 @@ typedef struct tls_index {
 void *__tls_get_addr(tls_index *ti)
 {
     if (ti->ti_module != 1u) {
-        rhu_shim_log("TLS module %lu is not wired (only the image's own module 1 exists)", ti->ti_module);
+        rhu_shim_last_words("TLS module %lu is not wired (only the image's own module 1 exists)", ti->ti_module);
         rhu_exit(121);
     }
 #if defined(RHU_SHIM_BREAK_TLSOFF)
-    /* Gate control: the offset dropped, so every thread-local symbol
-     * resolves to the front of the block. */
+    /* Built with this define, the offset is dropped, so every thread-local
+     * symbol resolves to the front of the block. */
     return rhu_tls_get(0);
 #elif defined(RHU_SHIM_BREAK_TLSCACHE)
-    /* Gate control: the first block seen is remembered and handed to
-     * every thread after it -- the shape a "look it up once" change
-     * would take, and the reason the per-thread copy is checked from a
-     * second thread rather than from the caller alone. */
+    /* Built with this define, the first block seen is remembered and handed
+     * to every thread after it, which is why the per-thread copy is checked
+     * from a second thread rather than from the caller alone. */
     static void *first;
     if (first == NULL)
         first = rhu_tls_get(0);
@@ -1376,15 +1544,13 @@ int __sched_cpucount(size_t bytes, const void *set)
 
 /* glibc's sysconf names: the page size, the processor counts, and the
  * physical / available page counts the collector's memory-load probe
- * reads -- answered from the arena window and its live headroom. */
+ * reads -- answered from the managed heap's window (chosen at
+ * initialization above): its size and its live headroom. */
 #define GLIBC_SC_PAGESIZE 30
 #define GLIBC_SC_NPROCESSORS_CONF 83
 #define GLIBC_SC_NPROCESSORS_ONLN 84
 #define GLIBC_SC_PHYS_PAGES 85
 #define GLIBC_SC_AVPHYS_PAGES 86
-
-extern char __rhu_arena_lo[];
-extern char __rhu_arena_hi[];
 
 long sysconf(int name)
 {
@@ -1395,9 +1561,9 @@ long sysconf(int name)
     case GLIBC_SC_NPROCESSORS_ONLN:
         return 1;
     case GLIBC_SC_PHYS_PAGES:
-        return (long)((uintptr_t)__rhu_arena_hi - (uintptr_t)__rhu_arena_lo) / (long)PAGE_BYTES;
+        return (long)(heap_window_bytes() / PAGE_BYTES);
     case GLIBC_SC_AVPHYS_PAGES:
-        return (long)(rhu_arena_headroom() / PAGE_BYTES);
+        return (long)(heap_window_free() / PAGE_BYTES);
     default:
         rhu_shim_log("sysconf(%d): not available (EINVAL)", name);
         SET_ERRNO(RHU_GERR_EINVAL);
@@ -1465,6 +1631,11 @@ typedef struct sig_disposition {
 static sig_disposition g_sig[RHU_GLIBC_NSIG];
 static uint32_t g_activation_armed;
 static uint32_t g_activation_count;
+#ifndef RHU_SHIM_BREAK_FAULT_UNARMED
+static uint32_t g_fault_armed;   /* the kernel's null-fault delivery armed (sticky) */
+#endif
+static uint32_t g_fault_count;   /* faults delivered to the runtime's handler (never counted as activations) */
+#define SHIM_FAULT_EXIT 139      /* the shim's own fault deaths: 128 + SIGSEGV, the Linux shell's word */
 
 uint32_t rhu_shim_activation_count(void)
 {
@@ -1483,20 +1654,135 @@ static int handler_is_recorded(void *h)
     return h != RHU_GLIBC_SIG_DFL && h != RHU_GLIBC_SIG_IGN;
 }
 
-/* The kernel's activation handler: the costume proper. */
+/* The stack-pointer trampoline. The runtime's handler may
+ * move the faulting thread's stack pointer UP before it throws (the
+ * interface-dispatch helper's pop of its two pushed words); the kernel never
+ * writes sp back, so the thread resumes here with r3 = the delta and r12 = the
+ * handler's pc (both scratch at RhpThrowHwEx's entry, which reads r0, r1 and
+ * sp and keeps r4 to r11 as the fault's). */
+__attribute__((naked, noinline)) static void rhu_fault_sp_tramp(void)
+{
+    __asm__ volatile("add sp, sp, r3\n\tbx r12");
+}
+
+/* The fault costume: a delivered null data access,
+ * dressed as the Linux record the runtime's handler reads -- SIGSEGV,
+ * SEGV_MAPERR, the faulting address in si_addr, the registers as today.
+ * The two deaths the rule names: no real handler recorded, or the
+ * runtime's decline (the pc unchanged and the disposition restored to the
+ * default: on Linux the access would run again and kill the process; here the
+ * kernel would deliver again, so the costume ends the process itself, loud).
+ * An upward stack-pointer edit within the thread's carve is honoured through
+ * the trampoline; any other edit is the loud end. */
+static void fault_costume(rhu_fault_ctx *f)
+{
+    rhu_ctx *k = &f->ctx;
+    rhu_glibc_ucontext uc;
+    rhu_glibc_siginfo si;
+    shim_block *b = block();
+    g_fault_count++;
+    if (RHU_FAULT_KIND(k->flags) != RHU_FAULT_NULL) {
+        rhu_shim_last_words("SIGSEGV: a fault of kind %u delivered; this layer arms the null kind alone; the process ends", RHU_FAULT_KIND(k->flags));
+        rhu_exit(SHIM_FAULT_EXIT);
+    }
+    sig_disposition d = g_sig[RHU_GSIG_SIGSEGV];
+    if (!handler_is_recorded(d.handler)) {
+        rhu_shim_last_words("SIGSEGV: null access at 0x%08x from pc 0x%08x with the default disposition; the process ends", f->fault_addr, k->pc);
+        rhu_exit(SHIM_FAULT_EXIT);
+    }
+    rhu_shim_log("SIGSEGV: null access at 0x%08x delivered to the runtime's handler", f->fault_addr);
+    memset(&uc, 0, sizeof uc);
+    memset(&si, 0, sizeof si);
+    si.si_signo = RHU_GSIG_SIGSEGV;
+    si.si_code = 1; /* SEGV_MAPERR: the zero page is unmapped on Linux */
+#ifdef RHU_SHIM_BREAK_FAULT_ADDR
+    /* Built with this define, the address is one past the page, which the
+     * runtime maps to a plain access violation, not the managed null
+     * reference. Never set in a hosted image. */
+    si.si_addr = 0x1000u;
+#else
+    si.si_addr = f->fault_addr;
+#endif
+    uc.uc_mcontext.oldmask = (uint32_t)b->sigmask;
+    uc.uc_mcontext.arm_r0 = k->r[0];
+    uc.uc_mcontext.arm_r1 = k->r[1];
+    uc.uc_mcontext.arm_r2 = k->r[2];
+    uc.uc_mcontext.arm_r3 = k->r[3];
+    uc.uc_mcontext.arm_r4 = k->r[4];
+    uc.uc_mcontext.arm_r5 = k->r[5];
+    uc.uc_mcontext.arm_r6 = k->r[6];
+    uc.uc_mcontext.arm_r7 = k->r[7];
+    uc.uc_mcontext.arm_r8 = k->r[8];
+    uc.uc_mcontext.arm_r9 = k->r[9];
+    uc.uc_mcontext.arm_r10 = k->r[10];
+    uc.uc_mcontext.arm_fp = k->r[11];
+    uc.uc_mcontext.arm_ip = k->r[12];
+    uc.uc_mcontext.arm_sp = k->sp;
+    uc.uc_mcontext.arm_lr = k->lr;
+    uc.uc_mcontext.arm_pc = k->pc;
+    uc.uc_mcontext.arm_cpsr = k->xpsr;
+    uc.uc_sigmask.word[0] = (uint32_t)b->sigmask;
+    uc.uc_sigmask.word[1] = (uint32_t)(b->sigmask >> 32);
+    if ((d.flags & RHU_GLIBC_SA_SIGINFO) != 0)
+        ((void (*)(int, rhu_glibc_siginfo *, void *))d.handler)(RHU_GSIG_SIGSEGV, &si, &uc);
+    else
+        ((void (*)(int))d.handler)(RHU_GSIG_SIGSEGV);
+    if (uc.uc_mcontext.arm_pc == k->pc && !handler_is_recorded(g_sig[RHU_GSIG_SIGSEGV].handler)) {
+        rhu_shim_last_words("SIGSEGV: null access at 0x%08x from pc 0x%08x declined by the runtime's handler (the faulting instruction is outside managed code); the process ends", f->fault_addr, k->pc);
+        rhu_exit(SHIM_FAULT_EXIT);
+    }
+    k->r[0] = uc.uc_mcontext.arm_r0;
+    k->r[1] = uc.uc_mcontext.arm_r1;
+    k->r[2] = uc.uc_mcontext.arm_r2;
+    k->r[3] = uc.uc_mcontext.arm_r3;
+    k->r[4] = uc.uc_mcontext.arm_r4;
+    k->r[5] = uc.uc_mcontext.arm_r5;
+    k->r[6] = uc.uc_mcontext.arm_r6;
+    k->r[7] = uc.uc_mcontext.arm_r7;
+    k->r[8] = uc.uc_mcontext.arm_r8;
+    k->r[9] = uc.uc_mcontext.arm_r9;
+    k->r[10] = uc.uc_mcontext.arm_r10;
+    k->r[11] = uc.uc_mcontext.arm_fp;
+    k->r[12] = uc.uc_mcontext.arm_ip;
+    k->lr = uc.uc_mcontext.arm_lr;
+    k->pc = uc.uc_mcontext.arm_pc;
+    if (uc.uc_mcontext.arm_cpsr != k->xpsr && g_status_edit_noted++ == 0)
+        rhu_shim_log("activation: a status-register edit in the signal context is ignored");
+    if (uc.uc_mcontext.arm_sp != k->sp) {
+        int32_t delta = (int32_t)(uc.uc_mcontext.arm_sp - k->sp);
+        uint32_t lo = 0;
+        uint32_t len = 0;
+        int in_carve = rhu_thread_stack_bounds(rhu_thread_self(), &lo, &len) == 0 && delta > 0 &&
+                       k->sp >= lo && (uint32_t)delta <= lo + len - k->sp;
+        if (!in_carve) {
+            rhu_shim_last_words("SIGSEGV: the runtime's handler moved the stack pointer by %d bytes outside the thread's stack; the process ends", delta);
+            rhu_exit(SHIM_FAULT_EXIT);
+        }
+        k->r[3] = (uint32_t)delta;
+        k->r[12] = k->pc | 1u;
+        k->pc = (uint32_t)(uintptr_t)rhu_fault_sp_tramp;
+    }
+}
+
+/* The kernel's activation handler: the costume proper (the fault branch
+ * first: a delivered fault context carries the flag). */
 static void act_costume(rhu_ctx *k)
 {
     rhu_glibc_ucontext uc;
     rhu_glibc_siginfo si;
     shim_block *b = block();
+    if ((k->flags & RHU_CTX_FAULT) != 0) {
+        fault_costume((rhu_fault_ctx *)k);
+        return;
+    }
     g_activation_count++;
     memset(&uc, 0, sizeof uc);
     memset(&si, 0, sizeof si);
     si.si_signo = SHIM_ACTIVATION_SIGNAL;
     si.si_code = RHU_GLIBC_SI_TKILL;
 #ifdef RHU_SHIM_BREAK_SIPID
-    /* A test knob: the record names a foreign process, the shape the runtime
-     * drops. Never set in a hosted image. */
+    /* Built with this define, the record names a foreign process, a record
+     * the runtime drops. Never set in a hosted image. */
     si.si_pid = 0;
 #else
     si.si_pid = getpid();
@@ -1518,8 +1804,9 @@ static void act_costume(rhu_ctx *k)
     uc.uc_mcontext.arm_sp = k->sp;
     uc.uc_mcontext.arm_lr = k->lr;
 #ifdef RHU_SHIM_BREAK_CTXPC
-    /* A test knob: the program counter slot carries the link register, the
-     * plumbing slip a layout assert cannot see. Never set in a hosted image. */
+    /* Built with this define, the program counter slot carries the link
+     * register, a wrong-field copy a layout assert cannot see. Never set in a
+     * hosted image. */
     uc.uc_mcontext.arm_pc = k->lr;
 #else
     uc.uc_mcontext.arm_pc = k->pc;
@@ -1588,6 +1875,33 @@ int sigaction(int signo, const rhu_glibc_sigaction *act, rhu_glibc_sigaction *ol
                 g_activation_armed = 1;
             }
             rhu_shim_log("activation: signal %d handler recorded; the kernel's activation delivery is armed", signo);
+        } else if (signo == RHU_GSIG_SIGSEGV) {
+            /* The activation entry first (the kernel refuses a
+             * kind armed with no entry), then the null kind, once; sticky. */
+            if (g_activation_armed == 0) {
+                int32_t rc = rhu_activation_register(act_costume);
+                if (rc != 0) {
+                    rhu_shim_log("activation: the kernel refused the handler registration (%d)", rc);
+                    rhu_exit(122);
+                }
+                g_activation_armed = 1;
+            }
+#ifdef RHU_SHIM_BREAK_FAULT_UNARMED
+            /* Built with this define, the disposition is recorded and the kernel
+             * call never made, so the first null access ends the program as the
+             * kernel designs it. Never set in a hosted image. */
+            rhu_shim_log("sigaction(%d): handler recorded; this platform delivers no signal of that number", signo);
+#else
+            if (g_fault_armed == 0) {
+                int32_t rc = rhu_fault_register(RHU_FAULT_NULL);
+                if (rc != 0) {
+                    rhu_shim_log("SIGSEGV: the kernel refused the null-fault delivery's arming (%d)", rc);
+                    rhu_exit(122);
+                }
+                g_fault_armed = 1;
+            }
+            rhu_shim_log("sigaction(%d): handler recorded; the kernel's null-fault delivery is armed", signo);
+#endif
         } else {
             rhu_shim_log("sigaction(%d): handler recorded; this platform delivers no signal of that number", signo);
         }
@@ -1787,8 +2101,8 @@ long getrandom(void *buf, size_t len, unsigned flags)
 void arc4random_buf(void *buf, size_t len)
 {
     if (secure_fill(buf, len) != 0) {
-        rhu_shim_log("arc4random_buf: the kernel's secure entropy call refused; refusing to return weak bytes");
-        rhu_exit(134);
+        rhu_shim_last_words("arc4random_buf: the kernel's secure entropy call refused; refusing to return weak bytes");
+        rhu_abort(134);
     }
 }
 
@@ -1831,6 +2145,19 @@ typedef struct dl_phdr_info {
 #define PF_R 4u
 #define PF_X 1u
 
+/* The execute-in-place window of a board whose map places the hosted
+ * program's code in a memory-mapped flash (the STM32F769 under its
+ * execute-in-place map): the window's text between __rhu_xip_lo and
+ * __rhu_xip_hi, its exception-index table between __rhu_xip_exidx_start
+ * and __rhu_xip_exidx_end. The four are weak references: a map that
+ * declares no window leaves them undefined (read as NULL), provides the
+ * text pair as 0 or brackets an empty window, and the table below then
+ * holds the registered modules alone. */
+extern char __rhu_xip_lo[] __attribute__((weak));
+extern char __rhu_xip_hi[] __attribute__((weak));
+extern char __rhu_xip_exidx_start[] __attribute__((weak));
+extern char __rhu_xip_exidx_end[] __attribute__((weak));
+
 typedef struct dl_mod {
     uint32_t lo, hi, exidx_lo, exidx_hi;
 } dl_mod;
@@ -1847,13 +2174,17 @@ static int dl_clips(const dl_mod *m, int i, int j)
 }
 
 /* One entry per registered code module: its text as load segments, and
- * its unwind index as the ARM exception-index segment. A program counter
- * belongs to the smallest module containing it, so a module's load
- * segments are emitted as its span minus every more specific module's
- * span -- an unwinder then never consults a foreign index for it. */
+ * its unwind index as the ARM exception-index segment; then, when the
+ * image's map brackets an execute-in-place window, one entry for the
+ * window -- its text and its own exception-index table -- so an
+ * unwinder finds the entries of the code that runs from it. A program
+ * counter belongs to the smallest module containing it, so a module's
+ * load segments are emitted as its span minus every more specific
+ * module's span -- an unwinder then never consults a foreign index for
+ * it. */
 int dl_iterate_phdr(int (*cb)(dl_phdr_info *, size_t, void *), void *data)
 {
-    dl_mod m[RHU_MODULE_MAX];
+    dl_mod m[RHU_MODULE_MAX + 1];
     int n = 0;
     for (int32_t h = 0; h < RHU_MODULE_MAX; h++) {
         rhu_module_desc d;
@@ -1867,12 +2198,21 @@ int dl_iterate_phdr(int (*cb)(dl_phdr_info *, size_t, void *), void *data)
         m[n].exidx_hi = d.exidx_hi;
         n++;
     }
+    uint32_t xlo = (uint32_t)(uintptr_t)__rhu_xip_lo;
+    uint32_t xhi = (uint32_t)(uintptr_t)__rhu_xip_hi;
+    if (xhi > xlo) {
+        m[n].lo = xlo;
+        m[n].hi = xhi;
+        m[n].exidx_lo = (uint32_t)(uintptr_t)__rhu_xip_exidx_start;
+        m[n].exidx_hi = (uint32_t)(uintptr_t)__rhu_xip_exidx_end;
+        n++;
+    }
     for (int i = 0; i < n; i++) {
-        elf32_phdr ph[RHU_MODULE_MAX + 2];
+        elf32_phdr ph[RHU_MODULE_MAX + 3];
         int np = 0;
         uint32_t cur = m[i].lo;
         memset(ph, 0, sizeof ph);
-        while (cur < m[i].hi && np < RHU_MODULE_MAX + 1) {
+        while (cur < m[i].hi && np < RHU_MODULE_MAX + 2) {
             int moved = 1;
             while (moved != 0) {
                 moved = 0;
@@ -1965,31 +2305,27 @@ typedef struct rhu_glibc_dl_info {
     void *dli_saddr;
 } rhu_glibc_dl_info;
 
-/* The in-image header the kernel states at the image base: the module
- * base every reader of this record shares (the host's registration, a
- * debugger, this answer). Sixteen words; the magic, the layout version
- * and the load address are the ones read here. */
-extern const uint32_t __rhu_image_header[16];
-#define RHU_SHIM_IMAGE_MAGIC 0x49554852u
-#define RHU_SHIM_IMAGE_LAYOUT 1u
+/* The image's load address -- the module base every reader of this
+ * record shares (the host's registration, a debugger, this answer): the
+ * address of the vector table's symbol, which every board map places at
+ * the image base and the in-image header's load-address word repeats.
+ * Read from no memory (on a board whose image base
+ * is 0 the header lies inside the guarded null page). */
+extern const uint32_t __vector_table[];
 
 /* An address inside a registered module's code is answered with the
- * image's own name and the load address its header states -- the one
- * number the host registered the module under. This image has no symbol
- * table to consult, so the nearest-symbol fields are null. Any other
- * address is not inside a module this hosting knows. */
+ * image's own name and its load address -- the one number the host
+ * registered the module under. This image has no symbol table to
+ * consult, so the nearest-symbol fields are null. Any other address is
+ * not inside a module this hosting knows. */
 int dladdr(const void *addr, void *info)
 {
     rhu_module_desc d;
     rhu_glibc_dl_info *out = (rhu_glibc_dl_info *)info;
     if (out == NULL || rhu_module_find((uint32_t)(uintptr_t)addr, &d) < 0)
         return 0;
-    if (__rhu_image_header[0] != RHU_SHIM_IMAGE_MAGIC || __rhu_image_header[1] != RHU_SHIM_IMAGE_LAYOUT) {
-        rhu_shim_log("dladdr: the in-image header does not read as layout version 1");
-        return 0;
-    }
     out->dli_fname = "/rhu";
-    out->dli_fbase = (void *)(uintptr_t)__rhu_image_header[3];
+    out->dli_fbase = (void *)(uintptr_t)__vector_table;
     out->dli_sname = NULL;
     out->dli_saddr = NULL;
     return 1;
@@ -2000,17 +2336,30 @@ int dladdr(const void *addr, void *info)
 /* ------------------------------------------------------------------ */
 
 /* The runtime calls this after writing a fresh block of call thunks into
- * memory it then executes. The processor cores this hosting runs on
- * keep their caches OFF on both silicon boards (the kernel's board
- * modules state that posture; the emulator models no cache), so nothing
- * is cleaned or invalidated here: the two barriers order the writes
- * before any fetch of the new instructions and drain the pipeline of
- * anything fetched earlier. The day a board's posture turns a cache on,
- * the kernel's cache-sync door lands beside it and this row calls it. */
+ * memory it then executes. The data cache is off on every board this
+ * hosting runs on, so the written bytes are in memory already; the
+ * instruction cache is on where the kernel turned it on at boot (the
+ * STM32F769 under its execute-in-place map), and a line of it may still
+ * hold what the written range held before. When the configuration and
+ * control register reads the instruction cache on (its IC bit), the
+ * writes are drained and the cache is invalidated by address over the
+ * range through the ICIMVAU register, one 32-byte line at a time; then,
+ * as on every board, the two barriers order the writes before any fetch
+ * of the new instructions and drain the pipeline of anything fetched
+ * earlier. The emulator models no cache and the Cortex-M33 rows' cores
+ * have none: the register reads the cache off there and nothing is
+ * written to it. */
 void __clear_cache(void *begin, void *end)
 {
-    (void)begin;
-    (void)end;
+    volatile uint32_t *const ccr = (volatile uint32_t *)0xE000ED14u;
+    if ((*ccr & (1u << 17)) != 0u) {
+        volatile uint32_t *const icimvau = (volatile uint32_t *)0xE000EF58u;
+        uint32_t line = (uint32_t)(uintptr_t)begin & ~31u;
+        uint32_t stop = (uint32_t)(uintptr_t)end;
+        __asm__ volatile("dsb sy" ::: "memory");
+        for (; line < stop; line += 32u)
+            *icimvau = line;
+    }
     __asm__ volatile("dsb sy\n\tisb sy" ::: "memory");
 }
 
@@ -2092,7 +2441,7 @@ int __prctl_time64(int option, ...)
 void __aeabi_unwind_cpp_pr1(void)
 {
     rhu_shim_log("unwind: personality routine 1 entered; this image never unwinds");
-    rhu_shim_exit(134);
+    rhu_abort(134);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2112,8 +2461,15 @@ static int fd_is_device(int fd)
     return fd >= RHU_SHIM_FD_DEVICE_LO && fd < RHU_SHIM_FD_DEVICE_LO + RHU_SHIM_FD_DEVICE_COUNT;
 }
 
+static int fd_is_tty(int fd)
+{
+    return fd >= RHU_SHIM_FD_TTY_LO && fd < RHU_SHIM_FD_TTY_LO + RHU_SHIM_FD_TTY_COUNT;
+}
+
 int open(const char *path, int flags, ...)
 {
+    if (rhu_ttydev_owns_path(path))
+        return rhu_ttydev_open(path, flags);
     if (path != NULL && (strncmp(path, "/dev/i2c-", 9) == 0 || strncmp(path, "/dev/spidev", 11) == 0))
         return rhu_busdev_open(path, flags);
     rhu_shim_log("open(%s): no such path (ENOENT)", path != NULL ? path : "(null)");
@@ -2123,7 +2479,8 @@ int open(const char *path, int flags, ...)
 
 int open64(const char *path, int flags, ...)
 {
-    (void)flags;
+    if (rhu_ttydev_owns_path(path))
+        return rhu_ttydev_open(path, flags);
     rhu_shim_log("open(%s): no such path (ENOENT)", path != NULL ? path : "(null)");
     SET_ERRNO(RHU_GERR_ENOENT);
     return -1;
@@ -2143,21 +2500,25 @@ int close(int fd)
         return 0;
     if (fd_is_device(fd))
         return rhu_busdev_close(fd);
+    if (fd_is_tty(fd))
+        return rhu_ttydev_close(fd);
     SET_ERRNO(RHU_GERR_EBADF);
     return -1;
 }
 
 /* Every request the bus device unit serves takes a pointer argument; the
  * one it refuses without reading (the file-transfer form's address by
- * value) is read as a pointer and never dereferenced. */
+ * value) is read as a pointer and never dereferenced. The serial device
+ * unit's requests take a pointer or a value in the same word; it reads
+ * the word as its request defines it. */
 int ioctl(int fd, unsigned long request, ...)
 {
-    if (fd_is_device(fd)) {
+    if (fd_is_device(fd) || fd_is_tty(fd)) {
         va_list ap;
         va_start(ap, request);
         void *arg = va_arg(ap, void *);
         va_end(ap);
-        return rhu_busdev_ioctl(fd, request, arg);
+        return fd_is_tty(fd) ? rhu_ttydev_ioctl(fd, request, arg) : rhu_busdev_ioctl(fd, request, arg);
     }
     SET_ERRNO(RHU_GERR_ENOTTY);
     return -1;

@@ -2,6 +2,7 @@ shimtest-activation: the activation compatibility adapter on the kernel's delive
 PASS shim-act-init (the realtime floor; the set operations; the mask blocks, reports and clears)
 PASS shim-act-refuse (a send with no handler, a non-activation signal, an unknown thread, an unrecordable signal: each refused with its errno)
 PASS shim-act-register (the query form reads the default; the install keeps the old disposition; the read-back matches; a one-argument disposition answers its predecessor)
+PASS shim-act-fault (the kernel's null fault delivered as SIGSEGV with the address, the registers and the pc; a redirect landed; an upward stack-pointer edit honoured by the trampoline)
 PASS shim-act-deliver (the handler ran on the target's own stack with the process id, the thread's own id, the origin code, and the interrupted registers inside the target's window; the recorded mask rides the context)
 PASS shim-act-setctx (a pc and r0 edit through the signal context landed on the interrupted thread; a stack-pointer edit was ignored and reported)
 PASS shim-act-block (the handler blocked on a futex inside the activation; the interrupted flow stood still and resumed after the release)

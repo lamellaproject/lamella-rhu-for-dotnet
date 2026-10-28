@@ -3,10 +3,13 @@
 //! RM0385 (the STM32F74x/F75x), 6.4.1 to 6.4.10 in both; RM0432 (the
 //! STM32L4+), 8.4.1 to 8.4.11; RM0456 (the STM32U5), 13.4.1 to 13.4.11. A
 //! board's row names its arm; a part whose manual states another layout
-//! gets its own, never one of these by implication. The routing arms: the
-//! classic arm (the F7 and the L4+) selects a line's port in SYSCFG and its
-//! EXTI block feeds vector positions shared by groups of line numbers, both
-//! blocks at the addresses the board's facts state; the U5's EXTI block
+//! gets its own, never one of these by implication. The STM32H7's port
+//! block (RM0399, the GPIO chapter) states the same layout at the D3
+//! domain's addresses and its rows take the classic arm with the H7's own
+//! register offsets. The routing arms: the classic arm (the F7, the L4+ and
+//! the H7) selects a line's port in SYSCFG and its EXTI block feeds vector
+//! positions shared by groups of line numbers, both blocks at the addresses
+//! the board's facts state; the U5's EXTI block
 //! (RM0456 chapter 23) selects the port itself, keeps rising and falling
 //! pending bits apart and has one vector position per line. The board's
 //! facts state the block's base, the port count and the clock-enable
@@ -55,6 +58,11 @@ pub fn configure(line: u32, mode: u32, pull: u32, initial: bool) {
     let moder = if mode == m::MODE_INPUT { 0b00 } else { 0b01 };
     let od = (mode == m::MODE_OUTPUT_OPEN_DRAIN) as u32;
     with_cs(|| unsafe {
+        // The pull, the output type and the DATA REGISTER first (BSRR: the
+        // output's initial level), the mode last: the pin leaves its reset
+        // state (input on the F7, analog on the U5) in one step with its
+        // pull, type and level already right, so the pad never shows the
+        // wrong level at open.
         rmw(reg(port, PUPDR), 0b11 << (2 * bit), pull << (2 * bit));
         rmw(reg(port, OTYPER), 1 << bit, od << bit);
         if mode != m::MODE_INPUT {
@@ -104,13 +112,26 @@ fn nvic_enable(line: usize) {
     }
 }
 
-/// The classic arm (the F7 family and the L4+): SYSCFG selects the port of
-/// each of the sixteen lines (EXTICR1..4, four bits per line, 0000 PA up the
-/// alphabet; RM0410 7.2.3, RM0432 9.2.3); the EXTI block (IMR 0x00, RTSR 0x08,
-/// FTSR 0x0C, SWIER 0x10, PR 0x14, a pending bit cleared by writing 1; RM0410
-/// 11.9, RM0432 chapter 16) feeds the vector positions 6 to 10 for lines 0 to
-/// 4, 23 for lines 5 to 9, 40 for lines 10 to 15; the addresses the facts'.
-#[cfg(any(feature = "board-st-nucleo-l4r5zi", feature = "board-st-stm32f746g-disco", feature = "board-st-stm32f769i-disco"))]
+/// The classic arm (the F7 family, the L4+ and the H7): SYSCFG selects the
+/// port of each of the sixteen lines (EXTICR1..4, four bits per line, 0000
+/// PA up the alphabet; RM0410 7.2.3, RM0432 9.2.3, RM0399 13.3.2); the EXTI
+/// block feeds the vector positions 6 to 10 for lines 0 to 4, 23 for lines 5
+/// to 9, 40 for lines 10 to 15 on all three; the addresses the facts'. The
+/// block's registers differ by family: the F7 and the L4+ (IMR 0x00, RTSR
+/// 0x08, FTSR 0x0C, SWIER 0x10, PR 0x14; RM0410 11.9, RM0432 chapter 16);
+/// the H7 (RM0399 chapter 21: RTSR1 0x00, FTSR1 0x04, SWIER1 0x08, the
+/// CPU1 interrupt mask C1IMR1 0x80 and the CPU1 pending C1PR1 0x88). A
+/// pending bit is cleared by writing 1 on all three.
+#[cfg(any(
+    feature = "board-st-nucleo-l4r5zi",
+    feature = "board-st-stm32f746g-disco",
+    feature = "board-st-stm32f769i-disco",
+    feature = "board-arduino-giga-r1-wifi",
+    feature = "board-arduino-portenta-h7",
+    feature = "board-arduino-portenta-h7-lite",
+    feature = "board-arduino-portenta-h7-lite-connected",
+    feature = "board-arduino-portenta-machine-control"
+))]
 mod exti {
     use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -120,14 +141,32 @@ mod exti {
     const RCC_SYSCFG_EN_BIT: u32 = facts::RCC_SYSCFG_EN_BIT;
     const SYSCFG_EXTICR1: usize = facts::SYSCFG_EXTICR1;
     const EXTI: usize = facts::EXTI_BASE;
+    #[cfg(not(rhu_supply_stub))]
     const EXTI_IMR: *mut u32 = EXTI as *mut u32;
+    #[cfg(not(rhu_supply_stub))]
     const EXTI_RTSR: *mut u32 = (EXTI + 0x08) as *mut u32;
+    #[cfg(not(rhu_supply_stub))]
     const EXTI_FTSR: *mut u32 = (EXTI + 0x0C) as *mut u32;
+    #[cfg(not(rhu_supply_stub))]
     const EXTI_SWIER: *mut u32 = (EXTI + 0x10) as *mut u32;
+    #[cfg(not(rhu_supply_stub))]
     const EXTI_PR: *mut u32 = (EXTI + 0x14) as *mut u32;
+    // The H7 rows (the cfg the build script sets for the STM32H7 boards).
+    #[cfg(rhu_supply_stub)]
+    const EXTI_IMR: *mut u32 = (EXTI + 0x80) as *mut u32;
+    #[cfg(rhu_supply_stub)]
+    const EXTI_RTSR: *mut u32 = EXTI as *mut u32;
+    #[cfg(rhu_supply_stub)]
+    const EXTI_FTSR: *mut u32 = (EXTI + 0x04) as *mut u32;
+    #[cfg(rhu_supply_stub)]
+    const EXTI_SWIER: *mut u32 = (EXTI + 0x08) as *mut u32;
+    #[cfg(rhu_supply_stub)]
+    const EXTI_PR: *mut u32 = (EXTI + 0x88) as *mut u32;
 
     pub fn route(line: u32, rising: bool, falling: bool) -> i32 {
         let (port, bit) = m::st_split(line);
+        // One EXTI line per line NUMBER, shared across the ports: the
+        // slot is claimed for this line or refused for another's.
         let r = with_cs(|| unsafe { claims::irq_slot_claim(&mut *addr_of_mut!(gpio::CLAIMS), bit, line) });
         if r != 0 {
             return r;
@@ -180,6 +219,8 @@ mod exti {
             if pr == 0 {
                 return;
             }
+            // The doctored control removes the pending clear, so the control
+            // image re-enters on the same edge and never returns to the check.
             if cfg!(not(feature = "test-gpio-doctored-mask")) {
                 write_volatile(EXTI_PR, pr);
             }
@@ -297,6 +338,8 @@ mod exti {
         unsafe {
             let rp = read_volatile(EXTI_RPR1) & (1 << bit);
             let fp = read_volatile(EXTI_FPR1) & (1 << bit);
+            // The doctored control removes the pending clears, so the control
+            // image re-enters on the same edge and never returns to the check.
             if cfg!(not(feature = "test-gpio-doctored-mask")) {
                 if rp != 0 {
                     write_volatile(EXTI_RPR1, rp);

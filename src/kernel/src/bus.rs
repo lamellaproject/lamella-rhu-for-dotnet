@@ -20,8 +20,15 @@
 //! the clock low; after an I2C budget the data line is read, and a device
 //! left holding it low is given up to nine clocks and a stop before the
 //! call returns.
+//!
+//! The witness `__rhu_bus_witness` is read by symbol (a debugger, the api
+//! flavor's checks). The kernel's lines, each a rare event: the bus
+//! recovered at a claim; a data byte not acknowledged, a bus error or
+//! arbitration lost (the message named); a wire wait past its budget (the
+//! block reset), and after it what the recovery found when a device held
+//! the data line. An address not acknowledged is a scan's answer: no line.
 
-#![cfg_attr(not(rhu_bus_rows), allow(dead_code))]
+#![cfg_attr(not(rhu_bus_rows), allow(dead_code))] // a row without a bus compiles the doors' helpers unused
 
 use core::ptr::{addr_of_mut, read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
@@ -210,7 +217,7 @@ pub fn wait_until(budget_ticks: u32, deadline_ns: u64, spin_ns: u64, mut cond: i
 /// sleeps on the word through the futex until the holder's release wakes
 /// it (or the word already moved), then tries again. Err(the timeout
 /// code) when the deadline passes first; Ok(whether a wait happened).
-fn tenancy_take(word: &AtomicU32, deadline_ns: u64) -> Result<bool, i32> {
+pub(crate) fn tenancy_take(word: &AtomicU32, deadline_ns: u64) -> Result<bool, i32> {
     let mut waited = false;
     loop {
         if word.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
@@ -226,7 +233,7 @@ fn tenancy_take(word: &AtomicU32, deadline_ns: u64) -> Result<bool, i32> {
 
 /// The tenancy released: the word stored 0 and one waiter woken (a wake
 /// with no waiter is a bounded walk under the section).
-fn tenancy_give(word: &AtomicU32) {
+pub(crate) fn tenancy_give(word: &AtomicU32) {
     word.store(0, Ordering::Release);
     sched::futex_wake(word.as_ptr(), 1);
 }
@@ -252,6 +259,7 @@ fn claim_lines(lines: impl Iterator<Item = u32> + Clone) -> i32 {
     })
 }
 
+// ---------------- the rows with a bus: the doors over the drivers ----------------
 
 #[cfg(rhu_bus_rows)]
 mod served {
@@ -321,6 +329,8 @@ mod served {
         };
         let word = &I2C_TENANCY[ix];
         let _ = tenancy_take(word, sched::DEADLINE_NONE);
+        // A claimed bus: at its own rate the claim answers 0 and changes
+        // nothing; at another rate it is refused busy, nothing programmed.
         let held = I2C_CLAIMED[ix].load(Ordering::Acquire);
         if held != 0 {
             tenancy_give(word);
@@ -360,6 +370,11 @@ mod served {
             return refused(sched::ERR_INVAL, 0, 0);
         }
         let d = &facts::I2C_BUSES[ix];
+        // The claimed rate, read back from the stored mode (the driver stores
+        // nothing). The wait's budget is the standard rate's: 27 ticks with a
+        // millisecond tick, and the same at 400 kHz and 1 MHz (the wire term
+        // is one tick at every rate from 100 kHz up), so one figure serves
+        // every mode.
         let hz = match m::I2C_RATES_HZ.get(held as usize - 1) {
             Some(&hz) => hz,
             None => m::I2C_RATES_HZ[0],
@@ -454,11 +469,16 @@ mod served {
             return refused(sched::ERR_INVAL, 0, 0);
         }
         let budget = m::budget_ticks(1, m::SPI_BITS_PER_BYTE, achieved, crate::board::TICK_HZ);
+        // The bus is shared: the wait for it has no deadline of its own --
+        // every holder's exchange is bounded wait by wait, so the wait is.
         let word = &SPI_TENANCY[ix];
         let waited = match tenancy_take(word, sched::DEADLINE_NONE) {
             Ok(w) => w,
             Err(code) => return refused(code, 0, 0),
         };
+        // The chip select is the device's: claimed for the board at its first
+        // use, UNDER THE BUS'S TENANCY, so two threads meeting at one select's
+        // first use cannot both claim it and drive the pad twice.
         if let Some(i) = sel {
             let bit = 1u8 << i;
             if SPI_SELECTS[ix].load(Ordering::Acquire) & bit == 0 {
@@ -506,6 +526,7 @@ mod served {
 #[cfg(rhu_bus_rows)]
 pub use served::{i2c_claim, i2c_recover, i2c_transfer, spi_claim, spi_transfer};
 
+// ---------------- the rows without a bus: every door but the count refuses ----------------
 
 #[cfg(not(rhu_bus_rows))]
 pub fn i2c_claim(_bus: u32, _hz: u32) -> i32 {

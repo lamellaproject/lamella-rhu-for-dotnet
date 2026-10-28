@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The one project every RHU package is packed from, for the five kinds
+       (the build package, one board package per row of the board table,
+       one runtime package per processor class, one tools package per host
+       and one symbols package per row): no build output; the contents the
+       pack script staged under the directory RhuStage names, packed at the
+       package root under the id RhuPackageId, with the description read
+       from the file the script names for the kind (descriptions.txt beside
+       this project, its placeholder filled) and the license expression the
+       script passes. The README and the icon are packed when the stage
+       carries them; every stage carries its SHA256SUMS, written by the
+       script over the staged files. -->
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">1.0.0-alpha.1</RhuSdkVersion>
+    <PackageId>$(RhuPackageId)</PackageId>
+    <Version>$(RhuSdkVersion)</Version>
+    <Authors>Lamella LLC</Authors>
+    <Company>Lamella LLC</Company>
+    <Copyright>Copyright (c) 2026 Lamella LLC</Copyright>
+    <!-- The description NuGet shows, read from the file RhuPackageDescriptionFile
+         names: handed as a property switch, a text would split on its commas
+         and semicolons. -->
+    <RhuPackageDescription Condition="'$(RhuPackageDescription)' == '' and '$(RhuPackageDescriptionFile)' != '' and Exists('$(RhuPackageDescriptionFile)')">$([System.IO.File]::ReadAllText('$(RhuPackageDescriptionFile)').Trim())</RhuPackageDescription>
+    <Description>$(RhuPackageDescription)</Description>
+    <PackageLicenseExpression>$(RhuPackageLicense)</PackageLicenseExpression>
+    <PackageLicenseExpression Condition="'$(RhuPackageLicense)' == ''">MIT OR Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/lamellaproject/lamella-rhu-for-dotnet</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReleaseNotes>First pre-release</PackageReleaseNotes>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <IncludeSymbols>false</IncludeSymbols>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <NoWarn>$(NoWarn);CS2008;NU5100;NU5110;NU5111;NU5128</NoWarn>
+    <PackageReadmeFile Condition="Exists('$(RhuStage)/README.md')">README.md</PackageReadmeFile>
+    <PackageIcon Condition="Exists('$(RhuStage)/icon.png')">icon.png</PackageIcon>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(RhuStage)' != ''">
+    <None Include="$(RhuStage)/**" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <Target Name="RhuRequireStage" BeforeTargets="GenerateNuspec">
+    <Error Condition="'$(RhuPackageId)' == ''" Text="REFUSE: RhuPackageId must name the package" />
+    <Error Condition="'$(RhuStage)' == '' or !Exists('$(RhuStage)/SHA256SUMS')" Text="REFUSE: RhuStage must name the staged package contents, with their SHA256SUMS" />
+    <Error Condition="'$(RhuPackageDescription)' == ''" Text="REFUSE: RhuPackageDescriptionFile must name a file carrying the package's description" />
+  </Target>
+
+</Project>

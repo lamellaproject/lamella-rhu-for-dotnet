@@ -13,17 +13,19 @@
 //! the gate 'rt-m33' on goldens/rt-m33 and the mps2-an505 machine,
 //! consuming the same two program objects from goldens/rt-m7 by sha; every
 //! class-bound fact is a field of the world record.
+//!
 
 use crate::gate::{write_fixture, Selfcheck};
 use crate::objfile::{producer_stamp_of, section_span, section_span_prefixed, sha256_without_stamp};
 use crate::gates::gc::{parse_undefined, parse_vendored_manifest, resolve_ld, run_tool_bounded, ToolCmd};
-use crate::gates::payload::{check_rt_placement, map_region, split_ld_log, RtBrackets, RT_HELLO_BRACKETS};
+use crate::gates::payload::{check_rt_placement, map_external_region, map_region, split_ld_log, RtBrackets, RT_HELLO_BRACKETS};
+use crate::gates::echo;
 use crate::gates::shim::markers_out_of_order;
-use crate::image::{check_records, elf32_phdrs, header_abi};
+use crate::image::{check_records, elf32_phdrs, header_abi, header_abi_compat};
 use crate::results::{chain_json_from_env, validate_results, Results};
 use crate::sha256::{sha256_file, sha256_hex};
 use crate::text::{contains_fixed, cr_count, eq_lf_normalized, payload_stream, word_sym_present, word_sym_value};
-use crate::tools::{cargo_build_kernel, cargo_build_kernel_at, command_words, echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts, ExecProfile, RustcFacts};
+use crate::tools::{cargo_build_kernel, cargo_build_kernel_at, command_words, echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts, Echo, ExecProfile, RustcFacts};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::time::Duration;
@@ -41,8 +43,7 @@ const RUN_TIMEOUT_S: u64 = 300;
 /// carry, the board map, the emulator machine, the kernel staticlib and
 /// its build, the shim and collector objects the images link, the pointers
 /// that resolve the archive set and the C library, whether the world
-/// carries the F769 rider, and the verdict's case count. The Cortex-M7
-/// world is the gate as it stood, its fields the constants of record.
+/// carries the STM32F769 rider, and the verdict's case count.
 pub(crate) struct RtWorld {
     pub(crate) gate: &'static str,
     pub(crate) display: &'static str,
@@ -80,7 +81,7 @@ pub(crate) struct RtWorld {
     /// the kernel's own target directory; Some((target dir, target,
     /// features)) builds under a directory of the gate's own.
     pub(crate) lib_build: Option<(&'static str, &'static str, &'static str)>,
-    pub(crate) shim_objects: [&'static str; 8],
+    pub(crate) shim_objects: [&'static str; 12],
     /// The suite's markers in the one order the contract allows for this world.
     pub(crate) suite_markers: &'static [&'static str],
     pub(crate) gc_objects: [&'static str; 3],
@@ -88,19 +89,17 @@ pub(crate) struct RtWorld {
     pub(crate) archives_local: &'static str,
     pub(crate) newlib_env: &'static str,
     pub(crate) newlib_local: &'static str,
-    /// Whether the world links the F769 rider case.
+    /// Whether the world links the STM32F769 rider case.
     pub(crate) rider: bool,
     /// The verdict's case count, as the line prints it.
     pub(crate) cases: &'static str,
-    /// The board the SDK parity leg publishes the gate's program for
-    /// (the SDK's board table's target name), and the leg's own names.
     pub(crate) sdk_board: &'static str,
     pub(crate) sdk_gate: &'static str,
     pub(crate) sdk_display: &'static str,
     pub(crate) sdk_results: &'static str,
 }
 
-/// The Cortex-M7 world: the gate as it stood, every field a constant of
+/// The Cortex-M7 world: the gate as frozen, every field a constant of
 /// record.
 pub(crate) const WORLD_M7: RtWorld = RtWorld {
     gate: GATE,
@@ -134,7 +133,7 @@ pub(crate) const WORLD_M7: RtWorld = RtWorld {
     newlib_env: "RHU_NEWLIB_M7",
     newlib_local: "newlib-m7.local",
     rider: true,
-    cases: "22/22 cases incl. 14 negative controls",
+    cases: "28/28 cases incl. 20 negative controls",
     sdk_board: "arm-mps2-an500",
     sdk_gate: "rt-m7-sdk-parity",
     sdk_display: "RT-M7 SDK PARITY",
@@ -164,15 +163,15 @@ pub(crate) const WORLD_M33: RtWorld = RtWorld {
     tier: "goldens/rt-m33",
     program_tier: "goldens/rt-m7",
     pin: SHA_FROZEN_MANIFEST_M33,
-    archive_set: "net11-rc1-rhu-cortex-m33-sgc-enabled",
-    set_file: "archives-net11-rc1-rhu-cortex-m33-sgc-enabled.txt",
+    archive_set: "net11-rc2-rhu-cortex-m33-sgc-enabled",
+    set_file: "archives-net11-rc2-rhu-cortex-m33-sgc-enabled.txt",
     donor: "attr-donor-v8m.bin",
     cpu_arch: "ARM v8-M Mainline",
     thumb_isa: "Permitted",
     map: "src/kernel/payload-mps2-an505.x",
     machine: "mps2-an505",
     lib: "src/kernel/target/rt-m33-gate/kernel/thumbv8m.main-none-eabihf/release/librhu_kernel.a",
-    lib_build: Some(("src/kernel/target/rt-m33-gate/kernel", "thumbv8m.main-none-eabihf", "qemu-exit,board-mps2-an505,payload,entropy-accept-software")),
+    lib_build: Some(("src/kernel/target/rt-m33-gate/kernel", "thumbv8m.main-none-eabihf", "qemu-exit,board-mps2-an505,payload,entropy-accept-software,stack-watermark")),
     shim_objects: [
         "goldens/shim/shim-core-an505.o",
         "goldens/shim/shim-sysnative-an505.o",
@@ -182,6 +181,10 @@ pub(crate) const WORLD_M33: RtWorld = RtWorld {
         "goldens/shim/shim-pal-surface-an505.o",
         "goldens/shim/shim-gpiod-an505.o",
         "goldens/shim/shim-busdev-an505.o",
+        "goldens/shim/shim-pwmfs-an505.o",
+        "goldens/shim/shim-iiofs-an505.o",
+        "goldens/shim/shim-ttydev-an505.o",
+        "goldens/shim/shim-ports-native-an505.o",
     ],
     gc_objects: ["goldens/gc/skel-row-an505.o", "goldens/gc/heap-row-an505.o", "goldens/gc/collect-row-an505.o"],
     suite_markers: &SUITE_MARKERS_M33,
@@ -190,7 +193,7 @@ pub(crate) const WORLD_M33: RtWorld = RtWorld {
     newlib_env: "RHU_NEWLIB_M33",
     newlib_local: "newlib-m33.local",
     rider: false,
-    cases: "21/21 cases incl. 14 negative controls",
+    cases: "27/27 cases incl. 20 negative controls",
     sdk_board: "arm-mps2-an505",
     sdk_gate: "rt-m33-sdk-parity",
     sdk_display: "RT-M33 SDK PARITY",
@@ -243,19 +246,18 @@ fn resolve_kit_dir(repo: &Path, w: &RtWorld) -> Option<String> {
 }
 
 /// goldens/rt-m7/MANIFEST.md's own sha256: the in-code anchor beside the
-/// manifest. A re-freeze updates the objects, the lists, the manifest
-/// and this pin together in one reviewed commit.
-pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "661c622cc98c90ad5a22995014fb8fd79584e96d97b8a5650fc7b127302d7a02";
+/// manifest.
+pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "7c133332cd22c00c4f35a160f64db0a0daebe9141e816b7957e341783a7481cf";
 
 /// goldens/rt-m33/MANIFEST.md's own sha256: the Cortex-M33 world's pin,
 /// beside its manifest the way the Cortex-M7 world's is; a re-freeze of
 /// that tier moves this line and nothing of the other world's.
-pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "406db1706a56acc08dbd8e1853516b3f14f6577a6edeb3678ec10b295938fa69";
+pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "3b9e56a1251d987ff4adea3cd92903d013e9f36dacc7beedfd6b13c68fa3fb94";
 
 /// The archive set the frozen merge consumed. The manifest's `archives:`
 /// line and the frozen set file must both name it; a merge recorded under
 /// another set is refused before its bytes are trusted.
-const ARCHIVE_SET: &str = "net11-rc1-rhu-cortex-m7-sgc-enabled";
+const ARCHIVE_SET: &str = "net11-rc2-rhu-cortex-m7-sgc-enabled";
 
 /// The frozen tier: the file names under goldens/rt-m7/ and what each is.
 const FROZEN_FILES: [(&str, &str); 16] = [
@@ -264,7 +266,7 @@ const FROZEN_FILES: [(&str, &str); 16] = [
     ("rthello-merged.o", "the merged object: the program object, the surgery object and the runtime archives, the descriptor rooted, attributes neutralized"),
     ("attr-donor-v7em.bin", "the build-attributes blob the merges apply (a donor compiled at the image ABI)"),
     ("control-attr-a-profile.bin", "the archives' own merged attributes (application profile), the negative control's input"),
-    ("archives-net11-rc1-rhu-cortex-m7-sgc-enabled.txt", "the archive set's identity: what built it, each archive by size and sha256, the set's demand and surface shas"),
+    ("archives-net11-rc2-rhu-cortex-m7-sgc-enabled.txt", "the archive set's identity: what built it, each archive by size and sha256, the set's demand and surface shas"),
     ("rthello-merged.undef.txt", "the merged object's undefined names, sorted: the demand surface pinned exactly"),
     ("rt-libc.o", "the C and math libraries' closure merged into one relocatable, attributes neutralized"),
     ("rt-libc.members.txt", "the closure's member list by archive and name, with the kit's two libraries by size and sha256"),
@@ -281,7 +283,7 @@ const SURGERY: &str = "startup-cookie-copied.o";
 pub(crate) const MERGED: &str = "rthello-merged.o";
 const DONOR: &str = "attr-donor-v7em.bin";
 const CONTROL_ATTRS: &str = "control-attr-a-profile.bin";
-const SET_FILE: &str = "archives-net11-rc1-rhu-cortex-m7-sgc-enabled.txt";
+const SET_FILE: &str = "archives-net11-rc2-rhu-cortex-m7-sgc-enabled.txt";
 pub(crate) const UNDEF_FILE: &str = "rthello-merged.undef.txt";
 const LIBC: &str = "rt-libc.o";
 const LIBC_MEMBERS: &str = "rt-libc.members.txt";
@@ -433,12 +435,19 @@ const LIBC_FORBIDDEN: [&str; 24] = [
 /// window, so the linker's segment over them is contiguous and the
 /// checker reads it there, exactly as the payload gate's link-only cases
 /// do.
+/// The kernel's output level word the SDK's link always carries (the
+/// property half of the log word: `--defsym=__rhu_log_level=<code>`, the SDK's default
+/// quiet differing from the kernel's PROVIDE), at the gate project's own
+/// value -- rthello says `verbose` in its project file, so 3. The link of
+/// record carries the same word, so the parity tie proves the SDK's link
+/// is the gate's line plus the level the project named.
+const SDK_LOG_LEVEL_WORD: &str = "--defsym=__rhu_log_level=3";
 const RT_LINK_WORDS: [&str; 6] = ["-u", "RhInitialize", "-u", "RhRegisterOSModule", "-u", "DotNetRuntimeContractDescriptor"];
 const AN500_MAP: &str = "src/kernel/payload-mps2-an500.x";
 const AN500_LIB: &str = "src/kernel/target/thumbv7em-none-eabihf/release/librhu_kernel.a";
 /// The frozen shim objects and collector row objects the image links,
 /// in the order the line takes them.
-const SHIM_OBJECTS: [&str; 8] = [
+const SHIM_OBJECTS: [&str; 12] = [
     "goldens/shim/shim-core.o",
     "goldens/shim/shim-sysnative.o",
     "goldens/shim/shim-libc-glue.o",
@@ -447,6 +456,10 @@ const SHIM_OBJECTS: [&str; 8] = [
     "goldens/shim/shim-pal-surface.o",
     "goldens/shim/shim-gpiod.o",
     "goldens/shim/shim-busdev.o",
+    "goldens/shim/shim-pwmfs.o",
+    "goldens/shim/shim-iiofs.o",
+    "goldens/shim/shim-ttydev.o",
+    "goldens/shim/shim-ports-native.o",
 ];
 const GC_OBJECTS: [&str; 3] = ["goldens/gc/skel-row.o", "goldens/gc/heap-row.o", "goldens/gc/collect-row.o"];
 
@@ -455,18 +468,34 @@ const GC_OBJECTS: [&str; 3] = ["goldens/gc/skel-row.o", "goldens/gc/heap-row.o",
 /// (the publish wrapper asserts the same both ways at artifact birth).
 const FLAVOUR_MARK: &str = "Object reference not set to an instance";
 
+/// The kernel's handshake for the frozen payload in the PLAIN form: the shim
+/// tier is frozen at the header's generation, so the stated and the served
+/// generations agree and the kernel prints neither the window's floor nor a
+/// second number. The placeholder is filled at the run from include/rhu.h
+/// (RHU_ABI), as the payload gate's entry line derives the same text -- an
+/// ABI bump moves the header alone, never a literal here; a tier frozen
+/// behind the header puts the window form back, with the tier's generation
+/// as the one literal, until its re-freeze.
+const ENTRY_MARKER: &str = "[payload] entry: payload-provided, built for hosting-API contract generation {abi} (this kernel: {abi})";
+
+/// The markers with the handshake's placeholders filled from the header.
+fn filled_markers(markers: &[&str], abi: u32, compat: u32) -> Vec<String> {
+    markers.iter().map(|m| m.replace("{abi}", &abi.to_string()).replace("{compat}", &compat.to_string())).collect()
+}
+
 /// The boot's markers, in the ONE order the contract allows: the kernel's
 /// handshake, the shim, the host's steps, the collector through the
 /// dynamic-loading seam, the registration, the module list, managed
 /// entry, the program's start, one collection, the verdict, the host's
 /// exit line, the kernel's return.
-const BOOT_MARKERS: [&str; 24] = [
-    "[payload] entry: payload-provided, built for hosting-API contract generation 35 (this kernel: 35)",
+const BOOT_MARKERS: [&str; 25] = [
+    ENTRY_MARKER,
     "[shim] init: per-thread block registered as module 1 (48 bytes)",
     "[host] stdio: standard error bound to the C library's stream",
     "[host] stdio: standard output line buffered",
     "[host] data: initialized region verified against its load image",
     "[host] ctors run: 0 early, 6 main",
+    "[shim] sigaction(11): handler recorded; the kernel's null-fault delivery is armed",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
     "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
     "[mgc] dlopen(\"rhu-mgc\") -> skeleton costume handle",
@@ -474,7 +503,7 @@ const BOOT_MARKERS: [&str; 24] = [
     "[mgc] dlsym(\"GC_Initialize\")",
     "[mgc-skel] call IGCHeap::Initialize -> S_OK",
     "[host] runtime: initialized",
-    "[host] runtime: managed code 389414 bytes, unboxing stubs 766 bytes",
+    "[host] runtime: managed code 350646 bytes, unboxing stubs 742 bytes",
     "[host] runtime: module registered, class-library slots: 12",
     "[host] runtime: modules initialized: 1",
     "[host] argv: 1",
@@ -497,8 +526,9 @@ const PENDING: [&str; 0] = [];
 /// runtime's own thread spawned at its 16 KB ask, the threading section's
 /// worker and the activation section's worker at the row's default),
 /// every section's verdict line, the summary last.
-const SUITE_MARKERS_M7: [&str; 42] = [
-    "[payload] entry: payload-provided, built for hosting-API contract generation 35 (this kernel: 35)",
+const SUITE_MARKERS_M7: [&str; 80] = [
+    ENTRY_MARKER,
+    "[shim] sigaction(11): handler recorded; the kernel's null-fault delivery is armed",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
     "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
     "[host] entering managed entry",
@@ -527,7 +557,7 @@ const SUITE_MARKERS_M7: [&str; 42] = [
     "PASS rt-gpio (the standard class over the doors: six lines, an output looped to an input read back, one edge to a callback and one to a waiter, two collections during the wait, the board's and an unpopulated line refused)",
     "[shim] /dev/i2c-1: a message of 256 bytes refused (EINVAL: the limit is 255)",
     "[shim] /dev/i2c-9: no such bus on this board (ENOENT)",
-    "PASS rt-i2c (the standard class over the doors: the sensor model's identity and burst read through combined transactions, its reset written, a second descriptor on the shared bus, an unanswered address ENXIO, a message over the limit EINVAL, a missing bus ENOENT)",
+    "PASS rt-i2c (the standard class over the doors: the sensor model's identity and burst read in combined transactions, its reset written, a second descriptor on the bus; an unanswered address ENXIO, an oversize message EINVAL, a missing bus ENOENT)",
     "[shim] /dev/spidev2.0: mode 0, 8 bits, 1000000 Hz asked, 1000000 Hz achieved",
     "[shim] /dev/spidev2.1: mode 3, 8 bits, 500000 Hz asked, 500000 Hz achieved",
     "[shim] /dev/spidev2.0: mode 0, 8 bits, 1000000 Hz asked, 1000000 Hz achieved",
@@ -538,11 +568,55 @@ const SUITE_MARKERS_M7: [&str; 42] = [
     "[shim] /dev/spidev2.0: an active-high select refused (EINVAL: the kernel drives the select low)",
     "[shim] /dev/spidev2.0: an active-high select refused (EINVAL: the kernel drives the select low)",
     "[shim] /dev/spidev9.0: no such bus on this board (ENOENT)",
-    "PASS rt-spi (the standard class over the doors: the memory model's identity at the achieved rate, echoes of four and five hundred and twelve bytes, a read shifting out ones, a second device with its own mode and rate on the shared bus, a device driving its own select, a select the bus lacks, a word size, an active-high select and a missing bus refused, least-significant-bit-first served by the class's own reversal)",
+    "PASS rt-spi (the standard class over the doors: the memory model's identity at the achieved rate; echoes of 4 and 512 bytes; a read shifting out ones; a second device, mode and rate; four refusals; LSB-first by the class's reversal)",
+    // The PWM section's lines as the Cortex-M7 world's probe measured them (the shim's device-file lines and the verdict).
+    "[shim] /sys/class/pwm/pwmchip0/export: line 0 exported (timer 1 channel 0, the timer's clock 1000000 Hz)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 3 exported (timer 2 channel 0, the timer's clock 1000000 Hz)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 1 is not a PWM line of this row (ENODEV)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 0 exported (timer 1 channel 0, the timer's clock 1000000 Hz)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 2 exported (timer 1 channel 1, the timer's clock 1000000 Hz)",
+    "[shim] /sys/class/pwm/pwmchip0/pwm2/period: 500000 ns refused (EBUSY: another held channel of the same timer runs another period)",
+    "[shim] /sys/class/pwm/pwmchip0/pwm2/period: 500000 ns refused (EBUSY: another held channel of the same timer runs another period)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 2 exported (timer 1 channel 1, the timer's clock 1000000 Hz)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 3 is held (EBUSY: as a GPIO line, by the board, or its timer output through another line)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 3 exported (timer 2 channel 0, the timer's clock 1000000 Hz)",
+    "PASS rt-pwm (the standard class over the sysfs files on the doors: the channel number is the line number; Start, duty, frequency and Stop; the quantized period; the refusals; the shared period EBUSY; a GPIO holder refuses and gives back)",
+    // The null section's lines as the probe measured them: the six delivered faults -- every case once; the compiler's explicit null check is a read of the object's first byte -- then the verdict.
+    "[shim] SIGSEGV: null access at 0x00000000 delivered to the runtime's handler",
+    "[shim] SIGSEGV: null access at 0x00000004 delivered to the runtime's handler",
+    "[shim] SIGSEGV: null access at 0x00000004 delivered to the runtime's handler",
+    "[shim] SIGSEGV: null access at 0x00000000 delivered to the runtime's handler",
+    "[shim] SIGSEGV: null access at 0x00000000 delivered to the runtime's handler",
+    "[shim] SIGSEGV: null access at 0x00000000 delivered to the runtime's handler",
+    "PASS rt-null (a null reference as the managed exception: a field read and write, an array element, an instance and an interface call each caught through the guard; a field past the unchecked window and a read at offset 0 caught the same)",
+    // The serial section's lines as the freeze captured them on this world's wire (the shim's lines of the serial
+    // device file -- the achieved-rate words are this row's -- then the verdict).
+    "[shim] /dev/ttyS1: DTR and RTS are not wired on this port; the state is kept",
+    "[shim] /dev/ttyS1: the port is held (EBUSY: the kernel's console or another opener)",
+    "[shim] /dev/ttyS9: no such serial port on this board (ENOENT)",
+    "[shim] /dev/ttyS1: RTS/CTS flow control is not available on this port (EINVAL)",
+    "[shim] /dev/ttyS1: 115200 7N1 refused by the port (EINVAL: a rate the part misses or a frame it lacks; the door answered -22)",
+    "[shim] /dev/ttyS1: 2000000 8N1 refused by the port (EINVAL: a rate the part misses or a frame it lacks; the door answered -22)",
+    "[shim] /dev/ttyS1: 250000 8N1 (250000 Bd achieved)",
+    "[shim] /dev/ttyS1: 921600 8N1 (925925 Bd achieved)",
+    "[shim] /dev/ttyS1: 115200 8N1 (115207 Bd achieved)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 11)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 12)",
+    "[shim] /dev/ttyS1: this port has no break control; the break is a no-op",
+    "[shim] /dev/ttyS1: DTR and RTS are not wired on this port; the state is kept",
+    "PASS rt-serial (the standard serial port class over the device files on the doors: two ports; 115200 8N1; the refusals by their exceptions; a silent read TimeoutException; 8 and 64 bytes echoed with DataReceived; the break a no-op; reopened)",
+    // The analog section's lines as the freeze captured them on this world's wire (the shim's lines of the
+    // IIO device files, then the verdict).
+    "[shim] open(/sys/bus/iio/devices/iio:device0/in_voltage0_raw): the analog input is held (EBUSY: a program holds GPIO line 0 as a GPIO line, or this program already holds the channel)",
+    "[shim] open(/sys/bus/iio/devices/iio:device0/in_voltage1_raw): the analog input is held (EBUSY: a program holds GPIO line 1 as a GPIO line, or this program already holds the channel)",
+    "[shim] gpiod: line 1 claim refused (EBUSY: the board or another claim holds it)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 0 exported (timer 1 channel 0, the timer's clock 1000000 Hz)",
+    "PASS rt-adc (the standard analog controller over the IIO files: 819 at 12 bits on line 0; the voltage members not supported; a held line refused on both controllers; a held line or channel refuses the other; the disposal gives back; converter 1 by file)",
     "RTSUITE: ALL GOOD",
 ];
-const SUITE_MARKERS_M33: [&str; 42] = [
-    "[payload] entry: payload-provided, built for hosting-API contract generation 35 (this kernel: 35)",
+const SUITE_MARKERS_M33: [&str; 80] = [
+    ENTRY_MARKER,
+    "[shim] sigaction(11): handler recorded; the kernel's null-fault delivery is armed",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
     "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
     "[host] entering managed entry",
@@ -563,6 +637,7 @@ const SUITE_MARKERS_M33: [&str; 42] = [
     "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 7)",
     "PASS rt-interlocked (a long compared, exchanged, added and read above 32 bits; two threads, 10000 increments)",
     "PASS rt-math (truncate and round away from zero through the C library; pow, log2, cbrt, remainder)",
+    // The GPIO section's lines as the Cortex-M7 world's freeze measured them (the section's shim lines and its verdict).
     "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 8)",
     "[shim] pthread_create: stack 256 KB clamped to 24 KB (the row's clamp)",
     "[shim] pthread_create: stack 262144 B asked, 24576 B spawned (tid 9)",
@@ -571,7 +646,7 @@ const SUITE_MARKERS_M33: [&str; 42] = [
     "PASS rt-gpio (the standard class over the doors: six lines, an output looped to an input read back, one edge to a callback and one to a waiter, two collections during the wait, the board's and an unpopulated line refused)",
     "[shim] /dev/i2c-1: a message of 256 bytes refused (EINVAL: the limit is 255)",
     "[shim] /dev/i2c-9: no such bus on this board (ENOENT)",
-    "PASS rt-i2c (the standard class over the doors: the sensor model's identity and burst read through combined transactions, its reset written, a second descriptor on the shared bus, an unanswered address ENXIO, a message over the limit EINVAL, a missing bus ENOENT)",
+    "PASS rt-i2c (the standard class over the doors: the sensor model's identity and burst read in combined transactions, its reset written, a second descriptor on the bus; an unanswered address ENXIO, an oversize message EINVAL, a missing bus ENOENT)",
     "[shim] /dev/spidev1.0: mode 0, 8 bits, 1000000 Hz asked, 1000000 Hz achieved",
     "[shim] /dev/spidev1.1: mode 3, 8 bits, 500000 Hz asked, 500000 Hz achieved",
     "[shim] /dev/spidev1.0: mode 0, 8 bits, 1000000 Hz asked, 1000000 Hz achieved",
@@ -582,7 +657,50 @@ const SUITE_MARKERS_M33: [&str; 42] = [
     "[shim] /dev/spidev1.0: an active-high select refused (EINVAL: the kernel drives the select low)",
     "[shim] /dev/spidev1.0: an active-high select refused (EINVAL: the kernel drives the select low)",
     "[shim] /dev/spidev9.0: no such bus on this board (ENOENT)",
-    "PASS rt-spi (the standard class over the doors: the memory model's identity at the achieved rate, echoes of four and five hundred and twelve bytes, a read shifting out ones, a second device with its own mode and rate on the shared bus, a device driving its own select, a select the bus lacks, a word size, an active-high select and a missing bus refused, least-significant-bit-first served by the class's own reversal)",
+    "PASS rt-spi (the standard class over the doors: the memory model's identity at the achieved rate; echoes of 4 and 512 bytes; a read shifting out ones; a second device, mode and rate; four refusals; LSB-first by the class's reversal)",
+    // The PWM section's lines as the Cortex-M33 world's probe measured them (the same timers, the same lines).
+    "[shim] /sys/class/pwm/pwmchip0/export: line 0 exported (timer 1 channel 0, the timer's clock 1000000 Hz)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 3 exported (timer 2 channel 0, the timer's clock 1000000 Hz)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 1 is not a PWM line of this row (ENODEV)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 0 exported (timer 1 channel 0, the timer's clock 1000000 Hz)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 2 exported (timer 1 channel 1, the timer's clock 1000000 Hz)",
+    "[shim] /sys/class/pwm/pwmchip0/pwm2/period: 500000 ns refused (EBUSY: another held channel of the same timer runs another period)",
+    "[shim] /sys/class/pwm/pwmchip0/pwm2/period: 500000 ns refused (EBUSY: another held channel of the same timer runs another period)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 2 exported (timer 1 channel 1, the timer's clock 1000000 Hz)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 3 is held (EBUSY: as a GPIO line, by the board, or its timer output through another line)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 3 exported (timer 2 channel 0, the timer's clock 1000000 Hz)",
+    "PASS rt-pwm (the standard class over the sysfs files on the doors: the channel number is the line number; Start, duty, frequency and Stop; the quantized period; the refusals; the shared period EBUSY; a GPIO holder refuses and gives back)",
+    // The null section's lines as the probe measured them: the six delivered faults -- every case once; the compiler's explicit null check is a read of the object's first byte -- then the verdict.
+    "[shim] SIGSEGV: null access at 0x00000000 delivered to the runtime's handler",
+    "[shim] SIGSEGV: null access at 0x00000004 delivered to the runtime's handler",
+    "[shim] SIGSEGV: null access at 0x00000004 delivered to the runtime's handler",
+    "[shim] SIGSEGV: null access at 0x00000000 delivered to the runtime's handler",
+    "[shim] SIGSEGV: null access at 0x00000000 delivered to the runtime's handler",
+    "[shim] SIGSEGV: null access at 0x00000000 delivered to the runtime's handler",
+    "PASS rt-null (a null reference as the managed exception: a field read and write, an array element, an instance and an interface call each caught through the guard; a field past the unchecked window and a read at offset 0 caught the same)",
+    // The serial section's lines as the freeze captured them on this world's wire (the shim's lines of the serial
+    // device file -- the achieved-rate words are this row's -- then the verdict).
+    "[shim] /dev/ttyS1: DTR and RTS are not wired on this port; the state is kept",
+    "[shim] /dev/ttyS1: the port is held (EBUSY: the kernel's console or another opener)",
+    "[shim] /dev/ttyS9: no such serial port on this board (ENOENT)",
+    "[shim] /dev/ttyS1: RTS/CTS flow control is not available on this port (EINVAL)",
+    "[shim] /dev/ttyS1: 115200 7N1 refused by the port (EINVAL: a rate the part misses or a frame it lacks; the door answered -22)",
+    "[shim] /dev/ttyS1: 2000000 8N1 refused by the port (EINVAL: a rate the part misses or a frame it lacks; the door answered -22)",
+    "[shim] /dev/ttyS1: 250000 8N1 (250000 Bd achieved)",
+    "[shim] /dev/ttyS1: 921600 8N1 (909090 Bd achieved)",
+    "[shim] /dev/ttyS1: 115200 8N1 (114942 Bd achieved)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 11)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 12)",
+    "[shim] /dev/ttyS1: this port has no break control; the break is a no-op",
+    "[shim] /dev/ttyS1: DTR and RTS are not wired on this port; the state is kept",
+    "PASS rt-serial (the standard serial port class over the device files on the doors: two ports; 115200 8N1; the refusals by their exceptions; a silent read TimeoutException; 8 and 64 bytes echoed with DataReceived; the break a no-op; reopened)",
+    // The analog section's lines as the freeze captured them on this world's wire (the shim's lines of the
+    // IIO device files, then the verdict).
+    "[shim] open(/sys/bus/iio/devices/iio:device0/in_voltage0_raw): the analog input is held (EBUSY: a program holds GPIO line 0 as a GPIO line, or this program already holds the channel)",
+    "[shim] open(/sys/bus/iio/devices/iio:device0/in_voltage1_raw): the analog input is held (EBUSY: a program holds GPIO line 1 as a GPIO line, or this program already holds the channel)",
+    "[shim] gpiod: line 1 claim refused (EBUSY: the board or another claim holds it)",
+    "[shim] /sys/class/pwm/pwmchip0/export: line 0 exported (timer 1 channel 0, the timer's clock 1000000 Hz)",
+    "PASS rt-adc (the standard analog controller over the IIO files: 819 at 12 bits on line 0; the voltage members not supported; a held line refused on both controllers; a held line or channel refuses the other; the disposal gives back; converter 1 by file)",
     "RTSUITE: ALL GOOD",
 ];
 const SUITE_ALL_GOOD: &str = "RTSUITE: ALL GOOD";
@@ -601,9 +719,9 @@ const SUITE_FORBIDDEN: [&str; 8] = ["FAIL ", "RTSUITE: FAIL", "Unhandled excepti
 const ACTIVATIONS_LINE: &str = "[host] activations delivered: ";
 const ACTIVATIONS_FLOOR: u32 = 3;
 
-/// The F769 rider's world: the board's payload map and staticlib (built
+/// The STM32F769 rider's world: the board's payload map and staticlib (built
 /// as the payload gate builds it), and the row's tier objects -- the
-/// shim's core and system-call objects under the F769 selector, the
+/// shim's core and system-call objects under the STM32F769 selector, the
 /// collector's heap and collect objects under the row's defines; the
 /// rest shared with the an500 line.
 const F769_BOARD: &str = "st-stm32f769i-disco";
@@ -611,7 +729,7 @@ const F769_TARGET: &str = "thumbv7em-none-eabihf";
 const F769_FEATURES: &str = "board-st-stm32f769i-disco,payload";
 const F769_MAP: &str = "src/kernel/payload-st-stm32f769i-disco.x";
 const F769_LIB: &str = "src/kernel/target/payload-gate/rt/st-stm32f769i-disco/thumbv7em-none-eabihf/release/librhu_kernel.a";
-const F769_SHIM_OBJECTS: [&str; 8] = [
+const F769_SHIM_OBJECTS: [&str; 12] = [
     "goldens/shim/shim-core-f769.o",
     "goldens/shim/shim-sysnative-f769.o",
     "goldens/shim/shim-libc-glue.o",
@@ -620,14 +738,17 @@ const F769_SHIM_OBJECTS: [&str; 8] = [
     "goldens/shim/shim-pal-surface.o",
     "goldens/shim/shim-gpiod.o",
     "goldens/shim/shim-busdev.o",
+    "goldens/shim/shim-pwmfs.o",
+    "goldens/shim/shim-iiofs.o",
+    "goldens/shim/shim-ttydev.o",
+    "goldens/shim/shim-ports-native.o",
 ];
 const F769_GC_OBJECTS: [&str; 3] = ["goldens/gc/skel-row.o", "goldens/gc/heap-row-f769.o", "goldens/gc/collect-row-f769.o"];
 
 /// The section classes the suite's frozen merged object carries at the
-/// merge (read off its linked image's brackets at the freeze; the maps'
-/// brackets read them exactly).
-const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 1169130, unbox: 2022, hydrated: 295388, tdata: 152, init_array: 24, modules: 4 };
-/// The internal cases a world's rederive leg runs, named for its gate.
+/// merge (the maps' brackets read them exactly).
+// The suite's brackets as the tier's freeze measured them in both worlds (re-stamped at each re-freeze).
+const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 1252290, unbox: 2038, hydrated: 328344, tdata: 152, init_array: 24, modules: 4 };
 fn internal_cases(w: &RtWorld) -> [String; 2] {
     [
         format!("rt.rederive-selector-control -- link-tier; runs under 'rhu-gate {} rederive' when the archive set is resolved: the same merge with the standalone-GC-disabled selector must not tie the frozen object", w.gate),
@@ -1180,6 +1301,8 @@ fn frozen_consistency(w: &RtWorld, records: &[(String, String)], on_disk: &[Stri
     let own = format!("{}/", w.tier);
     let programs = format!("{}/", w.program_tier);
     for (path, _) in records {
+        // A record lives in the world's tier, or -- for the two program
+        // objects -- in the program objects' tier, consumed by sha.
         let name = match path.strip_prefix(&own) {
             Some(n) => n,
             None => match path.strip_prefix(&programs) {
@@ -1247,6 +1370,7 @@ fn absent_fault(defined: &[String]) -> Option<String> {
 /// own direct-call thunks carry the platform verb's name with a `$thunk`
 /// suffix and are the program object's, not a platform layer's: a name
 /// with a `$` in it is never a platform definition.
+
 fn forbidden_fault(defined: &[String]) -> Option<String> {
     defined
         .iter()
@@ -1403,6 +1527,9 @@ fn parse_weak_undefined(dump: &str) -> Vec<String> {
 
 struct Rt {
     w: &'static RtWorld,
+    /// RHU_ABI and RHU_ABI_COMPAT as include/rhu.h states them: the handshake marker's values.
+    abi: u32,
+    compat: u32,
     repo: PathBuf,
     out: PathBuf,
     results: Results,
@@ -1441,6 +1568,7 @@ impl Rt {
 
     /// A passing case line; a negative control names what it broke (the
     /// shared results checker requires it).
+
     fn pass(&mut self, case: &str, control: &str, broke: &str, stats: &str) {
         self.results.emit(&format!(
             "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{case}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"{control}\",\"image\":null{}{}}}",
@@ -1494,7 +1622,7 @@ impl Rt {
             Ok(s) => s,
             Err(e) => self.fail(
                 "frozen-inputs",
-                &format!("{}/MANIFEST.md unreadable: {e} (the frozen tier's record; a drop copy without {} runs the chain with this tier DECLARED, never this gate)", self.w.tier, self.w.tier),
+                &format!("{}/MANIFEST.md unreadable: {e} (the frozen tier's record; an exported copy without {} runs the chain with this tier DECLARED, never this gate)", self.w.tier, self.w.tier),
             ),
         };
         if msha != self.w.pin {
@@ -1791,7 +1919,7 @@ impl Rt {
     /// of the gate's own.
     fn build_lib(&self, log: &Path) -> Result<bool, String> {
         match self.w.lib_build {
-            None => cargo_build_kernel(&self.repo, &["--lib", "--features", "payload,entropy-accept-software"], log),
+            None => cargo_build_kernel(&self.repo, &["--lib", "--features", "payload,entropy-accept-software,stack-watermark"], log),
             Some((dir, target, feats)) => {
                 let target_dir = self.repo.join(dir.replace('/', std::path::MAIN_SEPARATOR_STR));
                 let _ = std::fs::create_dir_all(&target_dir);
@@ -1890,7 +2018,8 @@ impl Rt {
             Ok(t) => parse_list(&t),
             Err(e) => self.fail(case, &format!("{UNDEF_FILE} unreadable: {e}")),
         };
-        let facts_p = match check_rt_placement(dump, &phdrs, &[], &demand, code, &RT_HELLO_BRACKETS) {
+        let external = map_external_region(&map_text);
+        let facts_p = match check_rt_placement(dump, &phdrs, &[], &demand, code, external, &RT_HELLO_BRACKETS) {
             Ok(f) => f,
             Err(e) => self.fail(case, &format!("placement: {e}")),
         };
@@ -1988,7 +2117,9 @@ impl Rt {
         if !eq_lf_normalized(&stream, &golden) {
             self.fail(case, &format!("payload stream differs from {}/{GOLDEN} (byte class)", self.w.tier));
         }
-        if let Some(fault) = markers_out_of_order(&raw, &BOOT_MARKERS) {
+        let boot_markers = filled_markers(&BOOT_MARKERS, self.abi, self.compat);
+        let boot_marker_refs: Vec<&str> = boot_markers.iter().map(String::as_str).collect();
+        if let Some(fault) = markers_out_of_order(&raw, &boot_marker_refs) {
             self.fail(case, &format!("the contract's order: {fault}"));
         }
         if !contains_fixed(&raw, BOOT_RETURN_LINE) {
@@ -2034,13 +2165,13 @@ impl Rt {
         println!("  PASS (control)");
     }
 
-    /// The F769 rider: the frozen merged runtime object linked under the
-    /// F769 payload map with the F769 payload staticlib and the row's own
-    /// tier objects (the shim's core object under the F769 selector, the
-    /// collector's heap and collect objects under the F769 row's defines;
+    /// The STM32F769 rider: the frozen merged runtime object linked under the
+    /// STM32F769 payload map with the STM32F769 payload staticlib and the row's own
+    /// tier objects (the shim's core object under the STM32F769 selector, the
+    /// collector's heap and collect objects under the STM32F769 row's defines;
     /// every other object shared with the an500 line, which the rederive
-    /// legs prove row-independent). Link-only here: the board's boot is the
-    /// kernel's flight, and this artifact is what it flies.
+    /// legs prove row-independent). Link-only here: this artifact is what
+    /// the board boots.
     fn case_link_board(&mut self, facts: &RustcFacts, ld: &ToolCmd, abi: u32) {
         let case = "rt.link-st-stm32f769i-disco";
         println!("== case {case} ==");
@@ -2139,7 +2270,8 @@ impl Rt {
             Ok(t) => parse_list(&t),
             Err(e) => self.fail(case, &format!("{UNDEF_FILE} unreadable: {e}")),
         };
-        let facts_p = match check_rt_placement(dump, &phdrs, &[], &demand, code, &RT_HELLO_BRACKETS) {
+        let external = map_external_region(&map_text);
+        let facts_p = match check_rt_placement(dump, &phdrs, &[], &demand, code, external, &RT_HELLO_BRACKETS) {
             Ok(f) => f,
             Err(e) => self.fail(case, &format!("placement: {e}")),
         };
@@ -2257,7 +2389,8 @@ impl Rt {
             Ok(t) => parse_list(&t),
             Err(e) => self.fail(case, &format!("{SUITE_UNDEF_FILE} unreadable: {e}")),
         };
-        let facts_p = match check_rt_placement(dump, &phdrs, &[], &demand, code, &SUITE_BRACKETS) {
+        let external = map_external_region(&map_text);
+        let facts_p = match check_rt_placement(dump, &phdrs, &[], &demand, code, external, &SUITE_BRACKETS) {
             Ok(f) => f,
             Err(e) => self.fail(case, &format!("placement: {e}")),
         };
@@ -2270,7 +2403,8 @@ impl Rt {
         }
         let raw_path = self.out.join("rt-suite.raw");
         let stderr_path = self.out.join("rt-suite.stderr");
-        let mut qargs: Vec<&str> = vec!["-M", self.w.machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+        let (chardev, echo) = self.echo_start(case);
+        let mut qargs: Vec<&str> = vec!["-M", self.w.machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-serial", &chardev, "-semihosting"];
         qargs.extend_from_slice(ExecProfile::Parity.qemu_args());
         qargs.push("-kernel");
         qargs.push(&elf_arg);
@@ -2282,6 +2416,7 @@ impl Rt {
             println!("  (run killed at its timeout; exit recorded as 124 -- a hang is observed, never a pass)");
         }
         let raw = std::fs::read(&raw_path).unwrap_or_default();
+        self.echo_end(case, echo);
         echo_file(&raw_path, "  | ");
         let code_exit = outcome.exit;
         if cr_count(&raw) == 0 {
@@ -2295,7 +2430,9 @@ impl Rt {
         if !eq_lf_normalized(&stream, &golden) {
             self.fail(case, &format!("payload stream differs from {}/{SUITE_GOLDEN} (byte class)", self.w.tier));
         }
-        if let Some(fault) = markers_out_of_order(&raw, self.w.suite_markers) {
+        let suite_markers = filled_markers(self.w.suite_markers, self.abi, self.compat);
+        let suite_marker_refs: Vec<&str> = suite_markers.iter().map(String::as_str).collect();
+        if let Some(fault) = markers_out_of_order(&raw, &suite_marker_refs) {
             self.fail(case, &format!("the suite's order: {fault}"));
         }
         if !contains_fixed(&raw, BOOT_RETURN_LINE) {
@@ -2321,7 +2458,7 @@ impl Rt {
         let stats = format!("{{\"stream_lines\":{lines},\"markers\":{},\"activations\":{activations},\"activations_floor\":{ACTIVATIONS_FLOOR}}}", self.w.suite_markers.len());
         self.pass_image(case, 0, &path_rel, &sha, Some(SUITE_GOLDEN), &stats);
         println!(
-            "== case {case}: PASS (exit 0; the payload stream equals its golden, {lines} lines with the verdict last; {} markers IN ORDER incl. the fifteen section verdicts; the host reports {activations} activations delivered (at least {ACTIVATIONS_FLOOR}: one per collection of the activation section); then the kernel's return line) ==",
+            "== case {case}: PASS (exit 0; the payload stream equals its golden, {lines} lines with the verdict last; {} markers IN ORDER incl. the seventeen section verdicts; the host reports {activations} activations delivered (at least {ACTIVATIONS_FLOOR}: one per collection of the activation section); then the kernel's return line) ==",
             self.w.suite_markers.len()
         );
         raw
@@ -2381,6 +2518,9 @@ impl Rt {
             );
             parts.push(format!("\"{name}\":{{\"d32_compiled\":0,\"d32_pinned_asm\":{},\"f64_sites\":{f64},\"arm_mode\":{},\"xdouble\":0}}", asm.len(), arm.len()));
         }
+        // The shim and collector objects the images link: the 64-bit
+        // exclusive-access census alone (their other facts are their own
+        // gates').
         let mut linked = 0usize;
         for obj in self.w.shim_objects.iter().chain(self.w.gc_objects.iter()) {
             let path = self.repo.join(obj.replace('/', std::path::MAIN_SEPARATOR_STR)).to_string_lossy().into_owned();
@@ -2477,6 +2617,25 @@ impl Rt {
     /// The suite image linked with one input substituted and booted once: a
     /// control's doctored input must be refused by the section's own checks
     /// (the section's FAIL lines the control names on the wire, and no ALL GOOD).
+    /// The wire's echo for the suite's image, which talks on the machine's
+    /// second serial port in its serial section: the chardev argument and
+    /// the running echo, through the shared module.
+    fn echo_start(&mut self, case: &str) -> (String, Echo) {
+        match echo::start_echo(Duration::from_secs(RUN_TIMEOUT_S)) {
+            Ok(x) => x,
+            Err(e) => self.fail(case, &e),
+        }
+    }
+
+    /// The echo's end: the thread joined, its count printed, its complaint
+    /// the case's failure.
+    fn echo_end(&mut self, case: &str, wire: Echo) {
+        match echo::end_echo(wire) {
+            Ok(n) => println!("  (the wire's echo on the second UART: {n} bytes echoed)"),
+            Err(e) => self.fail(case, &e),
+        }
+    }
+
     fn control_suite_variant(&mut self, case: &str, broke: &str, ld: &ToolCmd, qemu: &Path, shim_objects: &[String], lib: &str, tag: &str, fail_lines: &[&str]) {
         println!("== case {case} (negative control): {broke} ==");
         let path_rel = format!("src/kernel/target/{}/rt-suite-{tag}.elf", self.w.out_dir);
@@ -2504,7 +2663,8 @@ impl Rt {
         let elf_arg = elf.to_string_lossy().into_owned();
         let raw_path = self.out.join(format!("rt-suite-{tag}.raw"));
         let stderr_path = self.out.join(format!("rt-suite-{tag}.stderr"));
-        let mut qargs: Vec<&str> = vec!["-M", self.w.machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+        let (chardev, echo) = self.echo_start(case);
+        let mut qargs: Vec<&str> = vec!["-M", self.w.machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-serial", &chardev, "-semihosting"];
         qargs.extend_from_slice(ExecProfile::Parity.qemu_args());
         qargs.push("-kernel");
         qargs.push(&elf_arg);
@@ -2512,6 +2672,7 @@ impl Rt {
             self.fail(case, &e);
         }
         let raw = std::fs::read(&raw_path).unwrap_or_default();
+        self.echo_end(case, echo);
         let failed = fail_lines.iter().all(|l| contains_fixed(&raw, l));
         let all_good = contains_fixed(&raw, SUITE_ALL_GOOD);
         if !failed || all_good {
@@ -2549,7 +2710,7 @@ impl Rt {
         if let Some(tg) = target {
             bargs.extend_from_slice(&["--target", tg, "--no-default-features"]);
         }
-        bargs.extend_from_slice(&["--features", &feats]);
+        bargs.extend_from_slice(&["--features", feats.as_str()]);
         let ok = match cargo_build_kernel_at(&self.repo, &dir, &bargs, &log) {
             Ok(ok) => ok,
             Err(e) => {
@@ -2598,7 +2759,7 @@ impl Rt {
         if let Some(tg) = target {
             bargs.extend_from_slice(&["--target", tg, "--no-default-features"]);
         }
-        bargs.extend_from_slice(&["--features", &feats]);
+        bargs.extend_from_slice(&["--features", feats.as_str()]);
         let ok = match cargo_build_kernel_at(&self.repo, &dir, &bargs, &log) {
             Ok(ok) => ok,
             Err(e) => {
@@ -2616,6 +2777,112 @@ impl Rt {
             case,
             "the suite image linked against the row's kernel built with the bus doors' doctored models (a data byte not acknowledged, a clock that never completes, the pumps' bound removed; the I2C and SPI sections fail)",
             ld, qemu, &base, &doctored_lib, "bus-doctored", &["FAIL rt-i2c", "FAIL rt-spi"],
+        );
+    }
+
+    /// The PWM section's control: the version of the shim's PWM device-file
+    /// unit whose period file answers the value written, not the period the
+    /// timer runs, substituted in every world (the Cortex-M33 twin in the an505
+    /// world); the section's quantized-truth case refuses it.
+    fn control_suite_pwm(&mut self, ld: &ToolCmd, qemu: &Path) {
+        let base: Vec<String> = self.w.shim_objects.iter().map(|s| s.to_string()).collect();
+        let lib = self.w.lib;
+        let period = substitute_object(&base, "goldens/shim/shim-pwmfs.o", "goldens/shim/shim-pwmfs-break-period-asked.o", "goldens/shim/shim-pwmfs-an505.o", "goldens/shim/shim-pwmfs-break-period-asked-an505.o");
+        self.control_suite_variant(
+            "rt.suite-pwmfs-period-control",
+            "the suite image linked with the PWM device-file unit whose period file answers the value written, not the period the timer runs (the quantized truth unread)",
+            ld, qemu, &period, lib, "pwmfs-period", &["FAIL rt-pwm"],
+        );
+    }
+
+    /// The serial section's control: the suite image linked with the
+    /// serial device unit's variant whose close keeps the port's block (the
+    /// kernel's claim never released), so the class's reopen after its
+    /// close is refused; the Cortex-M33 twin serves the an505 world. The
+    /// class caches the rate it was given and never reads it back, so the
+    /// attributes-image control cannot bite here; the close can.
+    fn control_suite_ttydev(&mut self, ld: &ToolCmd, qemu: &Path) {
+        let base: Vec<String> = self.w.shim_objects.iter().map(|s| s.to_string()).collect();
+        let lib = self.w.lib;
+        let keeps = substitute_object(&base, "goldens/shim/shim-ttydev.o", "goldens/shim/shim-ttydev-break-close-keeps.o", "goldens/shim/shim-ttydev-an505.o", "goldens/shim/shim-ttydev-break-close-keeps-an505.o");
+        self.control_suite_variant(
+            "rt.suite-ttydev-close-keeps-control",
+            "the suite image linked with the serial device unit whose close keeps the port's block (the kernel's claim never released: the class's reopen after its close is refused)",
+            ld, qemu, &keeps, lib, "ttydev-close-keeps", &["FAIL rt-serial"],
+        );
+    }
+
+    /// The analog section's control: the IIO device-file unit's variant
+    /// whose read answers the previous sample, substituted in every world
+    /// (the Cortex-M33 twin in the an505 world); the section's loop step
+    /// reads the duty's change and refuses it.
+    fn control_suite_iiofs(&mut self, ld: &ToolCmd, qemu: &Path) {
+        let base: Vec<String> = self.w.shim_objects.iter().map(|s| s.to_string()).collect();
+        let lib = self.w.lib;
+        let stale = substitute_object(&base, "goldens/shim/shim-iiofs.o", "goldens/shim/shim-iiofs-break-read-stale.o", "goldens/shim/shim-iiofs-an505.o", "goldens/shim/shim-iiofs-break-read-stale-an505.o");
+        self.control_suite_variant(
+            "rt.suite-iiofs-read-stale-control",
+            "the suite image linked with the analog input device-file unit whose read answers the previous sample (the loop step's second reading is the first's)",
+            ld, qemu, &stale, lib, "iiofs-read-stale", &["FAIL rt-adc"],
+        );
+    }
+
+    /// The null section's controls: the guard control
+    /// links the suite against the row's kernel built with the null-page
+    /// guard removed (a field read through null returns the row's
+    /// reset-vector word and no exception is raised); the unarmed control
+    /// substitutes the core's variant that never arms the kernel's delivery
+    /// (the kernel's designed death at the first read through null); the
+    /// address control substitutes the core's variant that reports the
+    /// faulting address as one past the guarded page (the runtime ends the
+    /// process on an access violation, never the managed null reference;
+    /// its fail-fast line is read). The Cortex-M33
+    /// twins serve the an505 world, as the PWM period control's does.
+    fn control_suite_null(&mut self, ld: &ToolCmd, qemu: &Path) {
+        let base: Vec<String> = self.w.shim_objects.iter().map(|s| s.to_string()).collect();
+        let lib = self.w.lib;
+        let case = "rt.suite-null-guard-off-control";
+        let dir = self.repo.join("src").join("kernel").join("target").join(self.w.out_dir).join("kernel-null-guard-off");
+        let _ = std::fs::create_dir_all(&dir);
+        let log = self.out.join("rt-suite-null-guard-off-staticlib.log");
+        let (target, feats): (Option<&str>, String) = match self.w.lib_build {
+            None => (None, "payload,entropy-accept-software,null-guard-off".to_string()),
+            Some((_, target, feats)) => (Some(target), format!("{feats},null-guard-off")),
+        };
+        let mut bargs: Vec<&str> = vec!["--lib"];
+        if let Some(tg) = target {
+            bargs.extend_from_slice(&["--target", tg, "--no-default-features"]);
+        }
+        bargs.extend_from_slice(&["--features", feats.as_str()]);
+        let ok = match cargo_build_kernel_at(&self.repo, &dir, &bargs, &log) {
+            Ok(ok) => ok,
+            Err(e) => {
+                println!("rhu-gate: {e}");
+                false
+            }
+        };
+        if !ok {
+            echo_file(&log, "");
+            self.fail(case, "the guard-off kernel's staticlib build error");
+        }
+        let triple = target.unwrap_or("thumbv7em-none-eabihf");
+        let guard_off_lib = format!("src/kernel/target/{}/kernel-null-guard-off/{triple}/release/librhu_kernel.a", self.w.out_dir);
+        self.control_suite_variant(
+            case,
+            "the suite image linked against the row's kernel built with the null-page guard removed (a field read through null returns the row's reset-vector word; nothing is raised)",
+            ld, qemu, &base, &guard_off_lib, "null-guard-off", &["FAIL rt-null"],
+        );
+        let unarmed = substitute_object(&base, "goldens/shim/shim-core.o", "goldens/shim/shim-core-break-fault-unarmed.o", "goldens/shim/shim-core-an505.o", "goldens/shim/shim-core-break-fault-unarmed-an505.o");
+        self.control_suite_variant(
+            "rt.suite-fault-unarmed-control",
+            "the suite image linked with the shim's core variant that records the runtime's SIGSEGV handler and never arms the kernel's null-fault delivery (the first read through null is the kernel's designed death)",
+            ld, qemu, &unarmed, lib, "fault-unarmed", &["not delivered: no hosting layer has armed the delivery"],
+        );
+        let addr = substitute_object(&base, "goldens/shim/shim-core.o", "goldens/shim/shim-core-break-fault-addr.o", "goldens/shim/shim-core-an505.o", "goldens/shim/shim-core-break-fault-addr-an505.o");
+        self.control_suite_variant(
+            "rt.suite-fault-addr-control",
+            "the suite image linked with the shim's core variant that reports the faulting address as one past the guarded page (the runtime ends the process on an access violation, never the managed null reference)",
+            ld, qemu, &addr, lib, "fault-addr", &["Access Violation: Attempted to read or write protected memory"],
         );
     }
 
@@ -2711,7 +2978,15 @@ fn open(repo: &Path, w: &'static RtWorld, gate_id: &'static str, display: &'stat
             exit(1);
         }
     };
-    Rt { w, repo: repo.to_path_buf(), out, results, gate_id, display, records: Vec::new(), manifest_text: String::new() }
+    let header = std::fs::read_to_string(repo.join("src").join("kernel").join("include").join("rhu.h")).unwrap_or_default();
+    let (abi, compat) = match (header_abi(&header), header_abi_compat(&header)) {
+        (Some(a), Some(c)) => (a, c),
+        _ => {
+            println!("rhu-gate: include/rhu.h states no RHU_ABI or no RHU_ABI_COMPAT (the handshake marker's values)");
+            exit(1);
+        }
+    };
+    Rt { w, abi, compat, repo: repo.to_path_buf(), out, results, gate_id, display, records: Vec::new(), manifest_text: String::new() }
 }
 
 /// RHU_ABI as include/rhu.h states it: the generation the records must
@@ -2781,6 +3056,10 @@ pub fn run(repo: &Path, w: &'static RtWorld) -> ! {
     rt.control_suite_delivery(&suite_raw);
     rt.control_suite_gpio(&ld, &qemu);
     rt.control_suite_bus(&ld, &qemu);
+    rt.control_suite_pwm(&ld, &qemu);
+    rt.control_suite_ttydev(&ld, &qemu);
+    rt.control_suite_iiofs(&ld, &qemu);
+    rt.control_suite_null(&ld, &qemu);
     rt.case_census(&facts);
     rt.control_census(&facts);
     rt.control_census_ldrexd(&facts);
@@ -2943,6 +3222,7 @@ pub fn rederive(repo: &Path, w: &'static RtWorld) -> ! {
         exit(1);
     };
 
+    // 1. the surgery: the member out of the archive, its cookie section renamed.
     let case = "rt.rederive-surgery";
     println!("== case {case}: the startup member printed out of {SURGERY_ARCHIVE} at {dir} and its cookie section renamed ==");
     let set_text = std::fs::read_to_string(rt.frozen(rt.w.set_file)).unwrap_or_default();
@@ -2971,6 +3251,7 @@ pub fn rederive(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "positive", "", &format!("{{\"surgery_sha\":\"{record}\"}}"));
     println!("  PASS");
 
+    // 2. the merge, from the frozen program object, the frozen surgery object and the archives.
     let case = "rt.rederive-merge";
     println!("== case {case}: the merge re-derived from the frozen program object, the frozen surgery object and the archive set ==");
     let merge = |rt: &mut Rt, payload: &str, selector: &str, tag: &str| -> PathBuf {
@@ -3024,6 +3305,7 @@ pub fn rederive(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "positive", "", &format!("{{\"merged_sha\":\"{record}\",\"archives\":{}}}", MERGE_ARCHIVES.len()));
     println!("  PASS");
 
+    // 2b. the suite's merge: the same recipe from the frozen suite object.
     let case = "rt.rederive-merge-suite";
     println!("== case {case}: the suite's merge re-derived from the frozen suite object, the frozen surgery object and the archive set ==");
     let post_suite = merge(&mut rt, SUITE_PAYLOAD, "libstandalonegc-enabled.a", "enabled-suite");
@@ -3042,6 +3324,7 @@ pub fn rederive(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "positive", "", &format!("{{\"merged_sha\":\"{record}\",\"archives\":{}}}", MERGE_ARCHIVES.len()));
     println!("  PASS");
 
+    // 3. the closure, from the kit at the member list's identities.
     let case = "rt.rederive-libc";
     println!("== case {case}: the closure's members printed out of the kit's archives again at {kit} and re-merged ==");
     let members_text = std::fs::read_to_string(rt.frozen(LIBC_MEMBERS)).unwrap_or_default();
@@ -3090,6 +3373,7 @@ pub fn rederive(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "positive", "", &format!("{{\"libc_sha\":\"{want}\",\"members\":{}}}", members.members.len()));
     println!("  PASS");
 
+    // 4. the census over the archive set at the pointer: every member decoded.
     let case = "rt.rederive-census";
     println!("== case {case}: every member of the five archives at {dir} decoded -- no compiled function naming a double register above d15 (the pinned assembly pair the only ones); the ARM-state code exactly the pinned pair; no 64-bit exclusive-access instruction in any member ==");
     let objdump = match llvm_tool(&facts, "llvm-objdump") {
@@ -3163,6 +3447,7 @@ pub fn rederive(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "positive", "", &format!("{{\"archives\":{},\"d32_compiled\":0,\"d32_pinned_asm\":{},\"f64_sites\":{f64_total},\"arm_mode\":{},\"xdouble\":0}}", MERGE_ARCHIVES.len(), d32_all.len(), arm_all.len()));
     println!("  PASS");
 
+    // The selector control.
     let ccase = "rt.rederive-selector-control";
     println!("== case {ccase} (negative control): the same merge with {SELECTOR_CONTROL} in the selector's place ==");
     let cpost = merge(&mut rt, PAYLOAD, SELECTOR_CONTROL, "selector-control");
@@ -3392,6 +3677,7 @@ pub fn selfcheck(repo: &Path, w: &'static RtWorld) -> ! {
     let manifest_short = manifest.replace("0000000000000000000000000000000000000000000000000000000000000000", "000000000000000000000000000000000000000000000000000000000000000");
     sc.probe("manifest-sha-malformed", "a manifest record whose sha is 63 hex digits must parse to fewer records (a drifted record set)", parse_vendored_manifest(&manifest_short).len() == parse_vendored_manifest(&manifest).len());
 
+    // The census's detectors, the runner's attributes update, the delivery control's doctoring.
     let dis_hi = "00000000 <f>:\n       0: ec d1 7b 2b\tvldr\td17, [r1, #8]\n";
     sc.accept_probe("census-sees-d17", "a decode naming d17 in its operands is counted", d32_census(dis_hi).len() == 1);
     let dis_lo = "00000000 <f>:\n       0: ed 91 7b 02\tvldr\td7, [r1, #8]\n";
@@ -3567,11 +3853,522 @@ fn embeds_source(pdb: &[u8]) -> bool {
     pdb.windows(EMBEDDED_SOURCE_KIND.len()).any(|w| w == EMBEDDED_SOURCE_KIND)
 }
 
-/// The boot markers with the third thread's spawn line at the knob's value.
-fn knob_boot_markers(value: u64) -> Vec<String> {
+/// The external RAM init mode's row for the SDK parity cases: the
+/// Pimoroni Pico Plus 2 (8 MB of PSRAM behind the flash interface's second
+/// select, an external range), its shipped feature set and target (the
+/// payload gate's row line), and the three modes as the SDK's property
+/// names them, each with the kernel feature it adds (none for the boot-time
+/// init, the default) and the banner words the kernel compiles in for it
+/// (the arena's mode words). The row's archive per offered mode is built
+/// once under RAM_INIT_DIR, shared by both worlds, and packed beside the
+/// leg's own kernel under the fixed folder names.
+const RAM_INIT_ROW: &str = "pimoroni-pico-plus-2";
+const RAM_INIT_TARGET: &str = "thumbv8m.main-none-eabihf";
+const RAM_INIT_FEATURES: &str = "board-pimoroni-pico-plus-2,payload";
+const RAM_INIT_DIR: &str = "src/kernel/target/sdk-parity-ram-init";
+/// The hosting layer's line at boot naming the managed heap's window: 1
+/// when the rehydrated-data brackets lie inside the external RAM range
+/// (the row's own map), 0 when they lie in the chip's own RAM (the row's
+/// second map).
+const HEAP_WINDOW_LINE_EXTERNAL: &str = "the managed heap's window is 1 (external";
+const HEAP_WINDOW_LINE_INTERNAL: &str = "the managed heap's window is 0 (internal";
+/// The STM32F769I-DISCO row, whose board carries a memory-mapped external
+/// flash (the facts file's flash array: its external range mapped and
+/// executable): its payload kernel is built once under XIP_DIR, shared by
+/// both worlds, and packed beside the leg's own kernel, so the leg publishes
+/// the row under the program's two homes.
+const XIP_ROW: &str = "st-stm32f769i-disco";
+const XIP_TARGET: &str = "thumbv7em-none-eabihf";
+const XIP_FEATURES: &str = "board-st-stm32f769i-disco,payload";
+const XIP_DIR: &str = "src/kernel/target/sdk-parity-external-flash";
+/// The analog voltage switch the SDK sets per program: the four members of
+/// the standard analog classes whose reference turns it on, and the quantity
+/// type the standard API's ReadVoltage returns, whose symbol names witness
+/// the library an image carries.
+const VOLTAGE_MEMBERS: [&str; 4] = ["ReadVoltage", "MinVoltage", "MaxVoltage", "VoltageReference"];
+const VOLTAGE_TYPE: &str = "ElectricPotential";
+/// The board table's rule for AnalogVoltageFits: a row whose own payload
+/// map's code region is at least this long holds the library the voltage
+/// members compute in (internal-flash); a shorter region with an
+/// external-flash map holds it there alone (external-flash); a shorter
+/// region without one does not hold it (no attribute). The floor lies
+/// between the longest code region measured to refuse the library at the
+/// link and the shortest measured to hold it beside a program.
+const VOLTAGE_LIBRARY_FLOOR: u64 = 8 << 20;
+const RAM_INIT_MODES: [(&str, &str, &str); 3] = [
+    ("boot", "", "init at boot"),
+    ("first-use", "ram-init-first-use", "init at first use"),
+    ("background", "ram-init-background", "init in background"),
+];
+/// The SDK's withheld table (its targets file): one row per value a
+/// release withholds, each naming its property, the value and the words
+/// the refusal prints, with the row's own condition as its test; the
+/// gate reads the rows of the init mode's property.
+const WITHHELD_ROW: &str = "<_RhuFeatureWithheld ";
+const WITHHELD_RAM_INIT: &str = "RhuExternalRamInit";
+const SDK_TARGETS: &str = "src/sdk/Lamella.Rhu.Sdk/Sdk/Sdk.targets";
+const SDK_BOARDS: &str = "src/sdk/Lamella.Rhu.Sdk/Sdk/boards.props";
+
+/// The init mode values the SDK's withheld table withholds, read from the
+/// targets as shipped (the rows outside XML comments whose Include names
+/// the init mode's property, each row's Value), so the gate follows the
+/// one table the refusal reads.
+fn ram_init_withheld(repo: &Path) -> Result<Vec<String>, String> {
+    let path = repo.join(SDK_TARGETS.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut live = String::new();
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find("<!--") {
+        live.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find("-->") else {
+            return Err(format!("{}: an XML comment never closes", path.display()));
+        };
+        rest = &rest[start + end + 3..];
+    }
+    live.push_str(rest);
+    let mut withheld = Vec::new();
+    let mut at = 0;
+    while let Some(i) = live[at..].find(WITHHELD_ROW) {
+        let start = at + i;
+        let Some(len) = live[start..].find("/>") else {
+            return Err(format!("{}: a withheld row never closes", path.display()));
+        };
+        let row = &live[start..start + len];
+        let property = row_attr_text(row, "Include").ok_or_else(|| format!("{}: a withheld row without an Include", path.display()))?;
+        if property == WITHHELD_RAM_INIT {
+            let value = row_attr_text(row, "Value").ok_or_else(|| format!("{}: a withheld row without a Value", path.display()))?;
+            withheld.push(value);
+        }
+        at = start + len;
+    }
+    Ok(withheld)
+}
+
+/// The board table's init-mode kernels against the boards' facts files: a
+/// row carries both lazy archives exactly when its facts file lists an
+/// external RAM range, at the paths the SDK defines under the row's folder; no other
+/// row carries either. Answers every row's name with whether it is such a
+/// row.
+fn ram_init_table_check(repo: &Path) -> Result<Vec<(String, bool)>, String> {
+    let path = repo.join(SDK_BOARDS.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut rows = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("<LamellaTargetBoardRow ") {
+        let Some(len) = rest[i..].find("/>") else {
+            return Err("boards.props: a row never closes".to_string());
+        };
+        let row = &rest[i..i + len];
+        let name = row_attr_text(row, "Include").ok_or_else(|| "boards.props: a row without an Include".to_string())?;
+        let facts_path = repo.join(format!("src/sdk/Lamella.Rhu.Sdk/boards/{name}.json").replace('/', std::path::MAIN_SEPARATOR_STR));
+        let facts = std::fs::read_to_string(&facts_path).map_err(|e| format!("cannot read {}: {e}", facts_path.display()))?;
+        let compact: String = facts.chars().filter(|c| !c.is_whitespace()).collect();
+        let external = compact.contains("\"external\":true");
+        match (row_attr_text(row, "KernelRamInitFirstUse"), row_attr_text(row, "KernelRamInitBackground")) {
+            (Some(first), Some(background)) => {
+                if !external {
+                    return Err(format!("the row {name} names the lazy init-mode kernels but its facts file lists no external RAM range"));
+                }
+                let want_first = format!("kernels/{name}/ram-init-first-use/librhu_kernel.a");
+                let want_background = format!("kernels/{name}/ram-init-background/librhu_kernel.a");
+                if first != want_first || background != want_background {
+                    return Err(format!("the row {name}'s lazy kernel paths are not the defined ones: '{first}', '{background}'"));
+                }
+            }
+            (None, None) => {
+                if external {
+                    return Err(format!("the row {name}'s facts file lists an external RAM range but the table names no lazy init-mode kernels for it"));
+                }
+            }
+            _ => return Err(format!("the row {name} names one lazy init-mode kernel without the other")),
+        }
+        rows.push((name, external));
+        rest = &rest[i + len..];
+    }
+    if rows.is_empty() {
+        return Err("boards.props: no rows".to_string());
+    }
+    Ok(rows)
+}
+
+/// The board table's second payload maps against the boards' facts files
+/// and the tree: a row names a second map (MapInternal) exactly when its
+/// facts file lists an external RAM range, the name the row's own map with
+/// "-internal" before its extension, both files in the tree under
+/// src/kernel; no other row names one. Answers every row's name with its
+/// own map and its second map's package path.
+fn managed_memory_table_check(repo: &Path) -> Result<Vec<(String, String, Option<String>)>, String> {
+    let path = repo.join(SDK_BOARDS.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut rows = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("<LamellaTargetBoardRow ") {
+        let Some(len) = rest[i..].find("/>") else {
+            return Err("boards.props: a row never closes".to_string());
+        };
+        let row = &rest[i..i + len];
+        let name = row_attr_text(row, "Include").ok_or_else(|| "boards.props: a row without an Include".to_string())?;
+        let map = row_attr_text(row, "Map").ok_or_else(|| format!("boards.props: the row {name} names no Map"))?;
+        let facts_path = repo.join(format!("src/sdk/Lamella.Rhu.Sdk/boards/{name}.json").replace('/', std::path::MAIN_SEPARATOR_STR));
+        let facts = std::fs::read_to_string(&facts_path).map_err(|e| format!("cannot read {}: {e}", facts_path.display()))?;
+        let compact: String = facts.chars().filter(|c| !c.is_whitespace()).collect();
+        let external = compact.contains("\"external\":true");
+        let second = row_attr_text(row, "MapInternal");
+        match (&second, external) {
+            (Some(s), true) => {
+                let want = map.strip_suffix(".x").map(|m| format!("{m}-internal.x")).unwrap_or_default();
+                if *s != want {
+                    return Err(format!("the row {name}'s second map is '{s}', not the defined {want}"));
+                }
+                for m in [&map, s] {
+                    let Some(file) = m.strip_prefix("maps/") else {
+                        return Err(format!("the row {name}'s map '{m}' is not under maps/"));
+                    };
+                    let tree = repo.join("src").join("kernel").join(file);
+                    if !tree.is_file() {
+                        return Err(format!("the row {name}'s map {m} is not in the tree at {}", tree.display()));
+                    }
+                }
+            }
+            (Some(s), false) => return Err(format!("the row {name} names a second map ({s}) but its facts file lists no external RAM range")),
+            (None, true) => return Err(format!("the row {name}'s facts file lists an external RAM range but the table names no second map for it")),
+            (None, false) => {}
+        }
+        rows.push((name, map, second));
+        rest = &rest[i + len..];
+    }
+    if rows.is_empty() {
+        return Err("boards.props: no rows".to_string());
+    }
+    Ok(rows)
+}
+
+/// The four window symbols of a published image from its llvm-nm dump: the
+/// rehydrated-data brackets and the arena's second window; a missing one
+/// is named, never a silent zero.
+fn window_symbols(dump: &[u8]) -> Result<(u64, u64, u64, u64), String> {
+    let mut v = [0u64; 4];
+    for (i, s) in ["__rhu_hydrated_lo", "__rhu_hydrated_hi", "__rhu_arena1_lo", "__rhu_arena1_hi"].iter().enumerate() {
+        v[i] = word_sym_value(dump, s).ok_or_else(|| format!("the image does not define {s}"))?;
+    }
+    Ok((v[0], v[1], v[2], v[3]))
+}
+
+/// A row's two RAM ranges from its facts file, each as (base, bytes): the
+/// chip's own (the first range not marked external) and the external one.
+fn facts_ram_ranges(f: &FactsFile) -> Option<((u64, u64), (u64, u64))> {
+    let own = f.ram.iter().find(|r| !r.3)?;
+    let ext = f.ram.iter().find(|r| r.3)?;
+    Some(((own.1, own.2), (ext.1, ext.2)))
+}
+
+/// The board table's external-flash maps against the boards' facts files
+/// and the tree: a row names an external-flash map (MapExternalFlash)
+/// exactly when its facts file lists an external flash range that is mapped
+/// and executable, the name the row's own map with "-xip" before its
+/// extension, both files in the tree under src/kernel; no other row names
+/// one. Answers every row's name with its own map and its external-flash
+/// map's package path.
+fn program_memory_table_check(repo: &Path) -> Result<Vec<(String, String, Option<String>)>, String> {
+    let path = repo.join(SDK_BOARDS.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut rows = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("<LamellaTargetBoardRow ") {
+        let Some(len) = rest[i..].find("/>") else {
+            return Err("boards.props: a row never closes".to_string());
+        };
+        let row = &rest[i..i + len];
+        let name = row_attr_text(row, "Include").ok_or_else(|| "boards.props: a row without an Include".to_string())?;
+        let map = row_attr_text(row, "Map").ok_or_else(|| format!("boards.props: the row {name} names no Map"))?;
+        let facts = read_facts_file(&repo.join(format!("src/sdk/Lamella.Rhu.Sdk/boards/{name}.json").replace('/', std::path::MAIN_SEPARATOR_STR)))?;
+        let window = facts.flash.iter().any(|f| f.3 && f.4 && f.5);
+        let third = row_attr_text(row, "MapExternalFlash");
+        match (&third, window) {
+            (Some(s), true) => {
+                let want = map.strip_suffix(".x").map(|m| format!("{m}-xip.x")).unwrap_or_default();
+                if *s != want {
+                    return Err(format!("the row {name}'s external-flash map is '{s}', not the defined {want}"));
+                }
+                for m in [&map, s] {
+                    let Some(file) = m.strip_prefix("maps/") else {
+                        return Err(format!("the row {name}'s map '{m}' is not under maps/"));
+                    };
+                    let tree = repo.join("src").join("kernel").join(file);
+                    if !tree.is_file() {
+                        return Err(format!("the row {name}'s map {m} is not in the tree at {}", tree.display()));
+                    }
+                }
+            }
+            (Some(s), false) => return Err(format!("the row {name} names an external-flash map ({s}) but its facts file lists no mapped, executable external flash range")),
+            (None, true) => return Err(format!("the row {name}'s facts file lists a mapped, executable external flash range but the table names no external-flash map for it")),
+            (None, false) => {}
+        }
+        rows.push((name, map, third));
+        rest = &rest[i + len..];
+    }
+    if rows.is_empty() {
+        return Err("boards.props: no rows".to_string());
+    }
+    Ok(rows)
+}
+
+/// The board table's AnalogVoltageFits against each row's maps: the rule of
+/// VOLTAGE_LIBRARY_FLOOR over the code region of the row's own payload map
+/// (internal-flash at or above the floor; external-flash below it with an
+/// external-flash map; no attribute below it without one), the attribute
+/// exactly the rule's word. Answers every row's name with its attribute.
+fn analog_voltage_table_check(repo: &Path) -> Result<Vec<(String, Option<String>)>, String> {
+    let path = repo.join(SDK_BOARDS.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut rows = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("<LamellaTargetBoardRow ") {
+        let Some(len) = rest[i..].find("/>") else {
+            return Err("boards.props: a row never closes".to_string());
+        };
+        let row = &rest[i..i + len];
+        let name = row_attr_text(row, "Include").ok_or_else(|| "boards.props: a row without an Include".to_string())?;
+        let map = row_attr_text(row, "Map").ok_or_else(|| format!("boards.props: the row {name} names no Map"))?;
+        let Some(file) = map.strip_prefix("maps/") else {
+            return Err(format!("the row {name}'s map '{map}' is not under maps/"));
+        };
+        let map_path = repo.join("src").join("kernel").join(file);
+        let map_text = std::fs::read_to_string(&map_path).map_err(|e| format!("cannot read {}: {e}", map_path.display()))?;
+        let Some((_, code_len)) = crate::gates::payload::map_region(&map_text, "CODE") else {
+            return Err(format!("the row {name}'s map {map} states no CODE region"));
+        };
+        let external_map = row_attr_text(row, "MapExternalFlash").is_some();
+        let want = if code_len >= VOLTAGE_LIBRARY_FLOOR {
+            Some("internal-flash".to_string())
+        } else if external_map {
+            Some("external-flash".to_string())
+        } else {
+            None
+        };
+        let got = row_attr_text(row, "AnalogVoltageFits");
+        if got != want {
+            return Err(format!(
+                "the row {name}'s AnalogVoltageFits is {}, but its code region of {code_len} B{} calls for {}",
+                got.as_deref().unwrap_or("absent"),
+                if external_map { " with an external-flash map" } else { "" },
+                want.as_deref().unwrap_or("no attribute")
+            ));
+        }
+        rows.push((name, got));
+        rest = &rest[i + len..];
+    }
+    if rows.is_empty() {
+        return Err("boards.props: no rows".to_string());
+    }
+    Ok(rows)
+}
+
+/// A row's chip flash range and its mapped, executable external flash range
+/// from its facts file, each as (base, bytes).
+fn facts_flash_ranges(f: &FactsFile) -> Option<((u64, u64), (u64, u64))> {
+    let chip = f.flash.iter().find(|r| !r.3)?;
+    let window = f.flash.iter().find(|r| r.3 && r.4 && r.5)?;
+    Some(((chip.1, chip.2), (window.1, window.2)))
+}
+
+/// The execute-in-place image's brackets from its llvm-nm dump: the window,
+/// the managed code, the unboxing stubs' end, the window's index and the
+/// native code; a missing one is named, never a silent zero.
+struct XipSyms {
+    lo: u64,
+    hi: u64,
+    code_lo: u64,
+    code_hi: u64,
+    unbox_hi: u64,
+    exidx_start: u64,
+    exidx_end: u64,
+    stext: u64,
+    etext: u64,
+}
+
+fn xip_symbols(dump: &[u8]) -> Result<XipSyms, String> {
+    let mut v = [0u64; 9];
+    for (i, s) in ["__rhu_xip_lo", "__rhu_xip_hi", "__rhu_managedcode_lo", "__rhu_managedcode_hi", "__rhu_unbox_hi", "__rhu_xip_exidx_start", "__rhu_xip_exidx_end", "__stext", "__etext"].iter().enumerate() {
+        v[i] = word_sym_value(dump, s).ok_or_else(|| format!("the image does not define {s}"))?;
+    }
+    Ok(XipSyms { lo: v[0], hi: v[1], code_lo: v[2], code_hi: v[3], unbox_hi: v[4], exidx_start: v[5], exidx_end: v[6], stext: v[7], etext: v[8] })
+}
+
+/// One section's type, address and size from a section table in GNU readelf's
+/// layout (llvm-readobj --elf-output-style=GNU -S -W), by its exact name; None
+/// when the table has no such section.
+fn section_row(dump: &str, name: &str) -> Option<(String, u64, u64)> {
+    for l in dump.lines() {
+        let Some(j) = l.find(']') else { continue };
+        let mut it = l[j + 1..].split_whitespace();
+        if it.next() != Some(name) {
+            continue;
+        }
+        let kind = it.next()?.to_string();
+        let addr = u64::from_str_radix(it.next()?, 16).ok()?;
+        let _offset = it.next()?;
+        let size = u64::from_str_radix(it.next()?, 16).ok()?;
+        return Some((kind, addr, size));
+    }
+    None
+}
+
+/// The switch's publish summary line, its publish run as registered (rc 0,
+/// the image present, the row's facts generated once).
+fn voltage_publish_line<'a>(rt: &mut Rt, case: &str, controls: &'a str, label: &str) -> &'a str {
+    let Some(line) = control_line(controls, label) else {
+        rt.fail(case, &format!("the publish-side script left no summary line for {label}"));
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "generated") != "1" {
+        rt.fail(case, &format!("the publish did not run as registered (rc 0, the image present, the facts generated once): {line}"));
+    }
+    line
+}
+
+/// The switch's words after "analog voltage" in a publish summary line.
+fn voltage_words(line: &str) -> &str {
+    line.split_once(" words=").map(|(_, w)| w.trim()).unwrap_or("")
+}
+
+/// How many of an image's symbol names carry the quantity type's name.
+fn voltage_type_names(rt: &mut Rt, case: &str, nm_tool: &Path, elf: &Path, out_name: &str) -> usize {
+    let arg = elf.to_string_lossy().into_owned();
+    let dump = rt.tool_text(nm_tool, case, &[&arg], out_name);
+    dump.lines().filter(|l| l.contains(VOLTAGE_TYPE)).count()
+}
+
+/// One boot of a published image on the leg's emulator machine for the
+/// managed memory's home: the raw capture banked under the gate's output
+/// directory under the given name; the boot must end at the kernel's
+/// return line with the program's stream equal to the golden, the hosting
+/// layer's posture line as wanted and not the other, nothing forbidden,
+/// exit 0. Answers the emulator's version for the verdict line.
+#[allow(clippy::too_many_arguments)]
+fn boot_for_heap_window(rt: &mut Rt, case: &str, repo: &Path, machine: &str, tier: &str, out: &Path, elf: &Path, raw_name: &str, want: &str, not: &str) -> String {
+    let (qemu, qemu_version) = match resolve_qemu(repo) {
+        Ok(q) => q,
+        Err(e) => rt.fail(case, &e),
+    };
+    let raw_path = out.join(format!("{raw_name}.raw"));
+    let stderr_path = out.join(format!("{raw_name}.stderr"));
+    let elf_arg = elf.to_string_lossy().into_owned();
+    let mut qargs: Vec<&str> = vec!["-M", machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+    qargs.extend_from_slice(ExecProfile::Parity.qemu_args());
+    qargs.push("-kernel");
+    qargs.push(&elf_arg);
+    let outcome = match run_captured(&qemu, &qargs, &raw_path, &stderr_path, Duration::from_secs(RUN_TIMEOUT_S)) {
+        Ok(o) => o,
+        Err(e) => rt.fail(case, &e),
+    };
+    let raw = std::fs::read(&raw_path).unwrap_or_default();
+    echo_file(&raw_path, "  | ");
+    if outcome.timed_out {
+        rt.fail(case, "the boot hung (killed at its timeout)");
+    }
+    if cr_count(&raw) == 0 {
+        rt.fail(case, "no CR bytes in raw capture (wire discipline lost)");
+    }
+    let golden = match std::fs::read(rt.frozen(GOLDEN)) {
+        Ok(b) => b,
+        Err(e) => rt.fail(case, &format!("golden unreadable: {e}")),
+    };
+    if !eq_lf_normalized(&payload_stream(&raw), &golden) {
+        rt.fail(case, &format!("the payload stream differs from {tier}/{GOLDEN}"));
+    }
+    if !contains_fixed(&raw, BOOT_RETURN_LINE) {
+        rt.fail(case, &format!("the kernel's return line '{BOOT_RETURN_LINE}' not found"));
+    }
+    for m in FORBIDDEN_PATTERNS {
+        if contains_fixed(&raw, m) {
+            rt.fail(case, &format!("forbidden pattern '{m}' present"));
+        }
+    }
+    if !contains_fixed(&raw, want) {
+        rt.fail(case, &format!("the hosting layer's posture line '{want}' not found"));
+    }
+    if contains_fixed(&raw, not) {
+        rt.fail(case, &format!("the hosting layer's posture line reads '{not}'"));
+    }
+    if outcome.exit != 0 {
+        rt.fail(case, &format!("exit {}, wanted 0", outcome.exit));
+    }
+    qemu_version
+}
+
+/// The board table's channel facts against the boards' facts files: every
+/// row's two default channels and its legal set are copies of its facts
+/// file's `channels` row (the two defaults equal, the set equal in order,
+/// both defaults inside the set); a row without the three attributes, or a
+/// facts file without the member, is a fault. Answers every row's name
+/// with its two defaults and the size of its set.
+fn channel_facts_check(repo: &Path) -> Result<Vec<(String, String, String, usize)>, String> {
+    let path = repo.join(SDK_BOARDS.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut rows = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("<LamellaTargetBoardRow ") {
+        let Some(len) = rest[i..].find("/>") else {
+            return Err("boards.props: a row never closes".to_string());
+        };
+        let row = &rest[i..i + len];
+        let name = row_attr_text(row, "Include").ok_or_else(|| "boards.props: a row without an Include".to_string())?;
+        let log = row_attr_text(row, "LogChannel").ok_or_else(|| format!("the row {name} names no LogChannel"))?;
+        let console = row_attr_text(row, "ConsoleChannel").ok_or_else(|| format!("the row {name} names no ConsoleChannel"))?;
+        let legal = row_attr_text(row, "Channels").ok_or_else(|| format!("the row {name} names no Channels"))?;
+        let facts_path = repo.join(format!("src/sdk/Lamella.Rhu.Sdk/boards/{name}.json").replace('/', std::path::MAIN_SEPARATOR_STR));
+        let facts = std::fs::read_to_string(&facts_path).map_err(|e| format!("cannot read {}: {e}", facts_path.display()))?;
+        let compact: String = facts.chars().filter(|c| !c.is_whitespace()).collect();
+        let Some(at) = compact.find("\"channels\":{") else {
+            return Err(format!("{}: no channels member", facts_path.display()));
+        };
+        let body = &compact[at + "\"channels\":{".len()..];
+        let Some(end) = body.find('}') else {
+            return Err(format!("{}: the channels member never closes", facts_path.display()));
+        };
+        let body = &body[..end];
+        let field = |key: &str| -> Option<String> {
+            let k = format!("\"{key}\":\"");
+            let s = body.find(&k)? + k.len();
+            let e = body[s..].find('"')? + s;
+            Some(body[s..e].to_string())
+        };
+        let f_log = field("log").ok_or_else(|| format!("{}: channels.log missing", facts_path.display()))?;
+        let f_console = field("console").ok_or_else(|| format!("{}: channels.console missing", facts_path.display()))?;
+        let f_legal = {
+            let k = "\"legal\":[";
+            let s = body.find(k).ok_or_else(|| format!("{}: channels.legal missing", facts_path.display()))? + k.len();
+            let e = body[s..].find(']').ok_or_else(|| format!("{}: channels.legal never closes", facts_path.display()))? + s;
+            body[s..e].split(',').map(|w| w.trim_matches('"').to_string()).collect::<Vec<_>>().join(" ")
+        };
+        if log != f_log {
+            return Err(format!("{name}: LogChannel '{log}' != the facts file's channels.log '{f_log}'"));
+        }
+        if console != f_console {
+            return Err(format!("{name}: ConsoleChannel '{console}' != the facts file's channels.console '{f_console}'"));
+        }
+        if legal != f_legal {
+            return Err(format!("{name}: Channels '{legal}' != the facts file's channels.legal '{f_legal}'"));
+        }
+        if !legal.split(' ').any(|w| w == log) || !legal.split(' ').any(|w| w == console) {
+            return Err(format!("{name}: a default channel ({log}, {console}) is outside the row's legal set '{legal}'"));
+        }
+        let n = legal.split(' ').count();
+        rows.push((name, log, console, n));
+        rest = &rest[i + len..];
+    }
+    if rows.is_empty() {
+        return Err("boards.props: no rows".to_string());
+    }
+    Ok(rows)
+}
+
+/// The boot markers with the third thread's spawn line at the knob's value
+/// and the handshake's values from the header.
+fn knob_boot_markers(value: u64, abi: u32, compat: u32) -> Vec<String> {
     BOOT_MARKERS
         .iter()
-        .map(|m| if *m == STACK_KNOB_MARKER_DEFAULT { format!("[shim] pthread_create: stack {value} B asked, {value} B spawned (tid 3)") } else { m.to_string() })
+        .map(|m| if *m == STACK_KNOB_MARKER_DEFAULT { format!("[shim] pthread_create: stack {value} B asked, {value} B spawned (tid 3)") } else { m.replace("{abi}", &abi.to_string()).replace("{compat}", &compat.to_string()) })
         .collect()
 }
 
@@ -3647,6 +4444,7 @@ enum Json {
     Array(Vec<Json>),
     Str(String),
     Int(u64),
+    Bool(bool),
     Null,
 }
 
@@ -3688,8 +4486,16 @@ impl<'a> JsonReader<'a> {
             }
             Some(c) if c.is_ascii_digit() => self.integer(),
             Some(b'-') => Err(self.err("a negative number is not in the facts' shape")),
-            Some(b't') | Some(b'f') => Err(self.err("a boolean is not in the facts' shape")),
-            Some(_) => Err(self.err("a value of the facts' shape expected (an object, an array, a string, a whole number or null)")),
+            Some(b't') if self.b[self.i..].starts_with(b"true") => {
+                self.i += 4;
+                Ok(Json::Bool(true))
+            }
+            Some(b'f') if self.b[self.i..].starts_with(b"false") => {
+                self.i += 5;
+                Ok(Json::Bool(false))
+            }
+            Some(b't') | Some(b'f') => Err(self.err("'true' or 'false' expected")),
+            Some(_) => Err(self.err("a value of the facts' shape expected (an object, an array, a string, a whole number, a boolean or null)")),
             None => Err(self.err("the text ends before a value")),
         }
     }
@@ -3840,6 +4646,12 @@ impl Json {
             _ => Err(format!("{where_}: '{key}' is not a whole number")),
         }
     }
+    fn bool(&self, key: &str, where_: &str) -> Result<bool, String> {
+        match self.member(key, where_)? {
+            Json::Bool(b) => Ok(*b),
+            _ => Err(format!("{where_}: '{key}' is not a boolean")),
+        }
+    }
     fn ints(&self, key: &str, where_: &str) -> Result<Vec<u64>, String> {
         match self.member(key, where_)? {
             Json::Array(a) => a
@@ -3847,6 +4659,18 @@ impl Json {
                 .map(|v| match v {
                     Json::Int(n) => Ok(*n),
                     _ => Err(format!("{where_}: '{key}' holds something that is not a whole number")),
+                })
+                .collect(),
+            _ => Err(format!("{where_}: '{key}' is not an array")),
+        }
+    }
+    fn strs(&self, key: &str, where_: &str) -> Result<Vec<String>, String> {
+        match self.member(key, where_)? {
+            Json::Array(a) => a
+                .iter()
+                .map(|v| match v {
+                    Json::Str(s) => Ok(s.clone()),
+                    _ => Err(format!("{where_}: '{key}' holds something that is not a string")),
                 })
                 .collect(),
             _ => Err(format!("{where_}: '{key}' is not an array")),
@@ -3866,6 +4690,10 @@ impl Json {
 /// One boards/<row>.json file of the SDK package (the board class's
 /// source of facts): the pin table's rules, the buses, the clock and the
 /// posture -- the members the tie and the board class's markers read.
+/// One analog converter as the facts file states it: its number, its width in bits, its reference in millivolts
+/// and its channels (the chip's channel number and the pin, None for an internal source).
+type AdcFacts = (u64, u64, u64, Vec<(u64, Option<u64>)>);
+
 #[derive(Clone, Default)]
 struct FactsFile {
     name: String,
@@ -3878,6 +4706,21 @@ struct FactsFile {
     labels: String,
     i2c: Vec<(u64, u64, u64, Vec<u64>)>,
     spi: Vec<(u64, u64, u64, u64, Vec<u64>, u64, u64)>,
+    /// The one PWM chip's number and the lines a timer drives (the channel number is the line number).
+    pwm_chip: u64,
+    pwm_lines: Vec<u64>,
+    /// The board's RAM ranges -- the name, the base, the size, external, cached.
+    ram: Vec<(String, u64, u64, bool, bool)>,
+    /// The board's flash ranges where the row states them -- the name, the base, the size, external, mapped, executable (a row without the array carries none).
+    flash: Vec<(String, u64, u64, bool, bool, bool)>,
+    /// The board's UART rows -- the block and its pins (absent on a row whose UARTs have no pins).
+    uart: Vec<(u64, Option<u64>, Option<u64>)>,
+    /// The two streams' default channels and the row's legal set.
+    channels: (String, String, Vec<String>),
+    /// The chip's legal pin sets per block for a project's pin override.
+    uart_pairs: Vec<(u64, Vec<u64>, Vec<u64>)>,
+    /// The analog converters: a converter's number is its index in the kernel's block table.
+    adc: Vec<AdcFacts>,
 }
 
 fn read_facts_file(path: &Path) -> Result<FactsFile, String> {
@@ -3902,8 +4745,44 @@ fn read_facts_file(path: &Path) -> Result<FactsFile, String> {
     for b in j.objects("spi", w)? {
         f.spi.push((b.int("block", w)?, b.int("sck", w)?, b.int("mosi", w)?, b.int("miso", w)?, b.ints("cs", w)?, b.int("min", w)?, b.int("max", w)?));
     }
+    let pwm = j.member("pwm", w)?;
+    f.pwm_chip = pwm.int("chip", w)?;
+    f.pwm_lines = pwm.ints("lines", w)?;
+    for c in j.member("adc", w)?.objects("converters", w)? {
+        let mut channels = Vec::new();
+        for ch in c.objects("channels", w)? {
+            let pin = match ch.member("pin", w)? {
+                Json::Int(n) => Some(*n),
+                Json::Null => None,
+                _ => return Err(format!("{where_}: a channel's 'pin' is neither a whole number nor null")),
+            };
+            channels.push((ch.int("number", w)?, pin));
+        }
+        f.adc.push((c.int("number", w)?, c.int("bits", w)?, c.int("referenceMillivolts", w)?, channels));
+    }
+    for b in j.objects("ram", w)? {
+        f.ram.push((b.str("name", w)?, b.int("base", w)?, b.int("bytes", w)?, b.bool("external", w)?, b.bool("cached", w)?));
+    }
+    if j.member("flash", w).is_ok() {
+        for b in j.objects("flash", w)? {
+            f.flash.push((b.str("name", w)?, b.int("base", w)?, b.int("bytes", w)?, b.bool("external", w)?, b.bool("mapped", w)?, b.bool("executable", w)?));
+        }
+    }
+    for b in j.objects("uart", w)? {
+        let tx = if b.member("tx", w).is_ok() { Some(b.int("tx", w)?) } else { None };
+        let rx = if b.member("rx", w).is_ok() { Some(b.int("rx", w)?) } else { None };
+        f.uart.push((b.int("block", w)?, tx, rx));
+    }
+    let ch = j.member("channels", w)?;
+    f.channels = (ch.str("log", w)?, ch.str("console", w)?, ch.strs("legal", w)?);
+    for b in j.objects("uartPairs", w)? {
+        f.uart_pairs.push((b.int("block", w)?, b.ints("tx", w)?, b.ints("rx", w)?));
+    }
     if f.name.is_empty() || f.pins == 0 || f.clock_hz == 0 || f.posture.is_empty() {
         return Err(format!("{where_}: an empty name, pins, clockHz or posture"));
+    }
+    if f.ram.is_empty() || f.ram[0].3 || f.ram[0].4 {
+        return Err(format!("{where_}: the ram array is empty or its first range is not the internal SRAM"));
     }
     Ok(f)
 }
@@ -3958,9 +4837,180 @@ fn pad_lines(text: &str, name: &str) -> Option<Vec<u64>> {
         }
     } else {
         let open = block.rfind('[')? + 1;
+        if block[open..].trim().is_empty() {
+            return Some(out);
+        }
         for n in block[open..].split(',') {
             out.push(n.trim().parse().ok()?);
         }
+    }
+    Some(out)
+}
+
+/// A `0x` or decimal literal with underscores, as the kernel's facts write it.
+fn rust_literal(s: &str) -> Option<u64> {
+    let t = s.trim().replace('_', "");
+    match t.strip_prefix("0x") {
+        Some(h) => u64::from_str_radix(h, 16).ok(),
+        None => t.parse().ok(),
+    }
+}
+
+/// The `RAM_RANGES` rows of a kernel facts module for one board feature:
+/// the definition whose `#[cfg(...)]` line (the nearest above it,
+/// within four lines) names the feature, or carries no cfg at all; each
+/// `RamFacts { name: "..", base: .., bytes: .., external: .., cached: .. }`
+/// row read by its fields.
+fn kernel_ram_ranges(text: &str, feature: &str) -> Option<Vec<(String, u64, u64, bool, bool)>> {
+    let key = "pub const RAM_RANGES: ";
+    for (i, _) in text.match_indices(key) {
+        let cfg = text[..i].lines().rev().take(4).find(|l| l.trim().starts_with("#[cfg(")).map(|l| l.to_string());
+        let fits = match &cfg {
+            None => true,
+            Some(c) => c.contains(&format!("\"{feature}\"")),
+        };
+        if !fits {
+            continue;
+        }
+        let end = text[i..].find("];")? + i;
+        let block = &text[i..end];
+        let mut rows = Vec::new();
+        for (j, _) in block.match_indices("RamFacts {") {
+            let row_end = block[j..].find('}')? + j;
+            let row = &block[j + "RamFacts {".len()..row_end];
+            let field = |name: &str| -> Option<String> {
+                let k = format!("{name}:");
+                let at = row.find(&k)? + k.len();
+                let rest = row[at..].trim_start();
+                let stop = rest.find(',').unwrap_or(rest.len());
+                Some(rest[..stop].trim().to_string())
+            };
+            let name = field("name")?.trim_matches('"').to_string();
+            let base = rust_literal(&field("base")?)?;
+            let bytes = rust_literal(&field("bytes")?)?;
+            let external = field("external")? == "true";
+            let cached = field("cached")? == "true";
+            rows.push((name, base, bytes, external, cached));
+        }
+        return Some(rows);
+    }
+    None
+}
+
+/// The `FLASH_RANGES` rows of a kernel facts module, where the row states
+/// them: each `FlashFacts { name: "..", base: .., bytes: .., external: ..,
+/// mapped: .., executable: .. }` row read by its fields; None on a module
+/// without the table (a row whose facts file carries no flash array).
+fn kernel_flash_ranges(text: &str) -> Option<Vec<(String, u64, u64, bool, bool, bool)>> {
+    let key = "pub const FLASH_RANGES: ";
+    let i = text.find(key)?;
+    let end = text[i..].find("];")? + i;
+    let block = &text[i..end];
+    let mut rows = Vec::new();
+    for (j, _) in block.match_indices("FlashFacts {") {
+        let row_end = block[j..].find('}')? + j;
+        let row = &block[j + "FlashFacts {".len()..row_end];
+        let field = |name: &str| -> Option<String> {
+            let k = format!("{name}:");
+            let at = row.find(&k)? + k.len();
+            let rest = row[at..].trim_start();
+            let stop = rest.find(',').unwrap_or(rest.len());
+            Some(rest[..stop].trim().to_string())
+        };
+        let name = field("name")?.trim_matches('"').to_string();
+        let base = rust_literal(&field("base")?)?;
+        let bytes = rust_literal(&field("bytes")?)?;
+        let external = field("external")? == "true";
+        let mapped = field("mapped")? == "true";
+        let executable = field("executable")? == "true";
+        rows.push((name, base, bytes, external, mapped, executable));
+    }
+    Some(rows)
+}
+
+/// The kernel's `UART_ROWS` table of a facts module: each
+/// `UartRow { block: .., tx: .., rx: .. }` row's block and pins, a pin
+/// `NO_PIN` read as absent (the emulator rows' UARTs have no pins); an
+/// empty table on a row with no UART row (the ST rows).
+fn kernel_uart_rows(text: &str) -> Option<Vec<(u64, Option<u64>, Option<u64>)>> {
+    let start = text.find("pub const UART_ROWS: ")?;
+    let end = text[start..].find("];")? + start;
+    let block = &text[start..end];
+    let mut out = Vec::new();
+    for row in block.split("UartRow {").skip(1) {
+        let pin = |key: &str| -> Option<Option<u64>> {
+            let i = row.find(key)? + key.len();
+            if row[i..].trim_start().starts_with("crate::console::NO_PIN") {
+                Some(None)
+            } else {
+                Some(Some(field_number(row, key)?))
+            }
+        };
+        out.push((field_number(row, "block:")?, pin("tx:")?, pin("rx:")?));
+    }
+    Some(out)
+}
+
+/// The kernel's `CHANNELS` facts of a row: the two streams'
+/// default codes and the legal set, each `CH_*` name read as the SDK's word.
+fn kernel_channels(text: &str) -> Option<(String, String, Vec<String>)> {
+    let start = text.find("pub const CHANNELS: ")?;
+    let end = text[start..].find("};")? + start;
+    let decl = &text[start..end];
+    let word = |key: &str| -> Option<String> {
+        let i = decl.find(key)? + key.len();
+        channel_word(decl[i..].trim_start())
+    };
+    let log = word(" log: ")?;
+    let console = word(" console: ")?;
+    let li = decl.find("legal:")? + "legal:".len();
+    let open = decl[li..].find('[')? + li + 1;
+    let close = decl[open..].find(']')? + open;
+    let mut legal = Vec::new();
+    for item in decl[open..close].split(',') {
+        if item.trim().is_empty() {
+            continue;
+        }
+        legal.push(channel_word(item.trim())?);
+    }
+    Some((log, console, legal))
+}
+
+/// A `CH_*` constant's name, as the kernel's facts write it, read as the
+/// SDK's word for the channel.
+fn channel_word(s: &str) -> Option<String> {
+    let name: String = s
+        .trim_start_matches("crate::console::")
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    let word = match name.as_str() {
+        "CH_MEMORY" => "memory",
+        "CH_PROBE" => "probe",
+        "CH_OFF" => "off",
+        "CH_UART0" => "uart0",
+        "CH_UART1" => "uart1",
+        _ => return None,
+    };
+    Some(word.to_string())
+}
+
+/// The kernel's `UART_PAIRS` table of a facts module: per block, the
+/// TX pins and the RX pins the UART function reaches; an empty table on the
+/// emulator and ST rows.
+fn kernel_uart_pairs(text: &str) -> Option<Vec<(u64, Vec<u64>, Vec<u64>)>> {
+    let start = text.find("pub const UART_PAIRS: ")?;
+    let end = text[start..].find("];")? + start;
+    let block = &text[start..end];
+    let mut out = Vec::new();
+    for row in block.split("UartPairs {").skip(1) {
+        let list = |key: &str| -> Option<Vec<u64>> {
+            let i = row.find(key)? + key.len();
+            let open = row[i..].find('[')? + i + 1;
+            let close = row[open..].find(']')? + open;
+            row[open..close].split(',').map(|n| n.trim().parse().ok()).collect()
+        };
+        out.push((field_number(row, "block:")?, list("tx:")?, list("rx:")?));
     }
     Some(out)
 }
@@ -3980,6 +5030,28 @@ struct BoardFactsRow {
     /// Per SPI bus: the facts file's slowest and fastest rate, and the block's ladder's at its clock.
     ladder: Vec<(u64, u64, u64, u64)>,
     kernel_spi_hz: u64,
+    /// The facts file's PWM chip and lines against the kernel's PWM_LINES table.
+    pwm_chip: u64,
+    pwm_lines: Vec<u64>,
+    kernel_pwm_lines: Vec<u64>,
+    /// The facts file's RAM ranges and the kernel's (`RAM_RANGES` in the row's facts module).
+    ram: Vec<(String, u64, u64, bool, bool)>,
+    kernel_ram: Vec<(String, u64, u64, bool, bool)>,
+    /// The facts file's flash ranges and the kernel's (`FLASH_RANGES`), both empty on a row that states none.
+    flash: Vec<(String, u64, u64, bool, bool, bool)>,
+    kernel_flash: Vec<(String, u64, u64, bool, bool, bool)>,
+    /// The facts file's UART rows and the kernel's (`UART_ROWS`).
+    uart: Vec<(u64, Option<u64>, Option<u64>)>,
+    kernel_uart: Vec<(u64, Option<u64>, Option<u64>)>,
+    /// The facts file's channels and the kernel's (`CHANNELS`).
+    channels: (String, String, Vec<String>),
+    kernel_channels: (String, String, Vec<String>),
+    /// The facts file's legal pin sets and the kernel's (`UART_PAIRS`).
+    uart_pairs: Vec<(u64, Vec<u64>, Vec<u64>)>,
+    kernel_uart_pairs: Vec<(u64, Vec<u64>, Vec<u64>)>,
+    /// The facts file's analog converters and the kernel's (`ADC_BLOCKS` and `ADC_CHANNELS`).
+    adc: Vec<AdcFacts>,
+    kernel_adc: Vec<AdcFacts>,
 }
 
 /// Every row of the board table has a facts file naming it; its pin count,
@@ -4026,40 +5098,117 @@ fn read_board_facts(repo: &Path) -> Result<Vec<BoardFactsRow>, String> {
         let mut ladder = Vec::new();
         let mut kernel_spi_hz = 0;
         if !facts.i2c.is_empty() || !facts.spi.is_empty() {
-            if !ktext.contains("rp2350_bus_math::i2c_buses") {
+            // The chip's shared bus rows (rp2350_bus_math::i2c_buses, the Pico rows), or the row's own rows built
+            // through the chip's constructors (rp2350_bus_math::i2c_bus and spi_bus over the facts file's I2C_PADS,
+            // SPI_PADS and SPI_SELECTS): the pads are read where the row declares them.
+            let own = ktext.contains("rp2350_bus_math::i2c_bus(") || ktext.contains("rp2350_bus_math::spi_bus(");
+            if !ktext.contains("rp2350_bus_math::i2c_buses") && !own {
                 return Err(format!("{board}: the facts file carries buses but the tie knows the kernel's bus rows for the RP2350 alone"));
             }
             let bus = std::fs::read_to_string(repo.join("src").join("kernel").join("src").join("rp2350_bus_math.rs")).map_err(|e| format!("rp2350_bus_math.rs: {e}"))?;
-            let i2c_pads = pad_lines(&bus, "I2C0_PADS").ok_or("rp2350_bus_math.rs: no I2C0_PADS")?;
-            let spi_pads = pad_lines(&bus, "SPI0_PADS").ok_or("rp2350_bus_math.rs: no SPI0_PADS")?;
-            let selects = pad_lines(&bus, "SPI0_SELECTS").ok_or("rp2350_bus_math.rs: no SPI0_SELECTS")?;
+            let (i2c_pads, spi_pads, selects) = if own {
+                (
+                    pad_lines(&ktext, "I2C_PADS").ok_or(format!("{board}: the facts file names no I2C_PADS the tie can read"))?,
+                    pad_lines(&ktext, "SPI_PADS").ok_or(format!("{board}: the facts file names no SPI_PADS the tie can read"))?,
+                    pad_lines(&ktext, "SPI_SELECTS").ok_or(format!("{board}: the facts file names no SPI_SELECTS the tie can read"))?,
+                )
+            } else {
+                (
+                    pad_lines(&bus, "I2C0_PADS").ok_or("rp2350_bus_math.rs: no I2C0_PADS")?,
+                    pad_lines(&bus, "SPI0_PADS").ok_or("rp2350_bus_math.rs: no SPI0_PADS")?,
+                    pad_lines(&bus, "SPI0_SELECTS").ok_or("rp2350_bus_math.rs: no SPI0_SELECTS")?,
+                )
+            };
+            // The rates the facts list are the kernel's modes whose floor is at or below the row's clock at its posture, in the set's order;
+            // the SPI range is the block's ladder at the block's own clock (the crystal on the RP2350 rows).
             let modes = kernel_i2c_modes(&bus).ok_or("rp2350_bus_math.rs: no I2C_MODES rows with rate_hz and floor_hz")?;
             kernel_spi_hz = rust_const(&bus, "SPI_CLOCK_HZ").and_then(|v| rust_number(&v)).ok_or("rp2350_bus_math.rs: no SPI_CLOCK_HZ")?;
             kernel_rates = modes.iter().filter(|(_, floor)| *floor <= kernel_clock_hz).map(|(rate, _)| *rate).collect();
             for (block, sda, scl, r) in &facts.i2c {
-                if *block != 0 || i2c_pads.len() != 2 {
-                    return Err(format!("{board}: the kernel's bus rows carry I2C block 0 alone (two pads)"));
+                let named = if own { ktext.contains(&format!("rp2350_bus_math::i2c_bus({block}, ")) } else { *block == 0 };
+                if !named || i2c_pads.len() != 2 {
+                    return Err(format!("{board}: the kernel's bus rows carry no I2C block {block} with two pads"));
                 }
-                ties.push(("I2C0's data pad".to_string(), *sda, i2c_pads[0]));
-                ties.push(("I2C0's clock pad".to_string(), *scl, i2c_pads[1]));
+                ties.push((format!("I2C{block}'s data pad"), *sda, i2c_pads[0]));
+                ties.push((format!("I2C{block}'s clock pad"), *scl, i2c_pads[1]));
                 rates = r.clone();
             }
             for (block, sck, mosi, miso, cs, min, max) in &facts.spi {
-                if *block != 0 || spi_pads.len() != 3 || cs.len() != selects.len() {
-                    return Err(format!("{board}: the kernel's bus rows carry SPI block 0 alone (three pads, {} select)", selects.len()));
+                let named = if own { ktext.contains(&format!("rp2350_bus_math::spi_bus({block}, ")) } else { *block == 0 };
+                if !named || spi_pads.len() != 3 || cs.len() != selects.len() {
+                    return Err(format!("{board}: the kernel's bus rows carry no SPI block {block} with three pads and {} selects", selects.len()));
                 }
-                ties.push(("SPI0's clock pad".to_string(), *sck, spi_pads[0]));
-                ties.push(("SPI0's out pad".to_string(), *mosi, spi_pads[1]));
-                ties.push(("SPI0's in pad".to_string(), *miso, spi_pads[2]));
+                ties.push((format!("SPI{block}'s clock pad"), *sck, spi_pads[0]));
+                ties.push((format!("SPI{block}'s out pad"), *mosi, spi_pads[1]));
+                ties.push((format!("SPI{block}'s in pad"), *miso, spi_pads[2]));
                 for (k, c) in cs.iter().enumerate() {
-                    ties.push((format!("SPI0's select {k}"), *c, selects[k]));
+                    ties.push((format!("SPI{block}'s select {k}"), *c, selects[k]));
                 }
                 ladder.push((*min, *max, kernel_spi_hz / (254 * 256), kernel_spi_hz / 2));
             }
         }
-        rows.push(BoardFactsRow { board, lines: facts.pins, kernel_lines, clock_hz: facts.clock_hz, kernel_clock_hz, ties, rates, kernel_rates, ladder, kernel_spi_hz });
+        let kernel_pwm_lines = kernel_pwm_lines(&ktext, kernel_lines).ok_or(format!("{}: no PWM_LINES table the tie can read", kfile.display()))?;
+        let feature = format!("board-{}", board.strip_prefix("arm-").unwrap_or(&board));
+        let kernel_ram = kernel_ram_ranges(&ktext, &feature).ok_or(format!("{}: no RAM_RANGES rows for the feature {feature}", kfile.display()))?;
+        let kernel_flash = kernel_flash_ranges(&ktext).unwrap_or_default();
+        let kernel_uart = kernel_uart_rows(&ktext).ok_or(format!("{}: no UART_ROWS table the tie can read", kfile.display()))?;
+        let kernel_channels = kernel_channels(&ktext).ok_or(format!("{}: no CHANNELS facts the tie can read", kfile.display()))?;
+        let kernel_uart_pairs = kernel_uart_pairs(&ktext).ok_or(format!("{}: no UART_PAIRS table the tie can read", kfile.display()))?;
+        let kernel_adc = kernel_adc_tables(&ktext).ok_or(format!("{}: no ADC_BLOCKS and ADC_CHANNELS tables the tie can read", kfile.display()))?;
+        rows.push(BoardFactsRow { board, lines: facts.pins, kernel_lines, clock_hz: facts.clock_hz, kernel_clock_hz, ties, rates, kernel_rates, ladder, kernel_spi_hz, pwm_chip: facts.pwm_chip, pwm_lines: facts.pwm_lines.clone(), kernel_pwm_lines, ram: facts.ram, kernel_ram, flash: facts.flash, kernel_flash, uart: facts.uart, kernel_uart, channels: facts.channels, kernel_channels, uart_pairs: facts.uart_pairs, kernel_uart_pairs, adc: facts.adc.clone(), kernel_adc });
     }
     Ok(rows)
+}
+
+/// The kernel's PWM_LINES table as the row's facts module states it: the
+/// literal rows' `line:` numbers (the emulator rows), every line of the package
+/// where the table is the chip's generated one (`rp2350_pwm::lines::<LINE_COUNT>()`),
+/// none where the table is empty (the ST rows).
+fn kernel_pwm_lines(text: &str, line_count: u64) -> Option<Vec<u64>> {
+    let start = text.find("pub const PWM_LINES: ")?;
+    let end = text[start..].find(';')? + start;
+    let decl = &text[start..end];
+    if decl.contains("rp2350_pwm::lines::<LINE_COUNT>()") {
+        return Some((0..line_count).collect());
+    }
+    if decl.contains("= &[]") {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    for row in decl.split("PwmLine {").skip(1) {
+        out.push(field_number(row, "line:")?);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// The kernel's ADC_BLOCKS and ADC_CHANNELS tables as the row's facts module
+/// states them, in the facts file's shape: a converter's number is its index in
+/// the block table (the table's own `number:` is the chip's), its `bits:` and
+/// `reference_mv:` as written, and its channels the channel rows whose `block:`
+/// names it -- the chip's `channel:` number with its `line:`, None for
+/// `NO_LINE` (an internal source); two empty tables give an empty list.
+fn kernel_adc_tables(text: &str) -> Option<Vec<AdcFacts>> {
+    let blocks = rust_const(text, "ADC_BLOCKS")?;
+    let channels = rust_const(text, "ADC_CHANNELS")?;
+    let mut out: Vec<AdcFacts> = Vec::new();
+    if blocks.trim() != "&[]" {
+        for row in blocks.split("AdcBlock {").skip(1) {
+            out.push((out.len() as u64, field_number(row, "bits:")?, field_number(row, "reference_mv:")?, Vec::new()));
+        }
+    }
+    if channels.trim() != "&[]" {
+        for row in channels.split("AdcChannel {").skip(1) {
+            let block = field_number(row, "block:")? as usize;
+            let number = field_number(row, "channel:")?;
+            let line = if row.contains("line: crate::adc_math::NO_LINE") { None } else { Some(field_number(row, "line:")?) };
+            out.get_mut(block)?.3.push((number, line));
+        }
+    }
+    Some(out)
 }
 
 fn board_facts_fault(rows: &[BoardFactsRow]) -> Option<String> {
@@ -4072,6 +5221,15 @@ fn board_facts_fault(rows: &[BoardFactsRow]) -> Option<String> {
         }
         if r.clock_hz != r.kernel_clock_hz {
             return Some(format!("{}: the facts file's clockHz {} != the kernel's SYSCLK_HZ {} at the row's posture", r.board, r.clock_hz, r.kernel_clock_hz));
+        }
+        if r.pwm_chip != 0 {
+            return Some(format!("{}: the facts file's PWM chip is {}; the one chip of a row is 0", r.board, r.pwm_chip));
+        }
+        if r.pwm_lines != r.kernel_pwm_lines {
+            return Some(format!("{}: the facts file's PWM lines {} != the kernel's PWM_LINES {}", r.board, number_list(&r.pwm_lines), number_list(&r.kernel_pwm_lines)));
+        }
+        if r.adc != r.kernel_adc {
+            return Some(format!("{}: the facts file's analog converters {} != the kernel's ADC_BLOCKS and ADC_CHANNELS {}", r.board, adc_list(&r.adc), adc_list(&r.kernel_adc)));
         }
         if r.rates != r.kernel_rates {
             return Some(format!("{}: the facts file's I2C rates {} != the kernel's modes at {} Hz: {}", r.board, number_list(&r.rates), r.kernel_clock_hz, number_list(&r.kernel_rates)));
@@ -4086,8 +5244,101 @@ fn board_facts_fault(rows: &[BoardFactsRow]) -> Option<String> {
                 return Some(format!("{}: {what} {ours} != the kernel's {theirs}", r.board));
             }
         }
+        if r.ram != r.kernel_ram {
+            return Some(format!("{}: the facts file's RAM ranges {} != the kernel's RAM_RANGES {}", r.board, ram_list(&r.ram), ram_list(&r.kernel_ram)));
+        }
+        if r.flash != r.kernel_flash {
+            return Some(format!("{}: the facts file's flash ranges {} != the kernel's FLASH_RANGES {}", r.board, flash_list(&r.flash), flash_list(&r.kernel_flash)));
+        }
+        if r.uart != r.kernel_uart {
+            return Some(format!("{}: the facts file's UART rows {} != the kernel's UART_ROWS {}", r.board, uart_list(&r.uart), uart_list(&r.kernel_uart)));
+        }
+        if r.channels != r.kernel_channels {
+            return Some(format!("{}: the facts file's channels {} != the kernel's CHANNELS {}", r.board, channels_words(&r.channels), channels_words(&r.kernel_channels)));
+        }
+        if r.uart_pairs != r.kernel_uart_pairs {
+            return Some(format!("{}: the facts file's uartPairs {} != the kernel's UART_PAIRS {}", r.board, pairs_list(&r.uart_pairs), pairs_list(&r.kernel_uart_pairs)));
+        }
     }
     None
+}
+
+/// Analog converters as words: `converter 0: 12 bits of 3300 mV, channels 0 on 26, 1 on 27, 4 on no line`
+/// (`none` for an empty list).
+fn adc_list(v: &[AdcFacts]) -> String {
+    if v.is_empty() {
+        return "none".to_string();
+    }
+    v.iter()
+        .map(|(number, bits, mv, channels)| {
+            let ch: Vec<String> = channels
+                .iter()
+                .map(|(n, pin)| match pin {
+                    Some(p) => format!("{n} on {p}"),
+                    None => format!("{n} on no line"),
+                })
+                .collect();
+            format!("converter {number}: {bits} bits of {mv} mV, channels {}", if ch.is_empty() { "none".to_string() } else { ch.join(", ") })
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// UART rows as words: `UART0 on 0/1; UART1 on 8/9` (`UART0 (no pins)` on the emulator rows).
+fn uart_list(v: &[(u64, Option<u64>, Option<u64>)]) -> String {
+    if v.is_empty() {
+        return "none".to_string();
+    }
+    v.iter()
+        .map(|(block, tx, rx)| match (tx, rx) {
+            (Some(t), Some(r)) => format!("UART{block} on {t}/{r}"),
+            _ => format!("UART{block} (no pins)"),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The channels as words: `log memory, console memory, legal memory/off/uart0/uart1`.
+fn channels_words(c: &(String, String, Vec<String>)) -> String {
+    format!("log {}, console {}, legal {}", c.0, c.1, c.2.join("/"))
+}
+
+/// The legal pin sets as words: `UART0 tx 0/12/16/28 rx 1/13/17/29; ...`.
+fn pairs_list(v: &[(u64, Vec<u64>, Vec<u64>)]) -> String {
+    if v.is_empty() {
+        return "none".to_string();
+    }
+    let nums = |l: &[u64]| l.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("/");
+    v.iter()
+        .map(|(block, tx, rx)| format!("UART{block} tx {} rx {}", nums(tx), nums(rx)))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// RAM ranges as words: `SRAM 532480 B at 0x20000000 (internal, uncached)`.
+fn ram_list(v: &[(String, u64, u64, bool, bool)]) -> String {
+    if v.is_empty() {
+        return "none".to_string();
+    }
+    v.iter()
+        .map(|(name, base, bytes, external, cached)| {
+            format!("{name} {bytes} B at {base:#010x} ({}, {})", if *external { "external" } else { "internal" }, if *cached { "cached" } else { "uncached" })
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The flash ranges as words; "none" where the row states none.
+fn flash_list(v: &[(String, u64, u64, bool, bool, bool)]) -> String {
+    if v.is_empty() {
+        return "none".to_string();
+    }
+    v.iter()
+        .map(|(name, base, bytes, external, mapped, executable)| {
+            format!("{name} {bytes} B at {base:#010x} ({}, {}, {})", if *external { "external" } else { "internal" }, if *mapped { "mapped" } else { "unmapped" }, if *executable { "executable" } else { "data" })
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Numbers joined with commas; "none" for an empty list.
@@ -4147,7 +5398,7 @@ fn hex_after(text: &str, key: &str) -> Option<String> {
     }
 }
 
-/// The board class's four lines as the row's facts file predicts them, in order.
+/// The board class's five lines as the row's facts file predicts them, in order (the pin's PWM numbers third).
 fn board_class_markers(repo: &Path, board: &str) -> Result<Vec<String>, String> {
     let f = read_facts_file(&repo.join("src").join("sdk").join("Lamella.Rhu.Sdk").join("boards").join(format!("{board}.json")))?;
     let list = |v: Vec<u64>| if v.is_empty() { "none".to_string() } else { v.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ") };
@@ -4169,6 +5420,7 @@ fn board_class_markers(repo: &Path, board: &str) -> Result<Vec<String>, String> 
     Ok(vec![
         format!("TBHELLO: {who}, {} at {} Hz, {} pins, I2C {}, SPI {}", f.chip, f.clock_hz, f.pins, list(i2c), list(spi)),
         format!("TBHELLO: pins {}; pin 0: labels {label0}", f.pins),
+        format!("TBHELLO: pin 0: PWM {}", if f.pwm_lines.contains(&0) { format!("chip {}, channel 0", f.pwm_chip) } else { "none".to_string() }),
         third,
         "TBHELLO: end".to_string(),
     ])
@@ -4198,6 +5450,9 @@ fn read_stack_facts(repo: &Path) -> Result<StackFacts, String> {
         let ktext = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
         let kernel_pool = match kernel_pool_bytes(&ktext) {
             Some(v) => v,
+            // A board module that carries no pool of its own re-exports its
+            // chip module's (`pub use super::<chip>::*;`): the pool is read
+            // there, and a module with neither is refused.
             None => {
                 let chip = ktext
                     .lines()
@@ -4310,6 +5565,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     ));
     rt.verify_frozen();
 
+    // The staticlib as the gate builds it: the SDK package is packed with it.
     let case = "rt.sdk-parity-object";
     let log = rt.out.join("sdk-parity-staticlib-build.log");
     match rt.build_lib(&log) {
@@ -4321,6 +5577,67 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         Err(e) => rt.fail(case, &e),
     }
 
+    // The external RAM init mode's row: its kernel per mode the SDK's withheld
+    // table leaves offered (the row's default and its lazy archives), built once
+    // under a directory both worlds share and packed beside the leg's own
+    // kernel. A withheld mode's kernel is neither built nor packed: its
+    // publish below must refuse with the table's words.
+    let withheld = match ram_init_withheld(repo) {
+        Ok(v) => v,
+        Err(e) => rt.fail(case, &e),
+    };
+    let mut ram_init_kernels: Vec<String> = Vec::new();
+    for (mode, feature, _) in RAM_INIT_MODES {
+        if withheld.iter().any(|v| v == mode) {
+            println!("  the {mode} init mode is withheld by the SDK's withheld table: the row's kernel for it is neither built nor packed");
+            continue;
+        }
+        let dir = repo.join(RAM_INIT_DIR.replace('/', std::path::MAIN_SEPARATOR_STR)).join(mode);
+        let _ = std::fs::create_dir_all(&dir);
+        let feats = if feature.is_empty() { RAM_INIT_FEATURES.to_string() } else { format!("{RAM_INIT_FEATURES},{feature}") };
+        let log = rt.out.join(format!("sdk-parity-ram-init-{mode}-staticlib-build.log"));
+        println!("== build kernel staticlib {RAM_INIT_ROW} in the {mode} init mode (--lib --target {RAM_INIT_TARGET} --no-default-features --features {feats}) ==");
+        match cargo_build_kernel_at(repo, &dir, &["--lib", "--target", RAM_INIT_TARGET, "--no-default-features", "--features", feats.as_str()], &log) {
+            Ok(true) => {}
+            Ok(false) => {
+                echo_file(&log, "");
+                rt.fail(case, &format!("the {RAM_INIT_ROW} row's kernel staticlib build error in the {mode} init mode"));
+            }
+            Err(e) => rt.fail(case, &e),
+        }
+        let lib_rel = format!("{RAM_INIT_DIR}/{mode}/{RAM_INIT_TARGET}/release/librhu_kernel.a");
+        if !repo.join(lib_rel.replace('/', std::path::MAIN_SEPARATOR_STR)).is_file() {
+            rt.fail(case, &format!("no staticlib at {lib_rel} after the build"));
+        }
+        let name = if feature.is_empty() { RAM_INIT_ROW.to_string() } else { format!("{RAM_INIT_ROW}/{feature}") };
+        ram_init_kernels.push(format!("{name}={root}/{lib_rel}"));
+    }
+
+    // The external-flash row's kernel: the row's payload staticlib built once
+    // under a directory both worlds share and packed beside the leg's own
+    // kernel, so the leg publishes the row under the program's two homes.
+    {
+        let dir = repo.join(XIP_DIR.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let _ = std::fs::create_dir_all(&dir);
+        let log = rt.out.join("sdk-parity-external-flash-staticlib-build.log");
+        println!("== build kernel staticlib {XIP_ROW} (--lib --target {XIP_TARGET} --no-default-features --features {XIP_FEATURES}) ==");
+        match cargo_build_kernel_at(repo, &dir, &["--lib", "--target", XIP_TARGET, "--no-default-features", "--features", XIP_FEATURES], &log) {
+            Ok(true) => {}
+            Ok(false) => {
+                echo_file(&log, "");
+                rt.fail(case, &format!("the {XIP_ROW} row's kernel staticlib build error"));
+            }
+            Err(e) => rt.fail(case, &e),
+        }
+        let lib_rel = format!("{XIP_DIR}/{XIP_TARGET}/release/librhu_kernel.a");
+        if !repo.join(lib_rel.replace('/', std::path::MAIN_SEPARATOR_STR)).is_file() {
+            rt.fail(case, &format!("no staticlib at {lib_rel} after the build"));
+        }
+        ram_init_kernels.push(format!("{XIP_ROW}={root}/{lib_rel}"));
+    }
+
+    // The publish-side script: the pack, the publish through the SDK, the
+    // wrapper's assertions, the preprocessed project and the controls.
     let out_rel = format!("src/kernel/target/{}/sdk-parity", w.out_dir);
     let out = rt.out.join("sdk-parity");
     if std::fs::create_dir_all(&out).is_err() {
@@ -4334,7 +5651,10 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     args.push(w.sdk_board);
     args.push(&lib_there);
     args.push(&out_there);
-    println!("== the Linux environment for the publish: {} {} {} {} {} ==", words.join(" "), script, w.sdk_board, lib_there, out_there);
+    for k in &ram_init_kernels {
+        args.push(k);
+    }
+    println!("== the Linux environment for the publish: {} {} {} {} {} {} ==", words.join(" "), script, w.sdk_board, lib_there, out_there, ram_init_kernels.join(" "));
     let script_out = out.join("script.stdout");
     let script_err = out.join("script.stderr");
     let outcome = run_captured(Path::new(&words[0]), &args, &script_out, &script_err, Duration::from_secs(2400));
@@ -4351,6 +5671,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         Err(e) => rt.fail(case, &format!("the publish-side script did not run: {e}")),
     }
 
+    // 1. the object, byte for byte, after the path guard.
     println!("== case {case}: the object published through the SDK against the frozen program object ==");
     let fresh_obj = std::fs::read(out.join("rthello.o")).unwrap_or_default();
     let frozen_obj = std::fs::read(rt.frozen(PAYLOAD)).unwrap_or_default();
@@ -4379,6 +5700,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "positive", "", &format!("{{\"object_sha\":\"{want}\",\"bytes\":{}}}", fresh_obj.len()));
     println!("  PASS");
 
+    // 2. the surgery object.
     let case = "rt.sdk-parity-surgery";
     println!("== case {case}: the startup member printed out of the shipped archive and its cookie section renamed, against the frozen surgery object ==");
     let got = sha256_file(&out.join("startup-cookie-copied.o")).unwrap_or_default();
@@ -4390,6 +5712,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "positive", "", &format!("{{\"surgery_sha\":\"{want}\"}}"));
     println!("  PASS");
 
+    // 3. the merged object, whole.
     let case = "rt.sdk-parity-merge";
     println!("== case {case}: the merge the SDK made with the tools package's linker and the task assembly's attributes update, against the frozen merged object ==");
     let got = sha256_file(&out.join("rthello-merged.o")).unwrap_or_default();
@@ -4401,6 +5724,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "positive", "", &format!("{{\"merged_sha\":\"{want}\"}}"));
     println!("  PASS");
 
+    // 4. the image, against this runner's own link of the tier's merged object.
     let case = "rt.sdk-parity-link";
     println!("== case {case}: the image the SDK linked against this runner's link of the frozen merged object on the gate's line ==");
     let record_rel = format!("{out_rel}/rt-link-of-record.elf");
@@ -4408,6 +5732,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     let mut largs: Vec<String> = vec!["-T".to_string(), w.map.to_string(), "--gc-sections".to_string(), format!("-Map={map_rel}")];
     largs.extend(RT_LINK_WORDS.iter().map(|s| s.to_string()));
     largs.push(format!("{}/{MERGED}", w.tier));
+    largs.push(SDK_LOG_LEVEL_WORD.to_string());
     largs.extend(w.shim_objects.iter().map(|s| s.to_string()));
     largs.extend(w.gc_objects.iter().map(|s| s.to_string()));
     largs.push(format!("{}/{LIBC}", w.tier));
@@ -4425,35 +5750,100 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         Err(e) => rt.fail(case, &e),
     }
     let record_elf = repo.join(record_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-    let want = sha256_file(&record_elf).unwrap_or_default();
     let fresh_elf = out.join("rthello.elf");
-    let got = sha256_file(&fresh_elf).unwrap_or_default();
     let bytes = std::fs::metadata(&fresh_elf).map(|m| m.len()).unwrap_or(0);
-    if got.is_empty() || want.is_empty() {
+    let file_sha = sha256_file(&fresh_elf).unwrap_or_default();
+    // The shipped kernels are stripped of their debug information and bitcode by the pack, so the SDK's image carries
+    // no kernel DWARF while this runner's link of record (the whole unstripped archive) does: the two are compared on
+    // their loadable bytes, each after the same strip plus its comment section (the pack's gate's comparison).
+    let objcopy = match llvm_tool(&facts, "llvm-objcopy") {
+        Ok(p) => p,
+        Err(e) => rt.fail(case, &e),
+    };
+    let record_loadable = out.join("rt-link-of-record.loadable.elf");
+    let fresh_loadable = out.join("rthello.loadable.elf");
+    for (from, to, label) in [(&record_elf, &record_loadable, "record"), (&fresh_elf, &fresh_loadable, "fresh")] {
+        let from_arg = from.to_string_lossy().into_owned();
+        let to_arg = to.to_string_lossy().into_owned();
+        let oargs = ["--strip-debug", "-R", ".llvmbc", "-R", ".llvmcmd", "-R", ".comment", from_arg.as_str(), to_arg.as_str()];
+        match run_captured(&objcopy, &oargs, &out.join(format!("link-{label}.objcopy.stdout")), &out.join(format!("link-{label}.objcopy.stderr")), Duration::from_secs(120)) {
+            Ok(o) if o.exit == 0 => {}
+            Ok(o) => rt.fail(case, &format!("llvm-objcopy did not strip the {label} image for the comparison (exit {})", o.exit)),
+            Err(e) => rt.fail(case, &e),
+        }
+    }
+    let want = sha256_file(&record_loadable).unwrap_or_default();
+    let got = sha256_file(&fresh_loadable).unwrap_or_default();
+    if got.is_empty() || want.is_empty() || file_sha.is_empty() {
         rt.fail(case, "the image or the link of record is missing");
     }
     if got != want {
-        rt.fail(case, &format!("the image's sha256 {got} != the link of record's {want} -- the SDK's link is not the gate's"));
+        rt.fail(case, &format!("the image's loadable bytes {got} != the link of record's {want} -- the SDK's link is not the gate's"));
     }
-    println!("  the image byte-identical to this runner's link of record ({}...; {} bytes; this runner's linker {})", &want[..16], bytes, ld.version);
-    rt.pass(case, "positive", "", &format!("{{\"image_sha\":\"{want}\",\"bytes\":{bytes}}}"));
+    println!("  the image's loadable bytes tie this runner's link of record ({}...; the image {} bytes, sha256 {}..., the kernel's debug information stripped by the pack; this runner's linker {})", &want[..16], bytes, &file_sha[..16], ld.version);
+    // The link line's order as the shipped targets state it, read from the preprocessed project the publish-side
+    // script banked (the build package's targets as restored): the row's kernel after the tier objects, then the
+    // class's core archive, last before the output. The order moves the loadable bytes (measured at the pack),
+    // so the tie above holds for this order alone.
+    let pp = std::fs::read_to_string(out.join("rthello.pp.xml")).unwrap_or_default();
+    let order = "&quot;$(RhuBoardRoot)$(RhuKernel)&quot; &quot;$(RhuRuntimeRoot)$(RhuCore)&quot; -o &quot;$(_RhuElf)&quot;";
+    let seen = pp.matches(order).count();
+    if seen != 1 {
+        rt.fail(case, &format!("the preprocessed project states the link's order (the row's kernel, then the class's core archive, last before the output) {seen} times, not once"));
+    }
+    println!("  the link line names the row's kernel before the class's core archive, the core archive last before the output (the preprocessed project, once)");
+    rt.pass(case, "positive", "", &format!("{{\"image_loadable_sha\":\"{want}\",\"image_sha\":\"{file_sha}\",\"bytes\":{bytes}}}"));
     println!("  PASS");
 
+    // 5. the controls: the SDK's refusals through the real tool.
     let controls = std::fs::read_to_string(out.join("controls.txt")).unwrap_or_default();
-    for (name, broke, needle, what) in [
-        ("frozen", "frozen-byte", "does not tie its record", "one byte of a frozen tier object changed"),
-        ("board-missing", "board-missing", "LamellaTargetBoard is not set", "no board named"),
-        ("board-unknown", "board-unknown", "is not in the table", "a board not in the table"),
-        ("tool", "tool-byte", "does not tie its record", "one byte of the object copier changed"),
-        ("posture", "posture", "InvariantGlobalization", "the fixed posture moved"),
-        ("pack-root", "pack-root", "NetCoreTargetingPackRoot", "the reference assemblies' pack root moved back to the .NET SDK's own folder"),
-        ("stack-clamp", "stack-clamp", "above the row's clamp", "a thread stack above the row's clamp"),
-        ("stack-min", "stack-min", "below the kernel's minimum", "a thread stack below the kernel's minimum"),
-        ("stack-nan", "stack-nan", "not a whole number", "a thread stack that is not a whole number"),
-        ("stack-budget", "stack-budget", "fewer than three stacks", "a thread stack the row's pool cannot hold three of (the package's table in the cache doctored to a 64 KiB pool)"),
-        ("facts-missing", "facts-missing", "no board facts for", "the board class's program with the row's facts file deleted from the package in the cache (the generation must refuse before anything is compiled)"),
-        ("facts-byte", "facts-byte", "does not tie its record", "the board class's program with one byte of the row's facts file changed in the package in the cache (the frozen record must refuse at the link)"),
-    ] {
+    let facts_rel = format!("boards/{}.json (the board package)", w.sdk_board);
+    let release = match sdk_release_version(repo) {
+        Ok(v) => v,
+        Err(e) => rt.fail("rt.sdk-parity-control-stamped-version-doctored", &e),
+    };
+    let doctored_board = format!("Lamella.Rhu.Board.{} at {release}", w.sdk_board);
+    let table: &[(&str, &str, &str, &[&str], &str)] = &[
+        ("frozen", "frozen-byte", "RHU4012", &["does not tie its record: ", " (the board package)"], "one byte of a frozen tier object changed"),
+        ("board-missing", "board-missing", "RHU1001", &["LamellaTargetBoard is not set"], "no board named"),
+        ("board-unknown", "board-unknown", "RHU1002", &["is not in the table"], "a board not in the table"),
+        ("tool", "tool-byte", "RHU4012", &["does not tie its record: bin/llvm-objcopy (the tools package)"], "one byte of the object copier changed"),
+        ("posture", "posture", "RHU3004", &["InvariantGlobalization"], "the fixed posture moved"),
+        ("pack-root", "pack-root", "RHU3009", &["NetCoreTargetingPackRoot"], "the reference assemblies' pack root moved back to the .NET SDK's own folder"),
+        ("tools-host", "tools-host", "RHU4001", &["no tools package for macOS on Intel"], "the host named as macOS on Intel processors (osx-x64), for which the release has no tools package: the targets' one sentence, before anything is compiled"),
+        ("stack-clamp", "stack-clamp", "RHU2021", &["above the row's clamp"], "a thread stack above the row's clamp"),
+        ("stack-min", "stack-min", "RHU2020", &["below the kernel's minimum"], "a thread stack below the kernel's minimum"),
+        ("stack-nan", "stack-nan", "RHU2019", &["not a whole number"], "a thread stack that is not a whole number"),
+        ("stack-budget", "stack-budget", "RHU2025", &["fewer than three stacks"], "a thread stack the row's pool cannot hold three of (the package's table in the cache doctored to a 64 KiB pool)"),
+        ("pool-timeout-nan", "pool-timeout-nan", "RHU2022", &["is not a whole number of milliseconds or -1"], "a thread pool idle-worker timeout that is not a whole number of milliseconds or -1"),
+        ("pool-timeout-zero", "pool-timeout-zero", "RHU2023", &["no link word is the row's default"], "a thread pool idle-worker timeout of 0 (the link cannot carry it: no word is the row's default)"),
+        ("pool-timeout-big", "pool-timeout-big", "RHU2024", &["is above 2147483647"], "a thread pool idle-worker timeout above the 32-bit range the runtime reads"),
+        ("facts-missing", "facts-missing", "RHU1005", &["no board facts for"], "the board class's program with the row's facts file deleted from the package in the cache (the generation must refuse before anything is compiled)"),
+        ("facts-byte", "facts-byte", "RHU4012", &["does not tie its record: ", facts_rel.as_str()], "the board class's program with one byte of the row's facts file changed in the package in the cache (the frozen record must refuse at the link)"),
+        ("reflection-off", "reflection-off", "RHU2009", &["RhuReflection=off with the package Lamella.Hardware"], "the board class's program with the compiler's reflection data stripped (the class needs it: refused before anything is compiled, naming the property and the package)"),
+        ("ram-init-value", "ram-init-value", "RHU2003", &["is not one of: boot, first-use, background"], "an external RAM init mode value outside the three"),
+        ("ram-init-no-external", "ram-init-no-external", "RHU2011", &["has no external RAM"], "a lazy init mode on the Raspberry Pi Pico 2 row, which has no external RAM range"),
+        ("ram-init-frozen", "ram-init-frozen", "RHU4012", &["does not tie its record: kernels/pimoroni-pico-plus-2/ram-init-first-use/librhu_kernel.a"], "one byte of the row's lazy init-mode archive changed in the package in the cache (the frozen record must refuse at the link)"),
+        ("ram-init-withheld", "ram-init-withheld", "RHU2010", &["withheld in this release"], "the targets' withheld table in the package in the cache doctored with a row withholding the background value (the refusal before anything is compiled, with the row's words)"),
+        ("managed-memory-value", "managed-memory-value", "RHU2004", &["is not one of: external, internal"], "a managed memory home outside the two words"),
+        ("managed-memory-no-external", "managed-memory-no-external", "RHU2013", &["has no external RAM"], "the internal home on the Raspberry Pi Pico 2 row, which has no external RAM range"),
+        ("program-memory-value", "program-memory-value", "RHU2005", &["is not one of: internal, external"], "a program home outside the two words"),
+        ("program-memory-no-external-flash", "program-memory-no-external-flash", "RHU2014", &["has no memory-mapped external flash"], "the external home on the Raspberry Pi Pico 2 row, which has no memory-mapped external flash"),
+        ("program-memory-with-internal-heap", "program-memory-with-internal-heap", "RHU2015", &["RhuProgramMemory=external with RhuManagedMemory=internal"], "the external home asked together with the internal managed memory on the STM32F769I-DISCO row (the external-flash map keeps the heap in the external RAM)"),
+        ("analog-voltage-by-hand-no-room", "analog-voltage-by-hand-no-room", "RHU2016", &["=true in the project, but the board does not hold the library"], "the switch's program with the option set true by hand on the Raspberry Pi Pico 2 row, which does not hold the library (refused before anything is compiled)"),
+        ("log-value", "log-value", "RHU2006", &["is not one of: silent, quiet, verbose"], "a kernel output level outside the three words"),
+        ("channel-value", "channel-value", "RHU2008", &["is not one of: memory, probe, uart0, uart1, off"], "a console channel outside the five words"),
+        ("channel-row", "channel-row", "RHU2017", &["is not a channel of pimoroni-pico-plus-2 (its channels: memory, off, uart0, uart1)"], "a log channel the Pico Plus 2 row cannot serve (the probe), refused with the row's set"),
+        ("channel-row-console", "channel-row-console", "RHU2018", &["(its channels: uart0, uart1, memory, off)"], "a console channel this leg's emulator row cannot serve (the probe), refused with the row's set"),
+        ("channel-table", "channel-table", "RHU2018", &["(its channels: uart0, memory, off)"], "a console channel the row serves but struck from the table's set in the package in the cache (the set is the table's, never a literal)"),
+        ("contract-mismatch", "contract-mismatch", "RHU4002", &["is not this build package's"], "the shell's contract number set to 2 by a global property against the build package's 1: the two sides' numbers differ, refused before anything is compiled"),
+        ("stamped-version-doctored", "stamped-version", "RHU4014", &["not at this build package's version 9.9.9-doctored", doctored_board.as_str()], "the version stamp in the build package's properties in the cache doctored to another string: the shell's resolved packages are not at it, refused by name before any root is read"),
+        ("rid-other", "rid-other", "RHU3002", &["RuntimeIdentifier 'linux-arm64' is not linux-arm"], "RuntimeIdentifier given as a global property with another value than the posture's (amendment 3: the posture's own value passes), refused by name without a restore"),
+        ("roots-board", "roots-board", "RHU4005", &["is Lamella.Rhu.Board.rpi-pico2, not Lamella.Rhu.Board."], "the stub shell's board item in the cache doctored to another board's package id: the shell's board and the project's differ, refused before any root is read"),
+        ("roots-runtime", "roots-runtime", "RHU4007", &["not Lamella.Rhu.Runtime."], "the stub shell's runtime item in the cache doctored to another class's package id: the shell's class and the board's differ, refused before any root is read"),
+        ("boardless-publish", "boardless-publish", "RHU1001", &["LamellaTargetBoard is not set"], "a publish with no board named, after the boardless build of the same copy: refused by name at the first step, the assembly from the build untouched, no image"),
+    ];
+    for &(name, broke, code, needles, what) in table {
         let case = format!("rt.sdk-parity-control-{name}");
         println!("== case {case}: {what} -- the publish must refuse, nothing linked ==");
         let Some(line) = control_line(&controls, name) else {
@@ -4462,10 +5852,11 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         let rc = control_field(line, "rc");
         let elf = control_field(line, "elf");
         let refuse = line.split_once("refuse=").map(|(_, r)| r).unwrap_or("");
-        if rc == "0" || elf != "absent" || !refuse.contains(needle) {
-            rt.fail_control(&case, broke, &format!("the doctored input was not refused as registered: {line}"));
+        let code_read = control_field(line, "code");
+        if rc == "0" || elf != "absent" || code_read != code || needles.iter().any(|n| !refuse.contains(n)) {
+            rt.fail_control(&case, broke, &format!("the doctored input was not refused as registered (the code {code} and the words {needles:?} wanted): {line}"));
         }
-        println!("  refused (rc {rc}, no image): {}", refuse.trim());
+        println!("  refused (rc {rc}, {code}, no image): {}", refuse.trim());
         rt.pass(&case, "negative", broke, "");
         println!("  PASS");
     }
@@ -4501,6 +5892,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "negative", "project-path", "");
     println!("  PASS");
 
+    // 6. the board table's stack facts against the tree.
     let case = "rt.sdk-parity-row-facts";
     println!("== case {case}: the board table's stack facts (the pool, the default, the clamp per row) and the targets' minimum against the kernel's and the hosting layer's constants ==");
     let stack_facts = match read_stack_facts(repo) {
@@ -4514,6 +5906,10 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         println!("  {}: pool {} B, default {} B, clamp {} B -- the kernel's pool {}, the hosting layer's default {} and clamp {}", r.board, r.pool, r.default, r.clamp, r.kernel_pool, r.host_default, r.host_clamp);
     }
     println!("  the targets' minimum {} B = the header's RHU_THREAD_STACK_MIN {}", stack_facts.sdk_min, stack_facts.kernel_min);
+    // The board class's half of the same case: the boards' facts files (the shared board
+    // class's source of facts, boards/<row>.json in the SDK package) against
+    // the kernel's facts -- every row's pin count, its clock at the row's
+    // posture and the bus pads (nothing of LEDs or buttons: the board pages').
     let board_facts = match read_board_facts(repo) {
         Ok(f) => f,
         Err(e) => rt.fail(case, &e),
@@ -4523,10 +5919,10 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     }
     for r in &board_facts {
         if r.ties.is_empty() {
-            println!("  {}: the facts file's {} pins and {} Hz = the kernel's LINE_COUNT and SYSCLK_HZ at the row's posture; {} bus pins tied", r.board, r.lines, r.clock_hz, r.ties.len());
+            println!("  {}: the facts file's {} pins and {} Hz = the kernel's LINE_COUNT and SYSCLK_HZ at the row's posture; {} bus pins tied; {} PWM lines = the kernel's table; the RAM ranges {} = the kernel's RAM_RANGES; the flash ranges {} = the kernel's FLASH_RANGES; the UART rows {} and the channels {} = the kernel's UART_ROWS and CHANNELS; the legal pairs {} = the kernel's UART_PAIRS; the analog converters {} = the kernel's ADC_BLOCKS and ADC_CHANNELS", r.board, r.lines, r.clock_hz, r.ties.len(), r.pwm_lines.len(), ram_list(&r.ram), flash_list(&r.flash), uart_list(&r.uart), channels_words(&r.channels), pairs_list(&r.uart_pairs), adc_list(&r.adc));
         } else {
             let ranges: Vec<String> = r.ladder.iter().map(|(min, max, _, _)| format!("{min} to {max}")).collect();
-            println!("  {}: the facts file's {} pins and {} Hz = the kernel's LINE_COUNT and SYSCLK_HZ at the row's posture; {} bus pins tied; the I2C rates {} = the kernel's modes at that clock; the SPI range {} = the block's ladder at {} Hz", r.board, r.lines, r.clock_hz, r.ties.len(), number_list(&r.rates), ranges.join(" and "), r.kernel_spi_hz);
+            println!("  {}: the facts file's {} pins and {} Hz = the kernel's LINE_COUNT and SYSCLK_HZ at the row's posture; {} bus pins tied; the I2C rates {} = the kernel's modes at that clock; the SPI range {} = the block's ladder at {} Hz; the RAM ranges {} = the kernel's RAM_RANGES; the flash ranges {} = the kernel's FLASH_RANGES; the UART rows {} and the channels {} = the kernel's UART_ROWS and CHANNELS; the legal pairs {} = the kernel's UART_PAIRS; the analog converters {} = the kernel's ADC_BLOCKS and ADC_CHANNELS", r.board, r.lines, r.clock_hz, r.ties.len(), number_list(&r.rates), ranges.join(" and "), r.kernel_spi_hz, ram_list(&r.ram), flash_list(&r.flash), uart_list(&r.uart), channels_words(&r.channels), pairs_list(&r.uart_pairs), adc_list(&r.adc));
         }
     }
     match request_tie(repo) {
@@ -4549,8 +5945,34 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         Some(f) => println!("  refused: {f}"),
         None => rt.fail_control(case, "row-facts", "a doctored line count was accepted by the tie"),
     }
+    // The RAM ranges' control -- the first row's first range one byte larger in the facts file.
+    let mut doctored_ram = board_facts.clone();
+    doctored_ram[0].ram[0].2 += 1;
+    match board_facts_fault(&doctored_ram) {
+        Some(f) if f.contains("the facts file's RAM ranges") => println!("  refused: {f}"),
+        Some(f) => rt.fail_control(case, "row-facts", &format!("the tie refused the doctored RAM range for another reason: {f}")),
+        None => rt.fail_control(case, "row-facts", "a doctored RAM range was accepted by the tie"),
+    }
+    // The UART rows' and the channels' controls -- the first row's facts file with a
+    // UART row the kernel has not, then with its log stream naming a channel the kernel does not.
+    let mut doctored_uart = board_facts.clone();
+    doctored_uart[0].uart.push((7, None, None));
+    match board_facts_fault(&doctored_uart) {
+        Some(f) if f.contains("the facts file's UART rows") => println!("  refused: {f}"),
+        Some(f) => rt.fail_control(case, "row-facts", &format!("the tie refused the doctored UART rows for another reason: {f}")),
+        None => rt.fail_control(case, "row-facts", "a doctored UART row was accepted by the tie"),
+    }
+    let mut doctored_channels = board_facts.clone();
+    doctored_channels[0].channels.0 = "nowhere".to_string();
+    match board_facts_fault(&doctored_channels) {
+        Some(f) if f.contains("the facts file's channels") => println!("  refused: {f}"),
+        Some(f) => rt.fail_control(case, "row-facts", &format!("the tie refused the doctored channels for another reason: {f}")),
+        None => rt.fail_control(case, "row-facts", "a doctored channel was accepted by the tie"),
+    }
     rt.pass(case, "negative", "row-facts", "");
     println!("  PASS");
+    // The rates tie's control -- the first row with buses, its facts file's
+    // I2C rates doctored to list a rate the kernel's modes do not carry.
     let case = "rt.sdk-parity-control-rates";
     println!("== case {case}: the first row with buses, its facts file's I2C rates doctored to list 250000 among them -- the tie must refuse ==");
     let mut doctored_rates = board_facts.clone();
@@ -4567,6 +5989,54 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "negative", "rates", "");
     println!("  PASS");
 
+    // The PWM lines tie's control -- the first row's facts file doctored to list line 1 (the emulator
+    // rows' hole) among its PWM lines.
+    let case = "rt.sdk-parity-control-pwm-lines";
+    println!("== case {case}: the first row's facts file with its PWM lines doctored to list 1 -- the tie must refuse ==");
+    let mut doctored_pwm = board_facts.clone();
+    doctored_pwm[0].pwm_lines.push(1);
+    doctored_pwm[0].pwm_lines.sort_unstable();
+    match board_facts_fault(&doctored_pwm) {
+        Some(f) if f.contains("PWM lines") => println!("  refused: {f}"),
+        Some(f) => rt.fail_control(case, "pwm-lines", &format!("the tie refused for another reason: {f}")),
+        None => rt.fail_control(case, "pwm-lines", "a doctored PWM line list was accepted by the tie"),
+    }
+    rt.pass(case, "negative", "pwm-lines", "");
+    println!("  PASS");
+
+    // The analog converters tie's control -- the first row with a channel on a pin, that channel's pin
+    // moved to the next pin in the facts file; the tie must refuse it by the row's name.
+    let case = "rt.sdk-parity-control-adc-pin";
+    println!("== case {case}: the first row with an analog channel on a pin, its facts file's channel moved to the next pin -- the tie must refuse ==");
+    let mut doctored_adc = board_facts.clone();
+    let mut moved = None;
+    'rows: for r in doctored_adc.iter_mut() {
+        for c in r.adc.iter_mut() {
+            if let Some(ch) = c.3.iter_mut().find(|ch| ch.1.is_some()) {
+                ch.1 = ch.1.map(|p| p + 1);
+                moved = Some((r.board.clone(), c.0, ch.0));
+                break 'rows;
+            }
+        }
+    }
+    let Some((board, conv, chan)) = moved else {
+        rt.fail_control(case, "adc-pin", "no row with an analog channel on a pin to doctor");
+    };
+    match board_facts_fault(&doctored_adc) {
+        Some(f) if f.contains("analog converters") && f.contains(&board) => println!("  refused: {f}"),
+        Some(f) => rt.fail_control(case, "adc-pin", &format!("the tie refused for another reason: {f}")),
+        None => rt.fail_control(case, "adc-pin", &format!("a doctored channel pin ({board}: converter {conv}, channel {chan}) was accepted by the tie")),
+    }
+    rt.pass(case, "negative", "adc-pin", "");
+    println!("  PASS");
+
+    // 7. the thread stack knob: the gate's project published with
+    // RhuThreadStack set -- the compiled object the record's (the knob is
+    // link-time only), the response file free of the runtime's own knob, the
+    // budget line printed, the image defining the absolute symbol at the
+    // value, and the image booted on the emulator with the row's default
+    // moved: the hosting layer's third thread asks the row default through
+    // the shim's own thread attributes, so its spawn line reads the value.
     let case = "rt.sdk-parity-stack-knob";
     println!("== case {case}: the gate's project published with RhuThreadStack={STACK_KNOB} -- the object the record's, the response file free of the runtime's knob, the image defining __rhu_thread_stack_default={STACK_KNOB}, its boot with the third thread at that size ==");
     let Some(line) = control_line(&controls, "stack-knob") else {
@@ -4628,7 +6098,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     if !eq_lf_normalized(&payload_stream(&raw), &golden) {
         rt.fail(case, &format!("the payload stream differs from {}/{GOLDEN} under the knob", w.tier));
     }
-    let knob_markers = knob_boot_markers(STACK_KNOB);
+    let knob_markers = knob_boot_markers(STACK_KNOB, rt.abi, rt.compat);
     let knob_marker_refs: Vec<&str> = knob_markers.iter().map(String::as_str).collect();
     if let Some(fault) = markers_out_of_order(&raw, &knob_marker_refs) {
         rt.fail(case, &format!("the contract's order under the knob: {fault}"));
@@ -4649,6 +6119,45 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass_image(case, 0, &knob_rel, &knob_sha, Some(GOLDEN), &format!("{{\"knob\":{STACK_KNOB},\"markers\":{}}}", knob_markers.len()));
     println!("  PASS (the third thread's spawn line at {STACK_KNOB} B; the payload stream equals its golden; {} markers in order; {qemu_version})", knob_markers.len());
 
+    // 7b. the thread pool's idle-worker timeout knob: the gate's project
+    // published with RhuThreadPoolThreadTimeoutMs set, at 250 and at -1 --
+    // the compiled object the record's (the knob is link-time only), the
+    // image defining the absolute symbol at the value, the never as the
+    // 32-bit word; the environment row the hosting layer builds from the
+    // word is the shim gate's case.
+    for (name, knob, want) in [("pool-timeout-knob", "250", 250u64), ("pool-timeout-never", "-1", 4294967295u64)] {
+        let case = format!("rt.sdk-parity-{name}");
+        println!("== case {case}: the gate's project published with RhuThreadPoolThreadTimeoutMs={knob} -- the object the record's, the image defining __rhu_threadpool_thread_timeout_ms = {want} ==");
+        let Some(line) = control_line(&controls, name) else {
+            rt.fail(&case, "the publish-side script left no summary line for the knob publish");
+        };
+        if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" {
+            rt.fail(&case, &format!("the publish with the knob did not produce the image: {line}"));
+        }
+        let obj = std::fs::read(out.join(format!("control-{name}")).join("rthello.o")).unwrap_or_default();
+        if obj != frozen_obj {
+            rt.fail(&case, &format!("the object published with the knob is not the record's ({} bytes against {}): the knob reached the compile, which it must not", obj.len(), frozen_obj.len()));
+        }
+        let elf = out.join(format!("control-{name}")).join("rthello.elf");
+        let elf_arg = elf.to_string_lossy().into_owned();
+        let dump = rt.tool_text(&nm, &case, &[&elf_arg], &format!("sdk-parity-{name}.nm.txt"));
+        match word_sym_value(dump.as_bytes(), "__rhu_threadpool_thread_timeout_ms") {
+            Some(v) if v == want => println!("  the image defines __rhu_threadpool_thread_timeout_ms = {v}; the object the record's; the build's line: {}", line.split_once("budget=").map(|(_, b)| b.trim()).unwrap_or("")),
+            Some(v) => rt.fail(&case, &format!("the image defines __rhu_threadpool_thread_timeout_ms = {v}, not {want}")),
+            None => rt.fail(&case, "the image does not define __rhu_threadpool_thread_timeout_ms"),
+        }
+        rt.pass(&case, "positive", "", &format!("{{\"knob\":\"{knob}\",\"word\":{want}}}"));
+        println!("  PASS");
+    }
+
+    // 8. The path-map control: the same project published from a real
+    // git checkout at another path -- the root three levels above the
+    // project, the tree's ignore file covering the build directories, the
+    // shape at which the .NET SDK's git tasks embed the generated attribute
+    // sources into the symbol file as untracked files and move the
+    // assembly's module version id -- ties the record byte for byte with no
+    // source embedded; the same checkout with the source-control queries
+    // turned back on moves and embeds, so the control bites.
     let case = "rt.sdk-parity-control-git-checkout";
     println!("== case {case}: the same project published from a real git checkout at another path, its ignore rules covering the build directory -- its object must be the record's byte for byte and its symbol file must embed no source ==");
     let Some(line) = control_line(&controls, "git-checkout") else {
@@ -4691,8 +6200,13 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "negative", "source-control-queries", "");
     println!("  PASS");
 
+    // 9. The board class: the gate's second program, tbhello, published
+    // through the SDK with its reference to Lamella.Hardware -- the SDK
+    // generated the row's facts into it (a new program, tied to no record) --
+    // and its image booted on the emulator: the class's five lines in the
+    // order the facts file predicts, the kernel's return line, exit 0.
     let case = "rt.sdk-parity-board-class";
-    println!("== case {case}: the board class's program published through the SDK with the row's facts generated into it, its image booted on the emulator -- the class's four lines in order, exit 0 ==");
+    println!("== case {case}: the board class's program published through the SDK with the row's facts generated into it, its image booted on the emulator -- the class's five lines in order, exit 0 ==");
     let Some(line) = control_line(&controls, "board-class") else {
         rt.fail(case, "the publish-side script left no summary line for the board class's publish");
     };
@@ -4743,11 +6257,1241 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass_image(case, 0, &class_rel, &class_sha, None, &format!("{{\"markers\":{},\"board\":\"{}\"}}", class_markers.len(), w.sdk_board));
     println!("  PASS (the class's {} lines in the facts file's order; the image {}...; {qemu_version})", class_markers.len(), &class_sha[..16.min(class_sha.len())]);
 
+    // 9b. The reflection knob without the board class: the gate's first
+    // program, rthello, published with RhuReflection=off -- the knob reaches
+    // the compiler (the response file carries its argument once), the object
+    // moves off the record (the stripped data; a program tied to no record),
+    // and the image boots on the emulator: the program's verdict line, the
+    // kernel's return line, no forbidden pattern, exit 0. The knob stays
+    // honoured where nothing needs the data; with the board class referenced
+    // the control above shows it refused.
+    let case = "rt.sdk-parity-reflection-off-plain";
+    println!("== case {case}: the gate's program published with RhuReflection=off and no board class -- the knob honoured, the image booted on the emulator: the program's verdict, the kernel's return line, exit 0 ==");
+    let Some(line) = control_line(&controls, "reflection-off-plain") else {
+        rt.fail(case, "the publish-side script left no summary line for the publish with the reflection data stripped");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "refuse") != "NONE" {
+        rt.fail(case, &format!("the publish with the knob and no board class did not produce the image as registered (rc 0, the image present, no refusal): {line}"));
+    }
+    if control_field(line, "reflection-in-rsp") != "1" {
+        rt.fail(case, &format!("the response file does not carry the knob's argument once: {line}"));
+    }
+    let plain_obj = std::fs::read(out.join("control-reflection-off-plain").join("rthello.o")).unwrap_or_default();
+    if plain_obj.is_empty() {
+        rt.fail(case, "the publish with the knob left no object");
+    }
+    if plain_obj == frozen_obj {
+        rt.fail(case, "the object published with the reflection data stripped is the record's byte for byte: the knob did not reach the compile");
+    }
+    let plain_elf = out.join("control-reflection-off-plain").join("rthello.elf");
+    let plain_elf_arg = plain_elf.to_string_lossy().into_owned();
+    let raw_path = out.join("reflection-off-plain-boot.raw");
+    let stderr_path = out.join("reflection-off-plain-boot.stderr");
+    let mut qargs: Vec<&str> = vec!["-M", w.machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+    qargs.extend_from_slice(ExecProfile::Parity.qemu_args());
+    qargs.push("-kernel");
+    qargs.push(&plain_elf_arg);
+    let outcome = match run_captured(&qemu, &qargs, &raw_path, &stderr_path, Duration::from_secs(RUN_TIMEOUT_S)) {
+        Ok(o) => o,
+        Err(e) => rt.fail(case, &e),
+    };
+    let raw = std::fs::read(&raw_path).unwrap_or_default();
+    echo_file(&raw_path, "  | ");
+    if outcome.timed_out {
+        rt.fail(case, "the boot with the reflection data stripped hung (killed at its timeout)");
+    }
+    if cr_count(&raw) == 0 {
+        rt.fail(case, "no CR bytes in raw capture (wire discipline lost)");
+    }
+    if !contains_fixed(&raw, BOOT_ALL_GOOD) {
+        rt.fail(case, &format!("the program's verdict line '{BOOT_ALL_GOOD}' not found"));
+    }
+    if !contains_fixed(&raw, BOOT_RETURN_LINE) {
+        rt.fail(case, &format!("the kernel's return line '{BOOT_RETURN_LINE}' not found"));
+    }
+    for m in FORBIDDEN_PATTERNS {
+        if contains_fixed(&raw, m) {
+            rt.fail(case, &format!("forbidden pattern '{m}' present"));
+        }
+    }
+    if outcome.exit != 0 {
+        rt.fail(case, &format!("exit {}, wanted 0", outcome.exit));
+    }
+    let plain_sha = sha256_file(&plain_elf).unwrap_or_default();
+    let plain_rel = format!("{out_rel}/control-reflection-off-plain/rthello.elf");
+    rt.pass_image(case, 0, &plain_rel, &plain_sha, None, &format!("{{\"object_bytes\":{},\"record_bytes\":{}}}", plain_obj.len(), frozen_obj.len()));
+    println!("  PASS (the knob's argument in the response file; the object {} bytes against the record's {}; the image {}... booted to the verdict line; {qemu_version})", plain_obj.len(), frozen_obj.len(), &plain_sha[..16.min(plain_sha.len())]);
+
+    // 10. The external RAM init mode (the property's half of the lazy init modes): the
+    // board table's lazy kernels tied to the boards' facts files; then, on
+    // the external-RAM row, the publish per offered mode -- the object the
+    // record's (the mode is a link-time pick), the board line naming the
+    // mode's archive and the mode, the image's read-only data carrying the
+    // mode's banner words and neither other mode's; the named default the
+    // same image as none; a withheld mode's publish refused with the withheld
+    // table's words.
+    let case = "rt.sdk-parity-ram-init-table";
+    println!("== case {case}: the board table's init-mode kernels against the boards' facts files -- a row names the two lazy archives exactly when its facts list an external RAM range, at the defined paths ==");
+    match ram_init_table_check(repo) {
+        Ok(rows) => {
+            let lazy: Vec<&str> = rows.iter().filter(|(_, e)| *e).map(|(n, _)| n.as_str()).collect();
+            println!("  {} rows; the rows with an external RAM range and the two lazy kernels: {}", rows.len(), lazy.join(", "));
+            rt.pass(case, "positive", "", &format!("{{\"rows\":{},\"lazy_rows\":{}}}", rows.len(), lazy.len()));
+            println!("  PASS");
+        }
+        Err(e) => rt.fail(case, &e),
+    }
+    let objcopy = match llvm_tool(&facts, "llvm-objcopy") {
+        Ok(p) => p,
+        Err(e) => rt.fail("rt.sdk-parity-ram-init", &e),
+    };
+    let mut modes_offered = 0usize;
+    let mut modes_withheld = 0usize;
+    for (mode, _feature, phrase) in RAM_INIT_MODES {
+        let label = format!("ram-init-{mode}");
+        let case = format!("rt.sdk-parity-{label}");
+        let Some(line) = control_line(&controls, &label) else {
+            rt.fail(&case, "the publish-side script left no summary line for this publish");
+        };
+        if withheld.iter().any(|v| v == mode) {
+            println!("== case {case}: the {mode} value withheld by the SDK's withheld table -- the publish must refuse with the table's words, nothing linked ==");
+            let refuse = line.split_once("refuse=").map(|(_, r)| r).unwrap_or("");
+            if control_field(line, "rc") == "0" || control_field(line, "elf") != "absent" || !refuse.contains("withheld in this release") {
+                rt.fail_control(&case, "ram-init-withheld-table", &format!("the withheld value was not refused as the table says: {line}"));
+            }
+            println!("  refused (rc {}, no image): {}", control_field(line, "rc"), refuse.trim());
+            rt.pass(&case, "negative", "ram-init-withheld-table", "");
+            modes_withheld += 1;
+            println!("  PASS");
+            continue;
+        }
+        let want_kernel = if mode == "boot" { format!("kernels/{RAM_INIT_ROW}/librhu_kernel.a") } else { format!("kernels/{RAM_INIT_ROW}/ram-init-{mode}/librhu_kernel.a") };
+        println!("== case {case}: the gate's project published for {RAM_INIT_ROW} with RhuExternalRamInit={mode} -- the object the record's, the board line naming {want_kernel} and the mode, the image's rodata carrying \"{phrase}\" and neither other mode's words ==");
+        if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" {
+            rt.fail(&case, &format!("the publish did not produce the image: {line}"));
+        }
+        let obj = std::fs::read(out.join(format!("control-{label}")).join("rthello.o")).unwrap_or_default();
+        if obj != frozen_obj {
+            rt.fail(&case, &format!("the object published for the row in the {mode} init mode is not the record's ({} bytes against {}): the mode reached the compile, which it must not", obj.len(), frozen_obj.len()));
+        }
+        if control_field(line, "kernel") != want_kernel {
+            rt.fail(&case, &format!("the board line names the kernel '{}', not {want_kernel}", control_field(line, "kernel")));
+        }
+        if control_field(line, "mode") != mode {
+            rt.fail(&case, &format!("the board line's mode words read '{}', not {mode}", control_field(line, "mode")));
+        }
+        let elf = out.join(format!("control-{label}")).join("rthello.elf");
+        let rodata_path = out.join(format!("{label}.rodata.bin"));
+        let elf_arg = elf.to_string_lossy().into_owned();
+        let rodata_arg = rodata_path.to_string_lossy().into_owned();
+        let oargs = ["-O", "binary", "--only-section=.rodata", elf_arg.as_str(), rodata_arg.as_str()];
+        match run_captured(&objcopy, &oargs, &out.join(format!("{label}.objcopy.stdout")), &out.join(format!("{label}.objcopy.stderr")), Duration::from_secs(120)) {
+            Ok(o) if o.exit == 0 => {}
+            Ok(o) => rt.fail(&case, &format!("llvm-objcopy did not print the image's rodata out (exit {})", o.exit)),
+            Err(e) => rt.fail(&case, &e),
+        }
+        let rodata = std::fs::read(&rodata_path).unwrap_or_default();
+        if rodata.is_empty() {
+            rt.fail(&case, "the image's rodata printed out empty");
+        }
+        let count = |needle: &str| rodata.windows(needle.len()).filter(|w| *w == needle.as_bytes()).count();
+        for (_, _, p) in RAM_INIT_MODES {
+            let n = count(p);
+            if p == phrase && n == 0 {
+                rt.fail(&case, &format!("the image's rodata does not carry \"{phrase}\""));
+            }
+            if p != phrase && n != 0 {
+                rt.fail(&case, &format!("the image's rodata carries \"{p}\" ({n}) beside the mode's own words"));
+            }
+        }
+        let sha = sha256_file(&elf).unwrap_or_default();
+        rt.pass(&case, "positive", "", &format!("{{\"mode\":\"{mode}\",\"kernel\":\"{want_kernel}\",\"image_sha\":\"{sha}\",\"rodata_bytes\":{},\"phrase_count\":{}}}", rodata.len(), count(phrase)));
+        modes_offered += 1;
+        println!("  PASS (the object the record's; the kernel {want_kernel}; the rodata, {} bytes, carries \"{phrase}\" {} time(s) and neither other mode's words; the image {}...)", rodata.len(), count(phrase), &sha[..16.min(sha.len())]);
+    }
+    let case = "rt.sdk-parity-ram-init-default";
+    println!("== case {case}: the row published with RhuExternalRamInit=boot named and with the property empty -- the same image byte for byte under the row's default kernel ==");
+    let Some(line) = control_line(&controls, "ram-init-boot-named") else {
+        rt.fail(case, "the publish-side script left no summary line for the named default's publish");
+    };
+    let default_kernel = format!("kernels/{RAM_INIT_ROW}/librhu_kernel.a");
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "kernel") != default_kernel || control_field(line, "mode") != "boot" {
+        rt.fail(case, &format!("the named default's publish did not run as registered (rc 0, the image present, the row's default kernel, the mode boot): {line}"));
+    }
+    let named = std::fs::read(out.join("control-ram-init-boot-named").join("rthello.elf")).unwrap_or_default();
+    let plain = std::fs::read(out.join("control-ram-init-boot").join("rthello.elf")).unwrap_or_default();
+    if named.is_empty() || named != plain {
+        rt.fail(case, &format!("the named default's image ({} bytes) is not the empty property's ({} bytes)", named.len(), plain.len()));
+    }
+    rt.pass(case, "positive", "", &format!("{{\"bytes\":{}}}", named.len()));
+    println!("  PASS (the two images byte-identical, {} bytes)", named.len());
+
+    // 10b. The managed memory's home (the property's half of the external
+    // heap): the board table's second maps tied to the boards' facts files
+    // and to the tree; this leg's own emulator row published with the home
+    // internal -- the object the record's (the home is a link-time pick),
+    // the board line naming the row's second map and its default kernel,
+    // the image's rehydrated-data brackets inside the chip's own RAM range
+    // and its second window the whole external range, its boot printing
+    // the hosting layer's posture line internal with the program's stream
+    // equal to the golden -- and the row's default publish as the pair (the
+    // brackets inside the external range with the second window after
+    // them, the posture line external, the named default the same image as
+    // none); then the Pimoroni Pico Plus 2 row published with the home
+    // internal, its brackets read against its own facts (the image the
+    // bench boot's).
+    let case = "rt.sdk-parity-managed-memory-table";
+    println!("== case {case}: the board table's second maps against the boards' facts files and the tree -- a row names its second map exactly when its facts list an external RAM range, both files in the tree ==");
+    let home_rows = match managed_memory_table_check(repo) {
+        Ok(rows) => {
+            let named: Vec<&str> = rows.iter().filter(|(_, _, m)| m.is_some()).map(|(n, _, _)| n.as_str()).collect();
+            println!("  {} rows; the rows with a second map: {}", rows.len(), named.join(", "));
+            rt.pass(case, "positive", "", &format!("{{\"rows\":{},\"second_map_rows\":{}}}", rows.len(), named.len()));
+            println!("  PASS");
+            rows
+        }
+        Err(e) => rt.fail(case, &e),
+    };
+    let home_row = w.sdk_board;
+    let case = "rt.sdk-parity-managed-memory-internal";
+    let (home_map, home_second) = match home_rows.iter().find(|(n, _, _)| n == home_row) {
+        Some((_, m, Some(s))) => (m.clone(), s.clone()),
+        _ => rt.fail(case, &format!("the board table names no second map for this leg's row {home_row}")),
+    };
+    let home_facts = match read_facts_file(&repo.join(format!("src/sdk/Lamella.Rhu.Sdk/boards/{home_row}.json").replace('/', std::path::MAIN_SEPARATOR_STR))) {
+        Ok(f) => f,
+        Err(e) => rt.fail(case, &e),
+    };
+    let Some(((own_base, own_bytes), (ext_base, ext_bytes))) = facts_ram_ranges(&home_facts) else {
+        rt.fail(case, &format!("the facts file of {home_row} lists no chip RAM range beside an external one"));
+    };
+    let default_kernel = format!("kernels/{home_row}/librhu_kernel.a");
+    println!("== case {case}: the gate's project published for {home_row} with RhuManagedMemory=internal -- the object the record's, the board line naming {home_second} and {default_kernel}, the image's rehydrated-data brackets inside the chip's own RAM range and its second window the whole external range, its boot printing the hosting layer's posture line internal with the program's stream equal to the golden ==");
+    let Some(line) = control_line(&controls, "managed-memory-internal") else {
+        rt.fail(case, "the publish-side script left no summary line for the internal publish");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" {
+        rt.fail(case, &format!("the publish did not produce the image: {line}"));
+    }
+    let obj = std::fs::read(out.join("control-managed-memory-internal").join("rthello.o")).unwrap_or_default();
+    if obj != frozen_obj {
+        rt.fail(case, &format!("the object published with the home internal is not the record's ({} bytes against {}): the home reached the compile, which it must not", obj.len(), frozen_obj.len()));
+    }
+    if control_field(line, "map") != home_second {
+        rt.fail(case, &format!("the board line names the map '{}', not {home_second}", control_field(line, "map")));
+    }
+    if control_field(line, "kernel") != default_kernel {
+        rt.fail(case, &format!("the board line names the kernel '{}', not {default_kernel}", control_field(line, "kernel")));
+    }
+    if control_field(line, "home") != "internal" {
+        rt.fail(case, &format!("the board line's home words read '{}', not internal", control_field(line, "home")));
+    }
+    let nm_tool = match llvm_tool(&facts, "llvm-nm") {
+        Ok(p) => p,
+        Err(e) => rt.fail(case, &e),
+    };
+    let internal_elf = out.join("control-managed-memory-internal").join("rthello.elf");
+    let internal_elf_arg = internal_elf.to_string_lossy().into_owned();
+    let dump = rt.tool_text(&nm_tool, case, &[&internal_elf_arg], "sdk-parity-managed-memory-internal.nm.txt");
+    let (lo, hi, a1lo, a1hi) = match window_symbols(dump.as_bytes()) {
+        Ok(s) => s,
+        Err(e) => rt.fail(case, &e),
+    };
+    if !(lo <= hi && lo >= own_base && hi <= own_base + own_bytes) {
+        rt.fail(case, &format!("the rehydrated-data brackets [{lo:#x}, {hi:#x}) lie outside the chip's own RAM range [{own_base:#x}, {:#x})", own_base + own_bytes));
+    }
+    if a1lo != ext_base || a1hi != ext_base + ext_bytes {
+        rt.fail(case, &format!("the second window [{a1lo:#x}, {a1hi:#x}) is not the whole external range [{ext_base:#x}, {:#x})", ext_base + ext_bytes));
+    }
+    println!("  the brackets [{lo:#x}, {hi:#x}) inside the chip's own RAM; the second window [{a1lo:#x}, {a1hi:#x}) the whole external range; the object the record's; the board line: map {home_second}, kernel {default_kernel}, the home internal");
+    let qemu_version = boot_for_heap_window(&mut rt, case, repo, w.machine, w.tier, &out, &internal_elf, "managed-memory-internal-boot", HEAP_WINDOW_LINE_INTERNAL, HEAP_WINDOW_LINE_EXTERNAL);
+    let internal_sha = sha256_file(&internal_elf).unwrap_or_default();
+    rt.pass_image(case, 0, &format!("{out_rel}/control-managed-memory-internal/rthello.elf"), &internal_sha, Some(GOLDEN), &format!("{{\"map\":\"{home_second}\",\"hydrated_lo\":{lo},\"hydrated_hi\":{hi},\"arena1_lo\":{a1lo},\"arena1_hi\":{a1hi}}}"));
+    println!("  PASS (the posture line internal; the payload stream equals its golden; {qemu_version})");
+    let case = "rt.sdk-parity-managed-memory-default";
+    println!("== case {case}: the row published with RhuManagedMemory=external named and with the property empty -- the same image byte for byte under {home_map}, its rehydrated-data brackets inside the external range with the second window after them, its boot printing the posture line external ==");
+    let Some(named_line) = control_line(&controls, "managed-memory-external-named") else {
+        rt.fail(case, "the publish-side script left no summary line for the named default's publish");
+    };
+    let Some(plain_line) = control_line(&controls, "managed-memory-external") else {
+        rt.fail(case, "the publish-side script left no summary line for the empty property's publish");
+    };
+    for (label, l) in [("named", named_line), ("plain", plain_line)] {
+        if control_field(l, "rc") != "0" || control_field(l, "elf") != "present" || control_field(l, "map") != home_map || control_field(l, "kernel") != default_kernel || control_field(l, "home") != "external" {
+            rt.fail(case, &format!("the {label} default's publish did not run as registered (rc 0, the image present, the row's own map, its default kernel, the home external): {l}"));
+        }
+    }
+    let named = std::fs::read(out.join("control-managed-memory-external-named").join("rthello.elf")).unwrap_or_default();
+    let plain_elf = out.join("control-managed-memory-external").join("rthello.elf");
+    let plain = std::fs::read(&plain_elf).unwrap_or_default();
+    if named.is_empty() || named != plain {
+        rt.fail(case, &format!("the named default's image ({} bytes) is not the empty property's ({} bytes)", named.len(), plain.len()));
+    }
+    let plain_elf_arg = plain_elf.to_string_lossy().into_owned();
+    let dump = rt.tool_text(&nm_tool, case, &[&plain_elf_arg], "sdk-parity-managed-memory-external.nm.txt");
+    let (lo, hi, a1lo, a1hi) = match window_symbols(dump.as_bytes()) {
+        Ok(s) => s,
+        Err(e) => rt.fail(case, &e),
+    };
+    if !(lo <= hi && lo >= ext_base && hi <= ext_base + ext_bytes) {
+        rt.fail(case, &format!("the rehydrated-data brackets [{lo:#x}, {hi:#x}) lie outside the external range [{ext_base:#x}, {:#x})", ext_base + ext_bytes));
+    }
+    if a1lo < hi || a1lo - hi >= 8 || a1hi != ext_base + ext_bytes {
+        rt.fail(case, &format!("the second window [{a1lo:#x}, {a1hi:#x}) does not start at the brackets' end [{lo:#x}, {hi:#x}) 8-aligned and run to the external range's end {:#x}", ext_base + ext_bytes));
+    }
+    println!("  the two images byte-identical ({} bytes); the brackets [{lo:#x}, {hi:#x}) inside the external range; the second window [{a1lo:#x}, {a1hi:#x}) after them", named.len());
+    let qemu_version = boot_for_heap_window(&mut rt, case, repo, w.machine, w.tier, &out, &plain_elf, "managed-memory-external-boot", HEAP_WINDOW_LINE_EXTERNAL, HEAP_WINDOW_LINE_INTERNAL);
+    let plain_sha = sha256_file(&plain_elf).unwrap_or_default();
+    rt.pass_image(case, 0, &format!("{out_rel}/control-managed-memory-external/rthello.elf"), &plain_sha, Some(GOLDEN), &format!("{{\"map\":\"{home_map}\",\"bytes\":{},\"hydrated_lo\":{lo},\"hydrated_hi\":{hi},\"arena1_lo\":{a1lo},\"arena1_hi\":{a1hi}}}", named.len()));
+    println!("  PASS (the posture line external; the payload stream equals its golden; {qemu_version})");
+    let case = "rt.sdk-parity-managed-memory-internal-plus2";
+    let plus2_second = match home_rows.iter().find(|(n, _, _)| n == RAM_INIT_ROW) {
+        Some((_, _, Some(s))) => s.clone(),
+        _ => rt.fail(case, &format!("the board table names no second map for the {RAM_INIT_ROW} row")),
+    };
+    let plus2_facts = match read_facts_file(&repo.join(format!("src/sdk/Lamella.Rhu.Sdk/boards/{RAM_INIT_ROW}.json").replace('/', std::path::MAIN_SEPARATOR_STR))) {
+        Ok(f) => f,
+        Err(e) => rt.fail(case, &e),
+    };
+    let Some(((own_base, own_bytes), (ext_base, ext_bytes))) = facts_ram_ranges(&plus2_facts) else {
+        rt.fail(case, &format!("the facts file of {RAM_INIT_ROW} lists no chip RAM range beside an external one"));
+    };
+    let plus2_kernel = format!("kernels/{RAM_INIT_ROW}/librhu_kernel.a");
+    println!("== case {case}: the gate's project published for {RAM_INIT_ROW} with RhuManagedMemory=internal -- the object the record's, the board line naming {plus2_second} and {plus2_kernel}, the image's rehydrated-data brackets inside the chip's own RAM range and its second window the whole external range (the image the bench boot's) ==");
+    let Some(line) = control_line(&controls, "managed-memory-internal-plus2") else {
+        rt.fail(case, "the publish-side script left no summary line for the row's internal publish");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" {
+        rt.fail(case, &format!("the publish did not produce the image: {line}"));
+    }
+    let obj = std::fs::read(out.join("control-managed-memory-internal-plus2").join("rthello.o")).unwrap_or_default();
+    if obj != frozen_obj {
+        rt.fail(case, &format!("the object published for the row with the home internal is not the record's ({} bytes against {}): the home reached the compile, which it must not", obj.len(), frozen_obj.len()));
+    }
+    if control_field(line, "map") != plus2_second || control_field(line, "kernel") != plus2_kernel || control_field(line, "home") != "internal" {
+        rt.fail(case, &format!("the board line did not name the row's second map, its default kernel and the home internal: {line}"));
+    }
+    let plus2_elf = out.join("control-managed-memory-internal-plus2").join("rthello.elf");
+    let plus2_elf_arg = plus2_elf.to_string_lossy().into_owned();
+    let dump = rt.tool_text(&nm_tool, case, &[&plus2_elf_arg], "sdk-parity-managed-memory-internal-plus2.nm.txt");
+    let (lo, hi, a1lo, a1hi) = match window_symbols(dump.as_bytes()) {
+        Ok(s) => s,
+        Err(e) => rt.fail(case, &e),
+    };
+    if !(lo <= hi && lo >= own_base && hi <= own_base + own_bytes) {
+        rt.fail(case, &format!("the rehydrated-data brackets [{lo:#x}, {hi:#x}) lie outside the chip's own RAM range [{own_base:#x}, {:#x})", own_base + own_bytes));
+    }
+    if a1lo != ext_base || a1hi != ext_base + ext_bytes {
+        rt.fail(case, &format!("the second window [{a1lo:#x}, {a1hi:#x}) is not the whole external range [{ext_base:#x}, {:#x})", ext_base + ext_bytes));
+    }
+    let plus2_sha = sha256_file(&plus2_elf).unwrap_or_default();
+    rt.pass(case, "positive", "", &format!("{{\"map\":\"{plus2_second}\",\"image_sha\":\"{plus2_sha}\",\"hydrated_lo\":{lo},\"hydrated_hi\":{hi},\"arena1_lo\":{a1lo},\"arena1_hi\":{a1hi}}}"));
+    println!("  PASS (the brackets [{lo:#x}, {hi:#x}) inside the chip's own RAM; the second window [{a1lo:#x}, {a1hi:#x}) the whole external range; the object the record's; the image {}...)", &plus2_sha[..16.min(plus2_sha.len())]);
+
+    // 10c. The program's home (the external-flash posture): the board table's
+    // external-flash map tied to the boards' facts files and the tree, and
+    // its fit column tied to the maps; the STM32F769I-DISCO row published
+    // with RhuProgramMemory=external -- the object the record's (the home is
+    // a link-time pick), the board line naming the row's external-flash map
+    // and its default kernel, the image linked silent with no undefined
+    // name, the window read off the artifact (the managed code, the
+    // unboxing stubs and the index brackets inside the facts' external flash
+    // range; the program object's read-only data and its retyped index as
+    // window sections of the section table; the native code inside the
+    // chip's flash with its own exception-index table) -- and the row's
+    // default publish as the pair (the row's own map, the named default the
+    // same image as none, no window declared).
+    let case = "rt.sdk-parity-program-memory-table";
+    println!("== case {case}: the board table's external-flash maps against the boards' facts files and the tree -- a row names its external-flash map exactly when its facts list a mapped, executable external flash range, both files in the tree ==");
+    let xip_rows = match program_memory_table_check(repo) {
+        Ok(rows) => {
+            let named: Vec<&str> = rows.iter().filter(|(_, _, m)| m.is_some()).map(|(n, _, _)| n.as_str()).collect();
+            println!("  {} rows; the rows with an external-flash map: {}", rows.len(), named.join(", "));
+            rt.pass(case, "positive", "", &format!("{{\"rows\":{},\"external_flash_rows\":{}}}", rows.len(), named.len()));
+            println!("  PASS");
+            rows
+        }
+        Err(e) => rt.fail(case, &e),
+    };
+    let case = "rt.sdk-parity-analog-voltage-table";
+    println!("== case {case}: the board table's AnalogVoltageFits against each row's maps -- internal-flash where the row's code region is at least {VOLTAGE_LIBRARY_FLOOR} B, external-flash where a shorter region has an external-flash map, no attribute elsewhere ==");
+    match analog_voltage_table_check(repo) {
+        Ok(rows) => {
+            let words: Vec<String> = rows.iter().map(|(n, v)| format!("{n} {}", v.as_deref().unwrap_or("none"))).collect();
+            println!("  {} rows: {}", rows.len(), words.join(", "));
+            let internal = rows.iter().filter(|(_, v)| v.as_deref() == Some("internal-flash")).count();
+            let external = rows.iter().filter(|(_, v)| v.as_deref() == Some("external-flash")).count();
+            rt.pass(case, "positive", "", &format!("{{\"rows\":{},\"internal_flash_rows\":{internal},\"external_flash_rows\":{external}}}", rows.len()));
+            println!("  PASS");
+        }
+        Err(e) => rt.fail(case, &e),
+    }
+    let case = "rt.sdk-parity-program-memory-external";
+    let (xip_map, xip_second) = match xip_rows.iter().find(|(n, _, _)| n == XIP_ROW) {
+        Some((_, m, Some(s))) => (m.clone(), s.clone()),
+        _ => rt.fail(case, &format!("the board table names no external-flash map for the {XIP_ROW} row")),
+    };
+    let xip_facts = match read_facts_file(&repo.join(format!("src/sdk/Lamella.Rhu.Sdk/boards/{XIP_ROW}.json").replace('/', std::path::MAIN_SEPARATOR_STR))) {
+        Ok(f) => f,
+        Err(e) => rt.fail(case, &e),
+    };
+    let Some(((chip_base, chip_bytes), (win_base, win_bytes))) = facts_flash_ranges(&xip_facts) else {
+        rt.fail(case, &format!("the facts file of {XIP_ROW} lists no chip flash range beside a mapped, executable external one"));
+    };
+    let win_end = win_base + win_bytes;
+    let xip_kernel = format!("kernels/{XIP_ROW}/librhu_kernel.a");
+    println!("== case {case}: the gate's project published for {XIP_ROW} with RhuProgramMemory=external -- the object the record's, the board line naming {xip_second} and {xip_kernel}, the image linked silent with no undefined name, the window's brackets inside the external flash range and its sections in the section table, the native code inside the chip's flash ==");
+    let Some(line) = control_line(&controls, "program-memory-external") else {
+        rt.fail(case, "the publish-side script left no summary line for the external publish");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" {
+        rt.fail(case, &format!("the publish did not produce the image: {line}"));
+    }
+    let obj = std::fs::read(out.join("control-program-memory-external").join("rthello.o")).unwrap_or_default();
+    if obj != frozen_obj {
+        rt.fail(case, &format!("the object published with the program's home external is not the record's ({} bytes against {}): the home reached the compile, which it must not", obj.len(), frozen_obj.len()));
+    }
+    if control_field(line, "map") != xip_second || control_field(line, "kernel") != xip_kernel || control_field(line, "program") != "external" || control_field(line, "window-notice") != "1" {
+        rt.fail(case, &format!("the board line did not name the row's external-flash map, its default kernel and the home external with the window half's notice once: {line}"));
+    }
+    let xip_elf = out.join("control-program-memory-external").join("rthello.elf");
+    let xip_elf_arg = xip_elf.to_string_lossy().into_owned();
+    let undefined = rt.tool_text(&nm_tool, case, &["-u", &xip_elf_arg], "sdk-parity-program-memory-external.nm-u.txt");
+    if let Some(l) = undefined.lines().find(|l| l.split_whitespace().next() == Some("U")) {
+        rt.fail(case, &format!("the image carries a strong undefined name: {l}"));
+    }
+    let weak_undefined = undefined.lines().filter(|l| !l.trim().is_empty()).count();
+    let dump = rt.tool_text(&nm_tool, case, &[&xip_elf_arg], "sdk-parity-program-memory-external.nm.txt");
+    let xs = match xip_symbols(dump.as_bytes()) {
+        Ok(s) => s,
+        Err(e) => rt.fail(case, &e),
+    };
+    if !(xs.lo > win_base && xs.hi > xs.lo && xs.hi <= win_end) {
+        rt.fail(case, &format!("the window's brackets [{:#x}, {:#x}) lie outside the external flash range [{win_base:#x}, {win_end:#x}) or are empty", xs.lo, xs.hi));
+    }
+    if !(xs.code_lo >= xs.lo && xs.code_hi > xs.code_lo && xs.unbox_hi <= xs.hi && xs.exidx_start >= xs.lo && xs.exidx_end > xs.exidx_start && xs.exidx_end <= xs.hi) {
+        rt.fail(case, &format!("the managed code [{:#x}, {:#x}), the stubs' end {:#x} or the index [{:#x}, {:#x}) lie outside the window [{:#x}, {:#x}) or are empty", xs.code_lo, xs.code_hi, xs.unbox_hi, xs.exidx_start, xs.exidx_end, xs.lo, xs.hi));
+    }
+    if !(xs.stext >= chip_base && xs.etext <= chip_base + chip_bytes && xs.etext > xs.stext) {
+        rt.fail(case, &format!("the native code [{:#x}, {:#x}) lies outside the chip's flash range [{chip_base:#x}, {:#x})", xs.stext, xs.etext, chip_base + chip_bytes));
+    }
+    let readobj = match llvm_tool(&facts, "llvm-readobj") {
+        Ok(p) => p,
+        Err(e) => rt.fail(case, &e),
+    };
+    let sections = rt.tool_text(&readobj, case, &["--elf-output-style=GNU", "-S", "-W", &xip_elf_arg], "sdk-parity-program-memory-external.sections.txt");
+    let (Some((rodata_type, rodata_addr, rodata_size)), Some((exidx_type, exidx_addr, exidx_size)), Some((module0_type, _, _))) = (section_row(&sections, ".rhu_xip_rodata"), section_row(&sections, ".rhu_xip_exidx"), section_row(&sections, ".ARM.exidx")) else {
+        rt.fail(case, "the section table lacks .rhu_xip_rodata, .rhu_xip_exidx or .ARM.exidx");
+    };
+    if rodata_type != "PROGBITS" || rodata_size == 0 || rodata_addr < win_base || rodata_addr + rodata_size > win_end {
+        rt.fail(case, &format!(".rhu_xip_rodata is {rodata_type} of {rodata_size} B at {rodata_addr:#x}: not the program object's read-only data placed in the window"));
+    }
+    if exidx_type != "PROGBITS" || exidx_size == 0 || exidx_addr != xs.exidx_start {
+        rt.fail(case, &format!(".rhu_xip_exidx is {exidx_type} of {exidx_size} B at {exidx_addr:#x}: not the retyped index at the bracket {:#x}", xs.exidx_start));
+    }
+    if module0_type != "ARM_EXIDX" {
+        rt.fail(case, &format!(".ARM.exidx is {module0_type}: the native code's own index is not the exception-index table"));
+    }
+    println!("  the window [{:#x}, {:#x}) inside the external flash range: the managed code [{:#x}, {:#x}), the stubs to {:#x}, the read-only data {rodata_size} B at {rodata_addr:#x}, the index {exidx_size} B at {exidx_addr:#x} retyped PROGBITS; the native code [{:#x}, {:#x}) inside the chip's flash with its own ARM_EXIDX table; no strong undefined name ({weak_undefined} weak); the object the record's; the board line: map {xip_second}, kernel {xip_kernel}, the home external, the window half's notice", xs.lo, xs.hi, xs.code_lo, xs.code_hi, xs.unbox_hi, xs.stext, xs.etext);
+    let xip_sha = sha256_file(&xip_elf).unwrap_or_default();
+    rt.pass(case, "positive", "", &format!("{{\"map\":\"{xip_second}\",\"image_sha\":\"{xip_sha}\",\"xip_lo\":{},\"xip_hi\":{},\"managed_lo\":{},\"managed_hi\":{},\"exidx_start\":{},\"exidx_end\":{},\"rodata_bytes\":{rodata_size},\"exidx_bytes\":{exidx_size}}}", xs.lo, xs.hi, xs.code_lo, xs.code_hi, xs.exidx_start, xs.exidx_end));
+    println!("  PASS (the image {}...)", &xip_sha[..16.min(xip_sha.len())]);
+    let case = "rt.sdk-parity-program-memory-default";
+    println!("== case {case}: the row published with RhuProgramMemory=internal named and with the property empty -- the same image byte for byte under {xip_map}, the objects the record's, no window declared ==");
+    let Some(named_line) = control_line(&controls, "program-memory-internal-named") else {
+        rt.fail(case, "the publish-side script left no summary line for the named default's publish");
+    };
+    let Some(plain_line) = control_line(&controls, "program-memory-internal") else {
+        rt.fail(case, "the publish-side script left no summary line for the empty property's publish");
+    };
+    for (label, folder, l) in [("named", "control-program-memory-internal-named", named_line), ("plain", "control-program-memory-internal", plain_line)] {
+        if control_field(l, "rc") != "0" || control_field(l, "elf") != "present" || control_field(l, "map") != xip_map || control_field(l, "kernel") != xip_kernel || control_field(l, "program") != "internal" || control_field(l, "window-notice") != "0" {
+            rt.fail(case, &format!("the {label} default's publish did not run as registered (rc 0, the image present, the row's own map, its default kernel, the home internal, no window notice): {l}"));
+        }
+        let o = std::fs::read(out.join(folder).join("rthello.o")).unwrap_or_default();
+        if o != frozen_obj {
+            rt.fail(case, &format!("the {label} default's object is not the record's ({} bytes against {})", o.len(), frozen_obj.len()));
+        }
+    }
+    let named = std::fs::read(out.join("control-program-memory-internal-named").join("rthello.elf")).unwrap_or_default();
+    let plain_elf = out.join("control-program-memory-internal").join("rthello.elf");
+    let plain = std::fs::read(&plain_elf).unwrap_or_default();
+    if named.is_empty() || named != plain {
+        rt.fail(case, &format!("the named default's image ({} bytes) is not the empty property's ({} bytes)", named.len(), plain.len()));
+    }
+    let plain_elf_arg = plain_elf.to_string_lossy().into_owned();
+    let dump = rt.tool_text(&nm_tool, case, &[&plain_elf_arg], "sdk-parity-program-memory-internal.nm.txt");
+    let (Some(lo), Some(hi)) = (word_sym_value(dump.as_bytes(), "__rhu_xip_lo"), word_sym_value(dump.as_bytes(), "__rhu_xip_hi")) else {
+        rt.fail(case, "the default image does not define the window's brackets (the row's own map provides them as zero)");
+    };
+    if lo != 0 || hi != 0 {
+        rt.fail(case, &format!("the default image declares a window [{lo:#x}, {hi:#x}); the row's own map provides none"));
+    }
+    let plain_sha = sha256_file(&plain_elf).unwrap_or_default();
+    rt.pass(case, "positive", "", &format!("{{\"map\":\"{xip_map}\",\"image_sha\":\"{plain_sha}\",\"bytes\":{}}}", named.len()));
+    println!("  PASS (the two images byte-identical, {} bytes, no window declared; the objects the record's; the image {}...)", named.len(), &plain_sha[..16.min(plain_sha.len())]);
+
+    // 10d. The analog voltage switch, set per program by the SDK: the switch's
+    // program (tbvolts, naming the voltage members) published for the
+    // Pimoroni Pico Plus 2 row -- the switch true with the scan's witness,
+    // the compiler's feature argument and the knob once each in the response
+    // file, the library's quantity type among the image's symbols; for this
+    // leg's row -- false (the row does not hold the library), no feature
+    // argument, no such symbol, the image booted on the emulator to the
+    // program's lines; for the external-flash row under either home -- true
+    // under external with the library in the window, false under the
+    // default with the words naming the external home; the board class's
+    // program (no voltage member) for the Plus 2 row -- false by the scan's
+    // negative; the switch's program with the project's own false for the
+    // Plus 2 row -- the project's value kept.
+    let case = "rt.sdk-parity-analog-voltage-true";
+    println!("== case {case}: the switch's program published for {RAM_INIT_ROW} -- the switch true with the scan's witness, the feature argument and the knob once each in the response file, the library's quantity type among the image's symbols ==");
+    let true_line = voltage_publish_line(&mut rt, case, &controls, "analog-voltage-plus2");
+    let true_words = voltage_words(true_line);
+    if !true_words.starts_with("true (") || !VOLTAGE_MEMBERS.iter().any(|m| true_words.contains(&format!("({m} referenced by tbvolts)"))) {
+        rt.fail(case, &format!("the switch's line does not read true with the scan's witness: {true_words}"));
+    }
+    if control_field(true_line, "feature") != "1" || control_field(true_line, "knob") != "1" {
+        rt.fail(case, &format!("the response file does not carry the feature argument and the knob once each: {true_line}"));
+    }
+    let true_elf = out.join("control-analog-voltage-plus2").join("tbvolts.elf");
+    let true_names = voltage_type_names(&mut rt, case, &nm_tool, &true_elf, "sdk-parity-analog-voltage-plus2.nm.txt");
+    if true_names == 0 {
+        rt.fail(case, "the image carries no symbol of the library's quantity type: the switch did not reach the compile");
+    }
+    let true_sha = sha256_file(&true_elf).unwrap_or_default();
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{RAM_INIT_ROW}\",\"image_sha\":\"{true_sha}\",\"type_names\":{true_names}}}"));
+    println!("  PASS (analog voltage {true_words}; {true_names} symbols of the quantity type; the image {}...)", &true_sha[..16.min(true_sha.len())]);
+    let case = "rt.sdk-parity-analog-voltage-row";
+    println!("== case {case}: the switch's program published for this leg's row {} -- the switch false (the row does not hold the library), the feature argument false once, no symbol of the quantity type, the image booted on the emulator to the program's lines ==", w.sdk_board);
+    let row_line = voltage_publish_line(&mut rt, case, &controls, "analog-voltage-row");
+    let row_words = voltage_words(row_line);
+    if !row_words.starts_with("false (") || !row_words.contains("but the board does not hold the library") || !VOLTAGE_MEMBERS.iter().any(|m| row_words.contains(&format!("({m} referenced by tbvolts, but"))) {
+        rt.fail(case, &format!("the switch's line does not read false with the scan's witness and the row's reason: {row_words}"));
+    }
+    if control_field(row_line, "feature") != "0" || control_field(row_line, "feature-false") != "1" || control_field(row_line, "knob") != "0" {
+        rt.fail(case, &format!("the response file does not carry the feature argument false once and no knob for the switch: {row_line}"));
+    }
+    let row_elf = out.join("control-analog-voltage-row").join("tbvolts.elf");
+    let row_names = voltage_type_names(&mut rt, case, &nm_tool, &row_elf, "sdk-parity-analog-voltage-row.nm.txt");
+    if row_names != 0 {
+        rt.fail(case, &format!("the image carries {row_names} symbols of the library's quantity type with the switch false"));
+    }
+    let (qemu, qemu_version) = match resolve_qemu(repo) {
+        Ok(q) => q,
+        Err(e) => rt.fail(case, &e),
+    };
+    let row_elf_arg = row_elf.to_string_lossy().into_owned();
+    let raw_path = out.join("analog-voltage-row-boot.raw");
+    let stderr_path = out.join("analog-voltage-row-boot.stderr");
+    let mut qargs: Vec<&str> = vec!["-M", w.machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+    qargs.extend_from_slice(ExecProfile::Parity.qemu_args());
+    qargs.push("-kernel");
+    qargs.push(&row_elf_arg);
+    let outcome = match run_captured(&qemu, &qargs, &raw_path, &stderr_path, Duration::from_secs(RUN_TIMEOUT_S)) {
+        Ok(o) => o,
+        Err(e) => rt.fail(case, &e),
+    };
+    let raw = std::fs::read(&raw_path).unwrap_or_default();
+    echo_file(&raw_path, "  | ");
+    if outcome.timed_out {
+        rt.fail(case, "the switch's program's boot hung (killed at its timeout)");
+    }
+    if cr_count(&raw) == 0 {
+        rt.fail(case, "no CR bytes in raw capture (wire discipline lost)");
+    }
+    let switch_line = format!("TBVOLTS: {}; the switch false", w.sdk_board);
+    let volts_markers: [&str; 4] = [&switch_line, "TBVOLTS: pin 0 reads ", "TBVOLTS: NotSupportedException: ", "TBVOLTS: end"];
+    if let Some(fault) = markers_out_of_order(&raw, &volts_markers) {
+        rt.fail(case, &format!("the switch's program's lines: {fault}"));
+    }
+    if !contains_fixed(&raw, " of 12 bits") {
+        rt.fail(case, "the count line does not name the converter's 12 bits");
+    }
+    if !contains_fixed(&raw, BOOT_RETURN_LINE) {
+        rt.fail(case, &format!("the kernel's return line '{BOOT_RETURN_LINE}' not found"));
+    }
+    for m in FORBIDDEN_PATTERNS {
+        if contains_fixed(&raw, m) {
+            rt.fail(case, &format!("forbidden pattern '{m}' present"));
+        }
+    }
+    if outcome.exit != 0 {
+        rt.fail(case, &format!("exit {}, wanted 0", outcome.exit));
+    }
+    let row_sha = sha256_file(&row_elf).unwrap_or_default();
+    rt.pass_image(case, 0, &format!("{out_rel}/control-analog-voltage-row/tbvolts.elf"), &row_sha, None, &format!("{{\"board\":\"{}\",\"type_names\":0}}", w.sdk_board));
+    println!("  PASS (analog voltage {row_words}; no symbol of the quantity type; the image {}... booted to the program's four lines; {qemu_version})", &row_sha[..16.min(row_sha.len())]);
+    let case = "rt.sdk-parity-analog-voltage-unreferenced";
+    println!("== case {case}: the board class's program (no voltage member) published for {RAM_INIT_ROW} -- the switch false by the scan's negative, the feature argument false once, no symbol of the quantity type ==");
+    let un_line = voltage_publish_line(&mut rt, case, &controls, "analog-voltage-unreferenced");
+    let un_words = voltage_words(un_line);
+    if !un_words.starts_with("false (no voltage member referenced by the program)") {
+        rt.fail(case, &format!("the switch's line does not read false by the scan's negative: {un_words}"));
+    }
+    if control_field(un_line, "feature") != "0" || control_field(un_line, "feature-false") != "1" || control_field(un_line, "knob") != "0" {
+        rt.fail(case, &format!("the response file does not carry the feature argument false once and no knob for the switch: {un_line}"));
+    }
+    let un_elf = out.join("control-analog-voltage-unreferenced").join("tbhello.elf");
+    let un_names = voltage_type_names(&mut rt, case, &nm_tool, &un_elf, "sdk-parity-analog-voltage-unreferenced.nm.txt");
+    if un_names != 0 {
+        rt.fail(case, &format!("the image carries {un_names} symbols of the library's quantity type with no voltage member referenced"));
+    }
+    let un_sha = sha256_file(&un_elf).unwrap_or_default();
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{RAM_INIT_ROW}\",\"image_sha\":\"{un_sha}\",\"type_names\":0}}"));
+    println!("  PASS (analog voltage {un_words}; no symbol of the quantity type; the image {}...)", &un_sha[..16.min(un_sha.len())]);
+    let case = "rt.sdk-parity-analog-voltage-external-flash";
+    println!("== case {case}: the switch's program published for {XIP_ROW} with RhuProgramMemory=external -- the switch true with the scan's witness, the feature argument and the knob once each, the library's quantity type among the image's symbols, the managed code in the window ==");
+    let ext_line = voltage_publish_line(&mut rt, case, &controls, "analog-voltage-external-flash");
+    let ext_words = voltage_words(ext_line);
+    if !ext_words.starts_with("true (") || !VOLTAGE_MEMBERS.iter().any(|m| ext_words.contains(&format!("({m} referenced by tbvolts)"))) {
+        rt.fail(case, &format!("the switch's line does not read true with the scan's witness: {ext_words}"));
+    }
+    if control_field(ext_line, "feature") != "1" || control_field(ext_line, "knob") != "1" {
+        rt.fail(case, &format!("the response file does not carry the feature argument and the knob once each: {ext_line}"));
+    }
+    let ext_elf = out.join("control-analog-voltage-external-flash").join("tbvolts.elf");
+    let ext_names = voltage_type_names(&mut rt, case, &nm_tool, &ext_elf, "sdk-parity-analog-voltage-external-flash.nm.txt");
+    if ext_names == 0 {
+        rt.fail(case, "the image carries no symbol of the library's quantity type: the switch did not reach the compile");
+    }
+    let ext_elf_arg = ext_elf.to_string_lossy().into_owned();
+    let dump = rt.tool_text(&nm_tool, case, &[&ext_elf_arg], "sdk-parity-analog-voltage-external-flash.syms.txt");
+    let es = match xip_symbols(dump.as_bytes()) {
+        Ok(s) => s,
+        Err(e) => rt.fail(case, &e),
+    };
+    if !(es.lo > win_base && es.code_lo >= es.lo && es.code_hi > es.code_lo && es.hi <= win_end && es.hi - es.lo > xs.hi - xs.lo) {
+        rt.fail(case, &format!("the window [{:#x}, {:#x}) with the managed code [{:#x}, {:#x}) is not inside the external flash range, or not larger than the gate's program's window", es.lo, es.hi, es.code_lo, es.code_hi));
+    }
+    let ext_sha = sha256_file(&ext_elf).unwrap_or_default();
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{XIP_ROW}\",\"image_sha\":\"{ext_sha}\",\"type_names\":{ext_names},\"xip_lo\":{},\"xip_hi\":{}}}", es.lo, es.hi));
+    println!("  PASS (analog voltage {ext_words}; {ext_names} symbols of the quantity type; the window [{:#x}, {:#x}) in the external flash; the image {}...)", es.lo, es.hi, &ext_sha[..16.min(ext_sha.len())]);
+    let case = "rt.sdk-parity-analog-voltage-external-flash-default";
+    println!("== case {case}: the switch's program published for {XIP_ROW} under the default home -- the switch false with the words naming RhuProgramMemory=external, the feature argument false once, no symbol of the quantity type ==");
+    let def_line = voltage_publish_line(&mut rt, case, &controls, "analog-voltage-external-flash-default");
+    let def_words = voltage_words(def_line);
+    if !def_words.starts_with("false (") || !def_words.contains("RhuProgramMemory=external places the program in the board's external flash") {
+        rt.fail(case, &format!("the switch's line does not read false with the external home named: {def_words}"));
+    }
+    if control_field(def_line, "feature") != "0" || control_field(def_line, "feature-false") != "1" || control_field(def_line, "knob") != "0" {
+        rt.fail(case, &format!("the response file does not carry the feature argument false once and no knob for the switch: {def_line}"));
+    }
+    let def_elf = out.join("control-analog-voltage-external-flash-default").join("tbvolts.elf");
+    let def_names = voltage_type_names(&mut rt, case, &nm_tool, &def_elf, "sdk-parity-analog-voltage-external-flash-default.nm.txt");
+    if def_names != 0 {
+        rt.fail(case, &format!("the image carries {def_names} symbols of the library's quantity type under the default home"));
+    }
+    let def_sha = sha256_file(&def_elf).unwrap_or_default();
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{XIP_ROW}\",\"image_sha\":\"{def_sha}\",\"type_names\":0}}"));
+    println!("  PASS (analog voltage {def_words}; no symbol of the quantity type; the image {}...)", &def_sha[..16.min(def_sha.len())]);
+    let case = "rt.sdk-parity-analog-voltage-own";
+    println!("== case {case}: the switch's program published for {RAM_INIT_ROW} with the project's own option false -- the project's value kept, its feature argument false once and nothing of the SDK's, no symbol of the quantity type ==");
+    let own_line = voltage_publish_line(&mut rt, case, &controls, "analog-voltage-own-false");
+    let own_words = voltage_words(own_line);
+    if !own_words.starts_with("false (the project's own option)") {
+        rt.fail(case, &format!("the switch's line does not read false by the project's own option: {own_words}"));
+    }
+    if control_field(own_line, "feature") != "0" || control_field(own_line, "feature-false") != "1" || control_field(own_line, "knob") != "0" {
+        rt.fail(case, &format!("the response file does not carry the project's own feature argument false once and nothing of the SDK's: {own_line}"));
+    }
+    let own_elf = out.join("control-analog-voltage-own-false").join("tbvolts.elf");
+    let own_names = voltage_type_names(&mut rt, case, &nm_tool, &own_elf, "sdk-parity-analog-voltage-own-false.nm.txt");
+    if own_names != 0 {
+        rt.fail(case, &format!("the image carries {own_names} symbols of the library's quantity type with the project's own option false"));
+    }
+    let own_sha = sha256_file(&own_elf).unwrap_or_default();
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{RAM_INIT_ROW}\",\"image_sha\":\"{own_sha}\",\"type_names\":0}}"));
+    println!("  PASS (analog voltage {own_words}; no symbol of the quantity type; the image {}...)", &own_sha[..16.min(own_sha.len())]);
+
+    // 11. The kernel's output level and the two streams' channels (the
+    // log word's property half): the board table's channel facts tied to the boards'
+    // facts files; then the three link-time words read from the images as
+    // absolute symbols -- the leg's own image at verbose (the gate project's
+    // own posture), silent named, the SDK's default from a project copy
+    // without the line, one channel named with the other left to the
+    // kernel's PROVIDE, both named, a channel named on the external-RAM row
+    // -- each publish's object the record's (the words are link-time only)
+    // and the board line's words the effective choice.
+    let case = "rt.sdk-parity-channel-facts";
+    println!("== case {case}: the board table's channel facts against the boards' facts files -- every row's two default channels and its legal set the facts file's channels row, in order ==");
+    let channel_rows = match channel_facts_check(repo) {
+        Ok(rows) => {
+            let words: Vec<String> = rows.iter().map(|(n, l, c, k)| format!("{n} {l}/{c} ({k})")).collect();
+            println!("  {} rows tie their facts files: {}", rows.len(), words.join(", "));
+            rt.pass(case, "positive", "", &format!("{{\"rows\":{}}}", rows.len()));
+            println!("  PASS");
+            rows
+        }
+        Err(e) => rt.fail(case, &e),
+    };
+    let (board_log, board_console) = match channel_rows.iter().find(|r| r.0 == w.sdk_board) {
+        Some(r) => (r.1.clone(), r.2.clone()),
+        None => rt.fail(case, &format!("the board table has no row for this leg's board {}", w.sdk_board)),
+    };
+    let ram_log = match channel_rows.iter().find(|r| r.0 == RAM_INIT_ROW) {
+        Some(r) => r.1.clone(),
+        None => rt.fail(case, &format!("the board table has no row for {RAM_INIT_ROW}")),
+    };
+    let nm_tool = match llvm_tool(&facts, "llvm-nm") {
+        Ok(p) => p,
+        Err(e) => rt.fail("rt.sdk-parity-log-verbose", &e),
+    };
+    let word_cases: [(&str, &str, u64, u64, u64, &str, &str, &str); 6] = [
+        ("log-verbose", "", 3, 0, 0, "verbose", &board_log, &board_console),
+        ("log-silent", "control-log-silent", 1, 0, 0, "silent", &board_log, &board_console),
+        ("log-default", "control-log-default", 2, 0, 0, "quiet", &board_log, &board_console),
+        ("channel-off", "control-channel-off", 3, 1, 0, "verbose", "off", &board_console),
+        ("channel-both-memory", "control-channel-both-memory", 3, 2, 2, "verbose", "memory", "memory"),
+        ("channel-console-uart1", "control-channel-console-uart1", 3, 0, 17, "verbose", &ram_log, "uart1"),
+    ];
+    for (label, dir, level, log_code, console_code, level_word, log_word, console_word) in word_cases {
+        let case = format!("rt.sdk-parity-{label}");
+        println!("== case {case}: the image's three link-time words -- __rhu_log_level {level}, __rhu_log_channel {log_code}, __rhu_console_channel {console_code}; the board line 'log {level_word} to {log_word}; console to {console_word}'; the object the record's ==");
+        let Some(line) = control_line(&controls, label) else {
+            rt.fail(&case, "the publish-side script left no summary line for this publish");
+        };
+        if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" {
+            rt.fail(&case, &format!("the publish did not produce the image: {line}"));
+        }
+        if control_field(line, "log") != level_word || control_field(line, "logch") != log_word || control_field(line, "conch") != console_word {
+            rt.fail(&case, &format!("the board line's words are not 'log {level_word} to {log_word}; console to {console_word}': {line}"));
+        }
+        let elf = if dir.is_empty() { out.join("rthello.elf") } else { out.join(dir).join("rthello.elf") };
+        if !dir.is_empty() {
+            let bytes = std::fs::read(out.join(dir).join("rthello.o")).unwrap_or_default();
+            if bytes != frozen_obj {
+                rt.fail(&case, &format!("the object published is not the record's ({} bytes against {}): the property reached the compile, which it must not", bytes.len(), frozen_obj.len()));
+            }
+        }
+        let elf_arg = elf.to_string_lossy().into_owned();
+        let dump = rt.tool_text(&nm_tool, &case, &[&elf_arg], &format!("sdk-parity-{label}.nm.txt"));
+        for (sym, want) in [("__rhu_log_level", level), ("__rhu_log_channel", log_code), ("__rhu_console_channel", console_code)] {
+            match word_sym_value(dump.as_bytes(), sym) {
+                Some(v) if v == want => {}
+                Some(v) => rt.fail(&case, &format!("the image defines {sym} = {v}, not {want}")),
+                None => rt.fail(&case, &format!("the image does not define {sym}")),
+            }
+        }
+        let sha = sha256_file(&elf).unwrap_or_default();
+        rt.pass(&case, "positive", "", &format!("{{\"level\":{level},\"log_channel\":{log_code},\"console_channel\":{console_code},\"image_sha\":\"{sha}\"}}"));
+        println!("  PASS (__rhu_log_level {level}, __rhu_log_channel {log_code}, __rhu_console_channel {console_code}; the words as registered; the object the record's; the image {}...)", &sha[..16.min(sha.len())]);
+    }
+
+    // 12. The run verb: the SDK's two run targets and the manifest,
+    // driven through the real dotnet run in the Linux environment with a
+    // stand-in tool and a stand-in emulator the script writes: the manifest
+    // beside the image
+    // byte for byte against the expectation composed here from the image's
+    // own facts; the device list as .NET renders it; the run's command line
+    // and its exit code returned unchanged; then the controls.
+    let case = "rt.sdk-parity-manifest";
+    println!("== case {case}: the manifest the publish wrote beside the image, byte for byte against the expectation composed from the image's own facts (its sha256 and size, the header's words, the board row's channels, the runtime pin) ==");
+    let manifest_path = out.join("rthello.elf.manifest.json");
+    let manifest = std::fs::read(&manifest_path).unwrap_or_default();
+    if manifest.is_empty() {
+        rt.fail(case, "the publish left no rthello.elf.manifest.json beside the image under sdk-parity/");
+    }
+    let elf_bytes = std::fs::read(&fresh_elf).unwrap_or_default();
+    let fresh_elf_arg = fresh_elf.to_string_lossy().into_owned();
+    let dump = rt.tool_text(&nm_tool, case, &[&fresh_elf_arg], "sdk-parity-manifest.nm.txt");
+    let records = match check_records(dump.as_bytes(), &elf_bytes, rt.abi) {
+        Ok(r) => r,
+        Err(e) => rt.fail(case, &format!("the image's records: {e}")),
+    };
+    let runtime_pin = match sdk_runtime_pin(repo) {
+        Ok(v) => v,
+        Err(e) => rt.fail(case, &e),
+    };
+    let expected = manifest_text(w.sdk_board, &sha256_hex(&elf_bytes), elf_bytes.len(), records.abi, records.layout_version, &runtime_pin, &board_console, &board_log);
+    let expected_path = out.join("manifest.expected.json");
+    if std::fs::write(&expected_path, expected.as_bytes()).is_err() {
+        rt.fail(case, &format!("cannot write {}", expected_path.display()));
+    }
+    if manifest != expected.as_bytes() {
+        let got = String::from_utf8_lossy(&manifest).into_owned();
+        let diff = got
+            .lines()
+            .zip(expected.lines())
+            .enumerate()
+            .find(|(_, (a, b))| a != b)
+            .map(|(i, (a, b))| format!("line {}: '{a}' against '{b}'", i + 1))
+            .unwrap_or_else(|| format!("{} bytes against {}", manifest.len(), expected.len()));
+        rt.fail(case, &format!("the manifest is not the expectation byte for byte ({diff}); the expectation at {}", expected_path.display()));
+    }
+    println!("  the record ties the expectation byte for byte ({} bytes): the image's sha256 {}..., {} bytes; abi {}; debug layout {}; console {board_console}, log {board_log}; runtime {runtime_pin}, tested", manifest.len(), &sha256_hex(&elf_bytes)[..16], elf_bytes.len(), records.abi, records.layout_version);
+    rt.pass(case, "positive", "", &format!("{{\"bytes\":{},\"abi\":{},\"debug_layout_version\":{}}}", manifest.len(), records.abi, records.layout_version));
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-manifest-schema";
+    println!("== case {case}: the record with its schema moved to 2 -- the comparison must refuse it, and the stand-in tool's run must refuse it before anything is opened ==");
+    let doctored = expected.replacen("\"schema\": 1,", "\"schema\": 2,", 1);
+    if doctored == expected || doctored.as_bytes() == manifest.as_slice() {
+        rt.fail_control(case, "manifest-schema", "the doctored record is the expectation: the control would not bite");
+    }
+    let Some(line) = control_line(&controls, "manifest-schema") else {
+        rt.fail_control(case, "manifest-schema", "the publish-side script left no summary line for the schema control");
+    };
+    let refuse = line.split_once("refuse=").map(|(_, r)| r.trim()).unwrap_or("");
+    if control_field(line, "rc") != "1" || !refuse.contains("schema") {
+        rt.fail_control(case, "manifest-schema", &format!("the stand-in's run did not refuse the schema-2 record as registered: {line}"));
+    }
+    println!("  the comparison refuses the moved schema; the stand-in's run refused it (rc 1): {refuse}");
+    rt.pass(case, "negative", "manifest-schema", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-manifest-magic";
+    println!("== case {case}: the manifest task run on a copy of the image with its header magic flipped -- it must refuse naming the magic, no record written ==");
+    let Some(line) = control_line(&controls, "manifest-magic") else {
+        rt.fail_control(case, "header-magic", "the publish-side script left no summary line for the magic control");
+    };
+    let refuse = line.split_once("refuse=").map(|(_, r)| r.trim()).unwrap_or("");
+    if control_field(line, "rc") == "0" || control_field(line, "manifest") != "absent" || !refuse.contains("header magic") {
+        rt.fail_control(case, "header-magic", &format!("the doctored image was not refused as registered: {line}"));
+    }
+    println!("  refused (rc {}, no record): {refuse}", control_field(line, "rc"));
+    rt.pass(case, "negative", "header-magic", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-manifest-model-absent";
+    println!("== case {case}: the record with its model line removed -- the stand-in tool's run must refuse it by name before anything is opened (a schema 1 record states the execution model its image runs under) ==");
+    let Some(line) = control_line(&controls, "manifest-model-absent") else {
+        rt.fail_control(case, "manifest-model", "the publish-side script left no summary line for the model control");
+    };
+    let refuse = line.split_once("refuse=").map(|(_, r)| r.trim()).unwrap_or("");
+    if control_field(line, "rc") != "1" || control_field(line, "model-lines") != "0" || !refuse.contains("no model string") {
+        rt.fail_control(case, "manifest-model", &format!("the stand-in's run did not refuse the record without a model as registered: {line}"));
+    }
+    println!("  refused (rc 1, nothing opened): {refuse}");
+    rt.pass(case, "negative", "manifest-model", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-manifest-unknown-field";
+    println!("== case {case}: the record with a field the reader does not know added after the model -- the stand-in's run accepts it and reads the model native (the shell's reader ignores a field it does not know) ==");
+    let Some(line) = control_line(&controls, "manifest-unknown-field") else {
+        rt.fail(case, "the publish-side script left no summary line for the unknown-field run");
+    };
+    if control_field(line, "rc") != "7" || control_field(line, "model") != "native" || control_field(line, "accepted") != "1" || control_field(line, "keys") != "21" {
+        rt.fail(case, &format!("the stand-in's run did not accept the record with an unknown field as registered (rc 7, the model native, 21 keys): {line}"));
+    }
+    println!("  accepted (rc 7, the stand-in's code): the model native read, the unknown field ignored");
+    rt.pass(case, "positive", "", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-debug-line";
+    println!("== case {case}: the line tables of the published image -- every .debug_line unit read whole a second way with no backslash in a directory or file-name string (llvm-dwarfdump's reading beside it where the toolchain carries it), and the separator task run again over a copy: nothing to rewrite, the bytes identical ==");
+    let Some(line) = control_line(&controls, "debug-line") else {
+        rt.fail(case, "the publish-side script left no summary line for the line tables");
+    };
+    let units = control_field(line, "units");
+    let dwarfdump = control_field(line, "dwarfdump");
+    let dwarfdump_ok = dwarfdump == "absent" || dwarfdump == format!("rc0,units{units},errors0");
+    if control_field(line, "rc") != "0" || units.is_empty() || units == "0" || control_field(line, "backslashes") != "0" || !dwarfdump_ok || control_field(line, "again-rc") != "0" || control_field(line, "again-units") != units || control_field(line, "again-rewritten") != "0" || control_field(line, "before").is_empty() || control_field(line, "before") != control_field(line, "after") {
+        rt.fail(case, &format!("the line tables are not as registered (every unit read, no backslash, the task's second run rewriting nothing with the bytes identical): {line}"));
+    }
+    println!("  {units} units read whole, {} strings, no backslash; llvm-dwarfdump {dwarfdump}; the task again: {units} units, 0 rewritten, the image byte-identical ({}...)", control_field(line, "strings"), control_field(line, "after"));
+    rt.pass(case, "positive", "", &format!("{{\"units\":{units}}}"));
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-debug-line-doctored";
+    println!("== case {case}: the separator task over a copy of the image with its first line-table unit's version set to 9 -- refused by RHU5002 by name, the copy untouched ==");
+    let Some(line) = control_line(&controls, "debug-line-doctored") else {
+        rt.fail_control(case, "line-table-version", "the publish-side script left no summary line for the doctored line table");
+    };
+    let refuse = line.split_once("refuse=").map(|(_, r)| r.trim()).unwrap_or("");
+    if control_field(line, "rc") == "0" || control_field(line, "code") != "RHU5002" || control_field(line, "untouched") != "yes" || !refuse.contains("version 9") {
+        rt.fail_control(case, "line-table-version", &format!("the doctored line table was not refused as registered: {line}"));
+    }
+    println!("  refused (rc {}, RHU5002, the copy untouched): {refuse}", control_field(line, "rc"));
+    rt.pass(case, "negative", "line-table-version", "");
+    println!("  PASS");
+
+    let machine_word = w.machine[5..].to_ascii_uppercase();
+    let case = "rt.sdk-parity-devices";
+    println!("== case {case}: dotnet run --list-devices through the SDK with the stand-in tool's two probes and the stand-in emulator -- the list as .NET renders it, line for line ==");
+    let Some(line) = control_line(&controls, "run-devices") else {
+        rt.fail(case, "the publish-side script left no summary line for the device list");
+    };
+    if control_field(line, "rc") != "0" {
+        rt.fail(case, &format!("the device list did not exit 0: {line}"));
+    }
+    let listing = std::fs::read_to_string(out.join("run-run-devices.stdout")).unwrap_or_default();
+    let block = devices_block(&listing);
+    let want = format!(
+        "Available devices:\n\n  1. probe:{RUN_PROBE_A} - Debug Probe (CMSIS-DAP) (Device, Connected)\n  2. probe:{RUN_PROBE_B} - {RUN_PROBE_B_WORDS} (Device, Connected)\n  3. emulator:{} - Arm MPS2+ {machine_word} reference board under QEMU, for testing the runtime -- not your board (Emulator, Installed)\n\nExample: dotnet run --device probe:{RUN_PROBE_A}\n",
+        w.machine
+    );
+    if block != want {
+        rt.fail(case, &format!("the list is not the expectation:\n--- read\n{block}--- wanted\n{want}"));
+    }
+    println!("  the three rows as .NET renders them (the two probes with the escaped description intact, the emulator row with its description); the example names the first id");
+    rt.pass(case, "positive", "", "{\"rows\":3}");
+    println!("  PASS");
+    for (label, broke, what, rows, none, emulator, warn, phrase) in [
+        // (the controls tool-absent and tool-version are retired: they asserted RHU's resolution of the
+        // lamella tool, which the contract moves to the shell, whose own tool is hash-pinned; RHU names no tool)
+        ("run-devices-no-emulator", "no-emulator", "the emulator's folder named empty -- the two probes and no emulator row", "2", "0", "0", false, ""),
+    ] {
+        let case = format!("rt.sdk-parity-control-{label}");
+        println!("== case {case}: {what} ==");
+        let Some(line) = control_line(&controls, label) else {
+            rt.fail_control(&case, broke, "the publish-side script left no summary line for this control");
+        };
+        if control_field(line, "rc") != "0" || control_field(line, "rows") != rows || control_field(line, "emulator") != emulator || (none == "1") != (control_field(line, "none") != "0") || warn != (control_field(line, "warn") != "0") {
+            rt.fail_control(&case, broke, &format!("the list did not come back as registered (rows {rows}, the no-devices sentence {none}, emulator rows {emulator}, a warning {warn}): {line}"));
+        }
+        if !phrase.is_empty() {
+            let text = std::fs::read_to_string(out.join(format!("run-{label}.stdout"))).unwrap_or_default() + &std::fs::read_to_string(out.join(format!("run-{label}.stderr"))).unwrap_or_default();
+            if !text.contains(phrase) {
+                rt.fail_control(&case, broke, &format!("the warning does not carry '{phrase}'"));
+            }
+        }
+        println!("  as registered: {line}");
+        rt.pass(&case, "negative", broke, "");
+        println!("  PASS");
+    }
+
+    let case = "rt.sdk-parity-first-list";
+    println!("== case {case}: dotnet run --list-devices on a copy of the gate's project from an empty package folder of the case's own, the two packages from a feed of the case's own seeded by copy, the pinned cache's other entries through a fallback folder of the case's own, the tool the tools package's own -- the one command installs the two packages and lists whole: the emulator row, no warning that the tools package is not restored (a package the fallback folder lacks is fetched: the count is a figure in the summary line, never a condition) ==");
+    let Some(line) = control_line(&controls, "first-list") else {
+        rt.fail(case, "the publish-side script left no summary line for the first list");
+    };
+    if control_field(line, "feed") != "ok" {
+        rt.fail(case, &format!("the case's feed was not seeded by copy (the publish-side script's own refusal names the package): {line}"));
+    }
+    if control_field(line, "rc") != "0" || control_field(line, "installed") != "4" || control_field(line, "emulator") != "1" || control_field(line, "warn") != "0" || control_field(line, "none") != "0" {
+        rt.fail(case, &format!("the first list did not come back whole (RHU's four packages installed by the command beside the shell, the emulator row, no warning, no no-devices sentence): {line}"));
+    }
+    println!("  as registered: {line}");
+    rt.pass(case, "positive", "", &format!("{{\"rows\":{}}}", control_field(line, "rows")));
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-first-list-no-tools";
+    println!("== case {case}: the same from a feed of the case's own that holds the SDK package alone, over the same fallback folder (no Lamella package in it) -- the restore refuses by NuGet's own sentence naming the tools package, one restore and no second, nothing listed; a refusal naming the SDK package instead is a broken feed, not a pass ==");
+    let Some(line) = control_line(&controls, "first-list-no-tools") else {
+        rt.fail_control(case, "tools-package-absent", "the publish-side script left no summary line for the no-tools control");
+    };
+    let text = std::fs::read_to_string(out.join("run-first-list-no-tools.stdout")).unwrap_or_default() + &std::fs::read_to_string(out.join("run-first-list-no-tools.stderr")).unwrap_or_default();
+    if control_field(line, "feed") != "ok" {
+        rt.fail_control(case, "tools-package-absent", &format!("the control's feed was not seeded by copy (the publish-side script's own refusal names the package): {line}"));
+    }
+    if text.contains("MSB4236") || text.contains("Unable to find package Lamella.Sdk") || text.contains("Unable to find package Lamella.Rhu.Build") {
+        rt.fail_control(case, "tools-package-absent", &format!("the control refused for the wrong reason: the shell or the build package itself was not found (MSB4236, or NuGet's sentence naming Lamella.Sdk or Lamella.Rhu.Build) -- a broken feed, not the registered refusal of the tools package: {line}"));
+    }
+    if control_field(line, "rows") != "0" || control_field(line, "emulator") != "0" || control_field(line, "refused") == "0" || control_field(line, "restores") != "1" || !text.contains("NU1101") || !text.contains("Unable to find package Lamella.Rhu.Tools.") {
+        rt.fail_control(case, "tools-package-absent", &format!("the absent tools package was not refused as registered (NuGet's sentence naming it, one restore, nothing listed): {line}"));
+    }
+    println!("  refused by the restore (rc {}): {}", control_field(line, "rc"), text.lines().find(|l| l.contains("NU1101")).unwrap_or("").trim());
+    rt.pass(case, "negative", "tools-package-absent", "");
+    println!("  PASS");
+
+    let publish_dir = format!("{root}/src/rt/gate/rthello/bin/Release/net11.0/linux-arm/publish");
+    let case = "rt.sdk-parity-run-arguments";
+    println!("== case {case}: dotnet run --device {RUN_PROBE_A} through the SDK -- the image published with its manifest, the stand-in tool started with exactly run --manifest <the manifest> --probe <the id> --, and its code 7 returned unchanged ==");
+    let want_argv = format!("argv: [run] [--manifest] [{publish_dir}/rthello.elf.manifest.json] [--probe] [{RUN_PROBE_A}] [--]");
+    let Some(line) = control_line(&controls, "run-arguments") else {
+        rt.fail(case, "the publish-side script left no summary line for the run");
+    };
+    let text = std::fs::read_to_string(out.join("run-run-arguments.stdout")).unwrap_or_default();
+    let argv = text.lines().find(|l| l.starts_with("argv:")).map(|l| l.trim_end().to_string()).unwrap_or_default();
+    if control_field(line, "rc") != "7" || control_field(line, "manifest") != "present" {
+        rt.fail(case, &format!("the run did not end with the stand-in's code 7 with the manifest published: {line}"));
+    }
+    if argv != want_argv {
+        rt.fail(case, &format!("the stand-in was started with '{argv}', wanted '{want_argv}'"));
+    }
+    println!("  the manifest published beside the image; the command line exactly as registered; dotnet run returned 7, the stand-in's code, unchanged");
+    rt.pass(case, "positive", "", "{\"exit\":7}");
+    println!("  PASS");
+    let case = "rt.sdk-parity-run-emulator";
+    println!("== case {case}: dotnet run --device {} through the SDK -- the stand-in emulator started on the published image with the gate's own line ==", w.machine);
+    let want_argv = format!("argv: [-M] [{}] [-display] [none] [-monitor] [none] [-serial] [stdio] [-semihosting] [-kernel] [{publish_dir}/rthello.elf]", w.machine);
+    let Some(line) = control_line(&controls, "run-emulator") else {
+        rt.fail(case, "the publish-side script left no summary line for the emulator run");
+    };
+    let text = std::fs::read_to_string(out.join("run-run-emulator.stdout")).unwrap_or_default();
+    let argv = text.lines().find(|l| l.starts_with("argv:")).map(|l| l.trim_end().to_string()).unwrap_or_default();
+    if control_field(line, "rc") != "0" || argv != want_argv {
+        rt.fail(case, &format!("the emulator was not started as registered (rc {}): '{argv}', wanted '{want_argv}'", control_field(line, "rc")));
+    }
+    println!("  the emulator's line exactly as registered; the run returned the emulator's 0");
+    rt.pass(case, "positive", "", "{\"exit\":0}");
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-run-program-arguments";
+    println!("== case {case}: dotnet run --device {RUN_PROBE_A} -- one \"two words\" -- the words reach the tool after the bare double dash and it refuses them in one sentence, exit 1 ==");
+    let Some(line) = control_line(&controls, "run-program-arguments") else {
+        rt.fail_control(case, "program-arguments", "the publish-side script left no summary line for the run with program arguments");
+    };
+    let err = std::fs::read_to_string(out.join("run-run-program-arguments.stderr")).unwrap_or_default();
+    if control_field(line, "rc") != "1" || !err.contains("cannot take arguments yet") || !err.contains("(given: one two words)") {
+        rt.fail_control(case, "program-arguments", &format!("the program's arguments were not refused as registered: {line}"));
+    }
+    println!("  refused (rc 1): {}", err.lines().find(|l| l.contains("cannot take arguments yet")).unwrap_or("").trim());
+    rt.pass(case, "negative", "program-arguments", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-run-emulator";
+    println!("== case {case}: RHU's targets in the build package in the cache doctored (the emulator line's semihosting word moved; the probe line is the shell's) -- the command line must not be the expectation's: the comparison refuses ==");
+    let Some(line) = control_line(&controls, "run-emulator-moved") else {
+        rt.fail_control(case, "run-emulator", "the publish-side script left no summary line for the moved run");
+    };
+    let text = std::fs::read_to_string(out.join("run-run-emulator-moved.stdout")).unwrap_or_default();
+    let argv = text.lines().find(|l| l.starts_with("argv:")).map(|l| l.trim_end().to_string()).unwrap_or_default();
+    if argv.is_empty() || !argv.contains("[-semihostin]") {
+        rt.fail_control(case, "run-emulator", &format!("the doctored targets did not reach the stand-in with the moved word: {line}; '{argv}'"));
+    }
+    let want_argv = format!("argv: [-M] [{}] [-display] [none] [-monitor] [none] [-serial] [stdio] [-semihosting] [-kernel] [{publish_dir}/rthello.elf]", w.machine);
+    if argv == want_argv {
+        rt.fail_control(case, "run-emulator", "the moved command line read as the expectation: the control does not distinguish");
+    }
+    println!("  the moved line '{argv}' is not the expectation (rc {}): the comparison bites", control_field(line, "rc"));
+    rt.pass(case, "negative", "run-emulator", "");
+    println!("  PASS");
+
+    // 13. Three fixes of the run verb, each a case here: the run verb's no-build
+    // option (the publish at the end of the run verb's build, nothing from
+    // ComputeRunArguments), no C compiler on the host, a class library through the
+    // SDK; each read from the publish-side script's summary lines.
+    let case = "rt.sdk-parity-run-no-build";
+    println!("== case {case}: dotnet run --no-build --device {RUN_PROBE_A} after the runs above -- nothing published again (the image's bytes and its time unchanged), the last image run by the stand-in and its code 7 returned; then the same with the output level moved: the move ignored, nothing published, the same image run ==");
+    for name in ["run-no-build", "run-no-build-word"] {
+        let Some(line) = control_line(&controls, name) else {
+            rt.fail(case, &format!("the publish-side script left no summary line for {name}"));
+        };
+        let before = control_field(line, "before");
+        if control_field(line, "rc") != "7" || control_field(line, "argv") != "1" || before.is_empty() || before == "absent" || before != control_field(line, "after") || control_field(line, "time0") != control_field(line, "time1") {
+            rt.fail(case, &format!("the no-build run did not run the last image unchanged as registered ({name}): {line}"));
+        }
+    }
+    println!("  the last image run unchanged twice ({}, its time kept); the moved word ignored under the no-build option", control_field(control_line(&controls, "run-no-build").unwrap_or(""), "after"));
+    rt.pass(case, "positive", "", "{\"exit\":7}");
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-run-no-build";
+    println!("== case {case}: the no-build run's two controls -- the same moved word with the build (dotnet run --device {RUN_PROBE_A}) publishes again, the image's bytes and time moving; and with the published image set aside the no-build run is refused naming the image, nothing run ==");
+    let Some(built) = control_line(&controls, "run-word-built") else {
+        rt.fail_control(case, "run-no-build", "the publish-side script left no summary line for the moved word's run with the build");
+    };
+    if control_field(built, "rc") != "7" || control_field(built, "argv") != "1" || control_field(built, "before") == "absent" || control_field(built, "before") == control_field(built, "after") || control_field(built, "time0") == control_field(built, "time1") {
+        rt.fail_control(case, "run-no-build", &format!("the moved word with the build did not publish again: the control does not tell a publish that never runs from one the no-build option skips: {built}"));
+    }
+    let Some(absent) = control_line(&controls, "run-no-build-absent") else {
+        rt.fail_control(case, "run-no-build", "the publish-side script left no summary line for the no-build run without an image");
+    };
+    let text = std::fs::read_to_string(out.join("run-run-no-build-absent.stdout")).unwrap_or_default() + &std::fs::read_to_string(out.join("run-run-no-build-absent.stderr")).unwrap_or_default();
+    if control_field(absent, "rc") == "7" || control_field(absent, "rc") == "0" || control_field(absent, "argv") != "0" || control_field(absent, "refuse") == "0" || !text.contains(&format!("{publish_dir}/rthello.elf")) {
+        rt.fail_control(case, "run-no-build", &format!("the no-build run without an image was not refused naming the image: {absent}"));
+    }
+    println!("  the moved word with the build published again ({} -> {}); without an image the no-build run was refused (rc {}) naming {publish_dir}/rthello.elf", control_field(built, "before"), control_field(built, "after"), control_field(absent, "rc"));
+    rt.pass(case, "negative", "run-no-build", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-no-compiler";
+    println!("== case {case}: the publish with the compiler pack's alternative compiler name pointed at a program that does not exist -- the pack's probe is satisfied by the shell the SDK names, the publish passes and the object is the record's ==");
+    let Some(nc) = control_line(&controls, "no-compiler") else {
+        rt.fail(case, "the publish-side script left no summary line for the no-compiler publish");
+    };
+    // The record's object: the one the leg's first publish banked (an earlier case compared the
+    // hash with the device listing's text by a reused binding; this case reads the object itself).
+    let record_object = sha256_file(&out.join("rthello.o")).unwrap_or_default();
+    if control_field(nc, "rc") != "0" || control_field(nc, "elf") != "present" || control_field(nc, "probe") != "0" || control_field(nc, "object-sha256").is_empty() || !record_object.starts_with(control_field(nc, "object-sha256")) {
+        rt.fail(case, &format!("the publish with no C compiler to be found did not pass with the record's object: {nc}"));
+    }
+    println!("  the publish passed with the pack's probe satisfied by the shell; the object the record's ({}...)", control_field(nc, "object-sha256"));
+    rt.pass(case, "positive", "", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-no-compiler";
+    println!("== case {case}: both compiler names the pack looks for pointed at programs that do not exist (the SDK's shell overridden) -- the pack's probe must refuse by its own sentence, no image ==");
+    let Some(cp) = control_line(&controls, "compiler-probe") else {
+        rt.fail_control(case, "compiler-probe", "the publish-side script left no summary line for the compiler-probe publish");
+    };
+    if control_field(cp, "rc") == "0" || control_field(cp, "elf") != "absent" || control_field(cp, "probe") == "0" {
+        rt.fail_control(case, "compiler-probe", &format!("the pack's probe did not refuse the missing compilers: the control does not distinguish: {cp}"));
+    }
+    println!("  refused by the pack's sentence (rc {}), no image: the probe is the pack's and the SDK's name disarms it", control_field(cp, "rc"));
+    rt.pass(case, "negative", "compiler-probe", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-library";
+    println!("== case {case}: a class library (no OutputType: .NET's default) built through the SDK with the board named -- the build passes, the assembly written, no image ==");
+    let Some(lb) = control_line(&controls, "library-build") else {
+        rt.fail(case, "the publish-side script left no summary line for the library build");
+    };
+    if control_field(lb, "rc") != "0" || control_field(lb, "dll") != "present" || control_field(lb, "images") != "0" || control_field(lb, "outputtype") != "Library" {
+        rt.fail(case, &format!("the class library did not build through the SDK as registered: {lb}"));
+    }
+    println!("  the library built (OutputType {}), no image", control_field(lb, "outputtype"));
+    rt.pass(case, "positive", "", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-library";
+    println!("== case {case}: the same library published -- refused by name before anything is compiled ==");
+    let Some(lp) = control_line(&controls, "library-publish") else {
+        rt.fail_control(case, "library-publish", "the publish-side script left no summary line for the library publish");
+    };
+    if control_field(lp, "rc") == "0" || control_field(lp, "code") != "RHU1004" || !lp.contains("REFUSE: OutputType is 'Library', not Exe") {
+        rt.fail_control(case, "library-publish", &format!("the library's publish was not refused as registered (RHU1004 naming the output type): {lp}"));
+    }
+    println!("  refused (rc {}, RHU1004): OutputType is 'Library', not Exe", control_field(lp, "rc"));
+    rt.pass(case, "negative", "library-publish", "");
+    println!("  PASS");
+
+    // 14. The pack split's cases at the new hashes: the version
+    // stamp, amendment 3's RuntimeIdentifier, and the boardless listing with its control; each read from the
+    // publish-side script's summary lines and banked files.
+    let case = "rt.sdk-parity-stamped-version";
+    println!("== case {case}: the build package's properties as restored carry the pack's own version unconditioned (the pack's stamp; the tree's line defaults it for the desk alone), read through the shell as RhuSdkVersion ==");
+    let Some(line) = control_line(&controls, "stamped-version") else {
+        rt.fail(case, "the publish-side script left no summary line for the stamped version");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "version") != release || control_field(line, "stamped") != "1" || control_field(line, "conditioned") != "0" {
+        rt.fail(case, &format!("the stamped version did not read as registered (the release {release} unconditioned, no default line in the properties restored): {line}"));
+    }
+    println!("  RhuSdkVersion reads {release} through the shell; the properties file in the package folder carries the one unconditioned line and no default");
+    rt.pass(case, "positive", "", &format!("{{\"version\":\"{release}\"}}"));
+    println!("  PASS");
+    let case = "rt.sdk-parity-rid-global";
+    println!("== case {case}: the publish with RuntimeIdentifier given as a global property equal to the posture's value (amendment 3: the shell's run restores again with the chosen device and the build's own identifier) -- the publish passes and the object is the record's ==");
+    let Some(line) = control_line(&controls, "rid-equal") else {
+        rt.fail(case, "the publish-side script left no summary line for the publish with the global runtime identifier");
+    };
+    let record_object = sha256_file(&out.join("rthello.o")).unwrap_or_default();
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "object-sha256").is_empty() || !record_object.starts_with(control_field(line, "object-sha256")) {
+        rt.fail(case, &format!("the publish with the posture's own runtime identifier as a global property did not pass with the record's object: {line}"));
+    }
+    println!("  the publish passed with RuntimeIdentifier=linux-arm given globally; the object the record's ({}...)", control_field(line, "object-sha256"));
+    rt.pass(case, "positive", "", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-boardless-build";
+    println!("== case {case}: dotnet build with no board named through the shell, from an empty package folder of the case's own -- the managed assembly alone: rc 0, no image, no board and no runtime package restored ==");
+    let Some(line) = control_line(&controls, "boardless-build") else {
+        rt.fail(case, "the publish-side script left no summary line for the boardless build");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "assembly") != "present" || control_field(line, "images") != "0" || control_field(line, "board-packages") != "0" || control_field(line, "runtime-packages") != "0" {
+        rt.fail(case, &format!("the boardless build did not pass as registered (rc 0, the assembly, no image, no board or runtime package in the case's package folder): {line}"));
+    }
+    println!("  the boardless build passed: the assembly present, no image, {} lamella entries restored and none of a board or a runtime", control_field(line, "restored"));
+    rt.pass(case, "positive", "", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-routes-boardless";
+    println!("== case {case}: RhuRunRoutes with no board named (dotnet msbuild -getTargetResult through the shell) -- every row of the table listed once, each route carrying Board, the emulator rows with their machine and the stand-in's answer (the contract's amendment 1) ==");
+    let Some(line) = control_line(&controls, "routes-boardless") else {
+        rt.fail(case, "the publish-side script left no summary line for the boardless listing");
+    };
+    let listing = std::fs::read_to_string(out.join("routes-routes-boardless.txt")).unwrap_or_default();
+    let items: Vec<&str> = listing.lines().skip(1).collect();
+    let mut boards: Vec<&str> = items.iter().map(|l| control_field(l, "board")).collect();
+    boards.sort_unstable();
+    let mut rows: Vec<&str> = stack_facts.rows.iter().map(|r| r.board.as_str()).collect();
+    rows.sort_unstable();
+    let emulator_ok = items.iter().any(|l| l.starts_with("emulator ") && control_field(l, "board") == w.sdk_board && control_field(l, "machine") == w.machine && control_field(l, "available") == "true");
+    if control_field(line, "rc") != "0" || control_field(line, "result") != "Success" || boards != rows || boards.iter().any(|b| b.is_empty()) || !emulator_ok {
+        rt.fail(case, &format!("the boardless listing is not the table's every row once with Board on each route and this leg's emulator row available (read {} routes for {} rows): {line}", items.len(), rows.len()));
+    }
+    println!("  {} routes, one per row of the table, each with Board; the emulator route of {} on {} available", items.len(), w.sdk_board, w.machine);
+    rt.pass(case, "positive", "", &format!("{{\"routes\":{}}}", items.len()));
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-routes-boardless";
+    println!("== case {case}: the same listing with the board named -- its own route alone (the control: a board named lists one row, so the every-row listing above is the amendment's shape, not the target's indifference) ==");
+    let Some(line) = control_line(&controls, "routes-board") else {
+        rt.fail_control(case, "routes-board", "the publish-side script left no summary line for the listing with the board named");
+    };
+    let listing = std::fs::read_to_string(out.join("routes-routes-board.txt")).unwrap_or_default();
+    let items: Vec<&str> = listing.lines().skip(1).collect();
+    if control_field(line, "rc") != "0" || control_field(line, "result") != "Success" || items.len() != 1 || !items[0].starts_with("emulator ") || control_field(items[0], "board") != w.sdk_board || control_field(items[0], "machine") != w.machine {
+        rt.fail_control(case, "routes-board", &format!("the listing with the board named is not its one emulator route: {line}; {items:?}"));
+    }
+    println!("  one route, the emulator's for {} on {}: the control distinguishes", w.sdk_board, w.machine);
+    rt.pass(case, "negative", "routes-board", "");
+    println!("  PASS");
+
+    let case = "rt.sdk-parity-host-inputs";
+    println!("== case {case}: the build's host inputs as the shell resolves them (dotnet msbuild -getProperty through the shell) -- PathMap with the intermediate directory mapped to /rhu/obj/<project> ahead of the project directory's /rhu/src/<project>, and NoWin32Manifest true ==");
+    let Some(line) = control_line(&controls, "host-inputs") else {
+        rt.fail(case, "the publish-side script left no summary line for the host inputs");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "entries") != "2" || control_field(line, "obj-first") != "yes" || control_field(line, "src-second") != "yes" || control_field(line, "nowin32manifest") != "true" {
+        rt.fail(case, &format!("the host inputs are not as registered (two path-map entries, the intermediate directory's first, NoWin32Manifest true): {line}"));
+    }
+    println!("  the path map's two entries in their order; NoWin32Manifest true");
+    rt.pass(case, "positive", "", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-line-endings";
+    println!("== case {case}: the line-endings task over three sources -- CRLF under the directory rewritten to LF, LF under it left with its time, CRLF outside it left as it is ==");
+    let Some(line) = control_line(&controls, "line-endings") else {
+        rt.fail(case, "the publish-side script left no summary line for the line-endings task");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "rewritten") != "1" || control_field(line, "crlf-cr") != "0" || control_field(line, "lf-cr") != "0" || control_field(line, "lf-time") != "978307200" || control_field(line, "outside-cr") != "2" {
+        rt.fail(case, &format!("the line-endings task did not act as registered (one file rewritten, the LF file's time kept, the file outside untouched): {line}"));
+    }
+    println!("  one file rewritten to LF; the LF file untouched (its time 978307200 kept); the file outside the directory untouched (2 carriage returns)");
+    rt.pass(case, "positive", "", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-pathmap-empty";
+    println!("== case {case}: PathMap given empty as a global property (the SDK's default cannot fill a global property) -- refused by RHU3011 by name before anything is compiled, no image ==");
+    let Some(line) = control_line(&controls, "pathmap-empty") else {
+        rt.fail_control(case, "path-map", "the publish-side script left no summary line for the empty path map");
+    };
+    let refuse = line.split_once("refuse=").map(|(_, r)| r.trim()).unwrap_or("");
+    if control_field(line, "rc") == "0" || control_field(line, "elf") != "absent" || control_field(line, "code") != "RHU3011" || !refuse.contains("PathMap is empty") {
+        rt.fail_control(case, "path-map", &format!("the empty path map was not refused as registered: {line}"));
+    }
+    println!("  refused (rc {}, RHU3011, no image): {refuse}", control_field(line, "rc"));
+    rt.pass(case, "negative", "path-map", "");
+    println!("  PASS");
+
     rt.results.emit_summary(w.sdk_gate, "pass", 0);
     if !validate_results(repo, rt.results.path()) {
         println!("{}: FAIL -- results file failed schema validation", w.sdk_display);
         exit(1);
     }
-    println!("{}: PASS (9 positive cases -- 5 ties byte for byte, the fifth the same project at another directory under the SDK's path map; the board table's stack facts and the boards' facts files tied to the tree; the stack knob's image booted with the row's default moved; a real git checkout at another path tying the record; the board class's program booted with the row's facts generated into it -- + 16 negative controls through the real tool; the Linux environment's transcript under {out_rel})  [{} | {}]", w.sdk_display, facts.version, ld.version);
+    // The counts as the results file tallies them, one line per case (the
+    // validator refuses a summary that lies about its case lines).
+    let negative = rt.results.n_neg as usize;
+    let positive = rt.results.n_pass as usize - negative;
+    let ties = 5 + modes_offered + 5 + 1 + 2 + 3;
+    println!("{}: PASS ({positive} positive cases -- {ties} ties byte for byte, the fifth the same project at another directory under the SDK's path map the {modes_offered} after it the objects published for the external-RAM row in each offered init mode, {modes_withheld} withheld, two the objects published with the managed memory's home internal on this leg's row and the {RAM_INIT_ROW} row, three the objects published for the {XIP_ROW} row with the program's home internal, named and external, five the publishes with the output level or a channel named and the last the image's manifest against the expectation composed from its own facts; the board table's stack facts, the boards' facts files and the table's init-mode kernels tied to the tree; the stack knob's image booted with the row's default moved; a real git checkout at another path tying the record; the board class's program booted with the row's facts generated into it; the gate's program booted with the compiler's reflection data stripped; the init mode's kernel picked by the property on the {RAM_INIT_ROW} row and witnessed in the image's rodata, the named default the same image as none; the managed memory's home picked by the property on this leg's row and the {RAM_INIT_ROW} row and witnessed in the images' window symbols against the rows' facts, this leg's row booted under either map for the hosting layer's posture line, the named default the same image as none; the program's home picked by the property on the {XIP_ROW} row and witnessed in the image's window brackets and section table with no undefined name, the named default the same image as none; the analog voltage switch set per program by the SDK's scan, true on the {RAM_INIT_ROW} row and on the {XIP_ROW} row under the external home with the library's quantity type in the image, false on this leg's row (booted to the program's lines), under the {XIP_ROW} row's default home, for the board class's program and for a project's own false; the board table's external-flash map and its fit column tied to the facts files and the maps; the kernel's output level and the two streams' channels read from the images as the three absolute symbols with the board line's words, the board table's channel facts tied to the boards' facts files; the run verb's device list as .NET renders it and its two commands through dotnet run with the stand-in tool and emulator, the program's code returned unchanged, and the first list of a fresh project whole in the one command that restores it; the run's publish skipped under the no-build option and run again on a moved word, a publish with no C compiler to be found, and a class library built through the SDK and refused at publish; the image's manifest with the execution model native and the stand-in's acceptance of a field it does not know; the line tables of the image read whole with no host separator and the separator task rewriting nothing on a second run; the host inputs as the shell resolves them and the line-endings task's rewrite -- + {negative} negative controls through the real tool; the Linux environment's transcript under {out_rel})  [{} | {}]", w.sdk_display, facts.version, ld.version);
     exit(0);
+}
+
+/// The two probes the parity leg's stand-in tool lists, and the second one's description as .NET renders it once the tool's escapes are read back.
+const RUN_PROBE_A: &str = "0A1B2C3D4E5F6071";
+const RUN_PROBE_B: &str = "1F2E3D4C5B6A79880123ABCD";
+const RUN_PROBE_B_WORDS: &str = "ST-LINK/V2-1 ; 50% $(not) @(this) 'single' \"double\" <lt> &amp ? *";
+
+/// The release the feed's manifest names (lamella-rhu-release.json beside the feed the parity leg packs into, as the
+/// pack wrote it): the version every package of the release carries and the build package's properties are stamped with.
+fn sdk_release_version(repo: &Path) -> Result<String, String> {
+    let path = repo.join("src").join("kernel").join("target").join("sdk-feed").join("lamella-rhu-release.json");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let key = "\"release\":";
+    let rest = text.find(key).map(|i| &text[i + key.len()..]).ok_or_else(|| format!("{} names no release", path.display()))?;
+    let open = rest.find('"').ok_or_else(|| format!("{} names no release string", path.display()))?;
+    let rest = &rest[open + 1..];
+    let close = rest.find('"').ok_or_else(|| format!("{} names no release string", path.display()))?;
+    Ok(rest[..close].to_string())
+}
+
+/// The runtime build the SDK pins, as Sdk.props states it.
+fn sdk_runtime_pin(repo: &Path) -> Result<String, String> {
+    let path = repo.join("src").join("sdk").join("Lamella.Rhu.Sdk").join("Sdk").join("Sdk.props");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("<RhuRuntimeVersionTested>").and_then(|r| r.strip_suffix("</RhuRuntimeVersionTested>")).map(str::to_string))
+        .ok_or_else(|| format!("{} states no RhuRuntimeVersionTested", path.display()))
+}
+
+/// The manifest's record as the SDK writes it for the gate's program: the contract's keys in order (the execution model native the third), two-space indentation, LF, a final newline.
+fn manifest_text(board: &str, sha: &str, bytes: usize, abi: u32, debug_layout: u32, runtime: &str, console: &str, log: &str) -> String {
+    format!(
+        "{{\n  \"schema\": 1,\n  \"kind\": \"flash-image\",\n  \"model\": \"native\",\n  \"board\": \"{board}\",\n  \"format\": \"elf\",\n  \"base\": null,\n  \"sha256\": \"{sha}\",\n  \"bytes\": {bytes},\n  \"producer\": \"ilc+rhu-link\",\n  \"elf\": \"rthello.elf\",\n  \"map\": null,\n  \"image_kind\": \"monolith\",\n  \"layout_version\": 1,\n  \"abi\": {abi},\n  \"debug_layout_version\": {debug_layout},\n  \"codegen_profile\": \"ship\",\n  \"runtime\": \"{runtime}\",\n  \"runtime_tested\": true,\n  \"console_channel\": \"{console}\",\n  \"log_channel\": \"{log}\"\n}}\n"
+    )
+}
+
+/// The device list as .NET prints it, cut out of a run's stdout: from the "Available devices:" line through the "Example:" line, LF, a final newline.
+fn devices_block(text: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for l in text.lines() {
+        let l = l.trim_end_matches('\r');
+        if l.starts_with("Available devices:") {
+            inside = true;
+        }
+        if inside {
+            out.push_str(l);
+            out.push('\n');
+            if l.starts_with("Example:") {
+                break;
+            }
+        }
+    }
+    out
 }

@@ -3,12 +3,39 @@
   "maker": "STMicroelectronics",
   "product": "NUCLEO-U5A5ZJ-Q",
   "chip": "STM32U5A5ZJ",
-  "clockHz": 16000000,
+  "clockHz": 160000000,
   "posture": "default",
-  "postureName": "the internal oscillator posture",
+  "postureName": "the PLL posture",
   "pins": 160,
   "labels": "port",
   "functions": "gpio",
+  "pwm": {
+    "chip": 0,
+    "lines": []
+  },
+  "adc": {
+    "converters": []
+  },
   "i2c": [],
-  "spi": []
+  "spi": [],
+  "ram": [
+    {
+      "name": "SRAM",
+      "base": 536870912,
+      "bytes": 2555904,
+      "external": false,
+      "cached": false
+    }
+  ],
+  "uart": [],
+  "uartPairs": [],
+  "channels": {
+    "log": "probe",
+    "console": "probe",
+    "legal": [
+      "probe",
+      "memory",
+      "off"
+    ]
+  }
 }

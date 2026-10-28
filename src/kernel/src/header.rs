@@ -21,6 +21,9 @@ pub struct ImageHeader {
     pub reserved: [u32; 10],
 }
 
+// The pointer field is a link-time constant (the vector table's
+// address), never dereferenced by the kernel: sharing the record is
+// sound.
 unsafe impl Sync for ImageHeader {}
 
 pub const IMAGE_HEADER_MAGIC: u32 = 0x4955_4852;
@@ -35,6 +38,10 @@ unsafe extern "C" {
     static __vector_table: u32;
 }
 
+// #[used] pins the record past LTO dead-global elimination and the
+// named section (KEEP'd by every board map, placed at the fixed offset)
+// pins it past linker section GC: a record nothing in the image reads
+// is exactly the kind of global both passes delete.
 #[used]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".rhu_header")]

@@ -8,9 +8,9 @@
 //! result in RESULT (12.4.3.1; switching the input needs no settling
 //! time). The converter's clock is the crystal's 12 MHz on both clock
 //! postures: the block's registers do not answer while that clock runs
-//! faster than the system clock (a measured fact of the part, not in its
-//! datasheet), and the crystal never does; the generator (CLK_ADC_CTRL, Table
-//! 571) is switched with the block held in reset (8.1.3.2). An analog pad
+//! faster than the system clock, and the crystal never does; the generator
+//! (CLK_ADC_CTRL, Table 571) is switched with the block held in reset
+//! (8.1.3.2). An analog pad
 //! has its input disabled and its output disabled -- the chapter's rule,
 //! and erratum E9 makes an enabled input leak -- and no function. The
 //! rows whose channels have a digital twin pad on their net park the twin
@@ -18,7 +18,12 @@
 //! sensor is the channel past the package's last input; its bias (TS_EN)
 //! stays on for the block's life. One conversion at a time: the block has
 //! one owner, and a second channel's start waits its turn inside the
-//! door's budget. No interrupt, no FIFO, no free running; nothing masks.
+//! door's budget. A conversion the block flags (CS.ERR; the RP2350
+//! datasheet's section 12.4.3: the result undefined, the sample discarded)
+//! answers no sample: the next conversion is started with the block kept
+//! while the door asks for another attempt, and the block is released at
+//! its last.
+//! No interrupt, no FIFO, no free running; nothing masks.
 //! The record `__rhu_rp2350_adc` is read by symbol.
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
@@ -26,8 +31,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use super::rp2350::gpio_backend::{ctrl, pad, sio, GPIO_OE_CLR, GPIO_OUT_CLR};
 use super::rp2350::{
-    release_reset, CLOCKS, PAD_IE, PAD_ISO, PAD_OD, PAD_PDE, PAD_PUE, RESETS_RESET, RESETS_RESET_DONE, RESET_IO_BANK0,
-    RESET_PADS_BANK0, SYSCLK_HZ, XOSC_HZ,
+    release_reset, CLOCKS, PAD_IE, PAD_ISO, PAD_OD, PAD_PDE, PAD_PUE, RESETS_RESET_DONE, RESETS_RESET_SET,
+    RESET_IO_BANK0, RESET_PADS_BANK0, SYSCLK_HZ, XOSC_HZ,
 };
 use crate::adc_math;
 use crate::board::facts;
@@ -78,7 +83,7 @@ const CLK_ADC_AUXSRC: u32 = 0b111 << 5;
 const CLK_ADC_AUXSRC_XOSC: u32 = 0b011 << 5;
 /// CLK_ADC_DIV INT, bits 19:16, at 1: no division (Table 572).
 const CLK_ADC_DIV_1: u32 = 1 << 16;
-/// The clock gates' atomic set alias (section 2.1.3; WAKE_EN0 at CLOCKS + 0xac):
+/// The clock gates' atomic set alias (the RP2350 datasheet's section 2.1.3; WAKE_EN0 at CLOCKS + 0xac):
 /// the converter's own clock and its bus clock (Table 587, bits 2 and 3).
 const WAKE_EN0_SET: *mut u32 = (CLOCKS + 0x2000 + 0xAC) as *mut u32;
 /// WAKE_EN0 CLK_ADC_ADC, bit 2, and CLK_SYS_ADC, bit 3: the block's two clock gates (Table 587).
@@ -144,7 +149,7 @@ fn bring_up() {
     }
     let (ok, clk) = unsafe {
         write_volatile(WAKE_EN0_SET, WAKE_EN0_ADC);
-        write_volatile(RESETS_RESET, read_volatile(RESETS_RESET) | RESET_ADC);
+        write_volatile(RESETS_RESET_SET, RESET_ADC);
         let mut ok = true;
         let mut n = 0u32;
         while read_volatile(RESETS_RESET_DONE) & RESET_ADC != 0 {
@@ -180,7 +185,7 @@ fn bring_up() {
 
 /// A pad parked for analog use: the SIO output and enable cleared, no
 /// function, the pad written with its isolation latch set and released
-/// after (section 9.7) -- the output disabled, the input disabled, no pull.
+/// after (the RP2350 datasheet's section 9.7) -- the output disabled, the input disabled, no pull.
 fn park(line: u32) {
     with_cs(|| unsafe {
         let (oe_clr, mask) = sio(GPIO_OE_CLR, line);
@@ -303,20 +308,33 @@ pub fn ready(index: usize) -> bool {
     false
 }
 
-/// The result, the block released to the next channel; a conversion the
-/// block flagged is counted in the record (the sample is still answered:
-/// the flag means noisy, and the door's caller judges its readings).
-pub fn sample(index: usize) -> u32 {
+/// The result and the block released to the next channel -- or none for a
+/// conversion the block flagged (CS.ERR; the RP2350 datasheet's section 12.4.3
+/// leaves its result undefined and says such samples are discarded): the
+/// flagged conversion counted in the record and discarded, the next
+/// conversion started with the block kept when the door asks for another
+/// attempt, the block released otherwise. No sample is answered from a
+/// flagged conversion.
+pub fn sample(index: usize, again: bool) -> Option<u32> {
     let (cs, r) = unsafe { (read_volatile(CS), read_volatile(RESULT)) };
+    let flagged = cs & CS_ERR != 0;
     with_cs(|| unsafe {
         let rec = addr_of_mut!(RECORD);
         bump(addr_of_mut!((*rec).conversions));
-        if cs & CS_ERR != 0 {
+        if flagged {
             bump(addr_of_mut!((*rec).flagged));
         }
     });
+    if flagged && again {
+        kick(index);
+        return None;
+    }
     let _ = OWNER.compare_exchange(index as u32, NONE, Ordering::AcqRel, Ordering::Acquire);
-    r & RESULT_MASK
+    if flagged {
+        None
+    } else {
+        Some(r & RESULT_MASK)
+    }
 }
 
 /// The block reset after a conversion passed its budget: disabled, every

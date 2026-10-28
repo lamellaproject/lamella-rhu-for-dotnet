@@ -6,6 +6,51 @@
 //! on-chip boot ROM recognises it by the boot block this module places
 //! inside the image's first 4 KB and enters through the vector table at
 //! the image base.
+//!
+//! What stays as the boot ROM left it (unpulled levers, stated): the second
+//! core waits in the ROM for an entry point this kernel never sends; the
+//! flash read command the ROM's scan settled on (its clock divisor is landed
+//! at one value in the PLL posture); the flash cache (on); the on-chip voltage
+//! regulator (its reset setting covers 150 MHz); the crystal oscillator's
+//! startup delay; the access-control block's defaults; the UART's FIFO
+//! trigger levels. SRAM is never cached, so an instruction stream written
+//! into SRAM needs two barriers and no cache maintenance -- the posture the
+//! hosting tier reads.
+//!
+//! Two clock postures, feature-selected per board (`<board>-xtal12`, the
+//! gated-posture pattern: own feature, own image names, the banner line
+//! from register read-back).
+//!
+//! Clock posture 1 (default): the system PLL at 150 MHz off the 12 MHz
+//! crystal (12 MHz / 1 x 125 = a 1500 MHz VCO, / 5 / 2), the chip's rated
+//! clock, the flash clock divisor raised first so the flash never runs
+//! past its rating. Out of the ROM the system clock runs on the ring
+//! oscillator, whose frequency the chip does not promise: both postures
+//! switch away from it explicitly, the crystal first.
+//!
+//! Clock posture 2 (`<board>-xtal12`): the 12 MHz crystal alone, the PLL off.
+//!
+//! The peripheral clock the console derives its baud rate from is sourced
+//! from the crystal in both postures, so the divisor is one constant.
+//!
+//! The console (UART0 on GPIO 0 and 1, 115200 8N1) is driven the ring way:
+//! every byte lands in the console mirror in SRAM -- the transcript a debug
+//! probe reads, and the transmit ring's storage -- then the transmitter's
+//! FIFO is primed from the ring while it has room (a bounded register
+//! loop, never a wait on the wire), and the UART's transmit interrupt
+//! drains the rest as the wire takes it, at the lowest interrupt priority
+//! band. A writer holding the kernel critical section is never paced by
+//! the wire, so the tick is never masked across a character time. The
+//! panic and fault paths switch the driver to a polled fallback that
+//! pushes the whole ring through the wire synchronously, so a report is
+//! complete on the wire before the machine parks.
+//!
+//! Register addresses and bit positions per the RP2350 datasheet (the
+//! address map; the boot ROM, resets, clocks, crystal oscillator, PLL,
+//! GPIO and pads, UART and QSPI-interface chapters; the interrupt table;
+//! the Cortex-M33 chapter for the interrupt controller); pin wiring per
+//! the board datasheets (UART0 on GPIO 0 and 1, the pair a debug probe's
+//! serial bridge is documented for). The kernel takes no vendor headers.
 
 use core::ptr::{read_volatile, write_volatile};
 
@@ -33,11 +78,11 @@ pub(super) const PERI_HZ: u32 = XOSC_HZ;
 /// the chip's tick-generator block is not needed.
 pub const TICK_HZ: u32 = 1_000;
 
-/// Thread stack pool (lives in .kstacks): 96 KiB on these rows' 520 K of
+/// Thread stack pool (lives in .kstacks): 128 KiB on these rows' 520 K of
 /// SRAM -- the idle thread's 1 KiB, the hosting thread's and the finalizer's
-/// 16 KiB each, and three default 16 KiB workers; the link asserts the arena
+/// 16 KiB each, and five default 16 KiB workers; the link asserts the arena
 /// window that remains above the row's floor.
-pub const STACK_POOL_BYTES: usize = 96 * 1024;
+pub const STACK_POOL_BYTES: usize = 128 * 1024;
 
 /// Stack for the kmain thread (the boot thread's continuation).
 pub const KMAIN_STACK_BYTES: usize = 16 * 1024;
@@ -50,7 +95,7 @@ pub const NIRQ: usize = 52;
 /// The vector line a test image may claim: the last of the spare lines
 /// wired to nothing, implemented by the controller (a software pend takes
 /// it) and claimed by no kernel handler.
-#[allow(dead_code)]
+#[allow(dead_code)] // board-facts surface; the api flavor's band-interrupt control is its consumer
 pub const SPARE_IRQ: usize = NIRQ - 1;
 
 /// FPU shape: FPv5 SINGLE precision (the Cortex-M33 FPU) -- kernel f64
@@ -60,7 +105,7 @@ pub const SPARE_IRQ: usize = NIRQ - 1;
 /// single-precision FPU (the RP2350 datasheet, the Cortex-M33 section; its
 /// double-precision coprocessor is a separate coprocessor reached by
 /// coprocessor instructions, not the VFP double forms).
-#[allow(dead_code)]
+#[allow(dead_code)] // board-facts surface; the board facade's assert reads it
 pub const FPU_DP: bool = false;
 /// The cycle counter the lost-tick witness reads: the core's data
 /// watchpoint and trace unit counts processor cycles, enabled and
@@ -72,6 +117,23 @@ pub const CYCLE_COUNTER: bool = true;
 /// striped banks and the two small ones after them,
 /// 0x20000000..0x20082000), each end backed off by one 8-word frame.
 pub const FRAME_RANGES: [(usize, usize); 1] = [(0x2000_0000, 0x2008_2000 - 32)];
+
+/// The memory protection unit's table for the chip's rows (PMSAv8 denies
+/// by absence, so the table names everything the kernel and a hosted
+/// program touch): the XIP window (the flash the image executes from, the
+/// PSRAM window at 0x11000000, the cache-maintenance aliases), the
+/// SRAM (520 KB, the scratch banks included), the APB and AHB peripherals,
+/// and the SIO block. THE BOOT ROM IS LEFT UNCOVERED ON PURPOSE: the kernel
+/// makes no call into it after the bootrom hands over, so the whole 32 KB
+/// at address 0 is no-access, the first page among it. The private
+/// peripheral bus needs no entry. Asserted against the rows' link scripts
+/// at build time (src/mpu.rs); the PSRAM row extends this table.
+pub const MPU_REGIONS: &[crate::mpu::Region] = &[
+    crate::mpu::Region { lo: 0x1000_0000, hi: 0x1FFF_FFFF, device: false, exec: true },
+    crate::mpu::Region { lo: 0x2000_0000, hi: 0x2008_1FFF, device: false, exec: true },
+    crate::mpu::Region { lo: 0x4000_0000, hi: 0x5FFF_FFFF, device: true, exec: false },
+    crate::mpu::Region { lo: 0xD000_0000, hi: 0xDFFF_FFFF, device: true, exec: false },
+];
 
 /// The boot block the chip's boot ROM looks for inside the first 4 KB of a
 /// flash image (the board maps place it right after the in-image header):
@@ -88,6 +150,9 @@ pub const FRAME_RANGES: [(usize, usize); 1] = [(0x2000_0000, 0x2008_2000 - 32)];
 pub static __rhu_rp2350_boot_block: [u32; 5] =
     [0xffff_ded3, 0x1021_0142, 0x0000_01ff, 0x0000_0000, 0xab12_3579];
 
+// The console mirror and the transmit ring are the shared ring module's
+// (`super::ring`); this chip module owns the device and the four hooks
+// the ring drives, below the clock postures.
 
 pub(super) const CLOCKS: usize = 0x4001_0000;
 const CLK_REF_CTRL: *mut u32 = (CLOCKS + 0x30) as *mut u32;
@@ -130,24 +195,22 @@ const XOSC_STATUS_STABLE: u32 = 1 << 31;
 
 const RESETS: usize = 0x4002_0000;
 pub(super) const RESETS_RESET: *mut u32 = RESETS as *mut u32;
+/// The reset register's atomic aliases (the block's registers at +0x2000
+/// and +0x3000): a write to the set alias sets the mask's bits and one to
+/// the clear alias clears them, the other bits untouched, with no
+/// read-modify-write in software.
+pub(super) const RESETS_RESET_SET: *mut u32 = (RESETS + 0x2000) as *mut u32;
+pub(super) const RESETS_RESET_CLR: *mut u32 = (RESETS + 0x3000) as *mut u32;
 pub(super) const RESETS_RESET_DONE: *mut u32 = (RESETS + 0x08) as *mut u32;
 pub(super) const RESET_IO_BANK0: u32 = 1 << 6;
 pub(super) const RESET_PADS_BANK0: u32 = 1 << 9;
 #[cfg(not(rp2350_xtal))]
 const RESET_PLL_SYS: u32 = 1 << 14;
 const RESET_SYSINFO: u32 = 1 << 21;
-const RESET_UART0: u32 = 1 << 26;
 
 const IO_BANK0: usize = 0x4002_8000;
-const IO_BANK0_GPIO0_CTRL: *mut u32 = (IO_BANK0 + 0x04) as *mut u32;
-const IO_BANK0_GPIO1_CTRL: *mut u32 = (IO_BANK0 + 0x0C) as *mut u32;
-/// GPIOn_CTRL: FUNCSEL [4:0], 2 = UART0 on both pins (TX on GPIO 0, RX on
-/// GPIO 1); every override field at its normal value.
-const GPIO_CTRL_FUNCSEL_UART0: u32 = 2;
 
 const PADS_BANK0: usize = 0x4003_8000;
-const PADS_BANK0_GPIO0: *mut u32 = (PADS_BANK0 + 0x04) as *mut u32;
-const PADS_BANK0_GPIO1: *mut u32 = (PADS_BANK0 + 0x08) as *mut u32;
 /// Pad control: ISO bit 8 (the isolation latch, set at reset and released
 /// once the pad is configured), OD bit 7, IE bit 6, PUE bit 3, PDE bit 2
 /// (set at reset: every pad pulls down until told otherwise).
@@ -157,65 +220,17 @@ pub(super) const PAD_IE: u32 = 1 << 6;
 pub(super) const PAD_PUE: u32 = 1 << 3;
 pub(super) const PAD_PDE: u32 = 1 << 2;
 
-const UART0: usize = 0x4007_0000;
-const UART0_DR: *mut u32 = UART0 as *mut u32;
-const UART0_RSR: *mut u32 = (UART0 + 0x04) as *mut u32;
-const UART0_FR: *mut u32 = (UART0 + 0x18) as *mut u32;
-const UART0_IBRD: *mut u32 = (UART0 + 0x24) as *mut u32;
-const UART0_FBRD: *mut u32 = (UART0 + 0x28) as *mut u32;
-const UART0_LCR_H: *mut u32 = (UART0 + 0x2C) as *mut u32;
-const UART0_CR: *mut u32 = (UART0 + 0x30) as *mut u32;
-const UART0_IMSC: *mut u32 = (UART0 + 0x38) as *mut u32;
-const UART0_ICR: *mut u32 = (UART0 + 0x44) as *mut u32;
-/// FR: TXFF bit 5 (the transmit FIFO full), RXFE bit 4 (the receive FIFO
-/// empty) -- the FIFOs being on.
-const FR_TXFF: u32 = 1 << 5;
-const FR_RXFE: u32 = 1 << 4;
-/// A received word carries the byte in [7:0] and the framing, parity,
-/// break and overrun flags in [11:8].
-const DR_ERRORS: u32 = 0xF << 8;
-/// LCR_H: WLEN [6:5] = 11 for 8 data bits; FEN bit 4 turns the two
-/// 32-entry FIFOs on (the flag register then reads their state).
-const LCR_H_WLEN_8: u32 = 0b11 << 5;
-const LCR_H_FEN: u32 = 1 << 4;
-/// CR: UARTEN bit 0, TXE bit 8, RXE bit 9.
-const CR_UARTEN: u32 = 1 << 0;
-const CR_TXE: u32 = 1 << 8;
-const CR_RXE: u32 = 1 << 9;
-/// The transmit interrupt: bit 5 of the mask register (IMSC) and of the
-/// clear register (ICR). It is raised when the transmit FIFO falls
-/// through its trigger level (half full, the reset setting kept), never
-/// by an empty FIFO the interrupt was enabled over -- so the writer
-/// primes the FIFO itself and the interrupt only ever drains a backlog.
-const UART_TX_INT: u32 = 1 << 5;
-/// ICR's eleven clear bits (10:0): every interrupt cleared at init.
-const ICR_ALL: u32 = 0x7FF;
-const BAUD: u32 = 115_200;
-/// The baud divisor in 64ths, rounded to nearest: the integer part into
-/// IBRD, the six fraction bits into FBRD (12 MHz gives 6 + 33/64, which is
-/// 115,108 baud, 0.08 percent low).
-const BAUD_DIV_64: u32 = (PERI_HZ * 4 + BAUD / 2) / BAUD;
-const IBRD: u32 = BAUD_DIV_64 >> 6;
-const FBRD: u32 = BAUD_DIV_64 & 0x3F;
-const _: () = assert!(IBRD >= 1 && IBRD <= 0xFFFF, "baud divisor outside the integer register");
-
-/// UART0's interrupt line (the chip's interrupt table), its enable bit in
-/// the interrupt controller's second set-enable and clear-pending
-/// registers, and its priority byte in the priority array.
-pub const UART0_IRQ: usize = 33;
-const NVIC_ISER1: *mut u32 = 0xE000_E104 as *mut u32;
-const NVIC_ICPR1: *mut u32 = 0xE000_E284 as *mut u32;
-const NVIC_IPR: *mut u8 = 0xE000_E400 as *mut u8;
-/// The lowest band: masked inside a kernel critical section (the ceiling
-/// 0x40), below the tick (0x80), above the context switch (0xF0) -- the
-/// drain preempts thread code and nothing else, and the writer's section
-/// is its lock.
-const UART0_IRQ_PRIO: u8 = 0xE0;
-
-/// The interrupt lines this chip module claims with its own handlers,
-/// folded into the vector table by the boot module: UART0's transmit
-/// interrupt.
-pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[(UART0_IRQ, __rhu_rp2350_uart0_irq)];
+/// The chip's two PL011 UART blocks are the UART doors' backend
+/// (`rp2350_uart.rs`): a program's serial ports, and the wire of a
+/// stream whose channel word names a UART of the facts table -- NO block by
+/// default (the memory console takes no pin). The interrupt lines this chip
+/// module claims with its own handlers, folded into the vector table by the
+/// boot module: the two blocks' lines (33 and 34), armed only while a port
+/// is held.
+pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[
+    (super::rp2350_uart::IRQS[0], super::rp2350_uart::__rhu_rp2350_uart0_irq),
+    (super::rp2350_uart::IRQS[1], super::rp2350_uart::__rhu_rp2350_uart1_irq),
+];
 
 /// The family GPIO driver's handler on the bank's one interrupt line (the
 /// device seam: the driver owns the line; a hook is a tenant of it).
@@ -275,12 +290,35 @@ mod pll150 {
     pub const XIP_BASE: *const u32 = 0x1000_0000 as *const u32;
 }
 
+/// A per-boot salt for the PSRAM proof's pattern: 32 reads of the
+/// ring oscillator's random bit (the RP2350 datasheet, section 8.3.8: with
+/// the system clocks on the crystal, "read the RANDOMBIT register to get a
+/// 1-bit random number; to get an n-bit value, read it n times"; the
+/// register at ROSC_BASE 0x400e8000 + 0x20). Not entropy for anything else
+/// (the datasheet says it is not fit for security, and the entropy doors
+/// never see it): the proof wants a pattern a previous boot cannot have
+/// left in the part, nothing more.
+#[cfg(rhu_psram_window)]
+pub fn boot_salt() -> u32 {
+    const ROSC_RANDOMBIT: *const u32 = 0x400e_8020 as *const u32;
+    let mut v = 0u32;
+    for _ in 0..32 {
+        v = (v << 1) | (unsafe { read_volatile(ROSC_RANDOMBIT) } & 1);
+    }
+    v
+}
+
 /// Release peripherals from the reset controller and wait for each.
 pub(super) unsafe fn release_reset(mask: u32) {
     unsafe {
-        write_volatile(RESETS_RESET, read_volatile(RESETS_RESET) & !mask);
+        write_volatile(RESETS_RESET_CLR, mask);
         while read_volatile(RESETS_RESET_DONE) & mask != mask {}
     }
+}
+
+/// A block held in reset (a UART port's release): the reset bit set.
+pub(super) unsafe fn assert_reset(mask: u32) {
+    unsafe { write_volatile(RESETS_RESET_SET, mask) }
 }
 
 /// The crystal on and stable, the reference clock on it at divider 1, the
@@ -304,6 +342,8 @@ unsafe fn clocks_to_xosc() {
         while read_volatile(CLK_SYS_SELECTED) != CLK_SYS_SELECTED_REF {}
         write_volatile(CLK_SYS_DIV, CLK_SYS_DIV_1);
 
+        // The peripheral clock: its source selected with the generator
+        // stopped (the auxiliary mux glitches), then started and polled.
         let p = read_volatile(CLK_PERI_CTRL) & !(CLK_PERI_ENABLE | CLK_PERI_AUXSRC);
         write_volatile(CLK_PERI_CTRL, p);
         write_volatile(CLK_PERI_CTRL, p | CLK_PERI_AUXSRC_XOSC);
@@ -333,7 +373,7 @@ pub fn clock_init() {
 }
 
 /// The crystal posture: no clock line in the banner (the gated posture's
-/// own transcript, as the bring-up runs on hardware read it).
+/// own transcript is recorded separately).
 #[cfg(rp2350_xtal)]
 pub fn clock_readback() -> Option<crate::board::ClockReadback> {
     None
@@ -406,6 +446,8 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
         let refdiv = cs & CS_REFDIV;
         let postdiv = ((prim >> PRIM_POSTDIV1_SHIFT) & PRIM_POSTDIV)
             * ((prim >> PRIM_POSTDIV2_SHIFT) & PRIM_POSTDIV);
+        // A zero divider field is undefined by the datasheet: decoded as
+        // 0 Hz rather than divided by.
         let pll_hz = if refdiv == 0 || postdiv == 0 {
             0
         } else {
@@ -440,135 +482,33 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
     }
 }
 
-/// Route GPIO 0 and 1 to UART0 (function 2 on both), configure the two
-/// pads and release their isolation latches, and program 115200 8N1 from
-/// the crystal-sourced peripheral clock with the FIFOs on. The pads:
-/// drive and slew as reset (4 mA, slow), input enabled on both (the
-/// receiver needs it, the transmitter ignores it), output enabled, the
-/// transmit pin without pulls, and the receive pin pulled UP -- the reset
-/// state pulls every pad down, and a pulled-down receive line reads as a
-/// permanent break, a floating one as noise; pulled up, an unwired line
-/// idles high. Runs once, at the first console init (a panic before the
-/// boot's own init reaches it through the same path).
-unsafe fn console_hw_init() {
-    unsafe {
-        release_reset(RESET_IO_BANK0 | RESET_PADS_BANK0 | RESET_UART0);
-
-        write_volatile(IO_BANK0_GPIO0_CTRL, GPIO_CTRL_FUNCSEL_UART0);
-        write_volatile(IO_BANK0_GPIO1_CTRL, GPIO_CTRL_FUNCSEL_UART0);
-
-        let pad0 = (read_volatile(PADS_BANK0_GPIO0) & !(PAD_OD | PAD_PUE | PAD_PDE)) | PAD_IE;
-        write_volatile(PADS_BANK0_GPIO0, pad0 | PAD_ISO);
-        write_volatile(PADS_BANK0_GPIO0, pad0 & !PAD_ISO);
-        let pad1 = (read_volatile(PADS_BANK0_GPIO1) & !(PAD_OD | PAD_PDE)) | PAD_IE | PAD_PUE;
-        write_volatile(PADS_BANK0_GPIO1, pad1 | PAD_ISO);
-        write_volatile(PADS_BANK0_GPIO1, pad1 & !PAD_ISO);
-
-        write_volatile(UART0_CR, 0);
-        write_volatile(UART0_IBRD, IBRD);
-        write_volatile(UART0_FBRD, FBRD);
-        write_volatile(UART0_LCR_H, LCR_H_WLEN_8 | LCR_H_FEN);
-        write_volatile(UART0_IMSC, 0);
-        write_volatile(UART0_ICR, ICR_ALL);
-        write_volatile(UART0_RSR, 0);
-        write_volatile(UART0_CR, CR_UARTEN | CR_TXE | CR_RXE);
-    }
-}
-
-/// The console driver's init. The first call configures the hardware.
-/// The call the boot path makes (marked by `clock_init` through the ring
-/// module) arms the transmit interrupt -- its priority byte, its enable
-/// bit, the UART's mask -- and takes the interrupt mode; any later call
-/// is the panic or fault path's re-init and switches the driver to the
-/// polled mode with the interrupt masked, so the report that follows
-/// goes through the wire synchronously. The console mirror is not
-/// touched here (see `clock_init`), so a panic transcript appends to the
-/// boot's.
+/// The console driver's init on this row. The wire, when a stream's channel
+/// names a UART of the facts table, is a port the UART doors' module holds
+/// through its PL011 backend (`rp2350_uart.rs`), brought up by the
+/// console's init before this call; so this call keeps the wire record's
+/// mode alone: the boot's call (marked by `clock_init` through the ring
+/// module) takes the interrupt mode when a port is held and the no-wire
+/// mode otherwise (the memory console); a later call is
+/// the panic or fault path's re-init and records the polled mode the held
+/// ports were switched to (`uart::set_polled`, through the console). The
+/// console mirror is not touched here (see `clock_init`), so a panic
+/// transcript appends to the boot's.
 pub fn console_init() {
-    unsafe {
-        if ring::mode() == 0 {
-            console_hw_init();
-        }
-        if ring::take_boot_mark() {
-            write_volatile(NVIC_IPR.add(UART0_IRQ), UART0_IRQ_PRIO);
-            write_volatile(NVIC_ICPR1, 1 << (UART0_IRQ - 32));
-            write_volatile(NVIC_ISER1, 1 << (UART0_IRQ - 32));
-            write_volatile(UART0_IMSC, UART_TX_INT);
-            ring::set_mode(ring::MODE_IRQ);
-        } else {
-            write_volatile(UART0_IMSC, 0);
-            ring::set_mode(ring::MODE_POLLED);
-        }
+    let held = crate::uart::console_holds_any();
+    if ring::take_boot_mark() || ring::mode() == 0 {
+        ring::set_mode(if held { ring::MODE_IRQ } else { ring::MODE_NO_WIRE });
+    } else if held {
+        ring::set_mode(ring::MODE_POLLED);
     }
 }
 
-/// The ring's four hooks on this UART: the transmit FIFO takes a byte
-/// while its full flag is clear; a byte goes into the data register; the
-/// transmit interrupt is latched and cleared through the interrupt-clear
-/// register; and the interrupt is transition-shaped (it fires when the
-/// FIFO falls through its trigger level), so its mask stays set for the
-/// driver's life and the level-shaped enable is a no-op here.
-pub unsafe fn ring_tx_room() -> bool {
-    unsafe { read_volatile(UART0_FR) & FR_TXFF == 0 }
-}
-pub unsafe fn ring_tx_put(b: u8) {
-    unsafe { write_volatile(UART0_DR, b as u32) }
-}
-pub unsafe fn ring_tx_ack() {
-    unsafe { write_volatile(UART0_ICR, UART_TX_INT) }
-}
-pub unsafe fn ring_tx_irq(_enabled: bool) {}
-
-/// UART0's transmit interrupt: the ring's drain in the interrupt mode.
-/// Raised when the transmit FIFO falls through its trigger level; the
-/// interrupt is cleared first, then the FIFO refilled from the ring, so
-/// a later fall through the level raises it again while a backlog
-/// remains. Runs at the lowest priority band: a kernel critical section
-/// (the writer's lock) holds it off, and it holds off only the context
-/// switch; the FIFO's remaining half keeps the wire busy meanwhile.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __rhu_rp2350_uart0_irq() {
-    unsafe { ring::irq() }
-}
-
-/// Byte transmit through the shared ring (the mirror, the primed FIFO,
-/// the interrupt drain; the polled drain on the panic and fault paths).
-/// The caller holds the kernel critical section (the console's line
-/// lock), which masks the interrupt.
-pub fn console_putb(b: u8) {
-    ring::putb(b)
-}
-
-/// The room the ring has for a writer, in bytes (the door's back-pressure
-/// reads it outside the critical section).
-pub fn console_room() -> usize {
-    ring::room()
-}
-
-/// Non-blocking byte receive: one pending byte, or None immediately. A
-/// byte received with an error flag (framing, parity, break, overrun) is
-/// dropped and the receive status cleared, so the receiver never wedges;
-/// the lost byte is not recovered.
-pub fn console_getb() -> Option<u8> {
-    unsafe {
-        if read_volatile(UART0_FR) & FR_RXFE != 0 {
-            return None;
-        }
-        let word = read_volatile(UART0_DR);
-        if word & DR_ERRORS != 0 {
-            write_volatile(UART0_RSR, 0);
-            return None;
-        }
-        Some(word as u8)
-    }
-}
-
-/// Whether address 0 is readable memory on this row -- the low-address
-/// question's per-row record, MEASURED on the part (a read that returns
+/// Whether address 0 is readable memory on this row (a read that returns
 /// a word, or a bus fault): the api flavor's observation reads it before
-/// it touches the address.
+/// it touches the address. With the null-page guard the protection unit denies the first
+/// page on every row, so a guarded image never attempts the read; the
+/// `null-guard-off` control image alone does.
 /// This row: the boot ROM at 0.
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the api flavor's observation only
 pub const ADDRESS_ZERO_READABLE: bool = true;
 
 /// The entropy posture of this row: the chip's true random number generator
@@ -583,7 +523,7 @@ pub const ENTROPY: super::EntropyPosture = super::EntropyPosture::Source {
 };
 /// Whether this row carries a real-time clock the kernel reads at boot and
 /// writes at an explicit set.
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the api flavor's calendar check
 pub const RTC_PRESENT: bool = false;
 /// The calendar banner's text for this row, constant per image.
 pub const RTC_LINE: &str = "no calendar RTC on this chip (the always-on timer counts milliseconds); the base is the epoch until the tooling or the application sets it";
@@ -622,8 +562,8 @@ pub mod gpio_backend {
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use super::{
-        IO_BANK0, PADS_BANK0, PAD_IE, PAD_ISO, PAD_OD, PAD_PDE, PAD_PUE, RESETS_RESET, RESETS_RESET_DONE, RESET_IO_BANK0,
-        RESET_PADS_BANK0,
+        IO_BANK0, PADS_BANK0, PAD_IE, PAD_ISO, PAD_OD, PAD_PDE, PAD_PUE, RESETS_RESET_CLR, RESETS_RESET_DONE,
+        RESET_IO_BANK0, RESET_PADS_BANK0,
     };
     use crate::claims;
     use crate::critical::with_cs;
@@ -685,7 +625,7 @@ pub mod gpio_backend {
     fn release_banks() {
         unsafe {
             let mask = RESET_IO_BANK0 | RESET_PADS_BANK0;
-            write_volatile(RESETS_RESET, read_volatile(RESETS_RESET) & !mask);
+            write_volatile(RESETS_RESET_CLR, mask);
             while read_volatile(RESETS_RESET_DONE) & mask != mask {}
         }
     }
@@ -717,6 +657,13 @@ pub mod gpio_backend {
             let drive = mode == m::MODE_OUTPUT || (mode == m::MODE_OUTPUT_OPEN_DRAIN && !initial);
             write_volatile(if drive { oe_set } else { oe_clr }, mask);
         });
+        // A line that shares its header wire with an analog channel's
+        // pad (the row's twins, read the converse way round from the
+        // converter's own lookup) has that pad parked unless a program holds
+        // the channel -- the mirror of what the converter's claim does to the
+        // line -- so the pin's pull holds the wire alone. A re-configuration
+        // repeats the lookup; a release leaves a parked pad parked. The two
+        // Raspberry Pi rows name no twin, and the lookup folds away.
         crate::board::rp2350_adc::park_twin_channel(line);
     }
 
@@ -776,6 +723,7 @@ pub mod gpio_backend {
         let (k, s) = m::rp_word(line);
         let bits = ((rising as u32) << (s + m::RP_EDGE_HIGH)) | ((falling as u32) << (s + m::RP_EDGE_LOW));
         with_cs(|| unsafe {
+            // Stale edges cleared before the enable opens.
             write_volatile(intr(k), 0b1100 << s);
             write_volatile(inte(k), (read_volatile(inte(k)) & !(0b1111 << s)) | bits);
         });
@@ -818,6 +766,9 @@ pub mod gpio_backend {
                     let line = (k as u32) * 8 + b / 4;
                     let kind = b % 4;
                     let acknowledge = |k: usize, b: u32| {
+                        // The doctored control removes the acknowledgement, so
+                        // the control image re-enters on the same event and
+                        // never returns to the check.
                         if cfg!(feature = "test-gpio-doctored-mask") {
                             return;
                         }
@@ -828,16 +779,26 @@ pub mod gpio_backend {
                         }
                     };
                     if let Some(t) = claims::tenant_for(&*addr_of!(gpio::CLAIMS), inte(k) as u32, b) {
+                        // A tenant's bit: an edge or a force acknowledged; a
+                        // LEVEL bit masked here, before the wake, because a
+                        // level is not latched and would re-enter this handler
+                        // until the tenant's thread silenced the source -- the
+                        // tenant re-arms its enable bit after its service pass.
                         if forced & (1 << b) == 0 && kind < m::RP_EDGE_LOW {
                             write_volatile(inte(k), read_volatile(inte(k)) & !(1 << b));
                         } else {
                             acknowledge(k, b);
                         }
+                        // The word bumped before the wake, the fire path's
+                        // shape: a waiter between its read and its wait sees
+                        // the moved word and returns at once instead of
+                        // missing this wake.
                         AtomicU32::from_ptr(t.wake as *mut u32).fetch_add(1, Ordering::AcqRel);
                         sched::futex_wake(t.wake as *const u32, u32::MAX);
                         continue;
                     }
                     if forced & (1 << b) == 0 && kind < m::RP_EDGE_LOW {
+                        // An unowned level bit: masked, so it cannot storm.
                         write_volatile(inte(k), read_volatile(inte(k)) & !(1 << b));
                         continue;
                     }

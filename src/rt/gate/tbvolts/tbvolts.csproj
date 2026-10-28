@@ -1,0 +1,29 @@
+<Project Sdk="Lamella.Sdk">
+
+  <!-- The gate's third program: the analog voltage switch, which the SDK
+       sets per program by scanning this program's references. The program
+       names the voltage members, so the switch is true on a board whose
+       flash holds the library they compute in and false elsewhere; the
+       verification chain publishes it on both kinds of row and boots the
+       image where an emulator serves the row. TbVoltsSwitch, when the chain
+       passes it, sets the option by hand: the chain's controls read the
+       project's own value kept, and true refused where the board holds the
+       library nowhere. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <AssemblyName>tbvolts</AssemblyName>
+    <RootNamespace>Rhu.Hosted</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- The gate's posture: the kernel's whole boot report, what the goldens measure. -->
+    <RhuLogLevel>verbose</RhuLogLevel>
+    <LamellaHardwareVersion Condition="'$(LamellaHardwareVersion)' == ''">1.0.0-alpha.1</LamellaHardwareVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Lamella.Hardware" Version="$(LamellaHardwareVersion)" />
+    <RuntimeHostConfigurationOption Include="Lamella.Hardware.AnalogVoltage.IsSupported" Value="$(TbVoltsSwitch)" Trim="true" Condition="'$(TbVoltsSwitch)' != ''" />
+  </ItemGroup>
+
+</Project>

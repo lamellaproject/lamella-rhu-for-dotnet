@@ -1,0 +1,7 @@
+Lamella RHU for .NET -- the build package
+Copyright (c) 2026 Lamella LLC
+
+This package is licensed under your choice of the MIT license or the Apache
+License, Version 2.0. It carries Lamella's own files alone. The kernels,
+runtime libraries and tools its targets use are distributed in the board,
+runtime and tools packages, each with the license texts of what it carries.

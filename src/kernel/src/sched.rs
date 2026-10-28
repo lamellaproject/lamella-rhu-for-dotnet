@@ -1,6 +1,22 @@
 //! The scheduler: fixed-priority preemptive with round-robin inside a
 //! priority, PendSV context switch (lazy-FP honest), SysTick timebase,
 //! BASEPRI-only masking throughout.
+//!
+//! Priority architecture:
+//!   0x00..0x3F  zero-latency band -- never masked by the kernel
+//!               (BASEPRI ceiling 0x40, critical.rs)
+//!   0x80        SysTick
+//!   0xF0        SVCall + PendSV (the context switch runs last), and UsageFault --
+//!               the double-precision emulation's host: below every hardware
+//!               interrupt, so an emulated form delays nothing but the switch
+//!
+//! SysTick policy: the tick wakes due sleepers, then pends a switch
+//! iff a timer fired this tick OR an equal-or-more-urgent Ready peer
+//! exists -- round-robin rotation rides that second arm, and the `<=`
+//! doubles as a 1 ms safety net for any missed wake pend. A solo
+//! thread runs tick-free: every wake path pends explicitly instead of
+//! free-riding on the tick. A newly-spawned more-urgent thread
+//! preempts at spawn time, not at the next tick.
 
 use core::arch::global_asm;
 use core::ffi::c_void;
@@ -33,9 +49,15 @@ type AtexitFn = extern "C" fn(*mut c_void);
 const ICSR: *mut u32 = 0xE000_ED04 as *mut u32;
 const ICSR_PENDSVSET: u32 = 1 << 28;
 const ICSR_PENDSTSET: u32 = 1 << 26;
-const SHPR2: *mut u32 = 0xE000_ED1C as *mut u32;
-const SHPR3: *mut u32 = 0xE000_ED20 as *mut u32;
-const SHPR1: *mut u32 = 0xE000_ED18 as *mut u32;
+const SHPR2: *mut u32 = 0xE000_ED1C as *mut u32; // SVCall prio in [31:24]
+const SHPR3: *mut u32 = 0xE000_ED20 as *mut u32; // SysTick [31:24], PendSV [23:16]
+const SHPR1: *mut u32 = 0xE000_ED18 as *mut u32; // UsageFault [23:16], MemManage [7:0]; BusFault keeps its reset priority
+/// MemManage's priority: the emulation's level, below the zero-latency
+/// band and below the tick (the null-page guard's classifier never delays
+/// a native driver's interrupt; a MemManage raised under the kernel's mask
+/// or inside a handler of equal or higher urgency escalates to HardFault).
+/// Written by the protection unit's init and restated by `init()` below.
+pub const MEMMANAGE_PRIO: u32 = 0xF0;
 const SYST_CSR: *mut u32 = 0xE000_E010 as *mut u32;
 const SYST_RVR: *mut u32 = 0xE000_E014 as *mut u32;
 const SYST_CVR: *mut u32 = 0xE000_E018 as *mut u32;
@@ -101,7 +123,7 @@ pub const NAME_BYTES: usize = 16;
 /// bytes are copied at birth and may go away once the spawn returns.
 #[repr(C)]
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
+#[allow(dead_code)] // the pair is read off the artifact by the layout contract's readers
 struct NameRef {
     ptr: *const u8,
     len: usize,
@@ -115,9 +137,9 @@ struct Tcb {
     stack_base: u32,
     stack_top: u32,
     state: State,
-    prio: u8,
+    prio: u8, // numerically lower = more urgent; idle = 0xFF
     wake_tick: u32,
-    tid: i32,
+    tid: i32, // process-unique, monotonic
     entry: Option<extern "C" fn(usize)>,
     arg: usize,
     name: NameRef,
@@ -130,6 +152,7 @@ struct Tcb {
     /// True iff `wake_tick` is armed for this futex wait (an infinite
     /// wait must not join the timer walk).
     wait_deadline: bool,
+
     /// Per-module TLS blocks, kheap-backed, eagerly allocated (null =
     /// module absent or zero-sized). Cleared under the CS before their
     /// blocks are freed at exit, so the teardown is once-only even if
@@ -139,6 +162,7 @@ struct Tcb {
     /// before TLS teardown.
     atexit: [(Option<AtexitFn>, *mut c_void); ATEXIT_SLOTS],
     atexit_n: u8,
+    // ---- appended fields (after `atexit_n`, per the Tcb append rule)
     /// Suspension flag, ORTHOGONAL to `state`: a suspended thread
     /// keeps its state and its waits; it is simply never in the
     /// pickable set (sync_bits's ready arm). Only suspend/resume
@@ -158,15 +182,36 @@ struct Tcb {
     /// The interrupted context's saved-frame sp, held across the
     /// handler run so SVC #1 can rebuild the restore from it.
     act_saved_sp: u32,
+
     /// The 64-bit tick a sleep or a timed wait truly targets (0 = none).
     /// The armed `wake_tick` is this target inside the timer walk's
     /// 32-bit window, or the window's far edge with a re-arm at expiry
     /// -- a deadline past the window is never early.
     wake_far: u64,
-    /// The spawn name's bytes (appended, the Tcb append rule; `name`
-    /// points here), NUL after the kept bytes.
-    #[allow(dead_code)]
+    /// The spawn name's bytes (`name` points here), NUL after the kept bytes.
+    #[allow(dead_code)] // read by the api smoke's probe
     name_buf: [u8; NAME_BYTES],
+    // ---- the fault funnel's append (after `name_buf`, per the Tcb
+    // append rule) ----
+    /// A classified fault awaiting delivery at this thread's next pick:
+    /// the funnel sets it from the MemManage handler, the delivery
+    /// transform consumes it (before any pending activation: the thread
+    /// cannot make progress otherwise).
+    fault_pending: bool,
+    /// True while the context delivered to the handler is a fault context
+    /// (80 bytes: the 72 of `RhuCtx` and the fault's two words), from the
+    /// delivery transform to the final SVC #1 restore: the resume computes
+    /// the context's base from it.
+    act_fault: bool,
+    /// The fault's kind (1 = a null data access) and the access class the
+    /// funnel decoded (1 a read, 2 a write, 0 unknown), held from the
+    /// classification to the final restore for the belt's line.
+    fault_kind: u8,
+    fault_access: u8,
+    /// The faulting data address and the MemManage status bits, the two
+    /// words a delivered fault context carries after the 72.
+    fault_addr: u32,
+    fault_status: u32,
 }
 
 const TCB_INIT: Tcb = Tcb {
@@ -192,6 +237,12 @@ const TCB_INIT: Tcb = Tcb {
     act_saved_sp: 0,
     wake_far: 0,
     name_buf: [0; NAME_BYTES],
+    fault_pending: false,
+    act_fault: false,
+    fault_kind: 0,
+    fault_access: 0,
+    fault_addr: 0,
+    fault_status: 0,
 };
 
 static NEXT_TID: AtomicU32 = AtomicU32::new(1);
@@ -199,6 +250,28 @@ static NEXT_TID: AtomicU32 = AtomicU32::new(1);
 /// THE process-global activation handler (0 = unregistered); written
 /// once by `act_register` under the CS, read at delivery.
 static ACT_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
+/// The fault kinds a hosting layer has armed for delivery
+/// (`rhu_fault_register`): a bitmask, sticky for the process's
+/// life. 0 = nothing armed: a classified fault is the designed death.
+static FAULT_ARMED: AtomicU32 = AtomicU32::new(0);
+
+/// The one fault kind: a data access below the first
+/// page (`RHU_FAULT_NULL`, include/rhu.h).
+pub const FAULT_NULL: u32 = 1;
+/// `RhuCtx.flags` bit 8: the context is a fault context (`RHU_CTX_FAULT`),
+/// its kind in bits 15:12 (`RHU_FAULT_KIND`); the two words after the 72
+/// exist only then.
+pub const CTX_FLAG_FAULT: u32 = 1 << 8;
+pub const CTX_KIND_SHIFT: u32 = 12;
+pub const CTX_KIND_MASK: u32 = 0xF << CTX_KIND_SHIFT;
+/// A delivered fault context: the 72 bytes of `RhuCtx`, then `fault_addr`
+/// and `fault_status` (the C view `rhu_fault_ctx`).
+pub const FAULT_CTX_BYTES: u32 = 80;
+/// The access classes the funnel decodes from the faulting instruction.
+pub const ACCESS_UNKNOWN: u8 = 0;
+pub const ACCESS_READ: u8 = 1;
+pub const ACCESS_WRITE: u8 = 2;
 
 /// Idle's slot, recorded once at `init()` -- the refusal arms resolve
 /// idle by slot, never by name or priority.
@@ -218,6 +291,7 @@ struct Sched {
     futex_mask: u32,
     /// Exited-but-unreaped threads; reap() runs only when nonzero.
     exited_n: u32,
+    // ---- appended fields ----
     /// Retired stacks (base, len), pushed at reap, taken by exact-fit
     /// at spawn -- the pool's recycling story for the repeating-size
     /// case.
@@ -419,16 +493,22 @@ pub struct DebugLayout {
     pub tcb_off_name: u32,
     pub tcb_off_stack_base: u32,
     pub tcb_off_stack_top: u32,
+    // ---- version 2 appends (the thread-local-base door) ----
     pub tcb_off_tls: u32,
     pub tls_slots: u32,
     pub tls_slot_bytes: u32,
 }
 
+// #[used] pins the record past LTO dead-global elimination and the
+// named section (KEEP'd in every board script) pins it past linker
+// section GC: a contract symbol nothing in the image reads is exactly
+// the kind of global both passes delete. The test harness asserts all
+// three contract symbols in the linked artifact.
 #[used]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".rhu_debug")]
 pub static __rhu_debug_layout: DebugLayout = DebugLayout {
-    magic: 0x4448_5552,
+    magic: 0x4448_5552, // "RUHD" little-endian: reads "RHUD" in a byte dump
     version: DEBUG_LAYOUT_VERSION,
     max_threads: MAX_THREADS as u32,
     sched_off_tcbs: offset_of!(Sched, tcbs) as u32,
@@ -500,7 +580,7 @@ pub fn now_ms() -> u32 {
 }
 
 /// Context switches taken so far (see `SWITCHES`).
-#[allow(dead_code)]
+#[allow(dead_code)] // public scheduler API; exercised by the api-smoke flavor
 pub fn switch_count() -> u32 {
     SWITCHES.load(Ordering::Relaxed)
 }
@@ -558,6 +638,9 @@ pub fn try_spawn(
     prio: u8,
     stack_bytes: usize,
 ) -> Result<(usize, i32), SpawnErr> {
+    // A kernel-internal spawn below the floor, or of a size whose
+    // round-up would wrap, is a kernel bug (the C door refuses both
+    // before it calls here).
     assert!(
         (THREAD_STACK_MIN..=usize::MAX - 7).contains(&stack_bytes),
         "spawn: a stack of {} bytes is below the floor or wraps the rounding",
@@ -565,14 +648,22 @@ pub fn try_spawn(
     );
     let stack_bytes = (stack_bytes + 7) & !7;
     let r = with_cs(|| unsafe {
+        // The thread-id space is the positive i32 range: the id the
+        // next spawn would take is checked before anything is carved,
+        // so a spawn that would hand out a non-positive id is refused
+        // with nothing committed, and the counter never wraps.
         if NEXT_TID.load(Ordering::Relaxed) > i32::MAX as u32 {
             return Err(SpawnErr::TidExhausted);
         }
+        // Inside the CS with the slot commit: a module registered on
+        // another thread can never slip between the demand read and
+        // the birth, so the eager invariant cannot tear.
         let (demands, nmod) = registry::tls_demands();
         let s = sched();
         let Some(slot) = (0..MAX_THREADS).find(|&i| s.tcbs[i].state == State::Free) else {
             return Err(SpawnErr::NoSlot);
         };
+        // Exact-fit reuse of a retired stack, else bump the pool.
         let mut from_retired = false;
         let base = if let Some(ri) =
             (0..s.retired_n as usize).find(|&i| s.retired[i].1 as usize == stack_bytes)
@@ -583,6 +674,8 @@ pub fn try_spawn(
             from_retired = true;
             b as usize
         } else {
+            // The subtraction form: the sum would wrap for a size near
+            // the address space, the difference cannot.
             if stack_bytes > board::STACK_POOL_BYTES - s.pool_used {
                 return Err(SpawnErr::PoolExhausted);
             }
@@ -590,9 +683,13 @@ pub fn try_spawn(
             s.pool_used += stack_bytes;
             b
         };
-        let top = base + stack_bytes;
+        let top = base + stack_bytes; // 8-aligned: pool aligned, sizes rounded
+        // Stacks are zeroed for determinism, reused ones included
+        // (.kstacks is NOLOAD and dead stacks keep their garbage).
         ptr::write_bytes(base as *mut u8, 0, stack_bytes);
 
+        // Eager TLS for every registered module; failure unwinds
+        // wholesale -- the stack goes back where it came from.
         let mut tls = [ptr::null_mut::<u8>(); registry::MAX_MODULES];
         for m in 0..nmod {
             let (bytes, init) = demands[m];
@@ -622,22 +719,28 @@ pub fn try_spawn(
             tls[m] = block;
         }
 
+        // Hardware exception frame (basic, 8 words) at the very top...
         let hw = (top - 32) as *mut u32;
-        hw.add(0).write(slot as u32);
+        hw.add(0).write(slot as u32); // r0 = TCB slot for the trampoline
         hw.add(1).write(0);
         hw.add(2).write(0);
         hw.add(3).write(0);
-        hw.add(4).write(0);
-        hw.add(5).write(0);
+        hw.add(4).write(0); // r12
+        hw.add(5).write(0); // lr: the trampoline never returns
         let tramp: extern "C" fn(u32) -> ! = thread_tramp;
-        hw.add(6).write(tramp as usize as u32);
-        hw.add(7).write(0x0100_0000);
+        hw.add(6).write(tramp as usize as u32 & !1); // pc: bit 0 clear (the Thumb state is the T bit of xPSR below; a stacked pc with bit 0 set is unpredictable on the exception return)
+        hw.add(7).write(0x0100_0000); // xPSR: Thumb bit
+        // ...software frame below it: r4-r11 + EXC_RETURN (thread mode,
+        // PSP, basic frame).
         let sw = (top - 32 - 36) as *mut u32;
         for i in 0..8 {
             sw.add(i).write(0);
         }
         sw.add(8).write(0xFFFF_FFFD);
 
+        // The name copied into the control block: at most NAME_BYTES - 1
+        // bytes, cut at a character boundary, NUL after; the name
+        // pair points into the block's own buffer.
         let mut name_buf = [0u8; NAME_BYTES];
         let name_len = name_cut(name);
         name_buf[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
@@ -666,12 +769,20 @@ pub fn try_spawn(
             act_saved_sp: 0,
             wake_far: 0,
             name_buf,
+            fault_pending: false,
+            act_fault: false,
+            fault_kind: 0,
+            fault_access: 0,
+            fault_addr: 0,
+            fault_status: 0,
         };
         sync_bits(s, slot);
         Ok((slot, tid, s.started && prio < s.tcbs[s.current].prio))
     });
     match r {
         Ok((slot, tid, urgent)) => {
+            // A newly-runnable more-urgent thread must not wait for a
+            // tick.
             if urgent {
                 pend_switch();
             }
@@ -749,7 +860,7 @@ pub fn exit_current() -> ! {
         let s = sched();
         let cur = s.current;
         set_state(s, cur, State::Exited);
-        s.exited_n += 1;
+        s.exited_n += 1; // arms the reap in the very next switch
     });
     pend_switch();
     loop {
@@ -780,7 +891,7 @@ unsafe fn reap(s: &mut Sched) {
     }
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // public scheduler API; exercised by the sched-smoke flavor
 pub fn yield_now() {
     pend_switch();
 }
@@ -811,6 +922,7 @@ pub fn sleep_ms(ms: u32) {
     }
 }
 
+// ---------------- the hosting primitives ----------------
 
 /// Wait forever (`rhu.h` RHU_DEADLINE_NONE). Deadlines are absolute
 /// nanoseconds on the `now_ns` clock.
@@ -974,6 +1086,14 @@ pub fn futex_wait(addr: *const u32, expected: u32, deadline_ns: u64) -> i32 {
         Armed::Slept => {}
     }
     pend_switch();
+    // Resumed -- the three-exit discriminant, recorded by the one
+    // transitioner under the CS: a waker cleared `wait_addr` (woken);
+    // the timer walk left it set (deadline fired --
+    // `tick_for_deadline` guarantees the deadline has truly passed,
+    // so no recheck loop rides here); the activation break left it
+    // set AND latched `act_interrupted`. Woken wins over a raced
+    // latch (the wait WAS satisfied and the handler already ran); the
+    // latch is read-and-cleared here, its only reader.
     with_cs(|| unsafe {
         let s = sched();
         let cur = s.current;
@@ -1005,6 +1125,9 @@ pub fn futex_wake(addr: *const u32, n: u32) -> i32 {
         let split = (1u32 << (s.current + 1)).wrapping_sub(1);
         let mut count = 0u32;
         let mut urgent = false;
+        // Each pick: the most urgent waiter on the word, ties in rotation
+        // order (the slots after the caller's, then the slots before it);
+        // at most MAX_THREADS slots looked at per pick.
         while count < n {
             let mut best: Option<usize> = None;
             for part in [s.futex_mask & !split, s.futex_mask & split] {
@@ -1022,9 +1145,11 @@ pub fn futex_wake(addr: *const u32, n: u32) -> i32 {
             let Some(i) = best else {
                 break;
             };
-            s.tcbs[i].wait_addr = 0;
+            s.tcbs[i].wait_addr = 0; // woken, not timed out
             s.tcbs[i].wait_deadline = false;
             set_state(s, i, State::Ready);
+            // A suspended wakee counts as readied but cannot run -- no
+            // switch is owed for it.
             if !s.tcbs[i].suspended && s.tcbs[i].prio <= s.tcbs[s.current].prio {
                 urgent = true;
             }
@@ -1038,6 +1163,7 @@ pub fn futex_wake(addr: *const u32, n: u32) -> i32 {
     count as i32
 }
 
+// ---------------- the thread services ----------------
 
 /// Registration-side eager TLS: give every LIVE thread a block for the
 /// module being registered. All-or-nothing: a refused block unwinds
@@ -1132,7 +1258,30 @@ pub fn stack_bounds_by_tid(tid: i32) -> Option<(u32, u32)> {
     })
 }
 
+// ---------------- the suspension + activation seam ----------------
 
+// Frame types and the lazy floating-point discipline. A thread's
+// exception frames are basic until its first floating-point instruction
+// and extended from then on (CONTROL.FPCA stays set for its life). The
+// boot thread runs the kernel's floating-point selftest before the
+// scheduler starts, so kmain -- tid 2 once idle holds tid 1; the thread
+// that runs a payload's entry -- carries extended frames in every image,
+// while a spawned thread starts basic and stays so until it touches the
+// FPU (the hosted runtime's own first thread, 16 KB, stays basic). With
+// lazy stacking on, an exception entered from an extended context
+// reserves the frame's floating-point area and defers the s0-s15 save
+// until the next floating-point instruction executed by anyone. A
+// handler that returns through a frame OTHER than its own -- the
+// activation resume, which pops the target's original frames -- must
+// therefore complete its own frame's pending save first: otherwise a
+// basic-frame target resumes with a save still aimed at the dead space
+// below its stack pointer, and the next floating-point instruction
+// anywhere (the context switch's own restore of an extended thread)
+// writes 68 bytes of register images there. The context switch keeps
+// this discipline through its floating-point store; the resume arm
+// keeps it with one floating-point instruction before the pop; the
+// switch-entry witness (`LazyFpWitness`) counts every violation a
+// basic-frame entry can observe.
 
 /// The C-ABI `rhu_ctx` (include/rhu.h) -- layout mirrored exactly.
 /// sp is the post-pop stack pointer, a SNAPSHOT: refused on write by
@@ -1350,6 +1499,127 @@ pub fn act_send(tid: i32) -> i32 {
     r
 }
 
+// ---------------- the fault funnel's seam ----------------
+
+/// Arm the delivery of the fault kinds named by bits (`rhu_fault_register`):
+/// sticky for the process's life, a second call adds bits; 0, or
+/// RHU_EINVAL for a bit outside the known kinds. Until a
+/// hosting layer calls it, a classified fault is the designed death.
+pub fn fault_register(kinds: u32) -> i32 {
+    if kinds & !FAULT_NULL != 0 {
+        return ERR_INVAL;
+    }
+    FAULT_ARMED.fetch_or(kinds, Ordering::AcqRel);
+    0
+}
+
+/// The running thread as the funnel sees it at a fault taken from thread
+/// mode on the process stack: its identity and its carve. None before the
+/// scheduler starts (the boot thread, on MSP).
+pub struct FaultThread {
+    pub tid: i32,
+    pub name: [u8; NAME_BYTES],
+    pub name_len: usize,
+    pub base: u32,
+    pub top: u32,
+}
+
+/// Read in the fault handler (MemManage, or the HardFault it escalated
+/// to). The tick may preempt a MemManage but never moves `current` or the
+/// fields read here, and PendSV cannot preempt it; no critical section is
+/// taken, because the fault may have escalated from inside one.
+pub fn fault_thread() -> Option<FaultThread> {
+    let s = unsafe { sched() };
+    if !s.started {
+        return None;
+    }
+    let i = s.current;
+    let t = &s.tcbs[i];
+    Some(FaultThread { tid: t.tid, name: t.name_buf, name_len: t.name.len, base: t.stack_base, top: t.stack_top })
+}
+
+/// Why a classified null access was not queued: each the reason the
+/// funnel's line names before the designed death.
+pub enum FaultRefusal {
+    /// Thread mode on the main stack: the kernel's boot thread.
+    NotStarted,
+    /// Handler mode: the kernel's own code.
+    HandlerMode,
+    Idle,
+    /// Inside the activation handler: a fault in the runtime's own
+    /// handler is never re-transformed.
+    InActHandler,
+    /// BASEPRI set: inside the kernel's critical section (a belt; such a
+    /// fault escalates to HardFault before it can arrive here).
+    Masked,
+    /// No hosting layer armed the kind.
+    NotArmed,
+    /// No activation handler registered to deliver to.
+    NoHandler,
+    /// Fewer bytes above the floor than the delivery needs (the count).
+    StackRoom(u32),
+}
+
+/// Queue a null data access for delivery at the faulting thread's next
+/// pick: called from the MemManage
+/// handler with the trampoline's frame pointer and EXC_RETURN.
+/// Deliverable when ALL hold: thread mode on the process stack; the
+/// scheduler started; the current slot a thread other than idle; not
+/// inside the activation handler; BASEPRI clear; the activation handler
+/// registered AND the kind armed; the frame leaving the delivery's bytes
+/// above the floor (the switch's own save, the 148 of the delivery, the
+/// alignment and the guard's slack). Then the slot's fault fields are
+/// written, `fault_pending` set and the switch pended: the exception
+/// return tail-chains into PendSV before the thread executes another
+/// instruction, and the pick delivers.
+pub fn fault_queue(kind: u32, access: u8, addr: u32, status: u32, exc_return: u32, frame: u32) -> Result<(), FaultRefusal> {
+    if exc_return & 0x8 == 0 {
+        return Err(FaultRefusal::HandlerMode);
+    }
+    if exc_return & 0x4 == 0 {
+        return Err(FaultRefusal::NotStarted);
+    }
+    let basepri: u32;
+    unsafe { core::arch::asm!("mrs {}, BASEPRI", out(reg) basepri, options(nomem, nostack)) };
+    if basepri != 0 {
+        return Err(FaultRefusal::Masked);
+    }
+    with_cs(|| unsafe {
+        let s = sched();
+        if !s.started {
+            return Err(FaultRefusal::NotStarted);
+        }
+        let i = s.current;
+        if i as u32 == IDLE_SLOT.load(Ordering::Relaxed) {
+            return Err(FaultRefusal::Idle);
+        }
+        if s.tcbs[i].act_in_handler {
+            return Err(FaultRefusal::InActHandler);
+        }
+        if FAULT_ARMED.load(Ordering::Acquire) & kind == 0 {
+            return Err(FaultRefusal::NotArmed);
+        }
+        if ACT_HANDLER.load(Ordering::Acquire) == 0 {
+            return Err(FaultRefusal::NoHandler);
+        }
+        let ext = exc_return & 0x10 == 0;
+        let sw = 36 + if ext { 64 } else { 0 };
+        let need = sw + FAULT_CTX_BYTES + 68 + 8 + crate::mpu::GUARD_SLACK;
+        let room = frame.wrapping_sub(s.tcbs[i].stack_base);
+        if frame < s.tcbs[i].stack_base || room < need {
+            return Err(FaultRefusal::StackRoom(room));
+        }
+        s.tcbs[i].fault_kind = kind as u8;
+        s.tcbs[i].fault_access = access;
+        s.tcbs[i].fault_addr = addr;
+        s.tcbs[i].fault_status = status;
+        s.tcbs[i].fault_pending = true;
+        Ok(())
+    })?;
+    pend_switch();
+    Ok(())
+}
+
 /// The activation trampoline: entered by exception return on the
 /// TARGET's stack with &ctx in r0; calls the handler, then SVC #1
 /// hands the (possibly edited) ctx back to the kernel for the
@@ -1369,20 +1639,20 @@ extern "C" fn act_tramp(ctx: *mut RhuCtx) -> ! {
 /// rides the ORIGINAL frames untouched.
 unsafe fn build_tramp_frames(ctx_base: u32) -> u32 { unsafe {
     let fhw = (ctx_base - 32) as *mut u32;
-    fhw.add(0).write(ctx_base);
+    fhw.add(0).write(ctx_base); // r0 = &ctx
     fhw.add(1).write(0);
     fhw.add(2).write(0);
     fhw.add(3).write(0);
-    fhw.add(4).write(0);
-    fhw.add(5).write(0);
+    fhw.add(4).write(0); // r12
+    fhw.add(5).write(0); // lr: the trampoline never returns
     fhw.add(6).write(act_tramp as *const () as usize as u32 & !1);
-    fhw.add(7).write(0x0100_0000);
+    fhw.add(7).write(0x0100_0000); // xPSR: Thumb
     let new_sp = ctx_base - 68;
     let fsw = new_sp as *mut u32;
     for k in 0..8 {
         fsw.add(k).write(0);
     }
-    fsw.add(8).write(0xFFFF_FFFD);
+    fsw.add(8).write(0xFFFF_FFFD); // thread mode, PSP, basic frame
     new_sp
 }}
 
@@ -1396,8 +1666,11 @@ unsafe fn deliver_activation(s: &mut Sched, i: usize) { unsafe {
     let old_sp = s.tcbs[i].sp;
     let ctx_base = (old_sp - 72) & !7;
     let new_sp = ctx_base - 68;
+    // The floor the delivery must clear: the carve's base, plus the guard
+    // block's worst placement on the rows that program one (a write into
+    // the block from the switch would be the kernel's own MemManage).
     assert!(
-        new_sp >= s.tcbs[i].stack_base,
+        new_sp >= s.tcbs[i].stack_base + crate::mpu::GUARD_SLACK,
         "activation: tid {} has {} bytes of stack below its saved frame, a delivery needs 140",
         s.tcbs[i].tid,
         old_sp.wrapping_sub(s.tcbs[i].stack_base)
@@ -1407,6 +1680,40 @@ unsafe fn deliver_activation(s: &mut Sched, i: usize) { unsafe {
     s.tcbs[i].act_saved_sp = old_sp;
     s.tcbs[i].act_in_handler = true;
     s.tcbs[i].act_pending = false;
+    s.tcbs[i].sp = built;
+}}
+
+/// The fault delivery transform, the activation's twin on the
+/// PICKED thread: the ctx materialized as a FAULT ctx -- the 72 bytes of
+/// `RhuCtx` with flags bit 8 set and the kind in bits 15:12, then the
+/// faulting address and the status word -- below the saved frames, and
+/// the same frame pair entering the trampoline below it. Cost: 80 + 68 =
+/// 148 bytes, asserted against the floor as the activation's is (the
+/// funnel checked the room before it queued the fault; the thread has not
+/// run since). The resume door is the activation's: `apply_ctx` writes
+/// the edited r0-r12, lr and pc back into the original frames -- the
+/// shape the runtime's redirect to its throw helper needs (pc, r0 and r1
+/// edited; sp the fault site's).
+unsafe fn deliver_fault(s: &mut Sched, i: usize) { unsafe {
+    let old_sp = s.tcbs[i].sp;
+    let ctx_base = (old_sp - FAULT_CTX_BYTES) & !7;
+    let new_sp = ctx_base - 68;
+    assert!(
+        new_sp >= s.tcbs[i].stack_base + crate::mpu::GUARD_SLACK,
+        "fault delivery: tid {} has {} bytes of stack below its saved frame, a delivery needs 148",
+        s.tcbs[i].tid,
+        old_sp.wrapping_sub(s.tcbs[i].stack_base)
+    );
+    let mut c = fill_ctx(old_sp);
+    c.flags |= CTX_FLAG_FAULT | ((s.tcbs[i].fault_kind as u32) << CTX_KIND_SHIFT);
+    (ctx_base as *mut RhuCtx).write(c);
+    ((ctx_base + 72) as *mut u32).write(s.tcbs[i].fault_addr);
+    ((ctx_base + 76) as *mut u32).write(s.tcbs[i].fault_status);
+    let built = build_tramp_frames(ctx_base);
+    s.tcbs[i].act_saved_sp = old_sp;
+    s.tcbs[i].act_in_handler = true;
+    s.tcbs[i].act_fault = true;
+    s.tcbs[i].fault_pending = false;
     s.tcbs[i].sp = built;
 }}
 
@@ -1424,19 +1731,49 @@ extern "C" fn __rhu_act_resume(_psp: u32) -> u32 {
         let i = s.current;
         assert!(s.tcbs[i].act_in_handler, "activation: stray SVC #1");
         let saved = s.tcbs[i].act_saved_sp;
-        let ctx_base = (saved - 72) & !7;
+        let fault = s.tcbs[i].act_fault;
+        let ctx_base = (saved - if fault { FAULT_CTX_BYTES } else { 72 }) & !7;
+        let ctx = &mut *(ctx_base as *mut RhuCtx);
+        // The belt under the hosting layer's death rule: a FAULT ctx handed back with its pc UNCHANGED
+        // from the faulting instruction is the runtime's decline -- the
+        // page cannot become readable, so a resume would only fault again
+        // and be delivered again. The program ends here, through the
+        // terminal path, with the null line: no loop by construction.
+        if fault && ctx.flags & CTX_FLAG_FAULT != 0 {
+            let sw = saved as *const u32;
+            let ext = sw.add(8).read() & 0x10 == 0;
+            let fault_pc = ((saved + 36 + if ext { 64 } else { 0 }) as *const u32).add(6).read();
+            if ctx.pc & !1 == fault_pc & !1 {
+                let t = &s.tcbs[i];
+                crate::funnel::fault_declined(t.tid, name_of(t), t.fault_access, t.fault_addr, fault_pc);
+            }
+        }
         if s.tcbs[i].act_pending {
             s.tcbs[i].act_pending = false;
+            // A send that landed while the fault handler ran: re-entered
+            // once more on the EDITED context, as a plain activation (the
+            // fault's flag cleared so the costume takes its ordinary
+            // branch; the ctx stays where it is, 80 bytes).
+            if fault {
+                ctx.flags &= !(CTX_FLAG_FAULT | CTX_KIND_MASK);
+            }
             let new_sp = build_tramp_frames(ctx_base);
             s.tcbs[i].sp = new_sp;
             new_sp
         } else {
-            apply_ctx(saved, &*(ctx_base as *const RhuCtx));
+            apply_ctx(saved, ctx);
             s.tcbs[i].act_in_handler = false;
+            s.tcbs[i].act_fault = false;
             s.tcbs[i].sp = saved;
             saved
         }
     })
+}
+
+/// A control block's name as a string slice (the kept bytes are a
+/// character-boundary cut of the spawn name).
+fn name_of(t: &Tcb) -> &str {
+    core::str::from_utf8(&t.name_buf[..t.name.len]).unwrap_or("?")
 }
 
 /// Idle's tid, for the api smoke's refusal matrix ONLY (see
@@ -1583,8 +1920,29 @@ extern "C" fn __rhu_switch(sp: u32) -> u32 {
         let next = pick(s);
         s.current = next;
         if s.exited_n > 0 {
-            reap(s);
+            reap(s); // off the hot path: exits are rare, ticks are not
         }
+        // A classified fault on the PICKED thread first: the thread
+        // cannot make progress until the runtime's handler has seen it,
+        // so it goes before any activation; the same guards as the
+        // activation's (the funnel queues one only from a live thread
+        // outside a handler, so the arms are belts here).
+        let t = &s.tcbs[next];
+        if t.fault_pending
+            && !t.act_in_handler
+            && !t.suspended
+            && next as u32 != IDLE_SLOT.load(Ordering::Relaxed)
+        {
+            deliver_fault(s, next);
+        }
+        // Activation delivery on the PICKED thread -- including when
+        // pick returns the outgoing thread unchanged (the self-send
+        // path needs no "actual" switch). A preempted handler is
+        // never re-transformed (in-handler arm); idle and suspended
+        // are unreachable here by policy and pickability, guarded
+        // anyway. A fault delivered just above leaves its activation
+        // pending: SVC #1's re-delivery check takes it after the fault
+        // handler returns.
         let t = &s.tcbs[next];
         if t.act_pending
             && !t.act_in_handler
@@ -1593,8 +1951,16 @@ extern "C" fn __rhu_switch(sp: u32) -> u32 {
         {
             deliver_activation(s, next);
         }
+        // The picked thread's stack floor into the thread limit register
+        // (the v8-M rows): checked on every push and stacking in thread
+        // mode from the exception return on. Written in handler mode; the
+        // handler's own stack is not the one it bounds.
         #[cfg(armv8m)]
         core::arch::asm!("msr PSPLIM, {}", in(reg) s.tcbs[next].stack_base, options(nomem, nostack));
+        // The picked thread's guard block into the protection unit (the
+        // v7-M rows): the 32 bytes at its floor no-access from the
+        // exception return on; a no-op on the rows with the limit register.
+        crate::mpu::guard_set(s.tcbs[next].stack_base);
         s.tcbs[next].sp
     })
 }
@@ -1604,8 +1970,12 @@ extern "C" fn __rhu_first_sp() -> u32 {
     with_cs(|| unsafe {
         let s = sched();
         s.started = true;
+        // The first thread's floor into the thread limit register (the
+        // v8-M rows), as the switch does for every pick after this one.
         #[cfg(armv8m)]
         core::arch::asm!("msr PSPLIM, {}", in(reg) s.tcbs[s.current].stack_base, options(nomem, nostack));
+        // And its guard block into the protection unit (the v7-M rows).
+        crate::mpu::guard_set(s.tcbs[s.current].stack_base);
         s.tcbs[s.current].sp
     })
 }
@@ -1640,6 +2010,8 @@ fn ready_peer_at_or_above(s: &Sched) -> bool {
 /// below the zero-latency band; kernel CS holders delay it wholesale,
 /// so scheduler state is never seen torn.
 pub unsafe extern "C" fn systick_vector() { unsafe {
+    // The lost-tick witness first, on a counting row: the cycle count
+    // since the previous entry against the period.
     if board::CYCLE_COUNTER {
         let w = &mut *core::ptr::addr_of_mut!(TICK_WITNESS);
         if w.source == WITNESS_DWT {
@@ -1658,8 +2030,17 @@ pub unsafe extern "C" fn systick_vector() { unsafe {
             w.entries = w.entries.wrapping_add(1);
         }
     }
+    // The api flavor's band-interrupt control, armed by its check: one pend
+    // per tick while armed (a test image only).
     #[cfg(feature = "api-smoke")]
     crate::api_smoke::fp_band_tick();
+    // The background mode's witness (the api flavor's background image): a tick served
+    // while the arena's idle step holds a piece in flight is a tick served
+    // while the step writes outside the critical section.
+    #[cfg(all(feature = "api-smoke", rhu_ram_init_background))]
+    crate::arena::ram_init_tick_sample();
+    // The calendar's push mailbox: one load of its magic and one of its
+    // sequence number on the common path.
     crate::calendar::tick_poll();
     let now = TICKS.fetch_add(1, Ordering::Release).wrapping_add(1);
     if now == 0 {
@@ -1675,12 +2056,17 @@ pub unsafe extern "C" fn systick_vector() { unsafe {
         let i = m.trailing_zeros() as usize;
         m &= m - 1;
         if wake::expired(now, s.tcbs[i].wake_tick) {
+            // The armed window expired, but a far target still lies
+            // beyond it: re-arm at the window's edge and keep sleeping --
+            // the wake is never early, however far out the deadline.
             let now64 = ((TICKS_HI.load(Ordering::Relaxed) as u64) << 32) | now as u64;
             if s.tcbs[i].wake_far > now64 {
                 s.tcbs[i].wake_tick = wake::arm(now64, s.tcbs[i].wake_far).0;
                 continue;
             }
             set_state(s, i, State::Ready);
+            // A suspended sleeper's deadline fires (it keeps its
+            // timers) but wakes nothing pickable -- no switch owed.
             if !s.tcbs[i].suspended {
                 fired = true;
             }
@@ -1693,6 +2079,14 @@ pub unsafe extern "C" fn systick_vector() { unsafe {
 
 extern "C" fn idle_entry(_: usize) {
     loop {
+        // The background init mode: the idle thread zeroes the
+        // external window ahead of the hand-outs, one bounded step per
+        // turn with the critical section released between steps, and
+        // sleeps the core only once every lazy window is clean.
+        #[cfg(rhu_ram_init_background)]
+        if crate::arena::ram_init_step() {
+            continue;
+        }
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
 }
@@ -1700,15 +2094,29 @@ extern "C" fn idle_entry(_: usize) {
 /// Configure exception priorities + SysTick and create the idle thread.
 pub fn init() {
     unsafe {
-        write_volatile(SHPR1, 0xF0 << 16);
+        // The double-precision emulation's host at the floor, the switch's
+        // level: every hardware interrupt preempts an emulated form, and a
+        // form inside a critical section or a handler escalates to the hard
+        // fault instead of running there. MemManage at the same level (the
+        // null-page guard's classifier; the protection unit's init
+        // wrote it first, restated here so the word is one statement).
+        write_volatile(SHPR1, (0xF0 << 16) | MEMMANAGE_PRIO);
         write_volatile(SHPR2, 0xF0 << 24);
         write_volatile(SHPR3, (0x80 << 24) | (0xF0 << 16));
         write_volatile(SYST_RVR, board::SYSCLK_HZ / board::TICK_HZ - 1);
         write_volatile(SYST_CVR, 0);
-        write_volatile(SYST_CSR, 0b111);
+        write_volatile(SYST_CSR, 0b111); // CLKSOURCE | TICKINT | ENABLE
+        // The handler stack's floor into its limit register (the v8-M
+        // rows): the boot-stack reserve's low edge, where the arena's
+        // window ends -- the reserve's size below the handler stack's top.
         #[cfg(armv8m)]
         core::arch::asm!("msr MSPLIM, {}", in(reg) board::arena_window().1 as u32, options(nomem, nostack));
     }
+    // The lost-tick witness's counter, on a row that carries one: trace
+    // enabled, the unit unlocked where a core locks it, the counter
+    // zeroed and started, then VERIFIED to advance across a few reads
+    // before it is trusted -- a locked or absent counter on a silicon
+    // row is a finding the census line states, never a silent zero.
     if board::CYCLE_COUNTER {
         unsafe {
             write_volatile(DEMCR, read_volatile(DEMCR) | DEMCR_TRCENA);
@@ -1803,6 +2211,14 @@ SvcHandler:
     .type PendSvHandler, %function
     .thumb_func
 PendSvHandler:
+    /* Clear the local exclusive monitor at every context switch, so
+       an exclusive pair the outgoing thread left open fails its strex when
+       the thread resumes and re-reads (the arena's background zeroing,
+       arena.rs: the idle step abandons a piece a hand-out took over while
+       the step was out). The architecture leaves the monitor's clearing
+       on exception entry and return to the implementation; this is the
+       kernel's stated instruction, on both cores. */
+    clrex
     /* The switch-entry witness (LazyFpWitness): an entry whose own frame
        is basic -- the outgoing thread holds no floating-point context --
        must find no lazy state pending (FPCCR.LSPACT clear); one that

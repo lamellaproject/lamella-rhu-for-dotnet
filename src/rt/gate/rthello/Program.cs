@@ -1,4 +1,5 @@
 // The smallest hosted program: its markers in order, the verdict line last.
+
 using System;
 
 namespace Rhu.Hosted;

@@ -5,6 +5,7 @@ mod gate;
 mod gates;
 mod image;
 mod objfile;
+mod release;
 mod results;
 mod selfcheck;
 mod sha256;
@@ -14,7 +15,7 @@ mod tools;
 use std::process::exit;
 
 fn usage() -> ! {
-    println!("usage: rhu-gate <base | sched | payload | api | gc | shim | rt-m7 | rt-m33 | host | chain | selfcheck> [selfcheck | rederive | sdk-parity | attrs <pre> <donor> <out>]");
+    println!("usage: rhu-gate <base | sched | payload | api | gc | shim | rt-m7 | rt-m33 | host | chain | selfcheck> [selfcheck | rederive | sdk-parity | attrs <pre> <donor> <out>] | rhu-gate release <manifest | pack <out-dir> | fixture-tar <file>>");
     exit(2);
 }
 
@@ -56,6 +57,9 @@ fn main() {
         (Some("rt"), Some("attrs"), _) => gates::rt::attrs(&repo, &args[2..]),
         (Some("selfcheck"), None, 1) => selfcheck::run(&repo),
         (Some("chain"), None, 1) => chain::run(&repo),
+        (Some("release"), Some("manifest"), 2) => release::manifest(&repo),
+        (Some("release"), Some("pack"), 3) => release::pack(&repo, &args[2]),
+        (Some("release"), Some("fixture-tar"), 3) => release::fixture_tar(&args[2]),
         _ => usage(),
     }
 }

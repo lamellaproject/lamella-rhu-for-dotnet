@@ -6,8 +6,8 @@
  * machine-proves that the route by which mgc reaches the EE
  * (statically linked flat symbols) resolves for the WHOLE surface --
  * name mangling included -- before any collector code depends on it.
- * Never linked into images; the gate compiles it, nm-diffs it, and
- * throws it away.
+ * Never linked into an image: the collector gate compiles it, compares
+ * its symbol table, and discards the object.
  */
 
 #include "mgc_env.h"

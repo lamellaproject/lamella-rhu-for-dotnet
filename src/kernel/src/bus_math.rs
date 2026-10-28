@@ -4,7 +4,7 @@
 //! refused, the I2C timing word, the SPI divisor ladder and the wire-wait
 //! budget in ticks. No hardware access and no state, covered by the host tests; the drivers cite the manuals for the
 //! numbers here.
-#![allow(dead_code)]
+#![allow(dead_code)] // a row without a bus, and the host tier, compile the module unused in part
 
 /// What a pad does for its bus. A board's facts state it per pad, and the
 /// silicon backend derives the pad's electrical setup from it: the two I2C
@@ -33,7 +33,8 @@ pub struct Pad {
 /// block number (I2C1 is bus 1), the name a program gives the doors, as a
 /// Linux device node is named -- the block's base, its clock enable (a
 /// register and a bit), its kernel-clock selection (a register, a shift and
-/// the value that selects the fixed 16 MHz source), the block's kernel
+/// the value that selects the fixed source: 16 MHz on the F7 and the U5,
+/// the 64 MHz internal kernel clock on the H7), the block's kernel
 /// clock in Hz, and the two pads with their alternate function (an empty
 /// list on a row whose model has no pins). The table position is the
 /// enumeration index the count and the bus doors walk.
@@ -201,11 +202,17 @@ pub fn i2c_wire_bytes(msgs: &[I2cMsg]) -> u32 {
 
 /// The I2C timing word for a rate at a kernel clock: the manuals' own
 /// example row for standard mode at 16 MHz (prescaler 3, the data and
-/// clock setup fields 2 and 4, the high and low counts 0x0F and 0x13);
-/// any other pair is not served in this generation.
+/// clock setup fields 2 and 4, the high and low counts 0x0F and 0x13), and
+/// the same row at the STM32H7's 64 MHz internal kernel clock (RM0399's
+/// Table 409 is the 16 MHz row; its formula tPRESC = (PRESC + 1) x tI2CCLK
+/// makes the prescaler 15 the same 250 ns tick at 64 MHz, so the four other
+/// fields and the bus timing are the 16 MHz row's -- the register reading of the
+/// power-management chip); any other pair is not served.
 pub const fn i2c_timing(kernel_hz: u32, rate_hz: u32) -> Option<u32> {
     if kernel_hz == 16_000_000 && rate_hz == 100_000 {
         Some(0x3042_0F13)
+    } else if kernel_hz == 64_000_000 && rate_hz == 100_000 {
+        Some(0xF042_0F13)
     } else {
         None
     }

@@ -1,11 +1,38 @@
 //! Feature `payload`: host a minirt no-runtime payload (a frozen ILC
 //! object linked in by the external payload link, `payload-<board>.x`).
+//!
+//! The import surface below is exactly the payload objects' undefined
+//! symbol table: console write, the conservative GC's five memory
+//! windows, two register-level GC helpers, the stack-guard cookie, an
+//! unwind personality stub, and the three 64-bit shift helpers (the
+//! cookie and the shift helpers are weak: a hosted runtime that defines
+//! them displaces the kernel's).
+//! memset/memcpy/memmove resolve from the staticlib's bundled
+//! compiler-builtins. Payload bytes go through the kernel console's
+//! `\n` -> `\r\n` wire path unprefixed, so the payload stream filters
+//! and byte-diffs mechanically (console grammar).
+//!
+//! The entry seam (`rhu_payload_entry`, the one hosting-API member the
+//! kernel CALLS rather than serves): `run` brings the platform up,
+//! settles the contract-generation handshake, and hands the kmain
+//! thread to exactly one function that returns the program's exit
+//! code. The kernel provides that function as a WEAK default -- the
+//! constructor-array placement check and walks, the module list,
+//! managed Main. A payload that links a strong `rhu_payload_entry`
+//! owns the whole order instead, and the default never runs. The thread
+//! runs the entry at the hosted flat priority -- inside the band every
+//! thread the payload starts is clamped into, level with them, so a
+//! start waited for by yield alone completes -- and takes the kernel's
+//! own urgency back when the entry returns.
 
 use core::hint::black_box;
 use core::ptr::{addr_of, addr_of_mut, read_volatile};
 
 use crate::abi_window::{self, Verdict};
 use crate::{api, console, sched, semihost};
+
+#[cfg(all(feature = "test-payload-cycles", not(rhu_qspi_window)))]
+compile_error!("test-payload-cycles is a measurement posture of board-st-stm32f769i-disco -- select that board");
 
 /// GC arena, 96 KB. The hosted GC treats [arena_base, arena_base +
 /// arena_bytes) as its whole heap; the golden transcripts' heap-size
@@ -28,6 +55,7 @@ static mut ARENA: Arena = Arena([0; ARENA_BYTES]);
 #[unsafe(link_section = ".bss.rhu_payload_startbits")]
 static mut STARTBITS: [u8; ARENA_BYTES / 64] = [0; ARENA_BYTES / 64];
 
+// ---- console ----
 
 /// Write a NUL-terminated byte string to the console, unprefixed,
 /// under the console lock (payload lines must not tear against kernel
@@ -40,10 +68,15 @@ extern "C" fn sh_write0(p: *const u8) {
             n += 1;
         }
         let bytes = core::slice::from_raw_parts(p, n);
-        console::locked(|_| console::write_bytes(bytes));
+        #[cfg(all(feature = "test-payload-cycles", rhu_qspi_window))]
+        let t0 = console::door_cycles_now();
+        console::locked(console::Stream::Console, |_| console::write_bytes(console::Stream::Console, bytes));
+        #[cfg(all(feature = "test-payload-cycles", rhu_qspi_window))]
+        console::door_cycles_add(t0);
     }
 }
 
+// ---- conservative-GC memory windows ----
 
 #[unsafe(no_mangle)]
 extern "C" fn arena_base() -> *mut u8 {
@@ -111,7 +144,17 @@ gc_current_sp:
 "#
 );
 
+// ---- link-closure statics and stubs ----
 
+// The stack-guard cookie and the three 64-bit shift helpers are minirt
+// imports that a full runtime defines for itself, so the kernel's
+// definitions are WEAK: an object on the link line that carries its own
+// displaces them, and the minirt payloads keep the kernel's. The cookie
+// is the word the payload's /GS-style epilogue checks compare against
+// (entry and exit read the same word, so any consistent constant
+// satisfies the check; this profile has no runtime randomization source
+// at boot). Each shift helper is a weak trampoline into its Rust body
+// below -- the entry seam's idiom.
 core::arch::global_asm!(
     r#"
     .section .rodata.__security_cookie, "a", %progbits
@@ -151,12 +194,13 @@ RhpLRsh:
 /// EHABI personality routine named by the payload's unwind tables. The
 /// hosted profile fail-fasts instead of unwinding, so this is
 /// unreachable by design; park loudly-adjacent (wfi forever) if a
-/// future payload ever routes here.
+/// payload ever routes here.
 #[unsafe(no_mangle)]
 extern "C" fn __aeabi_unwind_cpp_pr0() -> ! {
     semihost::park()
 }
 
+// ---- 64-bit variable-shift helpers (the weak names above branch here) ----
 
 #[unsafe(no_mangle)]
 extern "C" fn __rhu_minirt_llsh(value: u64, count: i32) -> u64 {
@@ -173,7 +217,17 @@ extern "C" fn __rhu_minirt_lrsh(value: i64, count: i32) -> i64 {
     value >> (count & 63)
 }
 
+// ---- the entry seam ----
 
+// The weak default entry and the contract-generation sentinel. The
+// trampoline `rhu_payload_entry` is WEAK: an object on the link line
+// that defines the name strongly displaces it, and `run` tells the two
+// apart by comparing the entry's address with the non-weak alias
+// `__rhu_payload_entry_weak` at the trampoline. `rhu_payload_abi` is
+// the weak sentinel 0 ("no generation stated"): a payload that provides
+// its own entry defines it strongly as the RHU_ABI it was built
+// against. Both live in sections of their own, so a displaced default
+// costs the image nothing but the trampoline the alias keeps.
 core::arch::global_asm!(
     r#"
     .section .text.rhu_payload_entry, "ax", %progbits
@@ -291,6 +345,8 @@ extern "C" fn rhu_payload_entry_default() -> i32 {
         addr_of!(__init_array_end),
         window,
     );
+    // The destructor array is placed and checked like the other two and
+    // never walked here: the machine exit runs no destructors.
     let _fini = CtorArray::checked(
         ".fini_array",
         addr_of!(__fini_array_start),
@@ -319,14 +375,21 @@ extern "C" fn rhu_payload_entry_default() -> i32 {
 /// mismatched peer reports, never hangs.
 fn refuse_entry(reason: core::fmt::Arguments) -> ! {
     kprintln!("[payload] entry REFUSED: {}", reason);
-    semihost::exit(EXIT_ENTRY_REFUSED)
+    semihost::end(crate::exit_word::STATE_ABORTED, EXIT_ENTRY_REFUSED as i32)
 }
 
+// ---- managed entry sequence ----
 
 /// Settle the contract handshake and hand the thread to the payload
 /// entry; exit the machine with the code it returns. Runs on the kmain
 /// thread; never returns.
 pub fn run() -> ! {
+    // The handshake: whose entry, and which contract generation. The
+    // entry's address against the trampoline's alias says whether a
+    // payload displaced the default; a stated generation must be inside
+    // this kernel's window (the floor through its own), and a payload
+    // that provides an entry must state one. The judge is pure and the
+    // host tier tests it (abi_window).
     let provided = black_box(rhu_payload_entry as *const () as usize)
         != black_box(__rhu_payload_entry_weak as *const () as usize);
     let stated = unsafe { read_volatile(addr_of!(rhu_payload_abi)) };
@@ -368,14 +431,34 @@ pub fn run() -> ! {
         )),
     }
 
+    // The host thread joins the hosted band for the entry's life: the
+    // one flat priority the door hands every hosted thread, so a thread
+    // the payload starts and waits for by yield alone can run (a yield
+    // rotates equal-priority peers only; at kernel urgency the host
+    // could never release it). Kernel urgency returns with the entry,
+    // so the exit path keeps it.
     let kernel_prio = sched::set_current_prio(api::HOSTED_PRIO_FLAT as u8);
     kprintln!(
         "[payload] host thread: hosted priority {:#04x} for the entry, kernel urgency {} restored at return",
         api::HOSTED_PRIO_FLAT,
         kernel_prio
     );
+    #[cfg(all(feature = "test-payload-cycles", rhu_qspi_window))]
+    let t0 = crate::board::stm32f7_qspi::cycles();
     let rc = unsafe { rhu_payload_entry() };
+    #[cfg(all(feature = "test-payload-cycles", rhu_qspi_window))]
+    let ran = crate::board::stm32f7_qspi::cycles().wrapping_sub(t0);
     sched::set_current_prio(kernel_prio);
     kprintln!("[payload] managed Main returned {}", rc);
-    semihost::exit(rc as u32)
+    #[cfg(all(feature = "test-payload-cycles", rhu_qspi_window))]
+    {
+        let (doors, writes) = console::door_cycles();
+        kprintln!(
+            "[payload] cycles: managed Main ran {} cycles from the entry to the return, {} of them in the console's write doors over {} writes (the core's cycle counter at the core clock; the measurement posture test-payload-cycles)",
+            ran,
+            doors,
+            writes
+        );
+    }
+    semihost::end(crate::exit_word::STATE_RETURNED, rc)
 }

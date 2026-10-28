@@ -3,9 +3,9 @@
 //! its board-description generator's Rust emission for this board, the source
 //! `bsp/st-stm32f769i-disco/rust/st_stm32f769i_disco_bindings.rs`,
 //! the emission's sha256 0fe5d4b5b843025ea4dfda2c9db6a23e665ad92fee705687c35b0ddc121139e0.
-//! Nothing below the sentinel is edited in this tree: a re-vendoring replaces this whole file at
-//! the generator's next public commit, and the desk check ties the bytes to that commit's blob
-//! and to this header's hash. The facts module beside this file reads the constants the kernel
+//! Nothing below the sentinel is edited by hand: a re-vendoring replaces this whole file from
+//! the generator's public commit, and the recorded hash ties the bytes to that commit's blob
+//! and to this header. The facts module beside this file reads the constants the kernel
 //! needs and states its own.
 //! SPDX-License-Identifier: MIT OR Apache-2.0 -- the public repository's own licenses (LICENSE-MIT,
 //! LICENSE-APACHE at that commit), which these bytes carry; the copyright is the Lamella project's.

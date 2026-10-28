@@ -1,4 +1,16 @@
 //! The sched gate on the runner: scheduler conformance on QEMU mps2-an500.
+//!
+//! Four image flavors, each built, run, and asserted on markers AND
+//! semihosting exit codes on the raw capture: core (exit 0, default-boot
+//! golden byte-compare + the debug-layout contract pinned in the
+//! artifact), smoke (exit 0, sleep order + RR + tick preemption +
+//! callee-saved FP survival), panic (exit 1, panic from THREAD context),
+//! fault (exit 2, UsageFault from THREAD context with the extended FP
+//! frame on PSP). The core case compares the same boot transcript of
+//! record the base gate compares (one golden; the base lineage owns the
+//! name). Structured results are emitted as JSON lines beside the
+//! transcripts and validated as the last step.
+
 
 use crate::gate::{write_fixture, CaseRun, GateCtx, Selfcheck};
 use crate::results::{chain_json_from_env, golden_json, image_json, validate_results, Results};
@@ -136,6 +148,7 @@ impl SCHED {
             print_first_divergence(&golden_bytes, &run.raw);
             self.fail_case("core", code, 0, &sha, &path_rel, "transcript differs from golden");
         }
+        // The debug-layout contract, pinned in the artifact of record.
         let nm = match llvm_tool(&self.facts, "llvm-nm") {
             Ok(p) => p,
             Err(e) => self.ctx.gate_fail(&format!("core: {e}")),
@@ -320,6 +333,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         npass: 0,
         nneg: 0,
     };
+    // The earlier selfcheck's run line carries a literal "chain":null (unlike
+    // base's, which omits the field) -- mirrored for byte-comparability.
     sc.results.emit(&format!(
         "{{\"schema\":1,\"type\":\"run\",\"gate\":\"sched-selfcheck\",\"run\":\"sched-selfcheck-{}\",\"host\":\"{HOST}\",\"runner\":\"{RUNNER}\",\"chain\":null,\"tools\":{{\"qemu\":\"{}\",\"rustc\":\"{}\"}}}}",
         std::process::id(),
@@ -373,6 +388,9 @@ pub fn selfcheck(repo: &Path) -> ! {
         word_sym_present(&std::fs::read(&nolayout).unwrap_or_default(), "__rhu_debug_layout"),
     );
 
+    // Accept-direction probes: a checker broken toward reject-everything
+    // is as dead as one that accepts everything, and only a green gate
+    // run would notice. One per reject-direction checker family.
     let goodorder = tmp.join("goodorder.raw");
     write_fixture(
         &goodorder,

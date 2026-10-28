@@ -20,6 +20,9 @@ pub const HAS_EVENTS: bool = true;
 static LEVEL: [AtomicU8; facts::LINE_COUNT] = [const { AtomicU8::new(0) }; facts::LINE_COUNT];
 
 pub fn configure(line: u32, mode: u32, pull: u32, initial: bool) {
+    // An output shows its initial level from the moment it opens; an
+    // input reads its pull (a floating input reads low); the loop's input
+    // reads its output's level.
     let level = if mode != crate::gpio_math::MODE_INPUT {
         initial as u8
     } else if line == facts::LOOP_IN {
@@ -31,6 +34,8 @@ pub fn configure(line: u32, mode: u32, pull: u32, initial: bool) {
     };
     LEVEL[line as usize].store(level, Ordering::Release);
     if line == facts::LOOP_OUT && mode != crate::gpio_math::MODE_INPUT {
+        // The loop's input follows the output's initial level, silently:
+        // an open is not an edge.
         LEVEL[facts::LOOP_IN as usize].store(level, Ordering::Release);
     }
 }

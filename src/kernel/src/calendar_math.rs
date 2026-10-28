@@ -4,7 +4,7 @@
 //! two-digit packing the ST real-time clocks use for every field, and
 //! the century those clocks keep. No state and no peripheral: the host
 //! tier compiles this file from its own source and pins its cases.
-#![allow(dead_code)]
+#![allow(dead_code)] // the host tier exercises the whole surface; each row uses what its clock needs
 
 /// One second in ticks.
 pub const TICKS_PER_SECOND: u64 = 10_000_000;

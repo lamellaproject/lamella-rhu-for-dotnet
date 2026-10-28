@@ -1,7 +1,7 @@
 /* Lamella RHU -- Raspberry Pi Pico 2 W PAYLOAD link map: the kernel
  * staticlib (librhu_kernel.a, feature `payload`) merged with one frozen
  * ILC payload object under an external `ld -T`. Same machine map as
- * link-rpi-pico2-w.x -- keep the two in sync BY HAND -- plus the managed
+ * link-rpi-pico2-w.x -- keep the two in sync -- plus the managed
  * sections an ILC object carries: managed code and unboxing stubs
  * bracketed inside text, the __modules table bracketed for the
  * module-initializer walk, frozen/metadata blobs into rodata, the
@@ -36,7 +36,7 @@ MEMORY
  * (link-enforced by the window asserts at the bottom of this map). The
  * 512 K-class floor: the mini GC row fits it beside the hosted runtime's
  * declared demand (the asserts at the bottom of this map). */
-RHU_ARENA_MIN = 192K;
+RHU_ARENA_MIN = 160K;
 
 ENTRY(Reset);
 
@@ -158,7 +158,7 @@ SECTIONS
    * first, then the bits (two named inputs fix the order). No KEEP: an
    * image whose runtime never asks for the kernel arena (the frozen
    * runtime carves its own heap) carries the section EMPTY, section GC
-   * dropping the statics as it always did, its window unmoved. */
+   * dropping the statics, its window unmoved. */
   .rhu_payload_arena ORIGIN(DATA) (NOLOAD) : ALIGN(8)
   {
     __rhu_payload_arena_lo = .;
@@ -300,7 +300,7 @@ SECTIONS
  * establishes the zero-birth invariant over it at boot. (Top level: the
  * linker rejects a bare ASSERT between output sections and reports the
  * error one command late.) */
-RHU_BOOT_STACK_RESERVE = 64K;
+RHU_BOOT_STACK_RESERVE = 16K;
 __rhu_arena_lo = ALIGN(__rhu_console_log_end, 8);
 __rhu_arena_hi = __stack_start - RHU_BOOT_STACK_RESERVE;
 ASSERT(__rhu_arena_hi >= __rhu_arena_lo,
@@ -369,3 +369,26 @@ ASSERT(ADDR(.rhu_payload_arena) == ORIGIN(DATA),
   "the payload arena is not at the head of DATA (the collector's count follows its address)");
 ASSERT(SIZEOF(.rhu_payload_arena) == 0 || SIZEOF(.rhu_payload_arena) == 99840,
   "the payload arena section is neither empty (a runtime that never asks for the kernel arena) nor the 96 KB arena plus its 1,536 bytes of start bits");
+
+/* The null-page guard: the protection unit denies the first 4 KB of
+ * the address space on every row, so no code may be placed below it; the
+ * vector table alone may (exception vector reads bypass the unit). */
+ASSERT(__stext >= 0x1000,
+  "code placed inside the first page, which the protection unit denies (the null-page guard)");
+
+/* The console's link-time words. A project's knobs reach this
+ * prebuilt kernel as ABSOLUTE SYMBOLS the kernel reads by address at boot;
+ * an image linked without a knob gets 0 = the row's default (the facts'
+ * channels row; the level's 0 = verbose). The SDK passes --defsym from the
+ * project's properties; build.rs passes the environment's for the kernel's
+ * own images. The pin words are the serial act's (0 = the facts' pair). */
+PROVIDE(__rhu_log_level = 0);
+PROVIDE(__rhu_log_channel = 0);
+PROVIDE(__rhu_console_channel = 0);
+PROVIDE(__rhu_uart0_tx = 0);
+PROVIDE(__rhu_uart0_rx = 0);
+PROVIDE(__rhu_uart1_tx = 0);
+PROVIDE(__rhu_uart1_rx = 0);
+/* The handler stack's watermark word: 0 = off; 1 = the boot stack reserve is
+ * filled with a pattern at reset and its deepest use printed at the end. */
+PROVIDE(__rhu_stack_watermark = 0);

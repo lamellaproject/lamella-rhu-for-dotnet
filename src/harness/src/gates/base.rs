@@ -1,4 +1,13 @@
 //! The base gate on the runner: kernel conformance on QEMU mps2-an500.
+//!
+//! Three image flavors, each built, run, and asserted on markers AND
+//! semihosting exit codes: boot (exit 0, golden byte-compare + FP artifact
+//! checks), panic (exit 1, funnel report), fault (exit 2, CFSR decoded).
+//! Every assertion reads the raw capture file; the boot transcript must
+//! equal the committed golden (CR presence asserted byte-true, then
+//! LF-normalized compare on both sides). Structured results are emitted as
+//! JSON lines beside the transcripts and validated as the last step.
+
 
 use crate::gate::{write_fixture, CaseRun, GateCtx, Selfcheck};
 use crate::results::{chain_json_from_env, golden_json, image_json, validate_results, Results};
@@ -121,6 +130,8 @@ impl BASE {
             print_first_divergence(&golden_bytes, &run.raw);
             self.fail_case("boot", code, 0, &sha, &path_rel, "transcript differs from golden");
         }
+        // FP-path evidence in the ARTIFACT, not just the printout: the f32
+        // selftest must be hardware VFP, the f64 one a soft-float call.
         let objdump = match llvm_tool(&self.facts, "llvm-objdump") {
             Ok(p) => p,
             Err(e) => self.ctx.gate_fail(&format!("boot: {e}")),
@@ -251,7 +262,7 @@ pub fn run(repo: &Path) -> ! {
 
 /// Negative-control the gate's own checkers: every assertion helper must
 /// REJECT a doctored input, and the CR check must ACCEPT a genuine CRLF
-/// capture (it once failed in exactly that direction).
+/// capture.
 pub fn selfcheck(repo: &Path) -> ! {
     let (facts, _qemu, qemu_v) = setup(repo);
     let golden_path = repo.join("src").join("scripts").join("goldens").join("base-boot.txt");
@@ -335,6 +346,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         cr_count(&std::fs::read(&lfonly).unwrap_or_default()) > 0,
     );
 
+    // The one accept-direction probe: a checker that rejects everything is
+    // as broken as one that accepts everything; pin the accept side too.
     let crlf = tmp.join("crlf.raw");
     write_fixture(&crlf, b"crlf line\r\n");
     sc.accept_probe(

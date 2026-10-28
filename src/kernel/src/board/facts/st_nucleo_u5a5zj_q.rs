@@ -7,8 +7,12 @@
 //! description does not carry them), cited. The named signals -- the three
 //! user LEDs and the user button with its pull -- are the description's
 //! rows, never typed here.
+//!
+//! RM0456: Table 6 (GPIOA at 0x4202_0000 in the non-secure alias, one 1 KB
+//! block per port, A to J); 11.8.30 RCC_AHB2ENR1 (offset 0x08C; GPIOAEN bit
+//! 0 to GPIOJEN bit 9). UM2861: SWD on PA13 and PA14.
 
-#[allow(dead_code)]
+#[allow(dead_code)] // the description's whole emission; the kernel reads what it needs
 #[path = "vendored/st_nucleo_u5a5zj_q_bindings.rs"]
 mod bindings;
 
@@ -16,7 +20,7 @@ use crate::claims;
 use crate::gpio_math;
 
 /// Ten ports of sixteen lines: PA0 = 0 ... PJ15 = 159.
-#[allow(dead_code)]
+#[allow(dead_code)] // the facts' statement of the block; the driver derives the port from the line
 pub const PORT_COUNT: u32 = 10;
 pub const LINE_COUNT: usize = 160;
 
@@ -69,9 +73,9 @@ pub const LED2_LINE: u32 = line(bindings::LED2_PORT_BASE, bindings::LED2_PIN);
 pub const LED2_ACTIVE_LOW: bool = bindings::LED2_ACTIVE_LOW != 0;
 #[allow(dead_code)]
 pub const BUTTON0_LINE: u32 = line(bindings::BUTTON0_PORT_BASE, bindings::BUTTON0_PIN);
-#[allow(dead_code)]
+#[allow(dead_code)] // the silicon leg's check and the flights read the rows
 pub const BUTTON0_ACTIVE_LOW: bool = bindings::BUTTON0_ACTIVE_LOW != 0;
-#[allow(dead_code)]
+#[allow(dead_code)] // the silicon leg's check and the flights read the rows
 pub const BUTTON0_PULL: u32 = if bindings::BUTTON0_PULL_DOWN != 0 {
     gpio_math::PULL_DOWN
 } else if bindings::BUTTON0_PULL_UP != 0 {
@@ -91,16 +95,16 @@ const _: () = assert!(bindings::DEVICE_COUNT == 4, "the description's device cou
 /// counted on (a defined level through the LED's resistor: a quiet pad) and
 /// as the free line of the claim and refusal checks; the button as the
 /// input-only line; the console's transmit pin as the board-claimed line.
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_FREE: u32 = LED1_LINE;
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_OUT: Option<u32> = Some(LED0_LINE);
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_IN: u32 = LED1_LINE;
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_BOARD: u32 = CONSOLE_TX;
 /// No loopback on a board: the software trigger makes the edge beside the toggle.
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const LOOPBACK: bool = false;
 
 /// The button's line is an input only: an output claim on it is refused.
@@ -108,7 +112,7 @@ pub const fn input_only(line: u32) -> bool {
     line == BUTTON0_LINE
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_INPUT_ONLY: Option<u32> = Some(BUTTON0_LINE);
 
 /// The pins this part's package bonds out, one mask per port (bit n is pin
@@ -128,7 +132,7 @@ pub const fn populated(line: u32) -> bool {
 }
 
 /// A line inside the space that the package does not bond out (PB12).
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_UNPOPULATED: Option<u32> = Some(16 + 12);
 const _: () = assert!(!populated(16 + 12) && populated(CONSOLE_TX) && populated(CONSOLE_RX) && populated(13) && populated(14) && populated(BUTTON0_LINE), "the present list contradicts the check line, the board's own pins or a named signal");
 
@@ -179,7 +183,7 @@ pub const SPI_BUSES: &[crate::bus_math::SpiBus] = &[crate::bus_math::SpiBus {
 }];
 const _: () = assert!(populated(16 + 8) && populated(16 + 9) && populated(5) && populated(6) && populated(7) && populated(3 * 16 + 14) && populated(3 * 16 + 15), "a bus pad is not a pin of the package");
 
-/// The PWM and ADC tables of this row: empty in this generation, so the
+/// The PWM and ADC tables of this row: empty, so the
 /// count doors answer 0, the enumeration doors refuse every index, and
 /// every other door of the two families answers RHU_ENODEV. The tables
 /// are shaped for a board's every timer output and every converter
@@ -189,3 +193,35 @@ pub const PWM_TIMERS: &[crate::pwm_math::PwmTimer] = &[];
 pub const PWM_LINES: &[crate::pwm_math::PwmLine] = &[];
 pub const ADC_BLOCKS: &[crate::adc_math::AdcBlock] = &[];
 pub const ADC_CHANNELS: &[crate::adc_math::AdcChannel] = &[];
+
+/// The RAM ranges of this row (the hosted runtime learns them
+/// through the `rhu_ram_count` and `rhu_ram_range` doors): the physical
+/// range as the board's facts file states it in the SDK (`boards/<row>.json`,
+/// its `ram` array; the two kept equal by the hosted-runtime gate's facts
+/// tie), range 0 the internal SRAM the kernel's map calls DATA. Range 0's
+/// `base` and `bytes` are the map's DATA region, whole: the arena window
+/// the runtime is handed lies inside it, bracketed by the map.
+/// 2496 KB of SRAM (SRAM1, 2, 3 and 5, one contiguous window; SRAM4 at 0x28000000 is not offered).
+pub const RAM_RANGES: &[crate::ram::RamFacts] =
+    &[crate::ram::RamFacts { name: "SRAM", base: 0x2000_0000, bytes: 0x27_0000, external: false, cached: false, exec: true }];
+
+/// The console's channel facts of this row (the SDK's `channels` member):
+/// the two streams' default channel codes and the row's legal set
+/// (`crate::console`: 1 off, 2 memory, 3 probe, 0x10 + n uart n).
+pub const CHANNELS: crate::console::ChannelFacts = crate::console::ChannelFacts { log: crate::console::CH_PROBE, console: crate::console::CH_PROBE, legal: &[crate::console::CH_PROBE, crate::console::CH_MEMORY, crate::console::CH_OFF] };
+/// The pre-defined UART rows of this row (the SDK's `uart` member), by the
+/// chip's own block number with their pins (none on a row whose UARTs have
+/// no pins); a program's serial doors and the console's wire read them.
+pub const UART_ROWS: &[crate::console::UartRow] = &[];
+/// The gpio banner's line when the kernel holds a UART of this row as its
+/// console wire, by block (empty on a row with no UART row).
+pub const BANNER_UART: &[&str] = &[];
+/// The UART rows' names for the boot banner's console clause, by block.
+#[allow(dead_code)] // the Pico rows' banner clause reads it
+pub const UART_NAMES: &[&str] = &[];
+/// No pin override on this row (the UART rows have no pins, or there are
+/// none): the SDK's `uartPairs` member is empty.
+#[allow(dead_code)] // no row of this board reads it: the UART doors answer ENODEV here
+pub const UART_PAIRS: &[crate::console::UartPairs] = &[];
+/// No both-held banner line on this row.
+pub const BANNER_UART_BOTH: &str = "";

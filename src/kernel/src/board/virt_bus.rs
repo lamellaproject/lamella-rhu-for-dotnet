@@ -14,7 +14,7 @@
 //! whose clock is off answers no flag; a timing word or a frame size the
 //! model does not serve is refused loudly (a driver's mistake caught on
 //! the emulator). The STM32U5's file raises its mode fault as the block
-//! was seen to on the chip: at the write that leaves a master with the
+//! does on the chip: at the write that leaves a master with the
 //! software select management and a low internal select, whether or not
 //! the block is enabled -- the fault flag set, the master bit cleared, the
 //! enable refused until the flag-clear bit clears the fault. The pad seam
@@ -39,13 +39,14 @@ use crate::sched;
 
 const DOCTORED: bool = cfg!(feature = "test-bus-doctored");
 
+// ---------------- the pad seam: the I2C recovery's two lines alone ----------------
 
 /// What the doctored image arms before a transfer: a device that holds the
 /// clock low 25 ms in the next byte and then answers; a device left holding
 /// the data line low at the block's next reset -- until three clocks have
 /// come, until the clock has been held low 35 ms, or for good; the line free
 /// again.
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's doctored image
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Doctor {
     Stretch,
@@ -84,7 +85,7 @@ fn wire() -> &'static mut Wire {
 const STRETCH_NS: u64 = 25_000_000;
 const HOLD_NS: u64 = 35_000_000;
 
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's doctored image
 pub fn doctor(what: Doctor) {
     let w = wire();
     match what {
@@ -140,6 +141,7 @@ pub fn select_drive(_d: &SpiBus, index: u32, low: bool) {
     }
 }
 
+// ---------------- the clock cells: the enable and selection registers ----------------
 
 /// The reset and clock control registers the descriptors name, as cells
 /// the drivers write and the models consult: a block whose enable bit is
@@ -179,6 +181,7 @@ fn enabled(reg: usize, bit: u32) -> bool {
     c.value[k] & (1 << bit) != 0
 }
 
+// ---------------- the register seam ----------------
 
 pub fn rd(addr: usize) -> u32 {
     let i = &facts::I2C_BUSES[0];
@@ -245,16 +248,17 @@ pub fn wr8(addr: usize, v: u8) {
 /// The models' counters the api flavor's doctored image reads: bytes the
 /// SPI receive queue dropped on overflow; the I2C block's resets (the
 /// enable bit raised again after the first time).
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's doctored image
 pub fn probe_spi_drops() -> u32 {
     spi().core.drops
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's doctored image
 pub fn probe_i2c_resets() -> u32 {
     i2c().resets
 }
 
+// ---------------- the I2C block model and the sensor behind it ----------------
 
 /// The bits' time of one byte with its acknowledge at 100 kHz.
 const I2C_BYTE_NS: u64 = 90_000;
@@ -463,6 +467,8 @@ impl I2cModel {
                 }
                 if !pe {
                     self.clear_all();
+                    // The block's reset: the doctored device armed for it is
+                    // left in the middle of its byte, holding the data line.
                     let w = wire();
                     if self.pe && w.next != Held::No {
                         w.held = w.next;
@@ -532,6 +538,7 @@ impl I2cModel {
     }
 }
 
+// ---------------- the SPI models and the memory behind them ----------------
 
 /// The memory: the first byte under the select is the command; the
 /// identity command answers three bytes then zeros; any other command
@@ -662,7 +669,7 @@ impl SpiCore {
     }
 }
 
-#[cfg_attr(feature = "board-mps2-an500", allow(dead_code))]
+#[cfg_attr(feature = "board-mps2-an500", allow(dead_code))] // the U5 file's fields, unread by the F7 file's row
 struct SpiModel {
     core: SpiCore,
     dev: Memory,
@@ -799,6 +806,7 @@ impl SpiModel {
     fn wr(&mut self, off: usize, v: u32) {
         match off {
             0x00 => {
+                // The enable and the start are refused while the mode fault stands.
                 let v = if self.modf { v & !0x201 } else { v };
                 let spe = v & 1 != 0;
                 if spe && !self.core.spe {

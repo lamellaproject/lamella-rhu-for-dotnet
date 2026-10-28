@@ -1,9 +1,18 @@
 // The board class: one class for every board, built by name; the SDK generates the board's facts into the program at publish and hands them over before Main.
+// The class answers them and refuses, with Microsoft's own exception class
+// for "this board cannot do what was asked", a bus the board does not have or
+// an I2C rate the image does not serve. The rate a program asks for reaches
+// the image through RHU's one request on the I2C device node (Linux has no
+// such setting; the bus then runs at that rate for the program's run),
+// issued through the three C-library calls the standard package itself binds.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Device.Analog;
 using System.Device.Gpio;
+using System.Device.Gpio.Drivers;
 using System.Device.I2c;
+using System.Device.Pwm;
 using System.Device.Spi;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -24,13 +33,13 @@ public sealed class TargetBoard
     /// <summary>The board the program was built for; cheap, and the same facts every time.</summary>
     public TargetBoard()
     {
-        _f = s_facts ?? throw new InvalidOperationException("this program was not published for a board by the Lamella SDK, so no TargetBoard is known");
+        _f = s_facts ?? throw new InvalidOperationException("no board: this program was not published for a board (LamellaTargetBoard names one; dotnet publish or dotnet run --device builds the image for it), so no TargetBoard is known");
         Pins = new BoardPins(_f.Pins);
     }
 
     /// <summary>The SDK's seam: the generated source hands the board's facts over once, before Main.</summary>
     [EditorBrowsable(EditorBrowsableState.Never)]
-    public static void SetBuildFacts(BoardFacts facts)
+    internal static void SetBuildFacts(BoardFacts facts)
     {
         ArgumentNullException.ThrowIfNull(facts);
         if (s_facts is not null)
@@ -65,6 +74,12 @@ public sealed class TargetBoard
     /// <summary>The SPI buses the image serves, with their rate ladders.</summary>
     public IReadOnlyList<SpiBusInfo> SpiBuses => _f.SpiBuses;
 
+    /// <summary>The width in bits of a conversion on the chip's converter; 0 where the image serves no analog input.</summary>
+    internal int AnalogResolutionBits => _f.AnalogResolutionBits;
+
+    /// <summary>The voltage a full-scale conversion stands for, in millivolts; 0 where the image serves no analog input.</summary>
+    internal int AnalogReferenceMillivolts => _f.AnalogReferenceMillivolts;
+
     /// <summary>One line: the board, the chip, the clock, the pins, the buses.</summary>
     public override string ToString()
     {
@@ -78,11 +93,15 @@ public sealed class TargetBoard
         return b.ToString();
     }
 
-    /// <summary>The standard controller over the board's pins.</summary>
-    public GpioController CreateGpioController() => new GpioController();
+    /// <summary>
+    /// The standard controller over the board's pins, on the one driver the kernel serves: libgpiod's
+    /// first chip, named here so the published image carries that driver alone and none of the
+    /// standard class's board detection.
+    /// </summary>
+    public GpioController CreateGpioController() => new GpioController(new LibGpiodDriver(0));
 
     /// <summary>A device on an I2C bus at the standard rate, 100 kHz.</summary>
-    public I2cDevice CreateI2cDevice(I2cConnectionSettings settings) => CreateI2cDevice(settings, StandardI2cFrequency);
+    public I2cDevice CreateI2cDevice(I2cConnectionSettings connectionSettings) => CreateI2cDevice(connectionSettings, StandardI2cFrequency);
 
     /// <summary>
     /// A device on an I2C bus at a clock frequency in hertz the image serves; a bus the board does not
@@ -92,10 +111,10 @@ public sealed class TargetBoard
     /// rate on the same bus is refused with <see cref="InvalidOperationException"/> naming the
     /// running rate, and a device created the standard way runs the bus at 100 kHz.
     /// </summary>
-    public I2cDevice CreateI2cDevice(I2cConnectionSettings settings, int clockFrequency)
+    public I2cDevice CreateI2cDevice(I2cConnectionSettings connectionSettings, int clockFrequency)
     {
-        ArgumentNullException.ThrowIfNull(settings);
-        I2cBusInfo bus = FindI2c(settings.BusId);
+        ArgumentNullException.ThrowIfNull(connectionSettings);
+        I2cBusInfo bus = FindI2c(connectionSettings.BusId);
         bool served = false;
         foreach (int r in bus.Frequencies)
         {
@@ -116,8 +135,18 @@ public sealed class TargetBoard
             throw new NotSupportedException(b.ToString());
         }
 
-        ClaimRate(bus, clockFrequency);
-        return I2cDevice.Create(settings);
+        I2cDevice device = I2cDevice.Create(connectionSettings);
+        try
+        {
+            ClaimRate(bus, clockFrequency);
+        }
+        catch
+        {
+            device.Dispose();
+            throw;
+        }
+
+        return device;
     }
 
     /// <summary>
@@ -125,13 +154,91 @@ public sealed class TargetBoard
     /// nearest rate the block's ladder makes, as a Raspberry Pi serves it. A bus the board does
     /// not have is refused with <see cref="NotSupportedException"/>.
     /// </summary>
-    public SpiDevice CreateSpiDevice(SpiConnectionSettings settings)
+    public SpiDevice CreateSpiDevice(SpiConnectionSettings connectionSettings)
     {
-        ArgumentNullException.ThrowIfNull(settings);
-        FindSpi(settings.BusId);
-        return SpiDevice.Create(settings);
+        ArgumentNullException.ThrowIfNull(connectionSettings);
+        FindSpi(connectionSettings.BusId);
+        return SpiDevice.Create(connectionSettings);
     }
 
+    /// <summary>
+    /// The standard PWM channel at a chip's channel, the standard board class's form: <c>PwmChannel.Create</c> with
+    /// the two numbers, at a frequency in hertz and a duty cycle from 0 to 1; the channel starts stopped, as the
+    /// standard class leaves it. On this system the chip is 0 and the channel number is the GPIO line the channel
+    /// drives, the two numbers a pin's record carries (<see cref="BoardPin.PwmChip"/>,
+    /// <see cref="BoardPin.PwmChannelNumber"/>); a chip and channel no pin's record carries is refused with
+    /// <see cref="NotSupportedException"/> naming the board.
+    /// </summary>
+    public PwmChannel CreatePwmChannel(int chip, int channel, int frequency = 400, double dutyCyclePercentage = 0.5)
+    {
+        FindPwm(chip, channel);
+        return PwmChannel.Create(chip, channel, frequency, dutyCyclePercentage);
+    }
+
+    /// <summary>
+    /// The standard PWM channel at a chip's channel on a named pin, the standard board class's second form: on this
+    /// system a channel drives the one line its number names, so a pin other than that line is refused with
+    /// <see cref="NotSupportedException"/> naming both.
+    /// </summary>
+    public PwmChannel CreatePwmChannel(int chip, int channel, int frequency, double dutyCyclePercentage, int pin)
+    {
+        BoardPin record = FindPwm(chip, channel);
+        if (pin != record.PinNumber)
+        {
+            throw new NotSupportedException(Board() + ": PWM chip " + chip + ", channel " + channel + " drives " + Label(record) + " alone on this board, so it cannot be created on pin " + pin + ".");
+        }
+
+        return PwmChannel.Create(chip, channel, frequency, dutyCyclePercentage);
+    }
+
+    private BoardPin FindPwm(int chip, int channel)
+    {
+        foreach (BoardPin pin in Pins)
+        {
+            if (pin.PwmChip == chip && pin.PwmChannelNumber == channel)
+            {
+                return pin;
+            }
+        }
+
+        throw new NotSupportedException(Board() + ": no pin carries PWM chip " + chip + ", channel " + channel + " on this board, so no PWM channel can be created there.");
+    }
+
+    /// <summary>
+    /// The standard analog controller over the chip's converter, the standard Arduino board's form: chip must be 0,
+    /// the one converter the image presents; another number, or a board whose image serves no analog input, is
+    /// refused with <see cref="NotSupportedException"/> naming the board. The controller numbers its pins by GPIO
+    /// line, the numbers <c>GpioController.OpenPin</c> takes: <c>SupportsAnalogInput</c> says which lines carry an
+    /// analog input, <c>OpenPin</c> claims the line's channel for this program (a line a program holds as a GPIO
+    /// line, or a channel a controller holds, is refused), and the pin's <c>ReadRaw</c> is one conversion as a count
+    /// within <c>AdcResolutionBits</c>. The voltage members compute where <see cref="AnalogVoltage.IsSupported"/> is
+    /// true, with <c>VoltageReference</c> set to the board's reference (a program may set another before it opens a
+    /// pin), and throw <see cref="NotSupportedException"/> where it is false, with the reference unset.
+    /// </summary>
+    public AnalogController CreateAnalogController(int chip)
+    {
+        if (_f.AnalogResolutionBits == 0)
+        {
+            throw new NotSupportedException(Board() + ": this board's image serves no analog input.");
+        }
+
+        if (chip != 0)
+        {
+            throw new NotSupportedException(Board() + " has no analog controller " + chip + "; its one controller is chip 0.");
+        }
+
+        return new IioAnalogController(this);
+    }
+
+    internal string BoardWords() => Board();
+
+    internal string PinWords(int pinNumber) => Label(Pins[pinNumber]);
+
+    // RHU's one request on the I2C device node: the bus's rate in hertz, one 32-bit word in and
+    // out (the shim's BUSDEV_I2C_RATE; the harness ties the two numbers). A Linux board's bus
+    // speed is a device-tree property fixed for the boot, so the standard package has no setting
+    // for it; here the rate is set once for the program's run, by the first device created on the
+    // bus, through the three C-library calls the standard package itself binds.
     private const uint BusRateRequest = 0x0740;
     private const int OpenReadWrite = 2;
     private const int ErrnoBusy = 16;
@@ -207,6 +314,9 @@ public sealed class TargetBoard
 
     private static string Label(BoardPin pin) => pin.Labels.Count > 0 ? pin.Labels[0] : "pin " + pin.PinNumber;
 
+    // The standard package's own binding of the three calls (its Interop.Libc at the pin: the
+    // library "libc", SetLastError, the path as a C string, the request a 32-bit word, the
+    // argument a pointer); the SDK binds them directly at link time.
     private static class Native
     {
         [DllImport("libc", SetLastError = true)]

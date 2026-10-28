@@ -1,0 +1,19 @@
+<Project>
+
+  <!-- The build package's properties file under build/, the one NuGet's own
+       generated import of a package reads: that import comes before the
+       project's body and before the .NET SDK's own properties, too early
+       for RHU's properties, which read two of those. So this file is inert:
+       it names RHU's properties and targets files beside it for the SDK
+       that imports them at its own point in the evaluation (the properties
+       after the .NET SDK's, the targets after the ILCompiler pack's), and
+       states the number of the contract between that SDK and these files.
+       It lives in the tree under package/ (a tree folder named build is the
+       Rust rule's) and the pack stages it under build/. -->
+  <PropertyGroup>
+    <RhuShellContract>1</RhuShellContract>
+    <LamellaRhuBuildProps>$(MSBuildThisFileDirectory)../rhu/Sdk.props</LamellaRhuBuildProps>
+    <LamellaRhuBuildTargets>$(MSBuildThisFileDirectory)../rhu/Sdk.targets</LamellaRhuBuildTargets>
+  </PropertyGroup>
+
+</Project>

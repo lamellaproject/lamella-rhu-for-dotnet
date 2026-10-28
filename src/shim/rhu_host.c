@@ -44,7 +44,7 @@
 #include "rhu_shim.h"
 
 #include "rhu.h"
-#include "rhu_rt_entry_net11_rc1.h"
+#include "rhu_rt_entry_net11_rc2.h"
 
 /* The stream-shaped surface the C runtime offers. Declared here rather
  * than included: the standard header spells the stream names as macros,
@@ -58,9 +58,9 @@ int rhu_stdio_line_buffer_stdout(void);
  * definitions and its bootstrapper spell them at the pin: the
  * registration takes each range as a start address and a length in
  * bytes. They are the runtime's and the program's, never the shim's: in
- * a real image they come from the merged runtime object, and under the
- * gate a stand-in exports them so the ORDER can be proven without the
- * runtime present. */
+ * a real image they come from the merged runtime object, and the test
+ * program gate/rhu_shimtest.c exports stand-ins so the order can be checked
+ * without the runtime present. */
 
 /* The class-library function table, by the order the runtime indexes it
  * with and by the exported names its bootstrapper installs. The runtime
@@ -88,13 +88,15 @@ _Static_assert(RHU_RT_CLASSLIB_SLOTS == 12, "the slot count ties the pin");
 _Static_assert(RHU_RT_CLASSLIB_SLOTS > RHU_RT_CLASSLIB_SLOT_ResolveDispatch, "the table holds the dispatch slot");
 _Static_assert(RHU_RT_CLASSLIB_EXPORTS == 8, "eight slots carry an export at this pin");
 
-/* The in-image header the kernel states at the image base: sixteen
- * words -- the magic, the layout version, the header's size, the load
- * address, and the rest. The host reads the load address after checking
- * the first two, and passes it to the runtime as the module handle. */
-extern const uint32_t __rhu_image_header[16];
-#define RHU_HOST_IMAGE_MAGIC 0x49554852u
-#define RHU_HOST_IMAGE_LAYOUT 1u
+/* The image's load address, passed to the runtime as the module handle:
+ * the address of the vector table's symbol. Every board map places the
+ * vector table at the image base, and the in-image header's load-address
+ * word (at the base + 0x400) is defined as that same address, so the two
+ * never differ and the host reads no memory for it. The header's word is
+ * not read: on a board whose image base is 0 the header lies inside the
+ * null page the kernel's memory protection unit guards, and a read of it
+ * there would fault. */
+extern const uint32_t __vector_table[];
 
 /* The load and run brackets of the initialized data region. The boot
  * copies [__sdata, __edata) from __sidata; the host's job is to prove it
@@ -179,11 +181,14 @@ static uint32_t line_put_u(char *buf, uint32_t n, uint32_t v)
     return n;
 }
 
-static void line_end(char *buf, uint32_t n)
+/* The line ended and written on the kernel's LOG stream at a level (the
+ * log-door stage): the host's steps at RHU_LOG_VERBOSE, its FAIL line -- the
+ * last words before the exit -- at RHU_LOG_SILENT. */
+static void line_end(char *buf, uint32_t n, uint32_t level)
 {
     buf[n++] = '\r';
     buf[n++] = '\n';
-    rhu_console_write(buf, n);
+    rhu_log_write(level, buf, n);
 }
 
 static void host_log(const char *msg)
@@ -191,7 +196,7 @@ static void host_log(const char *msg)
     char buf[HOST_LINE_BYTES];
     uint32_t n = line_put_str(buf, 0u, "[host] ");
     n = line_put_str(buf, n, msg);
-    line_end(buf, n);
+    line_end(buf, n, RHU_LOG_VERBOSE);
 }
 
 /* One marker carrying one number. The host prints its own lines rather
@@ -203,7 +208,7 @@ static void host_logu(const char *msg, uint32_t v)
     uint32_t n = line_put_str(buf, 0u, "[host] ");
     n = line_put_str(buf, n, msg);
     n = line_put_u(buf, n, v);
-    line_end(buf, n);
+    line_end(buf, n, RHU_LOG_VERBOSE);
 }
 
 /* One marker carrying two numbers. */
@@ -216,7 +221,7 @@ static void host_logu2(const char *a, uint32_t x, const char *b, uint32_t y, con
     n = line_put_str(buf, n, b);
     n = line_put_u(buf, n, y);
     n = line_put_str(buf, n, c);
-    line_end(buf, n);
+    line_end(buf, n, RHU_LOG_VERBOSE);
 }
 
 static void host_die(const char *msg)
@@ -224,7 +229,7 @@ static void host_die(const char *msg)
     char buf[HOST_LINE_BYTES];
     uint32_t n = line_put_str(buf, 0u, "[host] FAIL ");
     n = line_put_str(buf, n, msg);
-    line_end(buf, n);
+    line_end(buf, n, RHU_LOG_SILENT);
     rhu_exit(70);
 }
 
@@ -244,8 +249,8 @@ static void verify_loaded_data(void)
         host_die("the data check reads outside the initialized data region");
     loaded = (const uint32_t *)(load + (at - run));
 #ifdef RHU_SHIM_BREAK_DATAVERIFY
-    /* Gate control: one byte of the run image damaged, exactly as a dead
-     * memory path would leave it. */
+    /* Built with this define, one byte of the run image is damaged, exactly
+     * as a dead memory path would leave it. */
     g_data_canary ^= 0x00000100u;
 #endif
     seen = g_data_canary;
@@ -319,13 +324,11 @@ static void run_static_ctors(void)
     host_logu2("ctors run: ", pre.n, " early, ", init.n, " main");
 }
 
-/* Step 6's module handle: the image's load address as its own header
- * states it, once the header reads as the layout this host knows. */
+/* Step 6's module handle: the image's load address, the vector table's
+ * address (a link-time constant; no memory read). */
 static void *image_base(void)
 {
-    if (__rhu_image_header[0] != RHU_HOST_IMAGE_MAGIC || __rhu_image_header[1] != RHU_HOST_IMAGE_LAYOUT)
-        host_die("the in-image header does not read as layout version 1");
-    return (void *)(uintptr_t)__rhu_image_header[3];
+    return (void *)(uintptr_t)__vector_table;
 }
 
 /* A bracketed range's length in bytes, its ends checked for order. */

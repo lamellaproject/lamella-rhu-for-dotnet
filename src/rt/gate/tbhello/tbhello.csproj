@@ -1,8 +1,8 @@
-<Project Sdk="Lamella.Rhu.Sdk">
+<Project Sdk="Lamella.Sdk">
 
   <!-- The gate's second program: the board class, built by name. The
        SDK generates the row's facts into this program because it references
-       Lamella.Hardware; the parity leg publishes it and boots its image. -->
+       Lamella.Hardware; the verification chain publishes it and boots its image. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net11.0</TargetFramework>
@@ -10,6 +10,8 @@
     <RootNamespace>Rhu.Hosted</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
+    <!-- The gate's posture: the kernel's whole boot report, what the goldens measure. -->
+    <RhuLogLevel>verbose</RhuLogLevel>
     <LamellaHardwareVersion Condition="'$(LamellaHardwareVersion)' == ''">1.0.0-alpha.1</LamellaHardwareVersion>
   </PropertyGroup>
 

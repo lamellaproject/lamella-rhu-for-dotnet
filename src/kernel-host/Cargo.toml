@@ -13,9 +13,14 @@ license = "MIT OR Apache-2.0"
 name = "rhu_kernel_host"
 path = "src/lib.rs"
 
-# No dependencies: the tier is the kernel's own pure code and the
-# standard library's test harness.
+# One dependency, the network stack's: the tier's net_math cases pin the kernel's
+# checksum arithmetic against the vendored stack's own parser (the same
+# release and features the kernel takes behind its `net` feature, read
+# from src/vendor/crates by the crate-local cargo config); the rest of
+# the tier is the kernel's own pure code and the standard library's test
+# harness.
 [dependencies]
+smoltcp = { version = "=0.14.0", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "socket-dhcpv4", "socket-dns"] }
 
 # The kernel's own feature names the included modules mention in their
 # configuration attributes, declared so the compiler knows them; the tier

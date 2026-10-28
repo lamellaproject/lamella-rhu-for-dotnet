@@ -1,25 +1,48 @@
 //! NUCLEO-U5A5ZJ-Q (STM32U5A5ZJ, Cortex-M33): the ARMv8-M silicon
 //! board. Flash-boot at 0x08000000, USART1 console on the ST-LINK VCP.
+//!
+//! Two clock postures, both off the chip's 16 MHz internal oscillator (the
+//! board fits no crystal on the HSE path): the PLL posture is the default
+//! and the internal-oscillator posture is selected by the feature
+//! `st-nucleo-u5a5zj-q-hsi16`. The build script sets the `stm32u5_pll160`
+//! cfg this module's clock code reads; the feature
+//! `st-nucleo-u5a5zj-q-pll160` names the default and builds the same image.
+//!
+//! The PLL posture (default): PLL1 at 160 MHz off HSI16, VCORE range 1
+//! with the EPOD boost, 4 flash wait states; the banner's clock line is
+//! decoded from the clock registers.
+//!
+//! The internal-oscillator posture (`st-nucleo-u5a5zj-q-hsi16`): HSI16 at
+//! 16 MHz. The STM32U5 RESETS ON MSIS (about 4 MHz), not on HSI, so this
+//! posture turns HSI16 on and switches SYSCLK to it explicitly. VCORE
+//! stays in its reset range 4 (good to 25 MHz) with one flash wait
+//! state, the range-4 row for 16 MHz; no clock line in the banner.
+//!
 
 use core::ptr::{read_volatile, write_volatile};
 
 use super::ring;
 
 pub const NAME: &str = "NUCLEO-U5A5ZJ-Q";
+/// The chip, as the SDK's facts file names it (the quiet line of the log doors).
+pub const CHIP: &str = "STM32U5A5ZJ";
 pub const CONSOLE: &str = "USART1 (ST-LINK VCP)";
 
-/// Clock posture 1 (default): HSI16, SYSCLK = HCLK = PCLK1 = PCLK2 =
-/// 16 MHz (all prescalers div1). `clock_init` enforces exactly this
-/// posture.
-#[cfg(not(feature = "st-nucleo-u5a5zj-q-pll160"))]
-pub const SYSCLK_HZ: u32 = 16_000_000;
-/// Clock posture 2 (`st-nucleo-u5a5zj-q-pll160`): PLL1 at 160 MHz off
-/// HSI16 -- 16 MHz /1 into the VCO, x20 = 320 MHz (inside the 128-544
-/// MHz VCO window), /2 on the R output lands SYSCLK at 160 MHz, the
-/// VCORE range-1 posture. HCLK = PCLK1 = PCLK2 = SYSCLK (div1: on this
-/// part every bus runs to 160 MHz in range 1, so no cap prescalers).
-#[cfg(feature = "st-nucleo-u5a5zj-q-pll160")]
+/// The PLL posture (the default): PLL1 at 160 MHz off HSI16 -- 16 MHz /1
+/// into the VCO, x20 = 320 MHz (inside the 128-544 MHz VCO window), /2 on
+/// the R output lands SYSCLK at 160 MHz, the VCORE range-1 posture.
+/// HCLK = PCLK1 = PCLK2 = SYSCLK (div1: on this part every bus runs to
+/// 160 MHz in range 1, so no cap prescalers). The literal stands on the
+/// posture's feature, the clock code on the cfg the build script sets from
+/// it; the assertion below ties the two.
+#[cfg(not(feature = "st-nucleo-u5a5zj-q-hsi16"))]
 pub const SYSCLK_HZ: u32 = 160_000_000;
+/// The internal-oscillator posture (`st-nucleo-u5a5zj-q-hsi16`): HSI16,
+/// SYSCLK = HCLK = PCLK1 = PCLK2 = 16 MHz (all prescalers div1).
+/// `clock_init` enforces exactly this posture.
+#[cfg(feature = "st-nucleo-u5a5zj-q-hsi16")]
+pub const SYSCLK_HZ: u32 = 16_000_000;
+const _: () = assert!(cfg!(stm32u5_pll160) == (SYSCLK_HZ == 160_000_000), "the row's clock literal is the PLL posture's exactly when the build script set the PLL cfg");
 /// USART1's kernel clock is PCLK2 (RCC_CCIPR1.USART1SEL = 00, stated
 /// explicitly by `console_init`), and PCLK2 = SYSCLK under div1.
 const PCLK2_HZ: u32 = SYSCLK_HZ;
@@ -54,7 +77,7 @@ pub const NIRQ: usize = 141;
 /// it take no priority write, so a control pended there would never fire;
 /// its peripheral is never clocked by the kernel, the line claimed by no
 /// kernel handler.
-#[allow(dead_code)]
+#[allow(dead_code)] // board-facts surface; the api flavor's band-interrupt control is its consumer
 pub const SPARE_IRQ: usize = 138;
 
 /// FPU shape: FPv5 SINGLE precision (the Cortex-M33 FPU) -- kernel
@@ -62,7 +85,7 @@ pub const SPARE_IRQ: usize = 138;
 /// never by context-switch code (lazy stacking is FP-shape-agnostic).
 /// The part: the STM32U5A5's Cortex-M33 with a single-precision FPU (its
 /// datasheet: "a single-precision FPU").
-#[allow(dead_code)]
+#[allow(dead_code)] // board-facts surface; the board facade's assert reads it
 pub const FPU_DP: bool = false;
 /// The cycle counter the lost-tick witness reads: the core's data
 /// watchpoint and trace unit counts processor cycles, enabled and
@@ -75,6 +98,21 @@ pub const CYCLE_COUNTER: bool = true;
 /// 8-word frame. SRAM4 (the SmartRun domain, 0x28000000) is outside
 /// this map, so no frame may legitimately point there.
 pub const FRAME_RANGES: [(usize, usize); 1] = [(0x2000_0000, 0x2027_0000 - 32)];
+
+/// The memory protection unit's table for this row (PMSAv8 denies by
+/// absence, so the table names everything the kernel and a hosted program
+/// touch): the flash (the kernel's CODE and APP windows), the contiguous
+/// SRAMs from 0x20000000 (SRAM1, 2, 3 and 5, 2496 KB; SRAM4 at 0x28000000
+/// is unused), and the peripherals (RCC, PWR, the GPIO ports, USART1, the
+/// RNG, the RTC and the flash interface all inside 0x40000000 to
+/// 0x5FFFFFFF). The private
+/// peripheral bus needs no entry. Asserted against the row's link scripts
+/// at build time (src/mpu.rs).
+pub const MPU_REGIONS: &[crate::mpu::Region] = &[
+    crate::mpu::Region { lo: 0x0800_0000, hi: 0x083F_FFFF, device: false, exec: true },
+    crate::mpu::Region { lo: 0x2000_0000, hi: 0x2026_FFFF, device: false, exec: true },
+    crate::mpu::Region { lo: 0x4000_0000, hi: 0x5FFF_FFFF, device: true, exec: false },
+];
 
 const RCC: usize = 0x4602_0C00;
 const RCC_CR: *mut u32 = RCC as *mut u32;
@@ -108,7 +146,7 @@ const ACR_LATENCY: u32 = 0b1111;
 /// range-4 column of RM0456's wait-state table tops 0 WS at 12 MHz.
 const ACR_LATENCY_1WS: u32 = 1;
 
-#[cfg(feature = "st-nucleo-u5a5zj-q-pll160")]
+#[cfg(stm32u5_pll160)]
 mod pll160 {
     /// 160 MHz in VCORE range 1: 4 wait states (RM0456 Table 54, the
     /// range-1 column: 3 WS tops at 128 MHz, 4 WS at 160).
@@ -213,7 +251,7 @@ pub use super::stm32_gpio::IRQS as GPIO_IRQS;
 /// to div1, SYSCLK switches and the switch is polled. MSIS, the PLLs
 /// and the VCORE range are left as found -- off the HSI16 path, so
 /// levers this posture does not need stay unpulled.
-#[cfg(not(feature = "st-nucleo-u5a5zj-q-pll160"))]
+#[cfg(not(stm32u5_pll160))]
 pub fn clock_init() {
     unsafe {
         let acr = read_volatile(FLASH_ACR);
@@ -238,9 +276,9 @@ pub fn clock_init() {
     ring::boot_mark();
 }
 
-/// Boring posture: no clock line in the banner (the banked transcript
-/// surface stands byte-identical).
-#[cfg(not(feature = "st-nucleo-u5a5zj-q-pll160"))]
+/// The internal-oscillator posture: no clock line in the banner (the quiet
+/// line's clock figure is the build's constant).
+#[cfg(not(stm32u5_pll160))]
 pub fn clock_readback() -> Option<crate::board::ClockReadback> {
     None
 }
@@ -265,10 +303,11 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
 /// lands at 80 MHz -- a 64 MHz step), a >= 5 us hold elapses, and HPRE
 /// releases to /1 (the exactly-80 MHz second step). Caches stay off;
 /// MSIS is left as found.
-#[cfg(feature = "st-nucleo-u5a5zj-q-pll160")]
+#[cfg(stm32u5_pll160)]
 pub fn clock_init() {
     use pll160::*;
     unsafe {
+        // Downshift to a known-safe HSI16 world (the internal-oscillator posture's shape).
         let acr = read_volatile(FLASH_ACR);
         if acr & ACR_LATENCY < ACR_LATENCY_1WS {
             write_volatile(FLASH_ACR, (acr & !ACR_LATENCY) | ACR_LATENCY_1WS);
@@ -282,17 +321,22 @@ pub fn clock_init() {
         write_volatile(RCC_CFGR1, cfgr1 | CFGR1_SW_HSI16);
         while read_volatile(RCC_CFGR1) & CFGR1_SWS != CFGR1_SWS_HSI16 {}
 
+        // PLL1 off and unlocked before its configuration is written.
         write_volatile(RCC_CR, read_volatile(RCC_CR) & !CR_PLL1ON);
         while read_volatile(RCC_CR) & CR_PLL1RDY != 0 {}
 
+        // PWR's bus clock, read back before any PWR register is used.
         write_volatile(RCC_AHB3ENR, read_volatile(RCC_AHB3ENR) | AHB3ENR_PWREN);
         let _ = read_volatile(RCC_AHB3ENR);
 
+        // Source shape while the PLL is off: HSI16 in at /1, booster /2.
         write_volatile(
             RCC_PLL1CFGR,
             PLL1CFGR_MBOOST_DIV2 | PLL1CFGR_RGE_8_16 | PLL1CFGR_SRC_HSI16,
         );
 
+        // Range 1 + boost enable together (the RM allows the pairing),
+        // then each ready flag in order.
         write_volatile(
             PWR_VOSR,
             read_volatile(PWR_VOSR) | VOSR_VOS_RANGE1 | VOSR_BOOSTEN,
@@ -300,13 +344,16 @@ pub fn clock_init() {
         while read_volatile(PWR_VOSR) & VOSR_VOSRDY == 0 {}
         while read_volatile(PWR_VOSR) & VOSR_BOOSTRDY == 0 {}
 
+        // 4 wait states before anything runs fast.
         let acr = read_volatile(FLASH_ACR) & !ACR_LATENCY;
         write_volatile(FLASH_ACR, acr | ACR_LATENCY_4WS);
         while read_volatile(FLASH_ACR) & ACR_LATENCY != ACR_LATENCY_4WS {}
 
+        // The two-step switch, in the RM's own order: AHB /2 first.
         let cfgr2 = read_volatile(RCC_CFGR2) & !CFGR2_HPRE;
         write_volatile(RCC_CFGR2, cfgr2 | CFGR2_HPRE_DIV2);
 
+        // x20 /2 (VCO at 320 MHz), R output enabled, lock waited.
         write_volatile(RCC_PLL1DIVR, PLL1DIVR_VALUE);
         write_volatile(RCC_PLL1CFGR, read_volatile(RCC_PLL1CFGR) | PLL1CFGR_REN);
         write_volatile(RCC_CR, read_volatile(RCC_CR) | CR_PLL1ON);
@@ -324,14 +371,14 @@ pub fn clock_init() {
     ring::boot_mark();
 }
 
-/// Gated posture: report the live clock tree for the banner line, every
+/// The PLL posture: report the live clock tree for the banner line, every
 /// numeric field decoded from registers (a silently-failed PLL yields
 /// SWS=HSI16 at 16 MHz -- or MSIS at 4 -- here, and the kmain assert
-/// dies loudly). Field mapping per the registered ruling: `pllp`
+/// dies loudly). Field mapping: `pllp`
 /// carries PLL1 R (this family's divider that lands SYSCLK, as P is the
 /// F7's) and `boost` states the EPOD booster's state (BOOSTRDY) in the
 /// reference manual's own words: each family's go-fast handshake by name.
-#[cfg(feature = "st-nucleo-u5a5zj-q-pll160")]
+#[cfg(stm32u5_pll160)]
 pub fn clock_readback() -> Option<crate::board::ClockReadback> {
     use pll160::*;
     /// Nominal MSIS out of reset -- decode-only: this posture leaves
@@ -342,12 +389,15 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
         let cfgr1 = read_volatile(RCC_CFGR1);
         let pllcfgr = read_volatile(RCC_PLL1CFGR);
         let plldivr = read_volatile(RCC_PLL1DIVR);
+        // Divider fields hold their value minus one.
         let m = ((pllcfgr >> 8) & 0xF) + 1;
         let n = (plldivr & 0x1FF) + 1;
         let r = ((plldivr >> 24) & 0x7F) + 1;
         let (src, base) = match pllcfgr & 0b11 {
             0b01 => ("MSIS", MSIS_HZ),
             0b10 => ("HSI16", HSI16_HZ),
+            // No crystal is fitted on this Nucleo's HSE path; an honest
+            // decoder still names the bits it read.
             0b11 => ("HSE", 0),
             _ => ("none", 0),
         };
@@ -392,6 +442,7 @@ unsafe fn console_hw_init() {
         write_volatile(GPIOA_AFRH, afrh | (0x7 << 4) | (0x7 << 8));
 
         write_volatile(USART1_CR1, 0);
+        // Round to nearest: truncation costs 0.6% at 16 MHz, rounding 0.1%.
         write_volatile(USART1_BRR, (PCLK2_HZ + BAUD / 2) / BAUD);
         write_volatile(USART1_CR1, CR1_UE | CR1_TE | CR1_RE);
     }
@@ -482,14 +533,16 @@ pub fn console_getb() -> Option<u8> {
     }
 }
 
-/// Whether address 0 is readable memory on this row -- the low-address
-/// question's per-row record, MEASURED on the part (a read that returns
+/// Whether address 0 is readable memory on this row (a read that returns
 /// a word, or a bus fault): the api flavor's observation reads it before
-/// it touches the address.
-/// This row: a precise bus fault, BFAR 0, measured on the board: no memory answers at 0 with the boot address the option bytes hold.
-#[allow(dead_code)]
+/// it touches the address. With the null-page guard the protection unit denies the first
+/// page on every row, so a guarded image never attempts the read; the
+/// `null-guard-off` control image alone does.
+/// This row: a precise bus fault, BFAR 0: no memory answers at 0 with the boot address the option bytes hold.
+#[allow(dead_code)] // read by the api flavor's observation only
 pub const ADDRESS_ZERO_READABLE: bool = false;
 
+// ---------------- the hardware sources of this row ----------------
 
 /// The RNG block (RM0456 chapter 48): a true random number generator
 /// with an analog noise source, a NIST-style conditioning stage and
@@ -567,6 +620,10 @@ pub fn entropy_init() -> bool {
         write_volatile(RCC_CCIPR2, read_volatile(RCC_CCIPR2) & !CCIPR2_RNGSEL);
         write_volatile(RCC_AHB2ENR1, read_volatile(RCC_AHB2ENR1) | AHB2ENR1_RNGEN);
         let _ = read_volatile(RCC_AHB2ENR1);
+        // The software reset sequence of the manual: the configuration
+        // with the conditioning reset set and the block disabled, the
+        // health-test thresholds while the reset is set, then the same
+        // configuration with the reset cleared and the block enabled.
         write_volatile(RNG_CR, RNG_CR_CONDRST | RNG_CR_CONFIG_C);
         write_volatile(RNG_HTCR, RNG_HTCR_CONFIG_C);
         write_volatile(RNG_CR, RNG_CR_CONFIG_C | RNG_CR_RNGEN);
@@ -688,7 +745,7 @@ const WPR_KEY2: u32 = 0x53;
 
 /// Whether this row carries a real-time clock the kernel reads at boot and
 /// writes at an explicit set.
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the api flavor's calendar check
 pub const RTC_PRESENT: bool = true;
 /// The calendar banner's text for this row, constant per image.
 pub const RTC_LINE: &str = "RTC block present, 32.768 kHz crystal mounted, no backup cell: the base carries across a reset, not a power cycle";
@@ -758,6 +815,8 @@ pub fn rtc_write(ticks: u64) -> super::RtcWrite {
         if bdcr & BDCR_RTCEN == 0 {
             write_volatile(RCC_BDCR, (bdcr & !BDCR_RTCSEL) | BDCR_RTCSEL_LSE | BDCR_RTCEN);
         }
+        // the source selection is written once per backup-domain reset: read it back, and
+        // an earlier selection of another source means this write was ignored
         if read_volatile(RCC_BDCR) & BDCR_RTCSEL != BDCR_RTCSEL_LSE {
             return super::RtcWrite::SkippedSourceHeld;
         }

@@ -1,4 +1,5 @@
-// The board class's program: it prints the board it was built for, in four lines the gate reads in order.
+// The board class's program: it prints the board it was built for, in five lines the gate reads in order.
+
 using System;
 using System.Device.I2c;
 using Lamella.Hardware;
@@ -13,6 +14,7 @@ internal static class Program
         Console.WriteLine("TBHELLO: " + board.ToString());
         BoardPin first = board.Pins[0];
         Console.WriteLine("TBHELLO: pins " + board.Pins.Count + "; pin 0: labels " + (first.Labels.Count == 0 ? "none" : string.Join(" ", first.Labels)));
+        Console.WriteLine("TBHELLO: pin 0: PWM " + (first.PwmChip is int chip ? "chip " + chip + ", channel " + first.PwmChannelNumber : "none"));
         try
         {
             using I2cDevice device = board.CreateI2cDevice(new I2cConnectionSettings(0, 0x50));

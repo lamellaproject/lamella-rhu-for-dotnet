@@ -14,8 +14,7 @@
 //! layout versions equal, the generation equal to the RHU_ABI the gate
 //! read from include/rhu.h. The kernel sources (src/kernel/src/header.rs
 //! and sched.rs) state the layouts; this file only reads them. The
-//! ELF32 helpers were the payload gate's; they moved here when a second
-//! gate needed them (behavior unchanged).
+//! ELF32 helpers are shared by every gate that reads an image.
 
 use crate::text::word_sym_value;
 
@@ -219,14 +218,14 @@ pub fn header_abi_compat(text: &str) -> Option<u32> {
 pub fn synth_elf32(phdrs: &[(u32, u32, u32, u32, u32, u32, u32)], data_at: usize, data: &[u8]) -> Vec<u8> {
     let mut e = vec![0u8; 52];
     e[0..4].copy_from_slice(b"\x7fELF");
-    e[4] = 1;
-    e[5] = 1;
-    e[6] = 1;
-    e[16..18].copy_from_slice(&2u16.to_le_bytes());
-    e[18..20].copy_from_slice(&40u16.to_le_bytes());
-    e[28..32].copy_from_slice(&52u32.to_le_bytes());
-    e[40..42].copy_from_slice(&52u16.to_le_bytes());
-    e[42..44].copy_from_slice(&32u16.to_le_bytes());
+    e[4] = 1; // ELFCLASS32
+    e[5] = 1; // little-endian
+    e[6] = 1; // EV_CURRENT
+    e[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    e[18..20].copy_from_slice(&40u16.to_le_bytes()); // EM_ARM
+    e[28..32].copy_from_slice(&52u32.to_le_bytes()); // e_phoff
+    e[40..42].copy_from_slice(&52u16.to_le_bytes()); // e_ehsize
+    e[42..44].copy_from_slice(&32u16.to_le_bytes()); // e_phentsize
     e[44..46].copy_from_slice(&(phdrs.len() as u16).to_le_bytes());
     for &(t, off, va, pa, fsz, msz, al) in phdrs {
         for v in [t, off, va, pa, fsz, msz, 6, al] {

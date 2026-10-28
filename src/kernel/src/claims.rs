@@ -12,6 +12,11 @@
 //! of converter channels per block. The record `__rhu_claims` is
 //! read by symbol (a debugger, the api flavor); nothing in a program
 //! reads it.
+//!
+//! Pure: no board dependency, host-tested. The callers hold the kernel
+//! critical section around every call that writes (the doors are called
+//! from hosted threads and the handlers run in the board band); this
+//! module does no masking of its own.
 
 /// The table's capacity: six banks of thirty-two lines cover the largest
 /// family in hand (eleven ports of sixteen on the F7 = 176; forty-eight on
@@ -159,6 +164,21 @@ pub fn claim_board(c: &mut Claims, line: u32) -> i32 {
     0
 }
 
+/// A board claim given back at runtime (a UART port's two lines at its
+/// release): the bit cleared when the board holds the line, a release
+/// counted; nothing when it does not (idempotent, never a refusal).
+#[cfg_attr(not(rhu_uart_rows), allow(dead_code))] // the UART doors' release on the rows with a UART table
+pub fn release_board(c: &mut Claims, line: u32) {
+    if line >= c.line_count {
+        return;
+    }
+    let (bank, mask) = split(line);
+    if c.board[bank] & mask != 0 {
+        c.board[bank] &= !mask;
+        c.releases += 1;
+    }
+}
+
 /// A program's release: refused `REFUSED_INVAL` when the program does not
 /// hold the line (a board claim is never released through a door).
 pub fn release(c: &mut Claims, line: u32) -> i32 {
@@ -182,7 +202,7 @@ pub fn is_program(c: &Claims, line: u32) -> bool {
     c.program[bank] & mask != 0
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the host tier's tests
 pub fn is_board(c: &Claims, line: u32) -> bool {
     if line >= c.line_count {
         return false;
@@ -193,7 +213,7 @@ pub fn is_board(c: &Claims, line: u32) -> bool {
 
 /// An interrupt slot claimed for a line's armed edge: the same line may
 /// re-arm its own slot; another line on the slot is refused `REFUSED_BUSY`.
-#[allow(dead_code)]
+#[allow(dead_code)] // the ST arms' interrupt slots
 pub fn irq_slot_claim(c: &mut Claims, slot: u32, line: u32) -> i32 {
     if slot as usize >= SLOTS {
         return refuse(c, line, REFUSED_INVAL);
@@ -211,7 +231,7 @@ pub fn irq_slot_claim(c: &mut Claims, slot: u32, line: u32) -> i32 {
 }
 
 /// The slot released by its owner (a release by any other line is ignored).
-#[allow(dead_code)]
+#[allow(dead_code)] // the ST arms' interrupt slots
 pub fn irq_slot_release(c: &mut Claims, slot: u32, line: u32) {
     if slot as usize >= SLOTS {
         return;
@@ -222,7 +242,7 @@ pub fn irq_slot_release(c: &mut Claims, slot: u32, line: u32) {
     }
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // the ST arms' interrupt slots
 pub fn irq_slot_owner(c: &Claims, slot: u32) -> Option<u32> {
     if slot as usize >= SLOTS || c.irq_slots & (1u32 << slot) == 0 {
         return None;
@@ -232,7 +252,7 @@ pub fn irq_slot_owner(c: &Claims, slot: u32) -> Option<u32> {
 
 /// A tenant's claim of an interrupt bit: refused `REFUSED_BUSY` when the
 /// bit is held or the table is full.
-#[allow(dead_code)]
+#[allow(dead_code)] // the tenant interface: the RP2350 handler reads it; no board registers a tenant
 pub fn tenant_add(c: &mut Claims, reg: u32, bit: u32, wake: u32) -> i32 {
     let n = c.tenant_count as usize;
     let mut i = 0;
@@ -250,7 +270,7 @@ pub fn tenant_add(c: &mut Claims, reg: u32, bit: u32, wake: u32) -> i32 {
     0
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // the tenant interface: the RP2350 handler reads it; no board registers a tenant
 pub fn tenant_for(c: &Claims, reg: u32, bit: u32) -> Option<Tenant> {
     let n = c.tenant_count as usize;
     let mut i = 0;
@@ -280,7 +300,7 @@ const fn channel_split(bit: usize) -> (usize, u32) {
 
 /// A program's claim of a timer channel (a PWM output): refused
 /// `REFUSED_INVAL` past the bitmap's reach, `REFUSED_BUSY` when held.
-#[allow(dead_code)]
+#[allow(dead_code)] // a row whose facts carry no PWM line or ADC channel claims no channel
 pub fn pwm_channel_claim(c: &mut Claims, timer: u32, channel: u32) -> i32 {
     if timer as usize >= PWM_TIMERS_MAX || channel as usize >= PWM_CHANNELS_MAX {
         return refuse_channel(c, REFUSED_INVAL);
@@ -294,7 +314,7 @@ pub fn pwm_channel_claim(c: &mut Claims, timer: u32, channel: u32) -> i32 {
 }
 
 /// The release of a timer channel: refused `REFUSED_INVAL` when it is not held.
-#[allow(dead_code)]
+#[allow(dead_code)] // a row whose facts carry no PWM line or ADC channel claims no channel
 pub fn pwm_channel_release(c: &mut Claims, timer: u32, channel: u32) -> i32 {
     if timer as usize >= PWM_TIMERS_MAX || channel as usize >= PWM_CHANNELS_MAX {
         return refuse_channel(c, REFUSED_INVAL);
@@ -307,7 +327,7 @@ pub fn pwm_channel_release(c: &mut Claims, timer: u32, channel: u32) -> i32 {
     0
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the host tier's tests
 pub fn pwm_channel_held(c: &Claims, timer: u32, channel: u32) -> bool {
     if timer as usize >= PWM_TIMERS_MAX || channel as usize >= PWM_CHANNELS_MAX {
         return false;
@@ -318,7 +338,7 @@ pub fn pwm_channel_held(c: &Claims, timer: u32, channel: u32) -> bool {
 
 /// A program's claim of a converter channel: refused `REFUSED_INVAL` past
 /// the bitmap's reach, `REFUSED_BUSY` when held.
-#[allow(dead_code)]
+#[allow(dead_code)] // a row whose facts carry no PWM line or ADC channel claims no channel
 pub fn adc_channel_claim(c: &mut Claims, block: u32, channel: u32) -> i32 {
     if block as usize >= ADC_BLOCKS_MAX || channel as usize >= ADC_CHANNELS_MAX {
         return refuse_channel(c, REFUSED_INVAL);
@@ -332,7 +352,7 @@ pub fn adc_channel_claim(c: &mut Claims, block: u32, channel: u32) -> i32 {
 }
 
 /// The release of a converter channel: refused `REFUSED_INVAL` when it is not held.
-#[allow(dead_code)]
+#[allow(dead_code)] // a row whose facts carry no PWM line or ADC channel claims no channel
 pub fn adc_channel_release(c: &mut Claims, block: u32, channel: u32) -> i32 {
     if block as usize >= ADC_BLOCKS_MAX || channel as usize >= ADC_CHANNELS_MAX {
         return refuse_channel(c, REFUSED_INVAL);
@@ -345,7 +365,7 @@ pub fn adc_channel_release(c: &mut Claims, block: u32, channel: u32) -> i32 {
     0
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the host tier's tests
 pub fn adc_channel_held(c: &Claims, block: u32, channel: u32) -> bool {
     if block as usize >= ADC_BLOCKS_MAX || channel as usize >= ADC_CHANNELS_MAX {
         return false;

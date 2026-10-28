@@ -28,8 +28,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::rp2350::gpio_backend::{ctrl, pad, sio, GPIO_OE_CLR, GPIO_OUT_CLR};
 use super::rp2350::{
-    release_reset, CLOCKS, PAD_IE, PAD_ISO, PAD_OD, PAD_PDE, PAD_PUE, RESETS_RESET, RESETS_RESET_DONE, RESET_IO_BANK0,
-    RESET_PADS_BANK0, SYSCLK_HZ,
+    release_reset, CLOCKS, PAD_IE, PAD_ISO, PAD_OD, PAD_PDE, PAD_PUE, RESETS_RESET_DONE, RESETS_RESET_SET,
+    RESET_IO_BANK0, RESET_PADS_BANK0, SYSCLK_HZ,
 };
 use super::rp2350_map as map;
 use crate::board::facts;
@@ -62,7 +62,7 @@ const DIV_INT_SHIFT: u32 = 4;
 const DIV_INT_MASK: u32 = 0xFF << DIV_INT_SHIFT;
 /// RESETS.RESET PWM, bit 16 (Table 535).
 const RESET_PWM: u32 = 1 << 16;
-/// The clock gate's atomic set alias (section 2.1.3: the bitmask set at
+/// The clock gate's atomic set alias (the RP2350 datasheet's section 2.1.3: the bitmask set at
 /// the register's address plus 0x2000; WAKE_EN0 at CLOCKS + 0xac, Table 587).
 const WAKE_EN0_SET: *mut u32 = (CLOCKS + 0x2000 + 0xAC) as *mut u32;
 /// WAKE_EN0 CLK_SYS_PWM, bit 25: the block's clock gate (Table 587).
@@ -161,7 +161,7 @@ fn bring_up() {
     }
     let ok = unsafe {
         write_volatile(WAKE_EN0_SET, WAKE_EN0_CLK_SYS_PWM);
-        write_volatile(RESETS_RESET, read_volatile(RESETS_RESET) | RESET_PWM);
+        write_volatile(RESETS_RESET_SET, RESET_PWM);
         let mut n = 0u32;
         let mut ok = true;
         while read_volatile(RESETS_RESET_DONE) & RESET_PWM != 0 {
@@ -183,7 +183,7 @@ fn bring_up() {
 /// The line's pad and function: the SIO output and enable cleared, the
 /// function 4 with the output overridden low (parked until a set and an
 /// enable), the pad written with its isolation latch set and released after
-/// (section 9.7) -- the input enabled, no pull, the output enabled (a driven
+/// (the RP2350 datasheet's section 9.7) -- the input enabled, no pull, the output enabled (a driven
 /// pad reads back through the SIO for a hardware run's own check; the leakage of
 /// erratum E9 is an undriven input's).
 pub fn configure(index: usize) {

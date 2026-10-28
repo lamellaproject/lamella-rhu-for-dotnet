@@ -3,7 +3,7 @@
 //! on the Cortex-M33 and on a Cortex-M7 with a single-precision FPU, as a
 //! coprocessor access denied on the Cortex-M4F (the double-precision
 //! encodings name coprocessor 11, which that FPU does not implement); both
-//! measured on hardware, both UsageFaults with the same frame -- and the
+//! UsageFaults with the same frame -- and the
 //! fault funnel hands the UsageFault here. This module decides whether
 //! the fault is such a form, computes it by the architecture's rules
 //! (`soft`), puts the result where the instruction would have, and returns
@@ -13,8 +13,8 @@
 //! lowest priority, so every interrupt preempts an emulated form; the rule
 //! that implies: no double-precision instruction in a handler or under a
 //! raised priority (a critical section) on these cores -- such a form
-//! escalates to the hard fault. Each emulated instruction costs one fault;
-//! the measured costs are on `trap`. The frame: the hardware pushes a basic
+//! escalates to the hard fault. Each emulated instruction costs one fault.
+//! The frame: the hardware pushes a basic
 //! frame (8 words) or an extended one (then S0-S15, FPSCR and a reserved
 //! word), saying which in EXC_RETURN bit 4; with lazy stacking on, an
 //! extended frame's floating-point area is unwritten until a floating-point
@@ -142,11 +142,18 @@ impl File {
     }
 }
 
+// The register names pass as token trees: the assembly macro reads an explicit
+// register only from a plain string token, never from a literal fragment.
 macro_rules! live_arms {
     (read $s:expr, $($n:literal => $reg:tt),*) => {
         match $s { $($n => { let v: u32; unsafe { asm!(concat!("vmov {0}, ", $reg), out(reg) v, options(nomem, nostack, preserves_flags)) }; v })*  _ => 0 }
     };
     (write $s:expr, $v:expr, $($n:literal => $reg:tt),*) => {
+        // The register is named in the assembly text ONLY, never declared as an output: a declared
+        // clobber of a callee-saved register makes the compiler save it at the function's entry and
+        // restore it at every return, undoing the live write before the handler returns (the
+        // register census proves per image that nothing of the
+        // compiler's names D8-D15 / S16-S31 in the kernel's functions beyond these arms).
         match $s { $($n => unsafe { asm!(concat!("vmov ", $reg, ", {0}"), in(reg) $v, options(nomem, nostack, preserves_flags)) },)* _ => {} }
     };
 }
@@ -165,6 +172,7 @@ fn live_write(s: u8, v: u32) {
         24 => "s24", 25 => "s25", 26 => "s26", 27 => "s27", 28 => "s28", 29 => "s29", 30 => "s30", 31 => "s31")
 }
 
+// The code range: the linker script's text bounds (every board's script defines them).
 unsafe extern "C" {
     static __stext: u8;
     static __etext: u8;
@@ -173,19 +181,16 @@ unsafe extern "C" {
 /// The gate: the funnel calls it at a UsageFault whose CFSR carries one of
 /// the form classes (`class`: the UNDEFINSTR or NOCP bit found set, cleared
 /// here when the form is emulated), with the frame the trampoline found and
-/// the EXC_RETURN it arrived with. The caller has checked nothing else. The
-/// cost per emulated instruction,
-/// measured by the api flavor's cost check on the Cortex-M33 silicon at
-/// 160 MHz (the cycle counter around one instruction, the bracket's own 7
-/// cycles included): about 1,900 cycles for an add, 2,100 for a subtract,
-/// 1,700 for a multiply, 2,400 to 2,600 for a multiply-accumulate, 9,400
-/// for a divide, 46,000 for a square root, and 900 to 1,500 for a move, a
-/// negation, a compare, a rounding or a conversion.
+/// the EXC_RETURN it arrived with. The caller has checked nothing else.
 pub fn trap(frame: *mut ExcFrame, exc_return: u32, class: u32) -> Trap {
+    // thread mode on the process stack only; the frame inside the thread ranges
     if exc_return & 0xC != 0xC {
         return refuse("outside thread mode or on the main stack");
     }
     let f = frame as usize;
+    // the frame's own size: a basic frame needs its 0x20 bytes for the trap's reads (the promotion
+    // checks the 0x68 of the frame it makes, and the stack limit, before it writes); an extended
+    // frame needs its 0x68 for the S0-S15 and FPSCR the trap reads and writes
     let need = if exc_return & EXC_RETURN_FTYPE == 0 { frame::EXTENDED_BYTES } else { frame::BASIC_BYTES };
     if !crate::board::FRAME_RANGES.iter().any(|&(lo, hi)| f >= lo && f + need <= hi) {
         return refuse("the frame outside the thread ranges");
@@ -194,10 +199,15 @@ pub fn trap(frame: *mut ExcFrame, exc_return: u32, class: u32) -> Trap {
     if pc & 1 != 0 {
         return refuse("an odd stacked pc");
     }
+    // the stacked pc inside the primary code range (the linker's text bounds) with room for the two
+    // halfwords, or else inside a registered module's own range (the registry's lookup, one bounded
+    // critical section on this rare path alone): a module placed outside the primary range executes
+    // its double-precision forms through the same emulation
     let (text_lo, text_hi) = (core::ptr::addr_of!(__stext) as usize, core::ptr::addr_of!(__etext) as usize);
     if ((pc as usize) < text_lo || (pc as usize) + 4 > text_hi) && !crate::registry::code_holds(pc, 4) {
         return refuse("the stacked pc outside every registered code range");
     }
+    // the instruction's two halfwords: the fetch that faulted succeeded, so the read is safe
     let hw1 = unsafe { read_volatile(pc as *const u16) };
     let hw2 = unsafe { read_volatile((pc + 2) as *const u16) };
     let dec = match decode::decode(hw1, hw2) {
@@ -208,6 +218,9 @@ pub fn trap(frame: *mut ExcFrame, exc_return: u32, class: u32) -> Trap {
     if (ud && dec.d >= 16) || (un && dec.n >= 16) || (um && dec.m >= 16) {
         return refuse("a doubleword register beyond D15");
     }
+    // a form inside an IT block carries the block's condition: when it fails, the form is a NOP
+    // (nothing written to the frame or the registers) and the program moves past it, the IT
+    // state advanced as the hardware advances it for any instruction of the block
     let xpsr = unsafe { read_volatile(&(*frame).xpsr) };
     let it = it_state(xpsr);
     if it != 0 && !decode::condition_passed((it >> 4) as u8, xpsr) {
@@ -223,12 +236,14 @@ pub fn trap(frame: *mut ExcFrame, exc_return: u32, class: u32) -> Trap {
     }
     let ext = exc_return & EXC_RETURN_FTYPE == 0;
     if ext {
+        // the pending lazy save, aimed at this frame: complete it with one floating-point instruction
         let fpccr = unsafe { read_volatile(FPCCR) };
         if fpccr & 1 != 0 {
             let fpcar = unsafe { read_volatile(FPCAR) } as usize;
             if fpcar != f + FRAME_S0 {
                 return refuse("lazy state pending for another frame");
             }
+            // the instruction makes the hardware write the frame, so the block is not marked memory-free
             unsafe { asm!("vmov.f32 s0, s0", options(nostack, preserves_flags)) };
         }
     }
@@ -239,6 +254,7 @@ pub fn trap(frame: *mut ExcFrame, exc_return: u32, class: u32) -> Trap {
     };
     let mut file = File { frame, ext, fresh: [0; 16], fpscr };
     execute(&dec, &mut file, xpsr);
+    // the results and the flags back: the frame's FPSCR, or the fresh context promoted under the frame
     let mut out = exc_return;
     if ext {
         unsafe { write_volatile((f + FRAME_FPSCR) as *mut u32, file.fpscr) };
@@ -251,6 +267,7 @@ pub fn trap(frame: *mut ExcFrame, exc_return: u32, class: u32) -> Trap {
             Err(reason) => return refuse(reason),
         }
     }
+    // resume past the instruction: the pc, the IT state, the fault status
     unsafe {
         let fr = frame::current(frame, out);
         write_volatile(&mut (*fr).pc, pc + 4);
@@ -348,6 +365,8 @@ fn execute(dec: &Decoded, file: &mut File, xpsr: u32) {
         }
         Form::FromInt { signed } => { let r = soft::from_int32(&mut ctx, file.s_read(dec.sm), signed); file.d_write(d, r) }
         Form::ToFixed { signed, bits, fbits } => {
+            // the result fills the doubleword register: extended by its sign for a
+            // signed form, by zeros for an unsigned one
             let r = soft::to_fixed(&mut ctx, file.d_read(d), signed, bits, fbits);
             let w = if signed { (((r << (32 - bits)) as i32) >> (32 - bits)) as i64 as u64 } else { r as u64 };
             file.d_write(d, w)

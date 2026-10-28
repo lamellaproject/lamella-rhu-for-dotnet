@@ -4,6 +4,10 @@
 //! both artifacts: the gate binary (rlib into `src/main.rs`) and the
 //! payload-hosting staticlib (external `ld -T` merge with a frozen ILC
 //! object).
+//!
+//! Console discipline: functional lines are deterministic -- stable
+//! prefixes, no timestamps -- so transcripts diff byte-for-byte against
+//! goldens and against a second hosting of the same payload.
 
 #![no_std]
 
@@ -22,8 +26,10 @@ mod calendar_math;
 mod claims;
 mod critical;
 mod entropy;
+mod exit_word;
 mod funnel;
 mod gpio;
+mod mpu;
 mod gpio_math;
 #[cfg(feature = "fpemul")]
 mod fpemul;
@@ -35,16 +41,45 @@ mod abi_window;
 mod payload;
 mod pwm;
 mod pwm_math;
+mod ram;
 mod registry;
 mod sched;
+mod uart;
+/// The UART pin words' arithmetic (the pin override's kernel half): the effective pair of a block from the row's pair, the chip's
+/// legal sets and the project's two words, pure, so the host tier proves what every claim runs.
+#[cfg_attr(not(rhu_uart_rows), allow(dead_code))]
+mod uart_math;
+/// The block-device doors: the device table and the five verbs on
+/// every row; the one device the STM32F769 row's card socket.
+mod blk;
+/// The SD host trait and the card layer over it, compiled
+/// where a row has a socket: the STM32F769's SDMMC2 host implements the trait.
+#[cfg(rhu_sd_socket)]
+mod sdhost;
+#[cfg(rhu_sd_socket)]
+mod sdcard;
+/// The FAT filesystem layer over the card, compiled for its one caller, the
+/// api checks of the socket row.
+#[cfg(all(rhu_sd_socket, feature = "api-smoke", not(feature = "test-sd-doctored")))]
+mod fat;
 
 /// The api flavor's band-interrupt control line and its handler, folded into
 /// the vector table beside the board's own lines; empty in every other image.
 #[cfg(feature = "api-smoke")]
 pub const TEST_IRQS: &[(usize, unsafe extern "C" fn())] = &[(api_smoke::FP_BAND_LINE, api_smoke::__rhu_fp_band_irq)];
-#[cfg(not(feature = "api-smoke"))]
+/// The fault-in-handler flavor's line and its handler: the same spare line,
+/// the two flavors never in one image.
+#[cfg(all(feature = "test-fault-in-handler", not(feature = "api-smoke")))]
+pub const TEST_IRQS: &[(usize, unsafe extern "C" fn())] = &[(board::SPARE_IRQ, fault_in_handler::__rhu_fault_in_handler_irq)];
+#[cfg(not(any(feature = "api-smoke", feature = "test-fault-in-handler")))]
 pub const TEST_IRQS: &[(usize, unsafe extern "C" fn())] = &[];
 mod semihost;
+/// The instruction cache's boot step on the STM32F769 row: on under the
+/// quad-SPI window alone.
+#[cfg(rhu_qspi_window)]
+mod cache;
+/// The handler stack's watermark: the boot stack reserve's pattern fill and its read-out.
+mod stack_watermark;
 
 /// The floating-point posture of this row, one line at boot: the Cortex-M7 class
 /// computes double precision in hardware; the M33 class (the single-precision
@@ -62,10 +97,15 @@ const FLAVOR: &str = if cfg!(feature = "test-panic") {
     "test-panic"
 } else if cfg!(feature = "test-fault") {
     "test-fault"
+} else if cfg!(feature = "test-fault-in-handler") {
+    "test-fault-in-handler"
+} else if cfg!(feature = "test-h7-pmic-read") {
+    "test-h7-pmic-read"
 } else if cfg!(feature = "test-kheap-loud") {
     "test-kheap-loud"
 } else if cfg!(feature = "test-tickcost") { "test-tickcost"
 } else if cfg!(feature = "test-stackovfl") { "test-stackovfl"
+} else if cfg!(feature = "test-nullpage") { "test-nullpage"
 } else if cfg!(feature = "sched-smoke") {
     "sched-smoke"
 } else if cfg!(feature = "api-smoke") {
@@ -83,6 +123,7 @@ static mut DATA_CANARY: u32 = 0xDA7A_C0DE;
 /// Lands in .bss -- proves the Reset zero-fill ran.
 static mut BSS_CANARY: u32 = 0;
 
+// Volatile-loaded operands so the float math executes at run time.
 static F32_A: f32 = 2.5;
 static F32_B: f32 = 1.5;
 static F64_A: f64 = 3.5;
@@ -96,11 +137,26 @@ pub extern "C" fn kmain() -> ! {
     let cpuid = unsafe { read_volatile(SCB_CPUID) };
     let vtor = unsafe { read_volatile(SCB_VTOR) };
 
+    // A quiet image prints ONE line -- the version, the board, its chip
+    // and its clock -- and nothing else of the boot report (a verbose image
+    // prints the report below instead). THE FORM:
+    // `Lamella RHU v<version>, <board> (<chip>, <clock> MHz)`.
+    if console::level() == console::LEVEL_QUIET {
+        klog!(
+            console::LEVEL_QUIET,
+            "Lamella RHU v{}, {} ({}, {} MHz)",
+            env!("CARGO_PKG_VERSION"),
+            board::NAME,
+            board::CHIP,
+            board::SYSCLK_HZ / 1_000_000
+        );
+    }
+    console::say_refusals();
     kprintln!(
         "rhu {} -- Lamella RHU: runtime-hosting unikernel for .NET on Cortex-M",
         env!("CARGO_PKG_VERSION")
     );
-    kprintln!("[boot] {} | {} | flavor: {}", board::NAME, board::CONSOLE, FLAVOR);
+    kprintln!("[boot] {} | {} | flavor: {}", board::NAME, console::clause(), FLAVOR);
     kprintln!(
         "[boot] VTOR={:#010x} CPUID={:#010x} ({} r{}p{})",
         vtor,
@@ -110,6 +166,18 @@ pub extern "C" fn kmain() -> ! {
         cpuid & 0xF
     );
 
+    // The memory protection unit: the first page no-access on every row
+    // and, on the v7-M rows, the slot for the running thread's stack guard
+    // (the null-page guard and the stack floor); the posture read back on its own boot line, pinned
+    // by the harness. Before the scheduler, so no thread ever runs with
+    // the page readable.
+    mpu::banner(&mpu::init());
+
+    // Gated clock postures announce themselves from register read-back
+    // (boards on their boring default return None and the recorded
+    // transcript surface stands). The assert is the in-image tripwire:
+    // a silently-failed posture prints its wrong line above, then dies
+    // loudly here -- never a silent pass at the wrong clock.
     if let Some(ck) = board::clock_readback() {
         kprintln!(
             "[boot] clock: {} | SYSCLK {} Hz (SWS={}, {}/{} x{} /{}) | flash WS {} | {}",
@@ -131,23 +199,115 @@ pub extern "C" fn kmain() -> ! {
         );
     }
 
+    // The board's RAM ranges, one line on every row: the internal
+    // SRAM everywhere; on the rows that carry the part, the PSRAM brought
+    // up through the flash interface's second chip select and proved by
+    // read-back -- here, with the clock final and before any
+    // interrupt source is enabled, the crate's preconditions met by
+    // position. A refusal is a loud death inside the call.
+    #[cfg(rhu_psram_window)]
+    {
+        let w = ram::psram_bring_up();
+        kprintln!(
+            "[boot] ram: 2 ranges -- {}; {} (the flash interface's second select on GPIO {}; KGD {:#04x}, read-back held; {})",
+            ram::Words(0),
+            ram::Words(1),
+            board::facts::PSRAM_SELECT_LINE,
+            w.id.kgd,
+            arena::INIT_MODE_WORDS
+        );
+    }
+    // On the STM32F769 row, the board's quad-SPI flash: brought up and
+    // mapped at 0x90000000 when the map this image was linked under declares
+    // the window (its brackets), proved by the two-path read-back and the
+    // window header's matched-set words, before the SDRAM and before any
+    // payload address is touched; the block stays disabled under the other
+    // maps. Then the instruction cache, on under the window alone (or under
+    // the flight-only measurement control test-icache).
+    #[cfg(rhu_qspi_window)]
+    {
+        let w = board::stm32f7_qspi::boot();
+        kprintln!("[boot] flash: {}", board::stm32f7_qspi::Banner(w));
+        cache::boot(w.is_some() || cfg!(feature = "test-icache"));
+        kprintln!("[boot] icache: {}", cache::Banner);
+    }
+    // On the STM32F769 row, the SDRAM behind the flexible memory controller,
+    // brought up and proved by read-back at the same position.
+    #[cfg(rhu_sdram_window)]
+    {
+        ram::sdram_bring_up();
+        kprintln!(
+            "[boot] ram: 2 ranges -- {}; {} (the flexible memory controller's bank 1 at {} MHz, CL {}; read-back held; {})",
+            ram::Words(0),
+            ram::Words(1),
+            board::stm32f7_sdram::WORDS.sdclk_hz / 1_000_000,
+            board::stm32f7_sdram::WORDS.cas,
+            arena::INIT_MODE_WORDS
+        );
+    }
+    // On the two emulator rows, the machines' PSRAM bank, proved by
+    // read-back at the same position (nothing to program).
+    #[cfg(rhu_mps2_window)]
+    {
+        ram::bank_bring_up();
+        kprintln!(
+            "[boot] ram: 2 ranges -- {}; {} (the machine's bank; read-back held; {})",
+            ram::Words(0),
+            ram::Words(1),
+            arena::INIT_MODE_WORDS
+        );
+    }
+    #[cfg(not(rhu_extram_window))]
+    kprintln!("[boot] ram: 1 range -- {}", ram::Words(0));
+    // The hosted runtime's rehydrated-data region, placed at the head of
+    // the external RAM region by the rows' maps: zeroed here, with the
+    // external RAM proved and before the arena takes its window past it.
+    #[cfg(rhu_extram_window)]
+    boot::zero_hydrated();
+    // On the STM32F769 row, the microSD socket: the card identified where
+    // one is seated and the banner's sd line either way; a refused card is
+    // not a boot death (the doors answer their codes).
+    #[cfg(rhu_sd_socket)]
+    blk::boot();
+
+    // The entropy posture and the calendar posture, one line each,
+    // constant per row and clock posture: the hardware source started
+    // where one serves, the real-time clock read where one was set.
     entropy::init();
     kprintln!("[boot] entropy: {}", entropy::banner());
     calendar::init_at_boot();
     kprintln!("[boot] calendar: {}", board::RTC_LINE);
     kprintln!("[boot] fpu: {}", FPU_LINE);
+    // The GPIO posture, constant per image: the line space and the board's
+    // own claims (the device seam).
     gpio::init();
     bus::init();
     kprintln!("[boot] gpio: {}", gpio::banner());
+    // The PWM and ADC posture, constant per image: the lines a timer can
+    // drive and the converter channels (the device seam).
     pwm::init();
     adc::init();
+    uart::init();
     kprintln!("[boot] pwm: {} lines on {} timers; adc: {} channels on {} blocks", pwm::LINES, pwm::TIMERS, adc::CHANNELS, adc::BLOCKS);
+    // The network posture, constant per image, on a row with a medium:
+    // the stack built over the medium, the pool's figure stated; no
+    // address on the banner (the transcript-surface rule: the hardware
+    // address goes to the witness and the info door).
+    #[cfg(rhu_net_rows)]
+    {
+        net::init();
+        kprintln!("[boot] net: {} medium, pool {} B, {} stream + {} datagram sockets", net::KIND_WORD, net::POOL_BYTES, net::STREAMS, net::DATAGRAMS);
+    }
 
     arena::init();
     kheap::init();
     registry::init_module0();
     sched::init();
     let main_slot = sched::spawn("kmain", kthread_main, 0, 3, board::KMAIN_STACK_BYTES);
+    // The network thread: one notch more urgent than the hosted flat
+    // level, 8 KB of the pool; it runs only once the scheduler starts.
+    #[cfg(rhu_net_rows)]
+    net::start();
     kprintln!(
         "[sched] online: {} slots | SysTick {} Hz | BASEPRI ceiling {:#04x} | zero-latency band below {:#04x} never masked",
         sched::MAX_THREADS,
@@ -159,20 +319,27 @@ pub extern "C" fn kmain() -> ! {
 }
 
 #[cfg_attr(
-    any(feature = "test-panic", feature = "test-fault", feature = "payload", feature = "test-kheap-loud", feature = "test-tickcost", feature = "test-stackovfl", feature = "api-smoke", feature = "unhosted-main"),
+    any(feature = "test-panic", feature = "test-fault", feature = "test-fault-in-handler", feature = "test-h7-pmic-read", feature = "payload", feature = "test-kheap-loud", feature = "test-tickcost", feature = "test-stackovfl", feature = "test-nullpage", feature = "api-smoke", feature = "unhosted-main"),
     allow(unreachable_code)
 )]
 extern "C" fn kthread_main(_: usize) {
     selftest();
+
+    #[cfg(feature = "test-h7-pmic-read")]
+    pmic_read::run();
 
     #[cfg(feature = "sched-smoke")]
     smoke::run();
 
     #[cfg(all(feature = "api-smoke", feature = "test-gpio-button"))]
     api_smoke::button_flight();
-    #[cfg(all(feature = "api-smoke", not(feature = "test-gpio-button")))]
+    #[cfg(all(feature = "api-smoke", any(feature = "test-uart-loopback", feature = "test-uart-jumper")))]
+    api_smoke::uart_flight();
+    #[cfg(all(feature = "api-smoke", not(any(feature = "test-gpio-button", feature = "test-uart-loopback", feature = "test-uart-jumper"))))]
     api_smoke::run();
 
+    // The payload flavor hands this thread to the hosted image and
+    // never returns; the machine exits with the payload's own verdict.
     #[cfg(feature = "payload")]
     payload::run();
 
@@ -185,8 +352,25 @@ extern "C" fn kthread_main(_: usize) {
         unsafe { core::arch::asm!("udf #0") };
     }
 
+    // The designed death inside an interrupt handler (the deepest path of the
+    // handler stack: the handler's frame, the fault's stacking, the funnel's
+    // report): the row's spare interrupt line, enabled at the lowest urgency
+    // and pended from this thread; its handler executes an undefined
+    // instruction, so the UsageFault raised inside it escalates to the
+    // HardFault the funnel names from handler mode, and the watermark line at
+    // the end reads the depth.
+    #[cfg(feature = "test-fault-in-handler")]
+    fault_in_handler::run();
+
+    // The stack-overflow designed death (the v8-M rows' stack limit): a
+    // thread descends past its floor; the limit register must raise the
+    // UsageFault with the overflow line. The survived shape prints the
+    // UNREACHABLE line and exits 3.
     #[cfg(feature = "test-stackovfl")]
     stackovfl::run();
+
+    #[cfg(feature = "test-nullpage")]
+    nullpage::run();
 
     #[cfg(feature = "test-kheap-loud")]
     {
@@ -195,9 +379,9 @@ extern "C" fn kthread_main(_: usize) {
         assert!(!a.is_null(), "kheap-loud: seed alloc failed");
         let g = api::rhu_kheap_alloc(64, 8);
         assert!(!g.is_null(), "kheap-loud: guard alloc failed");
-        api::rhu_kheap_free(a);
+        api::rhu_kheap_free(a); // a free block now heads the list
         kheap::probe_corrupt_first_free();
-        let _ = api::rhu_kheap_alloc(64, 8);
+        let _ = api::rhu_kheap_alloc(64, 8); // this walk must die loud
         kprintln!("[kheap-loud] UNREACHABLE: the corrupt walk survived");
         semihost::exit(3)
     }
@@ -240,8 +424,14 @@ extern "C" fn kthread_main(_: usize) {
 
     kprintln!("[base] ALL GOOD (boot + console + panic/fault funnel armed)");
     kprintln!("[sched] ALL GOOD (threads + timers + preemption online)");
+    // The api world's machine exit takes the hosting door -- the
+    // genuine-path exercise of rhu_exit: the gate's exit-status assert
+    // proves the door terminated the machine with the handed code.
     #[cfg(feature = "api-smoke")]
     {
+        // The doctored control's terminal half: a form from a range no module
+        // registers, so the emulation's funnel must refuse it and this image
+        // must never reach the exit door.
         #[cfg(feature = "test-fpemul-doctored")]
         {
             kprintln!("[api] module-code-control: a form from an unregistered range follows; the funnel must refuse it and this image must not reach the exit door");
@@ -250,6 +440,10 @@ extern "C" fn kthread_main(_: usize) {
         kprintln!("[api] exit-door: handing the machine exit to rhu_exit(0)");
         api::rhu_exit(0);
     }
+    // The unhosted-main flavor: the board's tenancy for the program registered
+    // first (the wireless module's interrupt bit and wake word, where the board
+    // has one; a refusal is one console line), then the kmain thread handed to
+    // the main the program defines -- declared, never defined -- and its code the machine's exit.
     #[cfg(feature = "unhosted-main")]
     {
         unsafe extern "C" { fn rhu_unhosted_main() -> i32; }
@@ -257,7 +451,17 @@ extern "C" fn kthread_main(_: usize) {
         if tenancy != 0 { kprintln!("[unhosted-main] the wireless tenancy was refused: {}", tenancy); }
         let code = unsafe { rhu_unhosted_main() };
         kprintln!("[unhosted-main] entry returned {}", code);
-        semihost::exit(code as u32)
+        semihost::end(exit_word::STATE_RETURNED, code)
+    }
+    // A boot image whose two streams both name the memory
+    // console (no wire) asserts before it exits that the mirror holds the
+    // banner's first line -- a mismatch exits 1 (the api gate pins the exit
+    // of its boot-memory image).
+    if console::channel(console::Stream::Log) == console::CH_MEMORY
+        && console::channel(console::Stream::Console) == console::CH_MEMORY
+        && !console::mirror_holds(concat!("rhu ", env!("CARGO_PKG_VERSION"), " -- Lamella RHU").as_bytes())
+    {
+        semihost::exit(1)
     }
     semihost::exit(0)
 }
@@ -288,6 +492,9 @@ fn selftest() {
     }
     kprintln!("[selftest] .bss zeroed, RAM readback: OK");
 
+    // kmain runs as a thread: process stack active, carved from the
+    // scheduler's pool. (The printed line is constant text -- the pool
+    // address is a layout rider; the checks read the live values.)
     let control: u32;
     let sp: u32;
     unsafe {
@@ -311,6 +518,8 @@ fn selftest() {
     assert!(q == 5.25f64, "f64 product wrong");
     kprintln!("[selftest] f64 multiply on soft-float path: OK");
 
+    // The tick clock advances and sleep never returns early -- the
+    // sleeper's own clock is the authority.
     let t0 = sched::now_ms();
     sched::sleep_ms(25);
     let dt = sched::now_ms().wrapping_sub(t0);
@@ -318,6 +527,7 @@ fn selftest() {
     kprintln!("[selftest] SysTick advances + sleep(25 ms) never early: OK");
 }
 
+// ---------------- scheduler smoke (feature sched-smoke) ----------------
 
 #[cfg(feature = "sched-smoke")]
 mod smoke {
@@ -371,6 +581,10 @@ mod smoke {
         sched::spawn("w1", worker, 1, 3, 4 * 1024);
         sched::spawn("w2", worker, 2, 3, 4 * 1024);
         sched::spawn("w3", worker, 3, 3, 4 * 1024);
+        // Equal priority on purpose: a correct fixed-priority scheduler
+        // STARVES a lower-priority spinner while kmain busy-loops, so
+        // the preemption proofs need an equal-priority peer sharing the
+        // slice via round-robin.
         sched::spawn("spin", spinner, 0, 3, 2 * 1024);
 
         sched::sleep_ms(150);
@@ -380,11 +594,21 @@ mod smoke {
         assert!(SPINS.load(Ordering::Relaxed) > 0, "spinner never ran");
         kprintln!("[smoke] PASS rr-preempt (spinner ran while kmain slept)");
 
+        // Tick-driven timeslicing: no voluntary yield here, so the
+        // spinner only advances if SysTick preempts this busy loop and
+        // round-robin rotates to the equal-priority peer.
         let s0 = SPINS.load(Ordering::Relaxed);
         busy_wait_ms(30);
         assert!(SPINS.load(Ordering::Relaxed) != s0, "no preemption during busy loop");
         kprintln!("[smoke] PASS tick-preempt (equal-priority peer advanced during busy loop)");
 
+        // Callee-saved FP state across preemption: the parker arms its
+        // FP context and parks distinctive words in s16/s17; the
+        // clobber thread deliberately dirties the same registers every
+        // slice; tick rotation interleaves all three of us. If PendSV's
+        // extended-frame save/restore is broken, the parker reads back
+        // the clobber's values -- the silent-corruption failure mode
+        // made loud.
         sched::spawn("fppark", fp_parker, 0, 3, 4 * 1024);
         sched::spawn("fpclob", fp_clobber, 0, 3, 2 * 1024);
         busy_wait_ms(40);
@@ -460,16 +684,25 @@ __rhu_fp_clobber:
     );
 }
 
+// ---------------- hosting-API smoke (feature api-smoke) ----------------
 
 #[cfg(feature = "api-smoke")]
-#[cfg_attr(feature = "test-gpio-button", allow(dead_code))]
+#[cfg_attr(any(feature = "test-gpio-button", feature = "test-uart-loopback", feature = "test-uart-jumper"), allow(dead_code))]
 mod api_smoke {
     use core::ffi::c_void;
     use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
     use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
     use crate::critical::with_cs;
-    use crate::{api, arena, board, calendar, calendar_math, entropy, gpio, gpio_math, kheap, registry, sched};
+    use crate::{api, arena, board, calendar, calendar_math, entropy, gpio, gpio_math, kheap, ram, registry, sched};
+    #[cfg(rhu_sd_socket)]
+    use crate::blk;
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    use crate::{fat, sdcard, sdhost};
+
+    /// The network doors' eight checks, on the rows with a medium.
+    #[cfg(rhu_net_rows)]
+    mod net_checks;
 
     fn busy_wait_ms(ms: u32) {
         let t0 = sched::now_ms();
@@ -484,9 +717,9 @@ mod api_smoke {
     /// arm-phase luck: a floored deadline conversion is early by most
     /// of a millisecond from this position, and an ignored pending tick
     /// reads backward across the wrap -- while the correct paths are
-    /// position-independent. (Discovered live: the check-4 floored
-    /// control PASSED on its first pre-hardening run because the arm
-    /// happened to sit early in its tick; the positioning below
+    /// position-independent. (Without the positioning the floored
+    /// control can pass when the arm
+    /// happens to sit early in its tick; the positioning below
     /// forces the case instead of hoping for it.)
     fn late_in_tick() {
         const SYST_CVR: *const u32 = 0xE000_E018 as *const u32;
@@ -529,7 +762,32 @@ mod api_smoke {
         check_arena_carve();
         check_arena_zero_birth();
         check_arena_rezero();
+        check_arena_rezero_band();
         check_arena_audit();
+        check_ram_range();
+        #[cfg(rhu_extram_window)]
+        check_hydrated_home();
+        #[cfg(armv8m)]
+        check_excl_posture();
+        #[cfg(rhu_extram_window)]
+        check_excl_window1();
+        #[cfg(rhu_qspi_window)]
+        check_qspi_window();
+        #[cfg(rhu_qspi_window)]
+        check_xip_posture();
+        #[cfg(rhu_ram_init_background)]
+        check_ram_init_frontier();
+        #[cfg(rhu_sd_socket)]
+        check_sd_identify();
+        #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+        {
+            check_sd_boot_sector();
+            check_sd_sdram_buffer();
+            check_sd_write_back();
+            check_fs_mount();
+            check_fs_walk();
+            check_fs_roundtrip();
+        }
         check_arena_headroom();
         check_kheap_basic();
         check_kheap_coalesce();
@@ -555,6 +813,16 @@ mod api_smoke {
         check_module_find();
         check_module_roots();
         check_console_pair();
+        check_console_mirror();
+        check_log_level();
+        check_uart_enumerate();
+        check_uart_claim_twice();
+        check_uart_frame();
+        check_uart_loopback();
+        check_uart_status_and_flush();
+        check_uart_timeout();
+        #[cfg(rhu_net_rows)]
+        net_checks::run();
         check_entropy();
         check_entropy_secure();
         check_host_band();
@@ -580,6 +848,8 @@ mod api_smoke {
         check_adc_claim();
         #[cfg(rhu_pwm_adc_rows)]
         check_pwm_adc_loop();
+        #[cfg(all(rhu_pwm_adc_models, feature = "test-adc-flagged"))]
+        check_adc_flagged();
         #[cfg(not(rhu_pwm_adc_rows))]
         check_pwm_adc_none();
         check_fp_double();
@@ -589,10 +859,84 @@ mod api_smoke {
         #[cfg(feature = "fp-cost")]
         check_fp_cost();
         check_module_code();
+        check_exit_word();
         check_tid_wrap();
         check_null_read();
+        check_handler_stack();
     }
 
+    // Check 39: the exit word -- the console mirror's header word a reader
+    // over the debug port reads to learn how the program ended: 0 while the
+    // program runs; the state and the code written by the exit paths in one
+    // store. The check pins the word's offset by symbol, writes through the
+    // exit paths' own store and reads the word back by symbol against the
+    // contract's numbers, refuses the words outside the contract, then
+    // restores 0 (the machine's own exit writes the final word after it).
+    fn check_exit_word() {
+        use crate::board::ring;
+        use crate::exit_word::{decode, magic, name, CODE_OFFSET, MAGIC_OFFSET, MAGIC_RETURNED, MAGIC_RUNNING, MAGIC_ABORTED, STATE_RETURNED, STATE_RUNNING, STATE_ABORTED};
+        kprintln!("[api] exit-word: the header's magic and exit code read by symbol against the contract's words");
+        let log = addr_of!(ring::__rhu_console_log);
+        let (magic_off, code_off) = unsafe { (addr_of!((*log).magic) as usize - log as usize, addr_of!((*log).exit_code) as usize - log as usize) };
+        assert!(magic_off == MAGIC_OFFSET && code_off == CODE_OFFSET, "exit-word: the magic sits at offset {} and the code at {}, wanted {} and {}", magic_off, code_off, MAGIC_OFFSET, CODE_OFFSET);
+        let (magic0, code0) = ring::end_words();
+        assert!(magic0 == MAGIC_RUNNING && code0 == 0, "exit-word: the header reads {:#010x} and {} while the program runs, wanted RLOG ({:#010x}) and 0", magic0, code0, MAGIC_RUNNING);
+        assert!(decode(magic0, code0) == Some((STATE_RUNNING, 0)), "exit-word: RLOG did not decode as running");
+        assert!(MAGIC_RETURNED.to_le_bytes() == *b"RRET" && MAGIC_ABORTED.to_le_bytes() == *b"RABT", "exit-word: the end magics are not RRET and RABT");
+        for (state, code) in [
+            (STATE_RETURNED, 42),
+            (STATE_ABORTED, 134),
+            (STATE_RETURNED, 70000),
+            (STATE_ABORTED, -1),
+            (STATE_ABORTED, i32::MIN),
+            (STATE_RETURNED, 0),
+        ] {
+            ring::end_mark(state, code);
+            let (magic_now, code_now) = ring::end_words();
+            assert!(magic_now == magic(state), "exit-word: the magic for {} {} read back {:#010x}, wanted {:#010x}", name(state), code, magic_now, magic(state));
+            assert!(code_now == code, "exit-word: the code for {} {} read back {}, wanted {}", name(state), code, code_now, code);
+            assert!(decode(magic_now, code_now) == Some((state, code)), "exit-word: the words {:#010x} and {} did not decode as {} {}", magic_now, code_now, name(state), code);
+        }
+        assert!(
+            decode(0, 0).is_none() && decode(u32::from_le_bytes(*b"RREt"), 42).is_none() && decode(u32::from_le_bytes(*b"RLOX"), 0).is_none(),
+            "exit-word: a magic outside the contract decoded"
+        );
+        ring::mark_running();
+        let (magic_after, code_after) = ring::end_words();
+        assert!(magic_after == MAGIC_RUNNING && code_after == 0, "exit-word: the header reads {:#010x} and {} after the restore, wanted RLOG and 0", magic_after, code_after);
+        kprintln!("[api] PASS exit-word (the magic at offset 0 and the code at offset 12 by symbol: RLOG and 0 while running; RRET beside 42, 70000 and 0 for returned, RABT beside 134, -1 and -2147483648 for aborted, each read back whole and decoded; a magic outside the three refused; RLOG and 0 restored)");
+    }
+
+    // Check 40: the handler stack's watermark -- the boot stack reserve's
+    // deepest use so far, read back from the pattern fill at reset (every
+    // check above ran its interrupts, its faults and its deliveries on it);
+    // the reserve a whole number of 4 KiB pages by the map symbols, the use
+    // above zero and under the reserve. The doctored control skips the fill,
+    // so the scan finds the reserve used whole and the check dies here.
+    fn check_handler_stack() {
+        kprintln!("[api] handler-stack: the boot stack reserve's high-water read back from the pattern fill at reset");
+        let (used, reserve) = crate::stack_watermark::high_water().expect("handler-stack: the api flavor measures its handler stack");
+        assert!(reserve >= 4096 && reserve % 4096 == 0, "handler-stack: the reserve reads {} bytes, not a whole number of 4 KiB pages", reserve);
+        assert!(used > 0, "handler-stack: the high-water reads 0 -- no word of the reserve was used (the fill ran after the boot's use, or the scan read the wrong region)");
+        assert!(used < reserve, "handler-stack: the high-water reads {} of {} bytes -- the reserve used whole (the fill missing or the floor crossed)", used, reserve);
+        kprintln!("[api] PASS handler-stack (the high-water {} of {} bytes, {} bytes of the reserve never touched; read back from the pattern fill at reset)", used, reserve, reserve - used);
+    }
+
+    // Check 1: the ns clock always advances. Three shapes: (1)
+    // thread-level paired reads, STRICT -- distinct calls never return
+    // equal values; (2) the wrapped-but-undelivered hazard EXERCISED:
+    // inside the kernel CS (SysTick masked) the counter is positioned
+    // late in its tick, then spun across two reloads, so the
+    // pending-tick handling is what keeps the second read ahead (with
+    // the handling removed this window reads backward deterministically
+    // -- the registered control's red shape); (3) the saturated-pend
+    // worst case CONSTRUCTED: cross a reload inside the CS (the pend
+    // bit latches), burn to late in the post-wrap generation, read (the
+    // pending +1 composes with a LATE interpolation), cross one more
+    // reload (the single bit saturates), read again early in the new
+    // generation. Both reads share a tick term, so ordering is the
+    // watermark's to carry -- without it this window reads backward by
+    // most of a tick, every run.
     fn check_monotonic() {
         kprintln!("[api] ns-monotonic: 5000 paired reads + cs wrap + saturated-pend windows armed");
         let mut prev = 0u64;
@@ -632,6 +976,9 @@ mod api_smoke {
         kprintln!("[api] ns-monotonic: its two designed windows each hold the tick masked across two SysTick reloads; where the witness counts, its 2 lost / 2 late are theirs by construction");
     }
 
+    // Check 2: the never-early sleep contract on the ns clock (the
+    // sleeper's own clock is the authority; the upper bound is
+    // deliberately unpinned -- timing-coupled).
     fn check_sleep() {
         kprintln!("[api] sleep-ns-floor: 25 ms request armed");
         late_in_tick();
@@ -653,6 +1000,7 @@ mod api_smoke {
         kprintln!("[api] PASS futex-eagain (changed value refused: no sleep, 0 switches)");
     }
 
+    // Check 4: an absolute-ns deadline honored, never early.
     fn check_timeout() {
         kprintln!("[api] futex-timeout: 10 ms deadline armed");
         static WORD: AtomicU32 = AtomicU32::new(0);
@@ -664,6 +1012,12 @@ mod api_smoke {
         kprintln!("[api] PASS futex-timeout (10 ms deadline honored: never early)");
     }
 
+    // Check 4b: a deadline past the scheduler's 32-bit tick window is
+    // never early. A waiter blocks with a deadline 2^32 ticks out and a
+    // sleeper sleeps 2^31 + 1 ticks; three ticks later neither has moved
+    // (a truncated arm would have fired both at once), and the waiter
+    // wakes with 0 on the wake. The sleeper stays asleep for the boot's
+    // life (its slot is one of the live ones later counts see).
     static FAR_WORD: AtomicU32 = AtomicU32::new(0);
     static FAR_RESULT: AtomicU32 = AtomicU32::new(u32::MAX);
     static FAR_SLEPT: AtomicU32 = AtomicU32::new(0);
@@ -682,6 +1036,9 @@ mod api_smoke {
     fn check_far_deadline() {
         kprintln!("[api] far-deadline: a futex wait and a sleep past the 32-bit tick window armed");
         sched::spawn("farw", far_waiter, 0, 4, 4 * 1024);
+        // Parked OR already returned: a wait that times out at once
+        // is caught by the assert below with its own
+        // words, never by the parking wait's bound.
         wait_until(
             || sched::probe_futex_waiting(FAR_WORD.as_ptr()) == 1 || FAR_RESULT.load(Ordering::Acquire) != u32::MAX,
             "far waiter parked or returned",
@@ -737,6 +1094,10 @@ mod api_smoke {
         kprintln!("[api] PASS futex-wake-all (released remaining 2, count exact, all ran after)");
     }
 
+    // Check 6b: the wake is priority-first. Two waiters on one word at
+    // different priorities, the LESS urgent one spawned first so its slot
+    // comes first in the rotation: wake(1) must ready the more urgent one
+    // (kernel-policy state read under the CS, as the wake checks above).
     static PRIO_WORD: AtomicU32 = AtomicU32::new(0);
     static PRIO_RAN: AtomicU32 = AtomicU32::new(0);
 
@@ -781,7 +1142,7 @@ mod api_smoke {
         }
         loop {
             if LOCK.swap(2, Ordering::Acquire) == 0 {
-                return;
+                return; // took a free lock, conservatively marked contended
             }
             SLOWPATH.fetch_add(1, Ordering::Relaxed);
             let _ = api::rhu_futex_wait(LOCK.as_ptr(), 2, sched::DEADLINE_NONE);
@@ -803,12 +1164,14 @@ mod api_smoke {
                     .is_ok(),
                 "mutex overlap: two threads inside the critical section"
             );
+            // Non-atomic on purpose: mutual exclusion is what protects
+            // this read-modify-write, and nothing else may.
             unsafe {
                 let c = read_volatile(addr_of!(COUNTER));
                 write_volatile(addr_of_mut!(COUNTER), c + 1);
             }
             if i % 50 == 0 {
-                busy_wait_ms(2);
+                busy_wait_ms(2); // hold across a tick: forced contention
             }
             IN_CS.store(0, Ordering::Release);
             unlock();
@@ -863,6 +1226,11 @@ mod api_smoke {
         true
     }
 
+    // Check 9: the window is what the maps bracket, and it overlaps
+    // nothing. Every fact read independently: the link brackets by
+    // extern symbol, the kstacks window from the scheduler, the statics
+    // window from the boot brackets -- disjointness is computed
+    // interval overlap, never inferred from placement order.
     fn check_arena_carve() {
         kprintln!("[api] arena-carve: window + disjointness asserts armed");
         unsafe extern "C" {
@@ -878,7 +1246,7 @@ mod api_smoke {
         let eb = addr_of!(__ebss) as usize;
         assert!(lo >= eks, "arena window: lo below __ekstacks");
         assert!(hi <= stk, "arena window: hi above __stack_start");
-        assert!(stk - hi >= 64 * 1024, "arena window: boot-stack reserve under 64K");
+        assert!(stk - hi >= 16 * 1024 && (stk - hi) % 4096 == 0, "arena window: boot-stack reserve under 16K or not whole 4 KiB pages");
         assert!(lo < hi, "arena window: empty or negative");
         assert!(bump >= lo && bump <= hi, "arena window: bump outside the window");
         let (klo, khi) = sched::kstacks_window();
@@ -910,6 +1278,10 @@ mod api_smoke {
         kprintln!("[api] PASS arena-zero-birth (pages read all-zero through the boot poison)");
     }
 
+    // Check 11: rezero re-establishes zero IN PLACE -- same address,
+    // headroom and the bump address byte-identical before and after
+    // (the zero-VA-burned contract) -- and refuses null + a range
+    // inside the window that was never handed out, touching nothing.
     fn check_arena_rezero() {
         kprintln!("[api] arena-rezero: pattern + rezero + VA-burn probe armed");
         let site = check_arena_rezero as *const () as usize as u32;
@@ -941,6 +1313,46 @@ mod api_smoke {
         kprintln!("[api] PASS arena-rezero (range re-zeroed in place: same address, zero VA burned, oob refused)");
     }
 
+    fn check_arena_rezero_band() {
+        kprintln!("[api] arena-rezero-band: a large range re-zeroed with the band-interrupt control armed; a tick landing inside the memset is the proof no critical section is held across it");
+        let site = check_arena_rezero_band as *const () as usize as u32;
+        let room = api::rhu_arena_headroom();
+        const SPARE: u32 = 256 * 1024;
+        let bytes = if room > SPARE + 64 * 1024 { core::cmp::min(1024 * 1024, room - SPARE) } else { room / 4 } & !4095;
+        assert!(bytes >= 16 * 1024, "arena-rezero-band: {} bytes of headroom leave no 16 KB range for the check", room);
+        let q = api::rhu_arena_alloc_at(bytes, 8, site);
+        assert!(!q.is_null(), "arena-rezero-band: the alloc of {} bytes failed", bytes);
+        let h0 = api::rhu_arena_headroom();
+        FP_BAND.hits.store(0, Ordering::Release);
+        REZERO_BAND_HITS.store(0, Ordering::Release);
+        let first_tick = sched::now_ms();
+        fp_band_arm(true);
+        let mut passes = 0u32;
+        loop {
+            let r = api::rhu_arena_rezero(q, bytes);
+            assert!(r == 0, "arena-rezero-band: the rezero answered {}", r);
+            passes += 1;
+            if REZERO_BAND_HITS.load(Ordering::Acquire) >= 1 || sched::now_ms().wrapping_sub(first_tick) >= FP_BAND_TICK_BOUND {
+                break;
+            }
+        }
+        fp_band_arm(false);
+        let inside = REZERO_BAND_HITS.load(Ordering::Acquire);
+        let hits = FP_BAND.hits.load(Ordering::Acquire);
+        kprintln!("[api] arena-rezero-band: {} control hit(s) landed inside the memset ({} control hits in all) over {} pass(es) of {} bytes within {} tick(s)", inside, hits, passes, bytes, sched::now_ms().wrapping_sub(first_tick));
+        assert!(scan_zero(q as *const u8, bytes as usize), "arena-rezero-band: the range reads nonzero after the rezero");
+        assert!(api::rhu_arena_headroom() == h0, "arena-rezero-band: the rezero burned VA");
+        assert!(
+            inside >= 1,
+            "arena-rezero-band: no tick landed inside the rezero's memset within {} ticks ({} control hits, {} passes over {} bytes): the memset runs under the critical section",
+            FP_BAND_TICK_BOUND,
+            hits,
+            passes,
+            bytes
+        );
+        kprintln!("[api] PASS arena-rezero-band (a tick landed inside the rezero's memset: the zeroing runs with the kernel band live, the wait bounded by the kernel's own tick count)");
+    }
+
     fn check_arena_audit() {
         kprintln!("[api] arena-audit: two-site attribution armed");
         let site_a = check_arena_audit as *const () as usize as u32;
@@ -959,6 +1371,676 @@ mod api_smoke {
         kprintln!("[api] PASS arena-audit (two sites attributed exactly: rows, counts, bytes)");
     }
 
+    fn check_ram_range() {
+        kprintln!("[api] ram-range: the count and every range's record against the board's facts; the window inside its range and the headroom the arena's own; a page drawn from each range inside its window and zero-born, re-zeroed in place; a page at an alignment above the page honoured from each range; the index past the count, a NULL and a misaligned record refused; the SRAM door unchanged");
+        let n = api::rhu_ram_count();
+        assert!(n == ram::SERVED as i32, "ram-range: the count reads {} against the {} this image serves by its facts", n, ram::SERVED);
+        let site = check_ram_range as *const () as usize as u32;
+        let mut r = ram::RamRange { base: 0, bytes: 0, lo: 0, hi: 0, free: 0, flags: 0 };
+        for i in 0..n as u32 {
+            assert!(api::rhu_ram_range(i, &mut r) == 0, "ram-range: range {}'s record refused", i);
+            let f = &board::facts::RAM_RANGES[i as usize];
+            assert!(r.base as usize == f.base && r.bytes as usize == f.bytes, "ram-range: range {} reads base {:#010x} and {} bytes against the facts' {:#010x} and {}", i, r.base, r.bytes, f.base, f.bytes);
+            assert!(r.lo >= r.base && r.hi <= r.base + r.bytes && r.lo < r.hi, "ram-range: range {}'s window [{:#010x}, {:#010x}) outside its range", i, r.lo, r.hi);
+            // The flags as the facts state them, the exec bit per range (the
+            // STM32F769's SDRAM is execute-never; every other range executable).
+            let want = (if f.external { ram::FLAG_EXTERNAL } else { 0 }) | (if f.cached { ram::FLAG_CACHED } else { 0 }) | (if f.exec { ram::FLAG_EXEC } else { 0 });
+            assert!(r.flags == want, "ram-range: range {}'s flags read {:#x} against {:#x}", i, r.flags, want);
+            assert!(r.free % 8 == 0 && r.free <= r.hi - r.lo, "ram-range: range {}'s headroom {} is not an 8-multiple inside its window", i, r.free);
+            if i == 0 {
+                assert!(r.free == api::rhu_arena_headroom(), "ram-range: range 0's headroom {} differs from the arena door's {}", r.free, api::rhu_arena_headroom());
+            }
+            // On a row with an external RAM range, range 1's window starts at
+            // the rehydrated-data region's end, 8-aligned: the region lies at
+            // the head of the range and outside the window, and the headroom
+            // at this first read is the window whole.
+            #[cfg(rhu_extram_window)]
+            if i == 1 {
+                let (h_lo, h_hi) = crate::boot::hydrated_bracket();
+                assert!(h_lo == r.base as usize && h_hi <= r.lo as usize, "ram-range: the rehydrated-data region [{:#010x}, {:#010x}) is not at the head of range 1 ({:#010x}) before its window ({:#010x})", h_lo, h_hi, r.base, r.lo);
+                assert!(r.lo as usize == (h_hi + 7) & !7, "ram-range: range 1's window starts at {:#010x}, not at the rehydrated-data region's end {:#010x} rounded to 8", r.lo, h_hi);
+                assert!(r.free == r.hi - r.lo, "ram-range: range 1's headroom {} at the first read is not its window's {} bytes", r.free, r.hi - r.lo);
+            }
+            let p = api::rhu_arena_alloc_from(i, 4096, 8, site);
+            assert!(!p.is_null(), "ram-range: the page from range {} refused NULL", i);
+            assert!(p as u32 >= r.lo && p as u32 + 4096 <= r.hi, "ram-range: the page {:#010x} from range {} lies outside its window", p as u32, i);
+            assert!(scan_zero(p as *const u8, 4096), "ram-range: the page from range {} reads nonzero", i);
+            let mut after = ram::RamRange { base: 0, bytes: 0, lo: 0, hi: 0, free: 0, flags: 0 };
+            assert!(api::rhu_ram_range(i, &mut after) == 0, "ram-range: range {}'s second record refused", i);
+            assert!(after.free + 4096 == r.free && after.lo == r.lo && after.hi == r.hi, "ram-range: range {}'s headroom moved from {} to {} for a 4096-byte page", i, r.free, after.free);
+            if i == 0 {
+                assert!(api::rhu_arena_headroom() == after.free, "ram-range: the SRAM door's headroom {} did not follow range 0's {}", api::rhu_arena_headroom(), after.free);
+            }
+            for k in 0..4096 {
+                unsafe { write_volatile(p.add(k), 0x3C) };
+            }
+            assert!(api::rhu_arena_rezero(p, 4096) == 0, "ram-range: the rezero of range {}'s page refused", i);
+            assert!(scan_zero(p as *const u8, 4096), "ram-range: range {}'s page reads nonzero after the rezero", i);
+            let big_align: u32 = if i == 0 { 16384 } else { 1 << 20 };
+            let big = api::rhu_arena_alloc_from(i, 4096, big_align, site);
+            assert!(!big.is_null(), "ram-range: the {}-aligned page from range {} refused NULL", big_align, i);
+            assert!(big as u32 % big_align == 0 && big as u32 >= r.lo && big as u32 + 4096 <= r.hi, "ram-range: the {}-aligned page {:#010x} from range {} misaligned or outside its window", big_align, big as u32, i);
+            assert!(scan_zero(big as *const u8, 4096), "ram-range: the {}-aligned page from range {} reads nonzero", big_align, i);
+        }
+        assert!(api::rhu_ram_range(n as u32, &mut r) == sched::ERR_INVAL, "ram-range: an index past the count not refused EINVAL");
+        assert!(api::rhu_ram_range(0, core::ptr::null_mut()) == sched::ERR_INVAL, "ram-range: a NULL record not refused EINVAL");
+        let misaligned = (addr_of_mut!(r) as usize + 2) as *mut ram::RamRange;
+        assert!(api::rhu_ram_range(0, misaligned) == sched::ERR_INVAL, "ram-range: a misaligned record not refused EINVAL");
+        kprintln!("[api] PASS ram-range ({} range(s) served and read back as the facts state them, each window inside its range with the arena's own headroom, a page drawn from each range inside its window and zero-born with the headroom moved by its size, re-zeroed in place, a page at 16 KB alignment from the SRAM range and at 1 MB from an external one honoured, the index past the count, a NULL and a misaligned record EINVAL, the SRAM door's headroom equal to range 0's)", n);
+    }
+
+    /// The quad-SPI window (the STM32F769 row; the api image's own map
+    /// declares the window with the header alone): the boot's bring-up
+    /// record printed, the window's first 64 words read twice through the
+    /// window and equal, the header's words equal to the boot's read, the
+    /// protection unit's region for the window read back as programmed
+    /// (read-only for every privilege, executable, Normal write-through, 64
+    /// MB at the window's base). Under the control test-xip-store a word is
+    /// stored into the window after the checks: the region must refuse it,
+    /// a MemManage death the funnel names (never a shipped image).
+    #[cfg(rhu_qspi_window)]
+    fn check_qspi_window() {
+        use crate::board::stm32f7_qspi as qspi;
+        kprintln!("[api] qspi-window: the boot's bring-up record, the window's first 64 words read twice and equal, the window header's words as the boot read them, the protection region's words read back");
+        let w = qspi::record().expect("qspi-window: the api image's map declares no window");
+        kprintln!(
+            "[api] qspi-window: {} {} id {:02x} {:02x} {:02x} at {} MHz, {} dummy clocks ({} driven as the alternate byte {:#04x}, {} left undriven), the sample shift {}; the window's image {} bytes past the header; {} cycles over the identification, the register fields and the indirect read, {} over the mode switch, the read-back and the header",
+            w.part.maker,
+            w.part.name,
+            w.id[0],
+            w.id[1],
+            w.id[2],
+            w.clk_hz / 1_000_000,
+            w.part.dummy_total,
+            2 * w.part.alt_bytes,
+            w.part.alt_value,
+            w.part.dummy_cycles,
+            if qspi::SAMPLE_SHIFT { "set" } else { "clear" },
+            w.image_bytes,
+            w.cycles_indirect,
+            w.cycles_window
+        );
+        let base = qspi::WINDOW.base as usize;
+        let mut first = [0u32; 64];
+        for (k, v) in first.iter_mut().enumerate() {
+            *v = unsafe { read_volatile((base + 4 * k) as *const u32) };
+        }
+        for (k, v) in first.iter().enumerate() {
+            let again = unsafe { read_volatile((base + 4 * k) as *const u32) };
+            assert!(again == *v, "qspi-window: word {} reads {:#010x} then {:#010x} through the window", k, v, again);
+        }
+        for k in 0..8 {
+            assert!(first[k] == w.header[k], "qspi-window: header word {} reads {:#010x} where the boot read {:#010x}", k, first[k], w.header[k]);
+        }
+        kprintln!("[api] qspi-window: the window's first words {:#010x} {:#010x} {:#010x} {:#010x} {:#010x} {:#010x} {:#010x} {:#010x}", first[0], first[1], first[2], first[3], first[4], first[5], first[6], first[7]);
+        let (rbar, rasr) = crate::mpu::region_readback(crate::mpu::REGION_QSPI);
+        assert!(rbar & !0x1F == base as u32, "qspi-window: region {}'s base reads {:#010x}, not the window's {:#010x}", crate::mpu::REGION_QSPI, rbar & !0x1F, base);
+        assert!(rasr == crate::mpu::RASR_QSPI, "qspi-window: region {}'s attributes read {:#010x}, not {:#010x} (read-only, executable, Normal write-through, 64 MB)", crate::mpu::REGION_QSPI, rasr, crate::mpu::RASR_QSPI);
+        #[cfg(feature = "test-xip-store")]
+        {
+            kprintln!("[api] qspi-window: THE CONTROL test-xip-store -- a word store into the window follows; the protection unit must refuse it (a MemManage death the funnel names)");
+            unsafe { write_volatile(base as *mut u32, 0) };
+            panic!("qspi-window: the store into the window went through: the region did not refuse it");
+        }
+        #[cfg(not(feature = "test-xip-store"))]
+        kprintln!(
+            "[api] PASS qspi-window (the bring-up record; 64 words read twice and equal; the header as the boot read it; region {} at {:#010x} with RASR {:#010x}: read-only for every privilege, executable, Normal write-through, {} MB)",
+            crate::mpu::REGION_QSPI,
+            base,
+            rasr,
+            qspi::WINDOW.bytes >> 20
+        );
+    }
+
+    /// The execute-in-place posture (the STM32F769 row): the instruction
+    /// cache on and the data cache off read back from the core under the
+    /// window, and the cycle counter over one 4 KB sequential read of the
+    /// window and one strided read of 256 words 1 KB apart, printed as a
+    /// record.
+    #[cfg(rhu_qspi_window)]
+    fn check_xip_posture() {
+        use crate::board::stm32f7_qspi as qspi;
+        kprintln!("[api] xip-posture: CCR.IC and CCR.DC read back under the window; the cycle counter over a 4 KB sequential read and a 256-word strided read (1 KB apart) of the window");
+        let (ic, dc, bp) = crate::cache::posture();
+        assert!(ic, "xip-posture: the instruction cache reads off under the window");
+        assert!(!dc, "xip-posture: the data cache reads on (the row's law keeps it off)");
+        let base = qspi::WINDOW.base as usize;
+        let mut sum = 0u32;
+        let t0 = qspi::cycles();
+        for k in 0..1024 {
+            sum = sum.wrapping_add(unsafe { read_volatile((base + 4 * k) as *const u32) });
+        }
+        let t1 = qspi::cycles();
+        for k in 0..256 {
+            sum ^= unsafe { read_volatile((base + 1024 * k) as *const u32) };
+        }
+        let t2 = qspi::cycles();
+        core::hint::black_box(sum);
+        kprintln!("[api] xip-posture: {} cycles over the 4 KB sequential read, {} over the 256-word strided read, at {} MHz on the flash clock", t1.wrapping_sub(t0), t2.wrapping_sub(t1), qspi::CLK_HZ / 1_000_000);
+        kprintln!("[api] PASS xip-posture (CCR.IC 1, CCR.DC 0, CCR.BP {}; the two reads timed on the cycle counter)", bp as u32);
+    }
+
+    /// The api flavor's own tenant of the hosted runtime's rehydrated-data
+    /// section (hydrated-home): 256 bytes, zero-initialized, placed by the
+    /// row's map at the head of the external RAM region.
+    #[cfg(rhu_extram_window)]
+    #[unsafe(link_section = ".hydrated.test")]
+    static mut HYDRATED_TEST: [u8; 256] = [0; 256];
+
+    /// The rehydrated-data region's home: the api flavor's static in the
+    /// section the row's map places at the head of the external RAM region,
+    /// before the arena's window 1. It reads
+    /// zero at the check through the poison the boot's bracket memset
+    /// cleared (boot.rs; a zero read is the memset's, never the memory's
+    /// reset state); a pattern written through the program's view reads
+    /// back, and on the RP2350 rows reads back through the uncached mirror
+    /// after the cache is cleaned, so the write reached the part.
+    #[cfg(rhu_extram_window)]
+    fn check_hydrated_home() {
+        kprintln!("[api] hydrated-home: the api flavor's 256-byte static in the rehydrated-data section -- zero through the boot poison, at the head of the external range before window 1, a pattern written and read back{}", if cfg!(rhu_psram_window) { " through the cached window and the uncached mirror" } else { "" });
+        let p = addr_of_mut!(HYDRATED_TEST) as *mut u8;
+        let (h_lo, h_hi) = crate::boot::hydrated_bracket();
+        assert!(p as usize >= h_lo && p as usize + 256 <= h_hi, "hydrated-home: the static {:#010x} lies outside the rehydrated-data bracket [{:#010x}, {:#010x})", p as usize, h_lo, h_hi);
+        let mut r = ram::RamRange { base: 0, bytes: 0, lo: 0, hi: 0, free: 0, flags: 0 };
+        assert!(api::rhu_ram_range(1, &mut r) == 0, "hydrated-home: range 1's record refused");
+        assert!(h_lo == r.base as usize && h_hi <= r.lo as usize, "hydrated-home: the bracket [{:#010x}, {:#010x}) is not at the head of range 1 ({:#010x}) before its window ({:#010x})", h_lo, h_hi, r.base, r.lo);
+        assert!(scan_zero(p as *const u8, 256), "hydrated-home: the static reads nonzero (the bracket's boot memset did not reach it)");
+        for k in 0..256 {
+            unsafe { write_volatile(p.add(k), (k as u8) ^ 0x5A) };
+        }
+        for k in 0..256 {
+            let v = unsafe { read_volatile(p.add(k)) };
+            assert!(v == (k as u8) ^ 0x5A, "hydrated-home: byte {} reads {:#04x} after the write", k, v);
+        }
+        #[cfg(rhu_psram_window)]
+        {
+            use lamella_psram_qspi::proof::Memory;
+            use lamella_psram_qspi::rp2350::{Mmio, WINDOW1_BASE, WINDOW1_UNCACHED_BASE};
+            unsafe { Mmio.flush() };
+            let mirror = (p as usize - WINDOW1_BASE + WINDOW1_UNCACHED_BASE) as *const u8;
+            for k in 0..256 {
+                let v = unsafe { read_volatile(mirror.add(k)) };
+                assert!(v == (k as u8) ^ 0x5A, "hydrated-home: byte {} reads {:#04x} through the uncached mirror (the write did not reach the part)", k, v);
+            }
+        }
+        for k in 0..256 {
+            unsafe { write_volatile(p.add(k), 0) };
+        }
+        kprintln!("[api] PASS hydrated-home (the static zero through the boot poison, at the head of the external range before window 1, 256 bytes written and read back{})", if cfg!(rhu_psram_window) { " through both views" } else { "" });
+    }
+
+    /// The posture the exclusive pairs rest on, read back on the PMSAv8 rows:
+    /// every enabled MPU region's shareability bits and ACTLR.EXTEXCLALL. A
+    /// non-shareable
+    /// region keeps its ldrex/strex pairs on the core's local monitor; a
+    /// Shareable region or EXTEXCLALL sends them to the fabric's global
+    /// monitor, which on the RP2350 answers for the SRAM alone. The shipped
+    /// posture reads SH = 00 on every region and EXTEXCLALL 0; the control
+    /// test-excl-shareable reads its Normal regions Shareable.
+    #[cfg(armv8m)]
+    fn check_excl_posture() {
+        kprintln!("[api] excl-posture: every enabled MPU region's shareability bits and ACTLR.EXTEXCLALL read back (a non-shareable region keeps its exclusive pairs on the core's local monitor)");
+        let (enabled, nonshare, share, extexclall) = crate::mpu::exclusive_posture();
+        assert!(enabled >= 1, "excl-posture: no MPU region reads enabled");
+        #[cfg(not(feature = "test-excl-shareable"))]
+        assert!(share == 0, "excl-posture: {} of {} enabled regions read Shareable (their exclusive pairs go to the fabric's global monitor)", share, enabled);
+        #[cfg(feature = "test-excl-shareable")]
+        assert!(share >= 1, "excl-posture: the control's Normal regions did not read Shareable ({} of {} enabled)", share, enabled);
+        assert!(extexclall == 0, "excl-posture: ACTLR.EXTEXCLALL reads 1 (every exclusive sent to the fabric's global monitor)");
+        kprintln!("[api] PASS excl-posture ({} regions enabled: {} non-shareable, {} Shareable; ACTLR.EXTEXCLALL {})", enabled, nonshare, share, extexclall);
+    }
+
+    /// The exclusive-access proof: a bounded load-exclusive and
+    /// store-exclusive pair on a word
+    /// drawn from window 1 (the external RAM) and on an SRAM word as the
+    /// control. The RP2350 datasheet (section 2.1.6.2) says its fabric reports
+    /// exclusive failure for every exclusive access outside the main SRAM, does
+    /// not suppress the store, and such loops run forever; the Cortex-M7
+    /// decides exclusives to non-shareable memory by its local monitor alone.
+    /// The pair is tried at most 64 times on each word and the outcome printed
+    /// as a fact (HELD at attempt n, or REFUSED after 64 with the word's value);
+    /// the check judges only the SRAM control and the bound: the record decides
+    /// the design, and the case never hangs. On the emulator rows QEMU's
+    /// monitor holds every pair: the case's mechanics proved there, not the
+    /// silicon's answer.
+    #[cfg(rhu_extram_window)]
+    fn check_excl_window1() {
+        kprintln!("[api] excl-window1: a bounded ldrex/strex pair (64 attempts) on a window-1 word and on an SRAM word armed");
+        #[cfg(feature = "test-excl-shareable")]
+        kprintln!("[api] excl-window1: THE CONTROL test-excl-shareable -- every Normal region programmed Shareable, each pair sent to the fabric's global monitor: the SRAM word expected to hold there, the window-1 word expected REFUSED after 64 with the stores gone through");
+        let site = check_excl_window1 as *const () as usize as u32;
+        let ext = api::rhu_arena_alloc_from(1, 8, 8, site) as *mut u32;
+        assert!(!ext.is_null(), "excl-window1: the window-1 word refused NULL");
+        let sram = api::rhu_arena_alloc_from(0, 8, 8, site) as *mut u32;
+        assert!(!sram.is_null(), "excl-window1: the SRAM word refused NULL");
+        // The attempt the store held at (0 when none in 64) and the last strex result.
+        fn pair(p: *mut u32) -> (u32, u32) {
+            let mut last = 1u32;
+            for n in 1..=64u32 {
+                let fail: u32;
+                unsafe {
+                    core::arch::asm!(
+                        "ldrex {t}, [{p}]",
+                        "adds {t}, {t}, #1",
+                        "strex {f}, {t}, [{p}]",
+                        p = in(reg) p,
+                        t = out(reg) _,
+                        f = out(reg) fail,
+                        options(nostack)
+                    );
+                }
+                last = fail;
+                if fail == 0 {
+                    return (n, 0);
+                }
+            }
+            unsafe {
+                core::arch::asm!("clrex", options(nomem, nostack));
+            }
+            (0, last)
+        }
+        let (n_ext, f_ext) = pair(ext);
+        let v_ext = unsafe { core::ptr::read_volatile(ext) };
+        let (n_sram, f_sram) = pair(sram);
+        let v_sram = unsafe { core::ptr::read_volatile(sram) };
+        assert!(n_sram == 1 && v_sram == 1, "excl-window1: the SRAM control's pair did not hold at the first attempt (held at {}, strex {}, the word {})", n_sram, f_sram, v_sram);
+        if n_ext != 0 {
+            kprintln!("[api] excl-window1: window-1 word {:#010x} HELD at attempt {} (the word reads {}); the SRAM word {:#010x} held at attempt 1", ext as u32, n_ext, v_ext, sram as u32);
+        } else {
+            kprintln!("[api] excl-window1: window-1 word {:#010x} REFUSED after 64 attempts (strex returned {} every time; the word reads {}: the stores {}); the SRAM word {:#010x} held at attempt 1", ext as u32, f_ext, v_ext, if v_ext == 0 { "suppressed" } else { "went through" }, sram as u32);
+        }
+        kprintln!("[api] PASS excl-window1 (the pair bounded on both words; the SRAM control held at the first attempt; the window-1 outcome printed above as the record's fact)");
+    }
+
+
+    /// The core's cycle counter (armed from boot on this row) and its reading in microseconds.
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn cyc() -> u32 {
+        unsafe { read_volatile(0xE000_1004 as *const u32) }
+    }
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn us(cycles: u32) -> u32 {
+        (cycles as u64 * 1_000_000 / board::SYSCLK_HZ as u64) as u32
+    }
+
+    #[cfg(rhu_sd_socket)]
+    fn check_sd_identify() {
+        kprintln!("[api] sd-identify: the device count, the record of mmcblk0 read at the call (the detect line and the identification) against the card's own registers; the index past the count, a NULL and a misaligned record refused");
+        let n = api::rhu_blk_count();
+        assert!(n == 1, "sd-identify: the count reads {} against the 1 socket this row has", n);
+        let mut d = blk::BlkDesc { block_bytes: 0, blocks: 0, flags: 0, name: [0; 16] };
+        assert!(api::rhu_blk_device(0, &mut d) == 0, "sd-identify: the record refused");
+        assert!(d.block_bytes == 512 && &d.name[..8] == b"mmcblk0\0", "sd-identify: the record's block size {} or name wrong", d.block_bytes);
+        assert!(d.flags & blk::FLAG_REMOVABLE != 0, "sd-identify: the socket's record not removable");
+        assert!(d.flags & blk::FLAG_PRESENT != 0, "sd-identify: no card in the socket (the flight needs one seated)");
+        #[cfg(not(feature = "test-sd-doctored"))]
+        {
+            let facts = blk::with_card(|c| (c.capacity_blocks, c.high_capacity, c.write_protected, c.width == sdhost::Width::Four, sdcard::cid_manufacturer(&c.cid), sdcard::cid_product(&c.cid), sdcard::cid_serial(&c.cid), c.version2));
+            let (cap, hc, wp, four, maker, product, serial, v2) = match facts {
+                Some(f) => f,
+                None => {
+                    let (step, why) = blk::refusal_words();
+                    panic!("sd-identify: the card refused at {} ({})", step, why);
+                }
+            };
+            kprintln!(
+                "[api] sd-identify: the card -- maker {:#04x}, product {}{}{}{}{}, serial {:#010x}, version 2 {}, high capacity {}, {} blocks of 512 ({} MB), write-protected {}, {} line(s)",
+                maker,
+                product[0] as char,
+                product[1] as char,
+                product[2] as char,
+                product[3] as char,
+                product[4] as char,
+                serial,
+                v2,
+                hc,
+                cap,
+                cap / 2048,
+                wp,
+                if four { 4 } else { 1 }
+            );
+            assert!(d.blocks == cap, "sd-identify: the record's {} blocks against the card's {}", d.blocks, cap);
+            kprintln!("[api] sd-identify: the identification took {} cycles = {} us at boot (the host spinning before the scheduler); {} yields inside the host's waits so far at {} Hz", blk::ident_cycles(), us(blk::ident_cycles()), blk::yields(), board::SYSCLK_HZ);
+            assert!((d.flags & blk::FLAG_HIGH_CAPACITY != 0) == hc && (d.flags & blk::FLAG_WRITE_PROTECTED != 0) == wp, "sd-identify: the record's flags {:#x} against the card's class", d.flags);
+        }
+        #[cfg(feature = "test-sd-doctored")]
+        {
+            let (step, why) = blk::refusal_words();
+            assert!(d.blocks == 0, "sd-doctored-control: the doctored identification passed with {} blocks (the control did not bite)", d.blocks);
+            #[repr(C, align(16))]
+            struct Buf([u8; 512]);
+            static mut B: Buf = Buf([0; 512]);
+            let r = api::rhu_blk_read(0, 0, 1, addr_of_mut!(B) as *mut c_void);
+            assert!(r == sched::ERR_IO || r == sched::ERR_TIMEDOUT, "sd-doctored-control: the read answered {} with the card refused", r);
+            kprintln!("[api] sd-doctored-control: the card refused at {} ({}); the record present with 0 blocks; the read refused {} -- the control bit", step, why, r);
+        }
+        assert!(api::rhu_blk_device(1, &mut d) == sched::ERR_INVAL, "sd-identify: the index past the count not refused EINVAL");
+        assert!(api::rhu_blk_device(0, core::ptr::null_mut()) == sched::ERR_INVAL, "sd-identify: a NULL record not refused EINVAL");
+        let misaligned = (addr_of_mut!(d) as usize + 2) as *mut blk::BlkDesc;
+        assert!(api::rhu_blk_device(0, misaligned) == sched::ERR_INVAL, "sd-identify: a misaligned record not refused EINVAL");
+        #[cfg(not(feature = "test-sd-doctored"))]
+        kprintln!("[api] PASS sd-identify (1 device, mmcblk0 at 512-byte blocks, present and removable, the record's capacity and flags the card's own; the index 1, a NULL and a misaligned record EINVAL)");
+    }
+
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn check_sd_boot_sector() {
+        kprintln!("[api] sd-boot-sector: block 0 read twice into two buffers and equal, the boot signature present; an 8-block read whose first block equals the single read; the sync door; the argument refusals -- a count of 0 and of 129, a range at and past the end, a NULL and a misaligned buffer EINVAL, device 1 ENODEV");
+        #[repr(C, align(16))]
+        struct Buf([u8; 4096]);
+        static mut A: Buf = Buf([0; 4096]);
+        static mut B: Buf = Buf([0; 4096]);
+        let a = addr_of_mut!(A) as *mut u8;
+        let b = addr_of_mut!(B) as *mut u8;
+        assert!(api::rhu_blk_read(0, 0, 1, a as *mut c_void) == 1, "sd-boot-sector: the first read of block 0 refused");
+        let t0 = cyc();
+        assert!(api::rhu_blk_read(0, 0, 1, b as *mut c_void) == 1, "sd-boot-sector: the second read of block 0 refused");
+        let one = cyc().wrapping_sub(t0);
+        let (sa, sb) = unsafe { (core::slice::from_raw_parts(a, 512), core::slice::from_raw_parts(b, 512)) };
+        assert!(sa == sb, "sd-boot-sector: the two reads of block 0 differ");
+        assert!(sa[510] == 0x55 && sa[511] == 0xAA, "sd-boot-sector: no boot signature in block 0 (bytes 510 and 511 read {:#04x} {:#04x}): the card is not formatted", sa[510], sa[511]);
+        let nonzero = sa.iter().filter(|&&x| x != 0).count();
+        kprintln!("[api] sd-boot-sector: block 0 -- bytes 0 to 3 {:02x} {:02x} {:02x} {:02x}, {} nonzero bytes, the signature 55 AA", sa[0], sa[1], sa[2], sa[3], nonzero);
+        let t0 = cyc();
+        assert!(api::rhu_blk_read(0, 0, 8, b as *mut c_void) == 8, "sd-boot-sector: the 8-block read refused");
+        let eight = cyc().wrapping_sub(t0);
+        kprintln!("[api] sd-boot-sector: one block read in {} cycles = {} us; 8 blocks in {} cycles = {} us; {} yields so far at {} Hz", one, us(one), eight, us(eight), blk::yields(), board::SYSCLK_HZ);
+        assert!(sa == unsafe { core::slice::from_raw_parts(b, 512) }, "sd-boot-sector: the 8-block read's first block differs from the single read");
+        assert!(api::rhu_blk_sync(0) == 0, "sd-boot-sector: the sync door refused");
+        assert!(api::rhu_blk_sync(1) == sched::ERR_NODEV, "sd-boot-sector: the sync of device 1 not refused ENODEV");
+        let cap = blk::with_card(|c| c.capacity_blocks).unwrap_or(0);
+        assert!(api::rhu_blk_read(0, 0, 0, a as *mut c_void) == sched::ERR_INVAL, "sd-boot-sector: a count of 0 not refused EINVAL");
+        assert!(api::rhu_blk_read(0, 0, 129, a as *mut c_void) == sched::ERR_INVAL, "sd-boot-sector: a count of 129 not refused EINVAL");
+        assert!(api::rhu_blk_read(0, cap, 1, a as *mut c_void) == sched::ERR_INVAL, "sd-boot-sector: a block at the capacity not refused EINVAL");
+        assert!(api::rhu_blk_read(0, cap - 1, 2, a as *mut c_void) == sched::ERR_INVAL, "sd-boot-sector: a range past the end not refused EINVAL");
+        assert!(api::rhu_blk_read(0, 0, 1, core::ptr::null_mut()) == sched::ERR_INVAL, "sd-boot-sector: a NULL buffer not refused EINVAL");
+        assert!(api::rhu_blk_read(0, 0, 1, unsafe { a.add(2) } as *mut c_void) == sched::ERR_INVAL, "sd-boot-sector: a misaligned buffer not refused EINVAL");
+        assert!(api::rhu_blk_read(1, 0, 1, a as *mut c_void) == sched::ERR_NODEV, "sd-boot-sector: device 1 not refused ENODEV");
+        assert!(api::rhu_blk_write(1, 0, 1, a as *const c_void) == sched::ERR_NODEV, "sd-boot-sector: a write to device 1 not refused ENODEV");
+        assert!(api::rhu_blk_write(0, 0, 0, a as *const c_void) == sched::ERR_INVAL, "sd-boot-sector: a write of 0 blocks not refused EINVAL");
+        kprintln!("[api] PASS sd-boot-sector (block 0 read twice and equal with the signature 55 AA, the 8-block read's first block equal to the single read, the sync door 0 and ENODEV for device 1; the counts 0 and 129, the ranges at and past the end, a NULL and a misaligned buffer EINVAL, device 1 ENODEV for a read and a write, a write of 0 blocks EINVAL)");
+    }
+
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn check_sd_sdram_buffer() {
+        kprintln!("[api] sd-sdram-buffer: block 1 and an 8-block run read by the controller's DMA stream straight into a page of the SDRAM range (the bus matrix's path to the flexible memory controller), equal to the same blocks read into the internal SRAM");
+        let site = check_sd_sdram_buffer as *const () as usize as u32;
+        let p = api::rhu_arena_alloc_from(1, 4096, 16, site);
+        assert!(!p.is_null(), "sd-sdram-buffer: the SDRAM page refused NULL");
+        #[repr(C, align(16))]
+        struct Buf([u8; 4096]);
+        static mut S: Buf = Buf([0; 4096]);
+        let s = addr_of_mut!(S) as *mut u8;
+        assert!(api::rhu_blk_read(0, 1, 1, s as *mut c_void) == 1, "sd-sdram-buffer: the SRAM read of block 1 refused");
+        assert!(api::rhu_blk_read(0, 1, 1, p as *mut c_void) == 1, "sd-sdram-buffer: the SDRAM read of block 1 refused");
+        let (ss, sp) = unsafe { (core::slice::from_raw_parts(s, 512), core::slice::from_raw_parts(p as *const u8, 512)) };
+        assert!(ss == sp, "sd-sdram-buffer: block 1 differs between the SRAM and the SDRAM buffer");
+        assert!(api::rhu_blk_read(0, 8, 8, s as *mut c_void) == 8, "sd-sdram-buffer: the SRAM 8-block read refused");
+        assert!(api::rhu_blk_read(0, 8, 8, p as *mut c_void) == 8, "sd-sdram-buffer: the SDRAM 8-block read refused");
+        let (ss, sp) = unsafe { (core::slice::from_raw_parts(s, 4096), core::slice::from_raw_parts(p as *const u8, 4096)) };
+        assert!(ss == sp, "sd-sdram-buffer: the 8-block run differs between the SRAM and the SDRAM buffer");
+        kprintln!("[api] PASS sd-sdram-buffer (block 1 and blocks 8 to 15 read into the SDRAM page at {:#010x} by the DMA stream, byte for byte the SRAM reads)", p as u32);
+    }
+
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn check_sd_write_back() {
+        kprintln!("[api] sd-write-back: 128 blocks (64 KB) at the card's middle read into an SDRAM buffer, WRITTEN BACK byte for byte to the same blocks, read again into a second buffer and compared; one block the same way; the wall times by the cycle counter and the yields the host's waits took (5.12's predictions (b) and (c)); a write-protected card refuses EROFS instead");
+        let site = check_sd_write_back as *const () as usize as u32;
+        let (cap, protected) = blk::with_card(|c| (c.capacity_blocks, c.write_protected)).unwrap_or((0, true));
+        let p1 = api::rhu_arena_alloc_from(1, 65536, 16, site);
+        let p2 = api::rhu_arena_alloc_from(1, 65536, 16, site);
+        assert!(!p1.is_null() && !p2.is_null(), "sd-write-back: the SDRAM buffers refused NULL");
+        if protected {
+            assert!(api::rhu_blk_write(0, 0, 1, p1 as *const c_void) == -30, "sd-write-back: a write on the protected card not refused EROFS");
+            kprintln!("[api] PASS sd-write-back (the card is write-protected: a write refused EROFS; the measurement skipped)");
+            return;
+        }
+        let lba = (cap / 2) & !127;
+        let y0 = blk::yields();
+        let t0 = cyc();
+        assert!(api::rhu_blk_read(0, lba, 128, p1 as *mut c_void) == 128, "sd-write-back: the 128-block read refused");
+        let r128 = cyc().wrapping_sub(t0);
+        let t0 = cyc();
+        assert!(api::rhu_blk_write(0, lba, 128, p1 as *const c_void) == 128, "sd-write-back: the 128-block write refused");
+        let w128 = cyc().wrapping_sub(t0);
+        let t0 = cyc();
+        assert!(api::rhu_blk_read(0, lba, 128, p2 as *mut c_void) == 128, "sd-write-back: the second 128-block read refused");
+        let r128b = cyc().wrapping_sub(t0);
+        let (s1, s2) = unsafe { (core::slice::from_raw_parts(p1 as *const u8, 65536), core::slice::from_raw_parts(p2 as *const u8, 65536)) };
+        assert!(s1 == s2, "sd-write-back: the 64 KB read back differs from what was written");
+        let t0 = cyc();
+        assert!(api::rhu_blk_write(0, lba, 1, p1 as *const c_void) == 1, "sd-write-back: the one-block write refused");
+        let w1 = cyc().wrapping_sub(t0);
+        assert!(api::rhu_blk_read(0, lba, 1, p2 as *mut c_void) == 1, "sd-write-back: the one-block read after the write refused");
+        assert!(s1[..512] == s2[..512], "sd-write-back: the one block read back differs");
+        let y = blk::yields().wrapping_sub(y0);
+        kprintln!(
+            "[api] sd-write-back: blocks {} to {} -- 64 KB read {} cycles = {} us, written {} cycles = {} us, read again {} cycles = {} us; one block written {} cycles = {} us; {} yields across the five transfers at {} Hz",
+            lba,
+            lba + 127,
+            r128,
+            us(r128),
+            w128,
+            us(w128),
+            r128b,
+            us(r128b),
+            w1,
+            us(w1),
+            y,
+            board::SYSCLK_HZ
+        );
+        kprintln!("[api] PASS sd-write-back (64 KB and one block at the card's middle written back byte for byte and read equal; the times above)");
+    }
+
+    /// The filesystem layer's volume over the socket for the three fs checks: a
+    /// static under the cfg, about 4.5 KB of .bss on the STM32F769 api image alone.
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    static mut FS_VOLUME: Option<fat::Volume<blk::SocketDevice>> = None;
+
+    /// The layer's clock seam: the calendar's reading when a source set it,
+    /// else None (the layer's FAT floor, 1 January 1980).
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn fs_now() -> Option<calendar_math::Civil> {
+        let (ticks, source) = calendar::get();
+        if source == calendar::SOURCE_UNSET {
+            None
+        } else {
+            Some(calendar_math::ticks_to_civil(ticks))
+        }
+    }
+
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn fs_volume() -> &'static mut fat::Volume<blk::SocketDevice> {
+        unsafe { (*addr_of_mut!(FS_VOLUME)).as_mut() }.expect("fs: the volume fs-mount mounted")
+    }
+
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn check_fs_mount() {
+        kprintln!("[api] fs-mount: the card's volume mounted through the filesystem layer with a 64 KB SDRAM scratch page from the arena's range 1 -- the type by the cluster count alone, the label, the cluster size, the counts and the free count, with the mount's cycles and whether the FSInfo's count served or one pass over the FAT ran");
+        let site = check_fs_mount as *const () as usize as u32;
+        let p = api::rhu_arena_alloc_from(1, 65536, 16, site);
+        assert!(!p.is_null(), "fs-mount: the SDRAM scratch page refused NULL");
+        let scratch = unsafe { core::slice::from_raw_parts_mut(p, 65536) };
+        let t0 = cyc();
+        let r = fat::Volume::mount_in(unsafe { &mut *addr_of_mut!(FS_VOLUME) }, blk::SocketDevice, scratch);
+        let dt = cyc().wrapping_sub(t0);
+        if let Err(r) = r {
+            panic!("fs-mount: the mount refused -- {}", r.words());
+        }
+        let v = fs_volume();
+        v.set_clock(fs_now);
+        let g = *v.geometry();
+        let kind = match g.kind {
+            fat::Kind::Fat12 => "FAT12",
+            fat::Kind::Fat16 => "FAT16",
+            fat::Kind::Fat32 => "FAT32",
+        };
+        let free = v.free_clusters();
+        kprintln!(
+            "[api] fs-mount: {} -- label {}, {} bytes per cluster ({} sectors), {} clusters, {} free, {} reserved sectors, {} FATs of {} sectors, the root {}, the volume at sector {} ({}) -- {} cycles = {} us; {}",
+            kind,
+            core::str::from_utf8(v.label()).unwrap_or("?"),
+            g.cluster_bytes,
+            g.sec_per_clus,
+            g.count_of_clusters,
+            free,
+            g.rsvd,
+            g.num_fats,
+            g.fat_sz,
+            if g.kind == fat::Kind::Fat32 { "a cluster chain" } else { "a fixed region" },
+            g.base,
+            if g.base == 0 { "the boot sector at block 0, no partition table" } else { "behind the partition table's first FAT entry" },
+            dt,
+            us(dt),
+            if v.hint_served() { "the FSInfo's count served (no pass)" } else { "one pass over the FAT ran" }
+        );
+        if !v.hint_served() {
+            kprintln!("[api] fs-mount: the pass read the FAT in {} calls through the scratch page", v.pass_calls());
+        }
+        assert!(g.count_of_clusters >= 1 && free <= g.count_of_clusters, "fs-mount: the counts are not consistent");
+        kprintln!("[api] PASS fs-mount ({} with {} clusters of {} bytes, {} free, at sector {}, mounted in {} us)", kind, g.count_of_clusters, g.cluster_bytes, free, g.base, us(dt));
+    }
+
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn check_fs_walk() {
+        kprintln!("[api] fs-walk: the root listed through the layer, up to 32 entries with their long names, kinds and sizes, to compare with a PC's listing");
+        let v = fs_volume();
+        let t0 = cyc();
+        let mut d = v.opendir(b"/").unwrap_or_else(|e| panic!("fs-walk: opendir refused {}", e.code()));
+        let mut e = fat::Entry::EMPTY;
+        let (mut n, mut dirs, mut files) = (0u32, 0u32, 0u32);
+        while n < 32 {
+            match v.readdir(&mut d, &mut e) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(err) => panic!("fs-walk: readdir refused {} after {} entries", err.code(), n),
+            }
+            n += 1;
+            if e.is_dir() {
+                dirs += 1;
+            } else {
+                files += 1;
+            }
+            kprintln!("[api] fs-walk:   {} {:>10} {}{}", if e.is_dir() { "d" } else { "-" }, e.size, core::str::from_utf8(e.name()).unwrap_or("?"), if e.long { "" } else { "  (a short name)" });
+        }
+        v.closedir(&mut d).unwrap_or_else(|e| panic!("fs-walk: closedir refused {}", e.code()));
+        let dt = cyc().wrapping_sub(t0);
+        kprintln!("[api] PASS fs-walk ({} entries listed -- {} directories, {} files -- in {} cycles = {} us)", n, dirs, files, dt, us(dt));
+    }
+
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn check_fs_roundtrip() {
+        kprintln!("[api] fs-roundtrip: THE ONE WRITE OF THE FLIGHT -- a file rhu-fs-roundtrip.tmp and a directory rhu-fs-roundtrip.dir the check creates and removes at the card's root, REFUSED before any write if either name exists; 1 MB of a cycle pattern written from an SDRAM buffer, synced, closed, re-read into a second SDRAM buffer and compared, truncated to 4096 bytes and re-read, unlinked; the directory made, listed empty and removed; the free count equal before and after; the times by the cycle counter");
+        const FILE: &[u8] = b"/rhu-fs-roundtrip.tmp";
+        const DIR: &[u8] = b"/rhu-fs-roundtrip.dir";
+        const LEN: usize = 1 << 20;
+        let v = fs_volume();
+        for name in [FILE, DIR] {
+            match v.stat(name) {
+                Err(fat::Error::NotFound) => {}
+                Ok(_) => panic!("fs-roundtrip: REFUSED before any write -- {} already exists on the card (no existing file is opened for writing)", core::str::from_utf8(name).unwrap_or("?")),
+                Err(e) => panic!("fs-roundtrip: the guard's stat refused {}", e.code()),
+            }
+        }
+        let protected = blk::with_card(|c| c.write_protected).unwrap_or(true);
+        if protected {
+            kprintln!("[api] PASS fs-roundtrip (the card is write-protected: nothing written, the roundtrip skipped)");
+            return;
+        }
+        let site = check_fs_roundtrip as *const () as usize as u32;
+        let p1 = api::rhu_arena_alloc_from(1, LEN as u32, 16, site);
+        let p2 = api::rhu_arena_alloc_from(1, LEN as u32, 16, site);
+        assert!(!p1.is_null() && !p2.is_null(), "fs-roundtrip: the SDRAM buffers refused NULL");
+        let (a, b) = unsafe { (core::slice::from_raw_parts_mut(p1, LEN), core::slice::from_raw_parts_mut(p2, LEN)) };
+        for (i, x) in a.iter_mut().enumerate() {
+            *x = (i as u8).wrapping_mul(7).wrapping_add((i >> 8) as u8) ^ ((i >> 16) as u8).wrapping_mul(31);
+        }
+        let free0 = v.free_clusters();
+        let t0 = cyc();
+        let mut h = v.open(FILE, fat::O_WRITE | fat::O_CREATE | fat::O_EXCL).unwrap_or_else(|e| panic!("fs-roundtrip: the create refused {}", e.code()));
+        let t_create = cyc().wrapping_sub(t0);
+        let t0 = cyc();
+        let mut done = 0;
+        while done < LEN {
+            let n = v.write(&mut h, &a[done..]).unwrap_or_else(|e| {
+                let w = blk::witness_snapshot();
+                panic!("fs-roundtrip: the {} refused {} after {} bytes; the sd witness -- refusals {}, last step {}, last why {}, writes {}, blocks written {}, the host status {:#010x}, the stream flags {:#010x}", "write", e.code(), done, w.0, w.1, w.2, w.3, w.4, w.5, w.6)
+            });
+            assert!(n > 0, "fs-roundtrip: a write moved nothing");
+            done += n;
+        }
+        let t_write = cyc().wrapping_sub(t0);
+        let t0 = cyc();
+        v.sync_file(&mut h).unwrap_or_else(|e| panic!("fs-roundtrip: the sync refused {}", e.code()));
+        let t_sync = cyc().wrapping_sub(t0);
+        v.close(&mut h).unwrap_or_else(|e| panic!("fs-roundtrip: the close refused {}", e.code()));
+        let mut h = v.open(FILE, fat::O_READ).unwrap_or_else(|e| panic!("fs-roundtrip: the re-open refused {}", e.code()));
+        assert!(v.fstat(&h).map(|s| s.size) == Ok(LEN as u32), "fs-roundtrip: the size after the close is not 1 MB");
+        let t0 = cyc();
+        let mut done = 0;
+        while done < LEN {
+            let n = v.read(&mut h, &mut b[done..]).unwrap_or_else(|e| {
+                let w = blk::witness_snapshot();
+                panic!("fs-roundtrip: the {} refused {} after {} bytes; the sd witness -- refusals {}, last step {}, last why {}, writes {}, blocks written {}, the host status {:#010x}, the stream flags {:#010x}", "read", e.code(), done, w.0, w.1, w.2, w.3, w.4, w.5, w.6)
+            });
+            assert!(n > 0, "fs-roundtrip: the read ended early at {} bytes", done);
+            done += n;
+        }
+        let t_read = cyc().wrapping_sub(t0);
+        assert!(a == b, "fs-roundtrip: the 1 MB read back differs from what was written");
+        v.close(&mut h).unwrap_or_else(|e| panic!("fs-roundtrip: the close after the read refused {}", e.code()));
+        let mut h = v.open(FILE, fat::O_READ | fat::O_WRITE).unwrap_or_else(|e| panic!("fs-roundtrip: the open for the truncate refused {}", e.code()));
+        v.truncate(&mut h, 4096).unwrap_or_else(|e| panic!("fs-roundtrip: the truncate refused {}", e.code()));
+        v.sync_file(&mut h).unwrap_or_else(|e| panic!("fs-roundtrip: the sync after the truncate refused {}", e.code()));
+        v.seek(&mut h, 0, fat::SEEK_SET).unwrap_or_else(|e| panic!("fs-roundtrip: the seek refused {}", e.code()));
+        b[..8192].fill(0);
+        let n = v.read(&mut h, &mut b[..8192]).unwrap_or_else(|e| panic!("fs-roundtrip: the read after the truncate refused {}", e.code()));
+        let after = v.read(&mut h, &mut b[4096..8192]).unwrap_or(1);
+        assert!(n == 4096 && after == 0, "fs-roundtrip: the truncated file reads {} then {} bytes, not 4096 then the end", n, after);
+        assert!(a[..4096] == b[..4096], "fs-roundtrip: the truncated file's bytes differ");
+        v.close(&mut h).unwrap_or_else(|e| panic!("fs-roundtrip: the close after the truncate refused {}", e.code()));
+        assert!(v.stat(FILE).map(|s| s.size) == Ok(4096), "fs-roundtrip: the size after the truncate is not 4096");
+        let t0 = cyc();
+        v.unlink(FILE).unwrap_or_else(|e| panic!("fs-roundtrip: the unlink refused {}", e.code()));
+        let t_unlink = cyc().wrapping_sub(t0);
+        v.mkdir(DIR).unwrap_or_else(|e| panic!("fs-roundtrip: the mkdir refused {}", e.code()));
+        let mut d = v.opendir(DIR).unwrap_or_else(|e| panic!("fs-roundtrip: the opendir refused {}", e.code()));
+        let mut e = fat::Entry::EMPTY;
+        let mut n = 0;
+        while v.readdir(&mut d, &mut e).unwrap_or_else(|e| panic!("fs-roundtrip: readdir refused {}", e.code())) {
+            assert!(e.name() == b"." || e.name() == b"..", "fs-roundtrip: the new directory lists an entry of its own");
+            n += 1;
+        }
+        v.closedir(&mut d).unwrap_or_else(|e| panic!("fs-roundtrip: closedir refused {}", e.code()));
+        assert!(n == 2, "fs-roundtrip: the new directory lists {} entries, not the two dots", n);
+        v.rmdir(DIR).unwrap_or_else(|e| panic!("fs-roundtrip: the rmdir refused {}", e.code()));
+        for name in [FILE, DIR] {
+            assert!(v.stat(name) == Err(fat::Error::NotFound), "fs-roundtrip: {} still present after", core::str::from_utf8(name).unwrap_or("?"));
+        }
+        v.sync().unwrap_or_else(|e| panic!("fs-roundtrip: the final sync refused {}", e.code()));
+        let free1 = v.free_clusters();
+        assert!(free1 == free0, "fs-roundtrip: the free count moved from {} to {}", free0, free1);
+        kprintln!(
+            "[api] fs-roundtrip: the create {} cycles = {} us, the 1 MB write {} = {} us, the sync {} = {} us, the 1 MB read {} = {} us, the unlink {} = {} us; {} clusters free before and after",
+            t_create,
+            us(t_create),
+            t_write,
+            us(t_write),
+            t_sync,
+            us(t_sync),
+            t_read,
+            us(t_read),
+            t_unlink,
+            us(t_unlink),
+            free0
+        );
+        kprintln!("[api] PASS fs-roundtrip (1 MB written from the SDRAM, read back equal into the SDRAM, truncated to 4096 and re-read equal, unlinked; the directory made, empty, removed; the two names absent and the free count unchanged)");
+    }
+
+    // Check 13, LAST in the family: headroom is honest to the byte. An
+    // alloc of exactly headroom() succeeds, a further 8-byte alloc is
+    // refused with a quiet NULL (the one honest NULL -- exhaustion),
+    // and headroom reads 0. Also the audit probe's refusal direction:
+    // a never-used site reads (0, 0) against the now-final table.
     fn check_arena_headroom() {
         kprintln!("[api] arena-headroom: exact-fit exhaustion armed");
         let missing = check_quiescent as *const () as usize as u32;
@@ -976,6 +2058,44 @@ mod api_smoke {
         assert!(q.is_null(), "alloc past exhaustion was not refused NULL");
         assert!(api::rhu_arena_headroom() == 0, "a refused alloc changed headroom");
         kprintln!("[api] PASS arena-headroom (exact fit taken, further alloc refused NULL, headroom 0)");
+    }
+
+    #[cfg(rhu_ram_init_background)]
+    fn check_ram_init_frontier() {
+        kprintln!("[api] ram-init-frontier: the background mode's frontier armed (64 KB re-poisoned above the lazy window's hand-out edge)");
+        let (index, lo, hi, bump0, clean0) = arena::probe_frontier();
+        assert!(bump0 >= lo && clean0 >= bump0 && clean0 <= hi, "ram-init-frontier: the frontier {:#010x} outside [bump {:#010x}, hi {:#010x}]", clean0, bump0, hi);
+        let poison_end = arena::probe_frontier_rewind(64 * 1024);
+        assert!(poison_end >= bump0 + 8192, "ram-init-frontier: under 8 KB left above the lazy window's hand-out edge");
+        let (_, _, _, _, clean1) = arena::probe_frontier();
+        assert!(clean1 == bump0, "ram-init-frontier: the frontier {:#010x} did not rewind to the hand-out edge {:#010x}", clean1, bump0);
+        let site = check_ram_init_frontier as *const () as usize as u32;
+        let p = api::rhu_arena_alloc_from(index as u32, 4096, 8, site);
+        assert!(!p.is_null(), "ram-init-frontier: the straddling page refused NULL");
+        assert!(p as usize == bump0, "ram-init-frontier: the straddling page {:#010x} is not at the hand-out edge {:#010x}", p as usize, bump0);
+        assert!(scan_zero(p as *const u8, 4096), "ram-init-frontier: the straddling page reads nonzero (the hand-out did not zero its part above the frontier)");
+        let (_, _, _, bump2, clean2) = arena::probe_frontier();
+        assert!(bump2 == bump0 + 4096 && clean2 == bump2, "ram-init-frontier: the frontier {:#010x} did not jump to the hand-out's end {:#010x}", clean2, bump2);
+        let mut ticks = 0u32;
+        loop {
+            let (_, _, _, _, c) = arena::probe_frontier();
+            if c >= hi {
+                break;
+            }
+            assert!(ticks < 20_000, "ram-init-frontier: the frontier {:#010x} short of the window's end {:#010x} after {} ticks of idle", c, hi, ticks);
+            api::rhu_sleep_ns(1_000_000);
+            ticks += 1;
+        }
+        let (mid, takeovers, retries, abandoned) = arena::probe_ram_init_witness();
+        kprintln!("[api] ram-init-frontier: {} tick(s) served mid-piece since boot (the zeroing outside the critical section); {} takeover(s) of the piece in flight, {} strex retr(y/ies), {} piece(s) abandoned", mid, takeovers, retries, abandoned);
+        assert!(mid > 0, "ram-init-frontier: no tick served while a piece was zeroing -- the background zeroing ran under the critical section");
+        let q = api::rhu_arena_alloc_from(index as u32, 4096, 8, site);
+        assert!(!q.is_null(), "ram-init-frontier: the page below the frontier refused NULL");
+        assert!(q as usize == bump2 && q as usize + 4096 <= poison_end, "ram-init-frontier: the page {:#010x} is not the next page inside the poisoned span", q as usize);
+        assert!(scan_zero(q as *const u8, 4096), "ram-init-frontier: the page below the frontier reads nonzero (the idle step did not zero the poison)");
+        let (_, _, _, bump3, clean3) = arena::probe_frontier();
+        assert!(clean3 == hi && bump3 == bump2 + 4096, "ram-init-frontier: the frontier {:#010x} moved for a hand-out below it (bump {:#010x})", clean3, bump3);
+        kprintln!("[api] PASS ram-init-frontier (the straddling page zero-born by the hand-out with the frontier at its end; the frontier at the window's end after {} tick(s) of idle; the page below it zero-born by the idle step alone)", ticks);
     }
 
 
@@ -996,6 +2116,12 @@ mod api_smoke {
         api::rhu_futex_wake(word.as_ptr(), u32::MAX);
     }
 
+    // Check 14: kheap alloc/write/free/re-alloc + mixed alignment. The
+    // heap is pristine here (module 0 carries no TLS and nothing else
+    // draws), so the freed head block is the first fit for its exact
+    // size -- address equality is the reuse proof. All blocks freed at
+    // the end: coalescing folds the heap back to one block, which the
+    // next check's adjacency asserts then verify from a cold start.
     fn check_kheap_basic() {
         kprintln!("[api] kheap-basic: alloc/free/reuse + mixed-align armed");
         let a = api::rhu_kheap_alloc(40, 8);
@@ -1023,6 +2149,11 @@ mod api_smoke {
         kprintln!("[api] PASS kheap-basic (freed block reused at the same address, alignment honored)");
     }
 
+    // Check 15: coalescing, proven on a guarded triple. The guard keeps
+    // z off the wilderness block so the 3-way merge -- island, forward,
+    // backward -- is exactly what the summed re-allocation proves; the
+    // sum is computed from the kheap's own header const, never a
+    // golden'd absolute.
     fn check_kheap_coalesce() {
         kprintln!("[api] kheap-coalesce: guarded three-block mixed-order free armed");
         let x = api::rhu_kheap_alloc(48, 8);
@@ -1041,9 +2172,9 @@ mod api_smoke {
             z as usize == y as usize + 80 + kheap::HDR_BYTES as usize,
             "kheap-coalesce: y/z not adjacent"
         );
-        api::rhu_kheap_free(y);
-        api::rhu_kheap_free(z);
-        api::rhu_kheap_free(x);
+        api::rhu_kheap_free(y); // island
+        api::rhu_kheap_free(z); // merges backward into y's block
+        api::rhu_kheap_free(x); // merges forward: one x..z block
         let sum = 48 + 80 + 112 + 2 * kheap::HDR_BYTES;
         let w = api::rhu_kheap_alloc(sum, 8);
         assert!(w == x, "kheap-coalesce: the summed span did not reallocate at the first block");
@@ -1052,6 +2183,11 @@ mod api_smoke {
         kprintln!("[api] PASS kheap-coalesce (adjacent frees merged whole: the summed span reallocated at the first block)");
     }
 
+    // Check 15b: the heap's size arithmetic is bounded. A request whose
+    // rounding wraps and a request over any row's heap are both refused
+    // NULL with the refusal line, and the heap is intact after (a plain
+    // alloc and free succeed). The requests are constants, so the two
+    // emulator rows print the same lines.
     fn check_kheap_bound() {
         kprintln!("[api] kheap-bound: a wrapping request and an over-heap request armed");
         assert!(api::rhu_kheap_alloc(0xFFFF_FFF7, 8).is_null(), "kheap-bound: a wrapping request was not refused");
@@ -1089,11 +2225,13 @@ mod api_smoke {
     }
 
     extern "C" fn tls_worker(arg: *mut c_void) {
-        let me = arg as usize;
+        let me = arg as usize; // 0 or 1
         let h1 = TLS_H1.load(Ordering::Acquire);
         let h2 = TLS_H2.load(Ordering::Acquire);
         let b1 = api::rhu_tls_get(h1);
         let b2 = api::rhu_tls_get(h2);
+        // Spawn-side eager init: image honored in module 1, zero fill
+        // in module 2 -- checked in-thread, before any write.
         if !scan_eq(b1, &TLS_INIT_IMAGE) || !scan_zero(b2, 48) {
             TLS_SEEN_BAD.store(1, Ordering::Release);
         }
@@ -1112,6 +2250,12 @@ mod api_smoke {
         api::rhu_futex_wake(TLS_EXITED.as_ptr(), u32::MAX);
     }
 
+    // Check 16: N-module TLS. Registration-side eager allocation gives
+    // kmain (and idle) their blocks at register time; spawn-side eager
+    // gives the two workers theirs at birth. Blocks are per (thread,
+    // module): six distinct addresses, init image and zero fill
+    // honored in every copy, and a thread's writes invisible outside
+    // its own blocks.
     fn check_tls_blocks() {
         kprintln!("[api] tls-blocks: two modules x two threads armed");
         let d1 = registry::ModuleDesc {
@@ -1137,6 +2281,7 @@ mod api_smoke {
         TLS_H1.store(h1, Ordering::Release);
         TLS_H2.store(h2, Ordering::Release);
 
+        // Registration-side eager: this thread's blocks exist NOW.
         let g1 = api::rhu_tls_get(h1);
         let g2 = api::rhu_tls_get(h2);
         assert!(scan_eq(g1, &TLS_INIT_IMAGE), "tls-blocks: kmain's init image wrong");
@@ -1170,6 +2315,8 @@ mod api_smoke {
         for w in all.windows(2) {
             assert!(w[0] != w[1], "tls-blocks: two blocks share an address");
         }
+        // Cross-thread visibility: each writer's byte is where it wrote
+        // it and nowhere else; kmain's own byte survived both workers.
         unsafe {
             assert!(read_volatile(a1) == 0x41 && read_volatile(b1) == 0x42, "tls-blocks: module-1 writes wrong");
             assert!(read_volatile(a2) == 0x61 && read_volatile(b2) == 0x62, "tls-blocks: module-2 writes wrong");
@@ -1181,6 +2328,17 @@ mod api_smoke {
         kprintln!("[api] PASS tls-blocks (per-thread blocks distinct, init image + zero fill honored, no cross-thread bleed)");
     }
 
+    // Check 16b: the thread-local-base door. The debug-visible layout
+    // record is read FROM MEMORY at its exported symbols exactly as a
+    // debugger reads it -- raw words at `__rhu_debug_layout`, then
+    // `__rhu_sched` walked with the recorded offsets, no kernel verb in
+    // the walk -- and judged against the doors: every live thread's
+    // module-0 pointer is null while the template brackets are empty
+    // (this family carries no thread-local template); the two
+    // registered modules' blocks read through the record equal what
+    // rhu_tls_get answers on kmain and what each of two parked workers
+    // answered for itself; every non-live slot reads null in every
+    // module column; the running thread's slot is the recorded current.
     static DOOR_PARK: AtomicU32 = AtomicU32::new(0);
     static DOOR_READY: AtomicU32 = AtomicU32::new(0);
     static DOOR_TID: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
@@ -1204,6 +2362,7 @@ mod api_smoke {
             static __rhu_tdata_lo: u32;
             static __rhu_tdata_hi: u32;
         }
+        // The record, as words at its symbol.
         let lay = addr_of!(sched::__rhu_debug_layout) as *const u32;
         let w = |i: usize| unsafe { read_volatile(lay.add(i)) };
         assert!(w(0) == 0x4448_5552, "tls-base-door: layout magic {:#x}", w(0));
@@ -1229,6 +2388,7 @@ mod api_smoke {
         assert!(t0 >= 1 && t1 >= 1 && t0 != t1, "tls-base-door: spawn failed");
         wait_until(|| DOOR_READY.load(Ordering::Acquire) == 2, "door workers ready");
 
+        // The doors' answers, taken once; the walk below never calls one.
         let me = api::rhu_thread_self();
         let g1 = api::rhu_tls_get(h1) as u32;
         let g2 = api::rhu_tls_get(h2) as u32;
@@ -1292,11 +2452,11 @@ mod api_smoke {
             DTOR_ORDER[seq as usize].store(arg as u32 + 1, Ordering::Release);
         }
         if api::rhu_thread_self() != DTOR_TID.load(Ordering::Acquire) {
-            DTOR_BAD.fetch_or(1, Ordering::AcqRel);
+            DTOR_BAD.fetch_or(1, Ordering::AcqRel); // ran off-thread
         }
         let p = api::rhu_tls_get(TLS_H1.load(Ordering::Acquire));
         if unsafe { read_volatile(p) } != 0xD7 {
-            DTOR_BAD.fetch_or(2, Ordering::AcqRel);
+            DTOR_BAD.fetch_or(2, Ordering::AcqRel); // TLS not live in a dtor
         }
     }
 
@@ -1310,6 +2470,7 @@ mod api_smoke {
         }
         let r = api::rhu_thread_atexit(Some(dtor_recorder), 8 as *mut c_void);
         assert!(r == sched::ERR_AGAIN, "tls-dtors: the ninth dtor was not refused ({})", r);
+        // Exit by returning: the entry-return path runs the dtors too.
     }
 
     fn check_tls_dtors() {
@@ -1323,10 +2484,10 @@ mod api_smoke {
         );
         assert!(t >= 1, "tls-dtors: spawn failed");
         wait_until(|| DTOR_SEQ.load(Ordering::Acquire) == 8, "eight dtors to run");
-        api::rhu_sleep_ns(2_000_000);
+        api::rhu_sleep_ns(2_000_000); // grace: nothing may run a ninth
         assert!(DTOR_SEQ.load(Ordering::Acquire) == 8, "tls-dtors: more than eight dtor runs");
         for (call, slot) in DTOR_ORDER.iter().enumerate() {
-            let want = 8 - call as u32;
+            let want = 8 - call as u32; // LIFO: call 0 sees arg 7 (+1 encoding)
             assert!(
                 slot.load(Ordering::Acquire) == want,
                 "tls-dtors: call {} recorded {} (want {})",
@@ -1339,6 +2500,7 @@ mod api_smoke {
         kprintln!("[api] PASS tls-dtors (dtors ran LIFO exactly once on the exiting thread, TLS live inside, cap refused honest)");
     }
 
+    // Checks 18-19 helpers: parked probes over one release word.
     static ABI_PARK: AtomicU32 = AtomicU32::new(0);
     static ABI_SELF_SEEN: AtomicI32 = AtomicI32::new(0);
 
@@ -1346,6 +2508,7 @@ mod api_smoke {
         while ABI_PARK.load(Ordering::Acquire) == 0 {
             let _ = api::rhu_futex_wait(ABI_PARK.as_ptr(), 0, sched::DEADLINE_NONE);
         }
+        // Exit by returning.
     }
 
     extern "C" fn probe_exit_verb(_: *mut c_void) {
@@ -1354,7 +2517,7 @@ mod api_smoke {
         while ABI_PARK.load(Ordering::Acquire) == 0 {
             let _ = api::rhu_futex_wait(ABI_PARK.as_ptr(), 0, sched::DEADLINE_NONE);
         }
-        api::rhu_thread_exit();
+        api::rhu_thread_exit(); // the explicit exit path
     }
 
     /// Spawn one parked probe through the C door.
@@ -1372,11 +2535,12 @@ mod api_smoke {
             },
             "probe exit",
         );
-        api::rhu_sleep_ns(2_000_000);
+        api::rhu_sleep_ns(2_000_000); // reap grace
     }
 
     fn check_thread_abi() {
         kprintln!("[api] thread-abi: C-door round trip + exact-fit stack reuse armed");
+        // (a) round trip + reuse at the unique 2K size.
         let t1 = spawn_probe(probe_exit_verb, 2048);
         assert!(t1 >= 1, "thread-abi: spawn returned {}", t1);
         wait_until(|| sched::probe_futex_waiting(ABI_PARK.as_ptr()) == 1, "probe 1 parked");
@@ -1385,7 +2549,7 @@ mod api_smoke {
         assert!(api::rhu_thread_stack_bounds(t1, &mut lo1, &mut b1) == 0, "thread-abi: bounds(t1) refused");
         release(&ABI_PARK);
         join_tid(t1);
-        ABI_PARK.store(0, Ordering::Release);
+        ABI_PARK.store(0, Ordering::Release); // re-arm for the next probe
 
         let t2 = spawn_probe(probe_exit_verb, 2048);
         assert!(t2 >= 1 && t2 != t1, "thread-abi: tid not unique across spawn-exit-spawn");
@@ -1397,6 +2561,11 @@ mod api_smoke {
         join_tid(t2);
         ABI_PARK.store(0, Ordering::Release);
 
+        // (c) the name is the kernel's copy: spawned with names in local
+        // buffers that are clobbered once the door returns, each thread's
+        // record still reads the bytes the door saw -- cut to the buffer,
+        // at a character boundary -- and points into its own block. The
+        // stacks are a size unique in the image's spawn history.
         let mut local = *b"clobbered-name-longer-than-15\0";
         let tn = api::rhu_thread_spawn(
             Some(probe_return),
@@ -1415,6 +2584,7 @@ mod api_smoke {
         release(&ABI_PARK);
         join_tid(tn);
         ABI_PARK.store(0, Ordering::Release);
+        // 14 ASCII bytes then one two-byte character straddling the cut.
         let mut local2 = *b"abcdefghijklmn\xc3\xa9\0";
         let tn2 = api::rhu_thread_spawn(
             Some(probe_return),
@@ -1433,6 +2603,7 @@ mod api_smoke {
         join_tid(tn2);
         ABI_PARK.store(0, Ordering::Release);
 
+        // (b) slot exhaustion, honest refusal, algorithmic count.
         let (live0, free0) = sched::probe_slot_states();
         assert!(
             live0 + free0 == sched::MAX_THREADS as u32,
@@ -1462,6 +2633,9 @@ mod api_smoke {
         }
         ABI_PARK.store(0, Ordering::Release);
         let (occ1, drops1, bytes1) = sched::probe_retired();
+        // The probes' 1K stacks matched nothing retired (idle never
+        // exits, every other historical size differs), so the list only
+        // gained: accepted up to capacity, the rest audited as leaked.
         let accepted = spawned.min(sched::RETIRED_CAP as u32 - occ0);
         assert!(occ1 == occ0 + accepted, "thread-abi: retired occupancy {} (want {})", occ1, occ0 + accepted);
         assert!(
@@ -1479,6 +2653,12 @@ mod api_smoke {
         kprintln!("[api] PASS thread-abi (round trip clean, tids unique, exact-fit stack reused, the name a kernel copy cut at the buffer, slot exhaustion refused honest)");
     }
 
+    // Check 18b: the spawn door's stack floor. Sizes the frames cannot
+    // fit (0, 1, 8, 64, one below the floor) and sizes whose 8-byte
+    // round-up wraps are refused RHU_EINVAL with nothing committed -- the
+    // slot census, the retired list and the pool's bump unchanged; the
+    // largest size that does not wrap is refused by the pool, RHU_EAGAIN;
+    // the floor itself spawns, parks and joins.
     fn check_stack_min() {
         kprintln!("[api] stack-min: sizes below the floor, sizes whose round-up wraps, the floor itself armed");
         let floor = sched::THREAD_STACK_MIN as u32;
@@ -1514,7 +2694,7 @@ mod api_smoke {
     extern "C" fn band_child(_: *mut c_void) {
         HB_CHILD_PRIO.store(sched::probe_current_prio() as u32, Ordering::Release);
         HB_CHILD_TID.store(api::rhu_thread_self(), Ordering::Release);
-        HB_STARTED.store(1, Ordering::Release);
+        HB_STARTED.store(1, Ordering::Release); // the started signal; exit by returning
     }
 
     extern "C" fn band_peer(_: *mut c_void) {
@@ -1564,6 +2744,9 @@ mod api_smoke {
         );
         join_tid(tc);
 
+        // (b) Joining re-runs the pick: back at kernel urgency, ready a
+        // band thread at the band's most urgent value; fifty yields hold
+        // it; the join runs it to completion before returning.
         assert!(sched::set_current_prio(kernel_prio) == flat, "host-band: the leave returned another priority");
         let tp = spawn_band(band_peer, api::HOSTED_PRIO_LO, c"bandpeer");
         for _ in 0..50 {
@@ -1577,6 +2760,9 @@ mod api_smoke {
         );
         join_tid(tp);
 
+        // (c) Leaving restores kernel urgency: a band thread spawned
+        // after it waits through fifty yields and runs once the host
+        // blocks (the join below sleeps).
         assert!(sched::set_current_prio(kernel_prio) == flat, "host-band: the second leave returned another priority");
         assert!(sched::probe_current_prio() == kernel_prio, "host-band: kernel urgency not restored");
         let tl = spawn_band(band_late, api::HOSTED_PRIO_FLAT, c"bandlate");
@@ -1589,6 +2775,13 @@ mod api_smoke {
         kprintln!("[api] PASS host-band (the host joined the band and its door-spawned child at the flat priority started through yield alone at one level, joining re-ran the pick, leaving restored kernel urgency and held a band thread until the host blocked)");
     }
 
+    // Check 37b: the calendar doors, late in the flavor (a board's
+    // low-speed crystal is ready by now, so on a row with a real-time
+    // clock the write-back is a measured fact). The base at boot is the
+    // epoch or a carried one (a warm board with a set clock, a pushed
+    // mailbox); an explicit set reads back with its source and the
+    // elapsed clock beneath it; a later explicit set replaces it; the
+    // source and range refusals; the states per class.
     fn check_calendar() {
         kprintln!("[api] calendar-door: the calendar base's doors armed (get, two explicit sets, the replace rule, the refusals, the record)");
         const T1: u64 = 631_167_699_060_000_000;
@@ -1656,7 +2849,14 @@ mod api_smoke {
     fn check_gpio_refuse() {
         kprintln!("[api] gpio-refuse: the board's line, a line past the space, an unpopulated line, an input-only output claim, a write on an input, an unclaimed read and release, a bad selector -- each refused with its code");
         let n = api::rhu_gpio_count() as u32;
-        assert!(api::rhu_gpio_claim(board::facts::CHECK_BOARD, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == gpio::ERR_BUSY, "gpio-refuse: the board's line not refused EBUSY");
+        // A row with no board-claimed line by default (the Pico rows:
+        // the memory console takes no pin) skips the board-line assertion
+        // and says so; every other row asserts it.
+        if board::facts::BOARD_CLAIMS.is_empty() {
+            kprintln!("[api] gpio-refuse: no line is claimed by the board on this row by default (the memory console takes no UART pin); the board-line assertion is skipped");
+        } else {
+            assert!(api::rhu_gpio_claim(board::facts::CHECK_BOARD, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == gpio::ERR_BUSY, "gpio-refuse: the board's line not refused EBUSY");
+        }
         assert!(api::rhu_gpio_claim(n, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == sched::ERR_INVAL, "gpio-refuse: the line at the space's end not refused EINVAL");
         assert!(api::rhu_gpio_claim(n + 1000, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == sched::ERR_INVAL, "gpio-refuse: a line far past the space not refused EINVAL");
         if let Some(u) = board::facts::CHECK_UNPOPULATED {
@@ -1683,7 +2883,8 @@ mod api_smoke {
             let p = addr_of!(gpio::WITNESS);
             (read_volatile(addr_of!((*p).refused_busy)), read_volatile(addr_of!((*p).refused_inval)), read_volatile(addr_of!((*p).refused_acces)), read_volatile(addr_of!((*p).last_refused_code)))
         };
-        assert!(busy >= 1 && inval >= 8 && acces >= 1, "gpio-refuse: the witness counts busy {} inval {} acces {}", busy, inval, acces);
+        let busy_floor: u32 = if board::facts::BOARD_CLAIMS.is_empty() { 0 } else { 1 };
+        assert!(busy >= busy_floor && inval >= 8 && acces >= 1, "gpio-refuse: the witness counts busy {} (floor {}) inval {} acces {}", busy, busy_floor, inval, acces);
         assert!(last == sched::ERR_INVAL, "gpio-refuse: the last refusal's code reads {}", last);
         kprintln!("[api] PASS gpio-refuse (the board's line EBUSY, the space's end and a far line EINVAL, an unpopulated line EINVAL and an input-only output claim EACCES where the row has them, a write on an input EACCES, an unclaimed read, write, release and edge EINVAL with a NULL event word, three bad selectors EINVAL, the witness's counts and last code as expected)");
     }
@@ -1711,6 +2912,9 @@ mod api_smoke {
     fn check_gpio_edge_one_kind() {
         kprintln!("[api] gpio-edge-one-kind: a rising-only arm on the software trigger, the word moved by one");
         let inp = board::facts::CHECK_IN;
+        // The input is pulled up: an input nothing holds is no premise of a
+        // count (a pad nothing drives floats on the chip revisions whose pads
+        // do not leak).
         assert!(api::rhu_gpio_claim(inp, gpio_math::MODE_INPUT, gpio_math::PULL_UP, 0) == 0, "gpio-edge-one-kind: the input claim refused");
         assert!(api::rhu_gpio_edge(inp, gpio_math::KIND_RISING) == 0, "gpio-edge-one-kind: the arm refused");
         let w = api::rhu_gpio_event_word(inp);
@@ -1732,7 +2936,7 @@ mod api_smoke {
     /// and both edges armed, and a ten-second wait on its event word lights
     /// the LED on the first event; the outcome is printed either way -- an
     /// interactive step that says "no press" honestly.
-    #[cfg(all(feature = "test-gpio-button", any(feature = "board-pimoroni-pico-plus-2", feature = "board-rpi-pico2", feature = "board-st-nucleo-l4r5zi", feature = "board-st-nucleo-u5a5zj-q", feature = "board-st-stm32f746g-disco", feature = "board-st-stm32f769i-disco")))]
+    #[cfg(all(feature = "test-gpio-button", any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-plus-2", feature = "board-rpi-pico2", feature = "board-st-nucleo-l4r5zi", feature = "board-st-nucleo-u5a5zj-q", feature = "board-st-stm32f746g-disco", feature = "board-st-stm32f769i-disco")))]
     pub fn button_flight() {
         let led = board::facts::LED0_LINE;
         let off = board::facts::LED0_ACTIVE_LOW as u32;
@@ -1759,6 +2963,83 @@ mod api_smoke {
             kprintln!("[flight] button: pressed after {} ms; the LED lit", (api::rhu_now_ns() - t0) / 1_000_000);
         } else {
             kprintln!("[flight] button: no press within 10 s (an interactive step; the wait returned {})", r);
+        }
+    }
+
+    /// THE UART FLAVORS (the features test-uart-loopback and test-uart-jumper,
+    /// never a shipped image; the Pico rows): the row's port 0 -- or its port
+    /// 1 under test-uart-port1 -- is claimed through the doors and set to
+    /// 115200 8N1; the loopback image turns the block's loopback bit on, so
+    /// the transmitter feeds the receiver inside the chip, and the jumper
+    /// image expects the port's pair wired together by hand (GP0 to GP1 on
+    /// port 0, the facts' pair; on port 1 the pair the project's pin words
+    /// name, since UART1 has no default pins on the Pico rows). A
+    /// 256-byte pattern is written in partial writes and read back within
+    /// two seconds, compared byte for byte; the witness's counts and PASS
+    /// are printed, the port released, and the image ends as the api flavor
+    /// does (the memory console holds the transcript for the debugger).
+    #[cfg(all(any(feature = "test-uart-loopback", feature = "test-uart-jumper"), rhu_uart_pl011))]
+    pub fn uart_flight() {
+        let port: u32 = if cfg!(feature = "test-uart-port1") { 1 } else { 0 };
+        let (jtx, jrx, _) = crate::uart::pins_for(port as usize);
+        let loopback = cfg!(feature = "test-uart-loopback");
+        if loopback {
+            kprintln!("[flight] uart: UART{} claimed through the doors at 115200 8N1, 256 bytes out and back over the block's loopback bit", port);
+        } else {
+            kprintln!("[flight] uart: UART{} claimed through the doors at 115200 8N1, 256 bytes out and back over a jumper from GP{} to GP{}", port, jtx, jrx);
+        }
+        let h = api::rhu_uart_claim(port);
+        assert!(h >= 0, "flight: the UART0 claim answered {}", h);
+        let mut ach = 0u32;
+        assert!(api::rhu_uart_configure(h, 115_200, 8, crate::uart::PARITY_NONE, 1, &mut ach) == 0, "flight: the configure refused");
+        kprintln!("[flight] uart: 115200 Bd asked, {} Bd achieved", ach);
+        #[cfg(feature = "test-uart-loopback")]
+        assert!(crate::uart::loopback(h, true), "flight: the loopback bit refused");
+        let mut pat = [0u8; 256];
+        for (i, b) in pat.iter_mut().enumerate() {
+            *b = (i as u8) ^ 0x5A;
+        }
+        let w0 = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(crate::uart::WITNESS)) };
+        let mut back = [0u8; 256];
+        let (mut sent, mut recv, mut writes) = (0usize, 0usize, 0u32);
+        let deadline = api::rhu_now_ns() + 2_000_000_000;
+        while recv < 256 {
+            if sent < 256 {
+                let t = api::rhu_uart_write(h, pat[sent..].as_ptr(), (256 - sent) as u32);
+                assert!(t >= 0, "flight: the write answered {}", t);
+                sent += t as usize;
+                writes += 1;
+            }
+            let n = api::rhu_uart_read(h, back[recv..].as_mut_ptr(), (256 - recv) as u32);
+            assert!(n >= 0, "flight: the read answered {}", n);
+            recv += n as usize;
+            if recv < 256 && n == 0 {
+                assert!(api::rhu_now_ns() < deadline, "flight: {} of 256 bytes back within two seconds (is the wire there?)", recv);
+                api::rhu_sleep_ns(1_000_000);
+            }
+        }
+        for i in 0..256 {
+            assert!(back[i] == pat[i], "flight: byte {} differs: {:#04x} sent, {:#04x} back", i, pat[i], back[i]);
+        }
+        let w = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(crate::uart::WITNESS)) };
+        kprintln!(
+            "[flight] uart: 256 bytes in {} writes; the witness {} out, {} in, {} interrupts, {} overruns, {} framing, {} parity, {} dropped",
+            writes,
+            w.bytes_out.wrapping_sub(w0.bytes_out),
+            w.bytes_in.wrapping_sub(w0.bytes_in),
+            w.irqs.wrapping_sub(w0.irqs),
+            w.overruns,
+            w.framing,
+            w.parity,
+            w.rx_dropped
+        );
+        #[cfg(feature = "test-uart-loopback")]
+        assert!(crate::uart::loopback(h, false), "flight: the loopback bit refused off");
+        assert!(api::rhu_uart_release(h) == 0, "flight: the release refused");
+        if loopback {
+            kprintln!("[flight] PASS uart-loopback (256 bytes out and back byte-equal over the block's loopback bit, the port released)");
+        } else {
+            kprintln!("[flight] PASS uart-jumper (256 bytes out and back byte-equal over a jumper from GP{} to GP{}, the port released)", jtx, jrx);
         }
     }
 
@@ -1793,11 +3074,17 @@ mod api_smoke {
         kprintln!("[api] gpio-edge: an armed input counted eight spaced edges once each, a parked waiter woken by one edge through the futex, the compare-and-wait, a burst coalesced, the level and wakeup kinds refused");
         let inp = board::facts::CHECK_IN;
         let out = board::facts::CHECK_OUT;
+        // The input is pulled up: an input nothing holds is no premise of a
+        // count (a pad nothing drives floats on the chip revisions whose pads
+        // do not leak).
         assert!(api::rhu_gpio_claim(inp, gpio_math::MODE_INPUT, gpio_math::PULL_UP, 0) == 0, "gpio-edge: the input claim refused");
         assert!(api::rhu_gpio_edge(inp, gpio_math::KIND_LEVEL_HIGH) == gpio::ERR_NOTSUP, "gpio-edge: a level kind not refused ENOTSUP");
         assert!(api::rhu_gpio_edge(inp, gpio_math::KIND_WAKE_BOTH) == gpio::ERR_NOTSUP, "gpio-edge: a wakeup kind not refused ENOTSUP");
         assert!(api::rhu_gpio_edge(inp, 9) == sched::ERR_INVAL, "gpio-edge: an unknown kind not refused EINVAL");
         if let Some(o) = out {
+            // The loop's output opens LOW, so the first toggle (high) is a
+            // change and every toggle after it alternates -- an open is not
+            // an edge, and a write at the level already driven is not one.
             assert!(api::rhu_gpio_claim(o, gpio_math::MODE_OUTPUT, gpio_math::PULL_NONE, 0) == 0, "gpio-edge: the output claim refused");
         }
         assert!(api::rhu_gpio_edge(inp, gpio_math::KIND_BOTH) == 0, "gpio-edge: the arm refused");
@@ -1832,10 +3119,12 @@ mod api_smoke {
         }
         assert!(EDGE_WAIT_RESULT.load(Ordering::Acquire) == 0, "gpio-edge: the waiter returned {}", EDGE_WAIT_RESULT.load(Ordering::Acquire));
         v = gpio_wait_count(w, v, 1);
+        // The compare-and-wait: an edge between the snapshot and the wait returns at once.
         let snap = v;
         gpio_fire_one(out, inp, 9);
         v = gpio_wait_count(w, snap, 1);
         assert!(api::rhu_futex_wait(w, snap, u64::MAX) == sched::ERR_AGAIN, "gpio-edge: a wait on a moved word did not return EAGAIN at once");
+        // A burst: two edges without a read between, one count of two.
         let snap2 = v;
         gpio_fire_one(out, inp, 10);
         gpio_fire_one(out, inp, 11);
@@ -1846,6 +3135,12 @@ mod api_smoke {
         let counted = unsafe { (*addr_of!(gpio::WITNESS)).edges_counted };
         assert!(counted == 12, "gpio-edge: the witness counted {} edges, the word 12", counted);
         assert!(api::rhu_gpio_edge(inp, gpio_math::KIND_NONE) == 0, "gpio-edge: the disarm refused");
+        // After the disarm: the toggle where the row has an output (on the
+        // loopback row the toggle IS the edge, and a disarmed line must count
+        // nothing; toggle 12 drives high after toggle 11's low); where the
+        // edge would come from the software trigger, the trigger is REFUSED
+        // on a disarmed line by contract, and that refusal is the check. The
+        // word is then read unmoved either way.
         if let Some(o) = out {
             assert!(api::rhu_gpio_write(o, 1) == 0, "gpio-edge: the toggle 12 refused");
         }
@@ -2068,6 +3363,7 @@ mod api_smoke {
         let (i2cs, spis) = (board::facts::I2C_BUSES, board::facts::SPI_BUSES);
         assert!(!i2cs.is_empty() && !spis.is_empty() && api::rhu_i2c_count() as usize == i2cs.len() && api::rhu_spi_count() as usize == spis.len(), "bus-pads: the counts read {} and {}", api::rhu_i2c_count(), api::rhu_spi_count());
         let line_of = |pads: &[bus_math::Pad], role: bus_math::PadRole| pads.iter().find(|p| p.role == role).map_or(u32::MAX, |p| p.line as u32);
+        // Every bus of the row is walked, in the tables' order.
         for (k, i2c) in i2cs.iter().enumerate() {
             let ni = api::rhu_i2c_bus(k as u32) as u32;
             assert!(ni == i2c.number, "bus-pads: the enumeration answered {} for the I2C bus at index {}, the facts state {}", ni, k, i2c.number);
@@ -2079,6 +3375,7 @@ mod api_smoke {
             assert!(api::rhu_i2c_claim(ni, 100_000) == 0, "bus-pads: the I2C claim refused");
             assert!(api::rhu_i2c_claim(ni, 100_000) == 0, "bus-pads: the second I2C claim did not answer 0");
             assert!(input(sda) == gpio::ERR_BUSY && input(scl) == gpio::ERR_BUSY, "bus-pads: the program's claim on a claimed bus's pad not refused EBUSY");
+            // A one-byte read: every family's block can ask an address that way.
             let mut probe = [0u8; 1];
             let msgs = [imsg(0x08, bus_math::MSG_READ, &mut probe)];
             let r = api::rhu_i2c_transfer(ni, msgs.as_ptr(), 1, api::rhu_now_ns() + 100_000_000);
@@ -2128,8 +3425,8 @@ mod api_smoke {
     /// holds the clock low 25 ms in one byte is SERVED; the unbounded pump
     /// loses bytes to the receive queue's honest overflow. On the register
     /// file that keeps the master bit and the internal select in two
-    /// registers, the first transfer after the claim takes the write order as
-    /// it once stood: the block falls out of master mode and the call answers
+    /// registers, the first transfer after the claim takes the wrong write
+    /// order: the block falls out of master mode and the call answers
     /// EIO at once, never after a budget. On the RP2350's models, the paths
     /// no honest run reaches: a claim on a block that has not come to rest
     /// and the first transfer after it (the claim's registers written again
@@ -2182,6 +3479,9 @@ mod api_smoke {
             let (l, h, s, pair) = probe_i2c_counts();
             assert!(c.speed == 2 && pair == 2 && (l, h, s) == (c.lcnt, c.hcnt, c.spklen), "bus-doctored: the fast-mode claim programmed low {} high {} spike {} to register pair {}, want low {} high {} spike {} to pair 2", l, h, s, pair, c.lcnt, c.hcnt, c.spklen);
             kprintln!("[api] bus-doctored: the fast-mode claim at {} Hz programmed the fast counts (low {}, high {}, spike {} at {} Hz; {} Hz achieved)", hz, c.lcnt, c.hcnt, c.spklen, clk, c.achieved_hz);
+            // The two shapes below rest on the doctored claim's 1 ms of
+            // un-rest (the model's UNRESTED_NS) having passed at the next
+            // opening -- the 2 ms sleep above -- deterministic under icount.
             doctor(Doctor::StatusStuck);
             let t0 = sched::now_ms();
             let r = api::rhu_i2c_transfer(ni, msgs.as_ptr(), 1, u64::MAX);
@@ -2263,8 +3563,8 @@ mod api_smoke {
             let t0 = sched::now_ms();
             let r = api::rhu_spi_transfer(ns, 0, 0, 1_000_000, core::ptr::null(), four.as_mut_ptr(), 4);
             let dt = sched::now_ms().wrapping_sub(t0);
-            assert!(r == sched::ERR_IO && dt <= 1, "bus-doctored: the old write order answered {} after {} ticks (the control did not bite)", r, dt);
-            kprintln!("[api] bus-doctored: the old write order answered {} at once; the block fell out of master mode and the fault was cleared", r);
+            assert!(r == sched::ERR_IO && dt <= 1, "bus-doctored: the wrong write order answered {} after {} ticks (the control did not bite)", r, dt);
+            kprintln!("[api] bus-doctored: the wrong write order answered {} at once; the block fell out of master mode and the fault was cleared", r);
         }
         let mut tx = [0u8; 64];
         let mut rx = [0u8; 64];
@@ -2384,6 +3684,7 @@ mod api_smoke {
         assert!(api::rhu_gpio_release(line1) == 0, "adc-claim: the GPIO release refused");
         let h1 = api::rhu_adc_claim(1);
         assert!(h1 == 1 && api::rhu_adc_read(h1) == 1638, "adc-claim: channel 1 after the line's release: handle {}", h1);
+        assert!(api::rhu_gpio_claim(line1, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == crate::adc::ERR_BUSY, "adc-claim: the GPIO claim of a held channel's line not refused EBUSY");
         assert!(api::rhu_adc_claim(6) == sched::ERR_INVAL, "adc-claim: a claim past the count not refused EINVAL");
         assert!(api::rhu_adc_read(99) == sched::ERR_INVAL, "adc-claim: a read on a bad handle not refused EINVAL");
         assert!(api::rhu_adc_release(99) == sched::ERR_INVAL, "adc-claim: a release of a bad handle not refused EINVAL");
@@ -2428,6 +3729,45 @@ mod api_smoke {
         kprintln!("[api] PASS pwm-adc-loop (10, 50 and 90 percent read back as {}, {} and {} of {} within a band of {}, the parked output 0, the inversed 10 percent {})", got[0], got[1], got[2], full, band, inv);
     }
 
+    /// The converter's conversion-error path on the virtual model under
+    /// `test-adc-flagged`: the channel whose first conversion the model flags
+    /// reads as the model states after one discard and retry; the channel the
+    /// model flags on every conversion is refused with the input/output code
+    /// after the attempts' bound, never a sample, the retries counted; the
+    /// first channel reads again after it, so the refused read left nothing
+    /// held. The doctored converter answers the flagged conversion's
+    /// undefined result as a sample, which this check refuses at its first
+    /// reading.
+    #[cfg(all(rhu_pwm_adc_models, feature = "test-adc-flagged"))]
+    fn check_adc_flagged() {
+        let once = crate::board::adc_backend::FLAGGED_ONCE;
+        let always = crate::board::adc_backend::FLAGGED_ALWAYS;
+        let attempts = crate::adc::CONVERSION_ATTEMPTS;
+        kprintln!("[api] adc-flagged: channel {}'s flagged first conversion discarded and retried, channel {} flagged on every conversion refused EIO after {} attempts with no sample, channel {} read again after it", once, always, attempts, once);
+        let c = &board::facts::ADC_CHANNELS[once];
+        let full = crate::adc_math::full_scale(board::facts::ADC_BLOCKS[c.block as usize].bits);
+        let want = ((c.channel as u32 + 1) * full / 5) as i32;
+        let w0 = adc_witness();
+        let h = api::rhu_adc_claim(once as u32);
+        assert!(h == once as i32, "adc-flagged: the claim of channel {} answered {}", once, h);
+        let s = api::rhu_adc_read(h);
+        assert!(s == want, "adc-flagged: channel {} read {} after its flagged first conversion, the model states {}", once, s, want);
+        let w1 = adc_witness();
+        assert!(w1.retries == w0.retries + 1 && w1.conversion_errors == w0.conversion_errors && w1.conversions == w0.conversions + 1, "adc-flagged: after the retried read the witness counts {} retries, {} conversion errors and {} conversions (before: {}, {} and {})", w1.retries, w1.conversion_errors, w1.conversions, w0.retries, w0.conversion_errors, w0.conversions);
+        let h2 = api::rhu_adc_claim(always as u32);
+        assert!(h2 == always as i32, "adc-flagged: the claim of channel {} answered {}", always, h2);
+        let r = api::rhu_adc_read(h2);
+        assert!(r == crate::adc::ERR_IO, "adc-flagged: channel {} flagged on every conversion answered {} (EIO expected, never a sample)", always, r);
+        let w2 = adc_witness();
+        assert!(w2.retries == w1.retries + attempts - 1 && w2.conversion_errors == w1.conversion_errors + 1 && w2.conversions == w1.conversions && w2.timeouts == w1.timeouts && w2.resets == w1.resets && w2.last_refused_code == crate::adc::ERR_IO && w2.last_refused_index == always as u32, "adc-flagged: after the refused read the witness counts {} retries, {} conversion errors, {} conversions, {} timeouts, {} resets, the last code {} at index {}", w2.retries, w2.conversion_errors, w2.conversions, w2.timeouts, w2.resets, w2.last_refused_code, w2.last_refused_index);
+        let s2 = api::rhu_adc_read(h);
+        assert!(s2 == want, "adc-flagged: channel {} read {} after the refused read on channel {}, the model states {}", once, s2, always, want);
+        let w3 = adc_witness();
+        assert!(w3.retries == w2.retries && w3.conversions == w2.conversions + 1, "adc-flagged: the read after the refusal counted {} retries and {} conversions (before: {} and {})", w3.retries, w3.conversions, w2.retries, w2.conversions);
+        assert!(api::rhu_adc_release(h) == 0 && api::rhu_adc_release(h2) == 0, "adc-flagged: the releases refused");
+        kprintln!("[api] PASS adc-flagged (channel {} read {} after one flagged conversion discarded and retried, channel {} refused EIO after {} flagged conversions with {} retries counted and no sample, channel {} read {} again after it)", once, s, always, attempts, attempts - 1, once, s2);
+    }
+
     /// The rows whose facts carry no PWM line and no ADC channel: the
     /// honest posture of every door.
     #[cfg(not(rhu_pwm_adc_rows))]
@@ -2455,6 +3795,12 @@ mod api_smoke {
         kprintln!("[api] PASS pwm-adc-none (the counts 0, the two enumeration doors EINVAL, the ten other doors ENODEV)");
     }
 
+    // Check 36: the thread-id space (runs LAST in the smoke: nothing
+    // spawns after it). The counter is sought to the last two positive
+    // ids -- the refusal cannot be reached by spawning -- and both
+    // spawns land exactly those ids; the spawn past the space is
+    // refused RHU_EAGAIN with the counter unmoved, twice; no negative id
+    // is ever handed out.
     fn check_tid_wrap() {
         kprintln!("[api] tid-wrap: the id space's last two ids + the refusal past it armed");
         sched::probe_tid_seek(0x7FFF_FFFE);
@@ -2474,6 +3820,10 @@ mod api_smoke {
         kprintln!("[api] PASS tid-wrap (ids 0x7ffffffe and 0x7fffffff handed out positive, the spawn past the id space refused EAGAIN twice with the counter unmoved, no negative id)");
     }
 
+    // Check 19: stack bounds. Own and peer locals bracketed by their
+    // own windows and only those, windows inside the kstacks pool,
+    // null out-pointers refused EINVAL, and a reaped tid refused ESRCH
+    // by tid lookup (slot reuse cannot alias).
     static PEER_LOCAL: AtomicUsize = AtomicUsize::new(0);
     static PEER_PARK: AtomicU32 = AtomicU32::new(0);
 
@@ -2596,6 +3946,7 @@ mod api_smoke {
         let h1 = TLS_H1.load(Ordering::Acquire);
         let h2 = TLS_H2.load(Ordering::Acquire);
         assert!(h3 > 0 && h3 != h1 && h3 != h2, "registry-basic: handle {} not distinct", h3);
+        // The clobber: the caller's struct dies; the stored copy must not.
         unsafe {
             core::ptr::write_bytes(addr_of_mut!(d3), 0xFF, 1);
         }
@@ -2708,6 +4059,16 @@ mod api_smoke {
         }
     }
 
+    // The module-code check, run after the emulation's checks (whose trap
+    // counts are absolutes since boot): a double-precision form executed from
+    // a registered module's range OUTSIDE the primary code range (a module
+    // placed elsewhere, the registry's case) -- the single-precision row's
+    // fault funnel accepts the faulting pc by the registry and emulates the
+    // form, the double-precision row's hardware computes it; the range
+    // predicate holds inside the registered range and fails past its end and
+    // on the unregistered buffer (registry-basic proved it false before the
+    // registration). The lines are the same on both rows; the funnel's counts
+    // are asserted, not printed.
     fn check_module_code() {
         kprintln!("[api] module-code: a form executed from a registered module's range outside the primary code range armed");
         unsafe extern "C" {
@@ -2758,13 +4119,13 @@ mod api_smoke {
         kprintln!("[api] susp-pick: suspended-ready spinner + woken-waiter hold armed");
         let (slot, tid) =
             sched::try_spawn("dspin", susp_spinner, 0, 3, 4096).ok().expect("susp-pick: spawn");
-        api::rhu_sleep_ns(2_000_000);
+        api::rhu_sleep_ns(2_000_000); // equal prio: it spins while we sleep
         assert!(SUSP_PROG.load(Ordering::Acquire) > 0, "susp-pick: spinner never ran");
         let mut ctx = zctx();
         assert!(api::rhu_thread_suspend(tid, &mut ctx) == 0, "susp-pick: suspend refused");
         let p0 = SUSP_PROG.load(Ordering::Acquire);
         for _ in 0..50 {
-            api::rhu_thread_yield();
+            api::rhu_thread_yield(); // every chance to rotate in
         }
         assert!(sched::probe_ready_among(&[slot]) == 1, "susp-pick: state left Ready");
         assert!(SUSP_PROG.load(Ordering::Acquire) == p0, "susp-pick: suspended spinner progressed");
@@ -2791,6 +4152,12 @@ mod api_smoke {
         kprintln!("[api] PASS susp-pick (suspended spinner stayed ready with zero progress, woken waiter held until resume)");
     }
 
+    // Check 22: the suspension snapshot is the thread's real saved
+    // context. The plant is an asm spin (calling into a park would
+    // leave callee frames, not the pattern, in the saved sw frame):
+    // tick preemption switches the planter out with the pattern live
+    // in r4/r5/r8/r9/r10/r11 (the asm!-plantable subset -- r6 and r7 are
+    // LLVM-reserved on this target).
     static CTX_REL: AtomicU32 = AtomicU32::new(0);
 
     extern "C" fn ctx_planter(_: usize) {
@@ -2822,7 +4189,7 @@ mod api_smoke {
         CTX_REL.store(0, Ordering::Release);
         let (_slot, tid) =
             sched::try_spawn("dctx", ctx_planter, 0, 3, 4096).ok().expect("susp-ctx: spawn");
-        api::rhu_sleep_ns(2_000_000);
+        api::rhu_sleep_ns(2_000_000); // deep in the spin by now
         let mut ctx = zctx();
         assert!(api::rhu_thread_suspend(tid, &mut ctx) == 0, "susp-ctx: suspend refused");
         for (reg, want) in [
@@ -2846,13 +4213,17 @@ mod api_smoke {
         assert!(ctx.sp > lo && ctx.sp <= lo + b, "susp-ctx: snapshot sp outside the target stack");
         let (tlo, thi) = (addr_of!(__stext) as u32, addr_of!(__etext) as u32);
         assert!(ctx.pc >= tlo && ctx.pc < thi, "susp-ctx: snapshot pc outside kernel text");
-        let _ = ctx.flags;
+        let _ = ctx.flags; // read and recorded, not pinned
         assert!(api::rhu_thread_resume(tid) == 0, "susp-ctx: resume refused");
         CTX_REL.store(1, Ordering::Release);
         join_tid(tid);
         kprintln!("[api] PASS susp-ctx (planted registers exact in ctx, sp inside the target stack, pc inside kernel text)");
     }
 
+    // Check 23: set-context -- registers and pc through the door,
+    // geometry refused. The pad runs by exception return with
+    // the planted r0 and exits by the C door (ctx.lr is not edited,
+    // so returning is not an option for it).
     static SC_WITNESS: AtomicU32 = AtomicU32::new(0);
     static SC_TID: AtomicI32 = AtomicI32::new(0);
 
@@ -2905,6 +4276,9 @@ mod api_smoke {
         kprintln!("[api] PASS susp-setctx (sp edit refused exact, the edited pc ran the pad with the planted witness)");
     }
 
+    // Check 24: resume of a more-urgent suspended thread preempts the
+    // caller before its next line (the spawn-preemption idiom on the
+    // resume path).
     static RU_WORD: AtomicU32 = AtomicU32::new(0);
     static RU_FLAG: AtomicU32 = AtomicU32::new(0);
 
@@ -2935,7 +4309,10 @@ mod api_smoke {
         kprintln!("[api] PASS resume-urgent (resume preempted the caller before its next line)");
     }
 
-    static ACT_MODE: AtomicU32 = AtomicU32::new(0);
+    // Checks 25-30 share ONE process-global handler (registered once
+    // in act-refuse, the first act check) dispatching on a MODE
+    // static; MODE changes only between checks, workers joined.
+    static ACT_MODE: AtomicU32 = AtomicU32::new(0); // 0 count, 1 redeliver, 2 rearm, 3 fp-costume
     static ACT_COUNT: AtomicU32 = AtomicU32::new(0);
     static ACT_TID: AtomicI32 = AtomicI32::new(0);
     static ACT_SP: AtomicUsize = AtomicUsize::new(0);
@@ -2949,6 +4326,9 @@ mod api_smoke {
         ACT_SP.store(addr_of!(probe) as usize, Ordering::Release);
         match ACT_MODE.load(Ordering::Acquire) {
             1 => {
+                // redeliver: first run snapshots + sends to self; the
+                // second run snapshots again (equality = the flow
+                // never ran between the two handler runs).
                 if n == 0 {
                     ACT_SNAP[0].store(D_PROG.load(Ordering::Acquire), Ordering::Release);
                     let r = api::rhu_activation_send(api::rhu_thread_self());
@@ -2961,6 +4341,9 @@ mod api_smoke {
                 H_MS.store(sched::now_ms(), Ordering::Release);
             }
             3 => {
+                // act-lazy-fp: ONE floating-point instruction inside the
+                // handler (the hosted runtime's activation shape), then
+                // the interrupted frame's type and the ctx address.
                 unsafe { core::arch::asm!("vmov.f32 s0, s0", out("s0") _, options(nomem, nostack)) };
                 LZ_FLAGS.store(unsafe { (*ctx).flags }, Ordering::Release);
                 LZ_CTX.store(ctx as u32, Ordering::Release);
@@ -3020,6 +4403,10 @@ mod api_smoke {
             api::rhu_thread_set_context(tp, core::ptr::null()) == sched::ERR_INVAL,
             "act-refuse: null ctx not EINVAL"
         );
+        // A context is a word array: a pointer that is not 4-aligned is
+        // refused as the futex doors refuse a misaligned word, before any
+        // access through it (the target stays unsuspended: the door's
+        // refusal comes first).
         let mis = (addr_of_mut!(c) as usize + 2) as *mut sched::RhuCtx;
         assert!(
             api::rhu_thread_suspend(tp, mis) == sched::ERR_INVAL,
@@ -3051,6 +4438,9 @@ mod api_smoke {
         kprintln!("[api] PASS act-refuse (pre-registration send, null/second registration, self/idle suspends, idle send, unknown tids, misaligned contexts, unsuspended resume/set-context all refused exact)");
     }
 
+    // Checks 26-28 target: a less-urgent spinner (prio 4) -- starved
+    // while kmain holds the CPU, so sends coalesce deterministically;
+    // its progress word is the interrupted-flow witness.
     static D_PROG: AtomicU32 = AtomicU32::new(0);
     static D_REL: AtomicU32 = AtomicU32::new(0);
 
@@ -3060,6 +4450,9 @@ mod api_smoke {
         }
     }
 
+    // Check 26: delivery -- peer arm (handler on the TARGET's thread
+    // and stack at its next scheduling-in) + self arm (the same-slot
+    // path: no pend inside send, delivery at the sender's own yield).
     fn check_act_deliver() {
         kprintln!("[api] act-deliver: peer + self delivery armed");
         ACT_MODE.store(0, Ordering::Release);
@@ -3070,7 +4463,7 @@ mod api_smoke {
             sched::try_spawn("dact", act_spinner, 0, 4, 4096).ok().expect("act-deliver: spawn");
         assert!(api::rhu_activation_send(tid) == 0, "act-deliver: send refused");
         let snap = D_PROG.load(Ordering::Acquire);
-        api::rhu_sleep_ns(2_000_000);
+        api::rhu_sleep_ns(2_000_000); // the starved target runs: delivery first
         wait_until(|| ACT_COUNT.load(Ordering::Acquire) == c0 + 1, "peer delivery");
         assert!(ACT_TID.load(Ordering::Acquire) == tid, "act-deliver: handler ran off-target");
         let (mut lo, mut b) = (0u32, 0u32);
@@ -3098,6 +4491,8 @@ mod api_smoke {
         kprintln!("[api] PASS act-deliver (handler ran once per send on the target thread and stack, both interrupted flows continued)");
     }
 
+    // Check 27: sends coalesce -- three sends before the starved
+    // target next runs deliver exactly one handler run.
     fn check_act_coalesce() {
         kprintln!("[api] act-coalesce: three sends before the target runs armed");
         ACT_MODE.store(0, Ordering::Release);
@@ -3111,7 +4506,7 @@ mod api_smoke {
         }
         api::rhu_sleep_ns(2_000_000);
         wait_until(|| ACT_COUNT.load(Ordering::Acquire) == c0 + 1, "coalesced delivery");
-        api::rhu_sleep_ns(2_000_000);
+        api::rhu_sleep_ns(2_000_000); // grace: nothing may deliver again
         assert!(
             ACT_COUNT.load(Ordering::Acquire) == c0 + 1,
             "act-coalesce: more than one delivery"
@@ -3122,6 +4517,9 @@ mod api_smoke {
         kprintln!("[api] PASS act-coalesce (three sends delivered exactly one handler run)");
     }
 
+    // Check 28: re-delivery -- a send from inside the handler re-enters
+    // the handler once more BEFORE the interrupted flow resumes (the
+    // SVC #1 re-check; same ctx storage, the cost never nests).
     fn check_act_redeliver() {
         kprintln!("[api] act-redeliver: in-handler self-send armed");
         ACT_COUNT.store(0, Ordering::Release);
@@ -3133,7 +4531,7 @@ mod api_smoke {
         assert!(api::rhu_activation_send(tid) == 0, "act-redeliver: send refused");
         api::rhu_sleep_ns(2_000_000);
         wait_until(|| ACT_COUNT.load(Ordering::Acquire) == 2, "both handler runs");
-        api::rhu_sleep_ns(2_000_000);
+        api::rhu_sleep_ns(2_000_000); // grace: no third run
         assert!(ACT_COUNT.load(Ordering::Acquire) == 2, "act-redeliver: ran again");
         assert!(
             ACT_SNAP[0].load(Ordering::Acquire) == ACT_SNAP[1].load(Ordering::Acquire),
@@ -3197,6 +4595,10 @@ mod api_smoke {
         kprintln!("[api] PASS act-eintr (the wait returned RHU_EINTR after the handler ran, the re-wait then woke clean)");
     }
 
+    // Check 30: a plain sleeper takes the delivery EARLY (ns-clock
+    // witness) and the sleep still returns not-early -- the re-arm
+    // (the sleep's recheck loop) is what reconciles the
+    // two; the never-early assert runs IN the sleeping thread.
     static RA_FLAG: AtomicU32 = AtomicU32::new(0);
     static RA_T0MS: AtomicU32 = AtomicU32::new(0);
     static RA_DONE: AtomicU32 = AtomicU32::new(0);
@@ -3220,7 +4622,7 @@ mod api_smoke {
         let (_slot, tid) =
             sched::try_spawn("drearm", rearm_worker, 0, 4, 4096).ok().expect("act-sleep-rearm: spawn");
         wait_until(|| RA_FLAG.load(Ordering::Acquire) == 1, "worker to reach its sleep");
-        api::rhu_sleep_ns(20_000_000);
+        api::rhu_sleep_ns(20_000_000); // it is provably IN the 200 ms sleep now
         assert!(api::rhu_activation_send(tid) == 0, "act-sleep-rearm: send refused");
         wait_until(|| RA_DONE.load(Ordering::Acquire) == 1, "sleep to finish not-early");
         assert!(
@@ -3234,12 +4636,33 @@ mod api_smoke {
         kprintln!("[api] PASS act-sleep-rearm (the handler ran early, the sleep still returned not-early)");
     }
 
+    // Check 38: the activation resume completes the lazy floating-point
+    // state the handler armed. The hosted runtime's activation handler
+    // executes a floating-point instruction, so the trampoline's resume
+    // SVC arrives with lazy stacking pending in the SVC's own extended
+    // frame; a target whose interrupted frame is BASIC (a thread that
+    // never touched the FPU) would otherwise resume with that save still
+    // aimed under its stack pointer, and the next floating-point
+    // instruction anywhere -- the context switch's own restore of an
+    // extended thread -- would write 68 bytes of register images there.
+    // The observable is the switch-entry witness, not a crash: a fresh
+    // target (never any floating-point use: basic frames) takes one
+    // delivery whose handler runs one floating-point instruction, then
+    // yields eight times after its resume -- eight switch entries with
+    // its own frame basic -- and the witness must have counted nothing.
+    // A resume that leaves the state armed is counted at every one of
+    // those entries, the pending save's address equal to the handler's
+    // ctx address minus 80 (the trampoline's push, then the SVC frame's
+    // floating-point area 32 bytes into its 104).
     static LZ_FLAGS: AtomicU32 = AtomicU32::new(0xFFFF);
     static LZ_CTX: AtomicU32 = AtomicU32::new(0);
     static LZ_SWITCHES: AtomicU32 = AtomicU32::new(0);
     static LZ_DONE: AtomicU32 = AtomicU32::new(0);
 
     extern "C" fn lazy_target(_: usize) {
+        // The send lands before this thread is first picked, so the
+        // delivery -- and the handler's floating-point instruction --
+        // precede this first instruction of the thread's own code.
         let sw0 = sched::switch_count();
         for _ in 0..8 {
             api::rhu_thread_yield();
@@ -3258,7 +4681,7 @@ mod api_smoke {
         let (_slot, tid) =
             sched::try_spawn("dlazy", lazy_target, 0, 4, 4096).ok().expect("act-lazy-fp: spawn");
         assert!(api::rhu_activation_send(tid) == 0, "act-lazy-fp: send refused");
-        api::rhu_sleep_ns(2_000_000);
+        api::rhu_sleep_ns(2_000_000); // the starved target runs: delivery first, then its yields
         wait_until(|| LZ_DONE.load(Ordering::Acquire) == 1, "the target's yields after its resume");
         join_tid(tid);
         ACT_MODE.store(0, Ordering::Release);
@@ -3415,6 +4838,9 @@ mod api_smoke {
             out.exidx_lo == out.exidx_hi,
             "mod-roots: exidx range not empty in a base-family image"
         );
+        // The TLS template joins the bracket ties: size equals the
+        // bracket span (empty in this family), and the init pointer
+        // follows the emptiness (NULL iff zero -- the honest pair).
         let tlo = core::hint::black_box(addr_of!(__rhu_tdata_lo) as u32);
         let thi = core::hint::black_box(addr_of!(__rhu_tdata_hi) as u32);
         assert!(
@@ -3424,6 +4850,8 @@ mod api_smoke {
         assert!(out.tls_bytes == 0, "mod-roots: tls not empty in a base-family image");
         assert!(out.tls_init.is_null(), "mod-roots: empty tls carries a non-null init image");
         assert!(!out.name.is_null(), "mod-roots: module 0 name wrong");
+        // One storage, two doors: find's desc for a text address must
+        // byte-match roots(0)'s.
         let mut via_find = sentinel_desc();
         assert!(
             api::rhu_module_find(out.text_lo, &mut via_find) == 0,
@@ -3448,7 +4876,20 @@ mod api_smoke {
         kprintln!("[api] PASS mod-roots (module 0 ranges tie the link brackets, frozen, exidx, and tls empty in this family, walk ends ESRCH at the table count)");
     }
 
+    // ---------- the hosting doors (the console pair + entropy; the
+    // exit door runs LAST as the machine's own exit -- kthread_main
+    // hands the final code through it, and the gate's exit-status
+    // assert is the proof it terminated the machine). ----------
 
+    // The console doors. The write door pushes a whole known line
+    // through the kernel wire (the gate pins that exact line arriving
+    // with CRLF discipline -- the door IS the path under test),
+    // returns the count exact, and refuses null, oversize and over-bound
+    // (the door's stated maximum) honestly.
+    // The read door on this world answers 0 -- the gate serial feeds
+    // no input, so no-input honesty is the deterministic observable
+    // -- writes NOTHING into the buffer, and never waits (this check
+    // returning is the proof).
     fn check_console_pair() {
         kprintln!("[api] console-pair: door write + no-input read armed");
         let line = b"[api] console-door: this line reached the wire through rhu_console_write\n";
@@ -3464,6 +4905,10 @@ mod api_smoke {
             api::rhu_console_write(line.as_ptr(), (i32::MAX as u32) + 1) == sched::ERR_INVAL,
             "console-pair: oversize write not refused EINVAL"
         );
+        // The over-bound request carries a buffer that is REAL for its
+        // whole length, so the refusal is judged on the count alone and
+        // a door that accepted the request would write bytes that exist
+        // (a control's transcript stays a clean panic, never undefined).
         static OVER_BOUND: [u8; api::CONSOLE_MAX_WRITE as usize + 1] = [b'x'; api::CONSOLE_MAX_WRITE as usize + 1];
         assert!(
             api::rhu_console_write(OVER_BOUND.as_ptr(), OVER_BOUND.len() as u32) == sched::ERR_INVAL,
@@ -3483,6 +4928,284 @@ mod api_smoke {
         kprintln!("[api] PASS console-pair (door write returned exact and hit the wire, no-input read returned 0 writing nothing, null, oversize and over-bound refused)");
     }
 
+    fn check_console_mirror() {
+        kprintln!("[api] console-mirror: a line through the log stream lands in the 16 KB memory console whole");
+        let log = core::ptr::addr_of!(board::ring::__rhu_console_log);
+        let magic = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*log).magic)) };
+        assert!(magic == board::ring::CONSOLE_LOG_MAGIC, "console-mirror: the header's magic is {:#010x}, not RLOG", magic);
+        let size = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*log).size)) };
+        assert!(size == board::ring::CONSOLE_LOG_BYTES as u32, "console-mirror: the header's size is {}, not 16 KB", size);
+        let before = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*log).written)) };
+        let line = b"[api] console-mirror: this line is read back from the memory console\n";
+        assert!(
+            api::rhu_log_write(crate::console::LEVEL_VERBOSE, line.as_ptr(), line.len() as u32) == line.len() as i32,
+            "console-mirror: the log door returned the wrong count"
+        );
+        let after = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*log).written)) };
+        let wire = line.len() as u32 + 1;
+        assert!(after.wrapping_sub(before) == wire, "console-mirror: the count moved by {} for a wire length of {}", after.wrapping_sub(before), wire);
+        let bytes = unsafe { core::ptr::addr_of!((*log).bytes) as *const u8 };
+        for i in 0..wire as usize {
+            let want = if i + 1 < line.len() { line[i] } else if i + 1 == line.len() { b'\r' } else { b'\n' };
+            let got = unsafe { core::ptr::read_volatile(bytes.add((before as usize + i) % board::ring::CONSOLE_LOG_BYTES)) };
+            assert!(got == want, "console-mirror: byte {} of the line reads {:#04x}, not {:#04x}", i, got, want);
+        }
+        kprintln!("[api] PASS console-mirror (the header's magic and size, the count moved by the line's wire length, the bytes equal)");
+    }
+
+    fn check_log_level() {
+        kprintln!("[api] log-level: the level door and the log write door in a verbose image");
+        assert!(api::rhu_log_level() == 3, "log-level: a gate image's level is not verbose (3)");
+        let l3 = b"[api] log-door: this verbose line reached the wire through rhu_log_write\n";
+        assert!(api::rhu_log_write(3, l3.as_ptr(), l3.len() as u32) == l3.len() as i32, "log-level: the verbose write returned the wrong count");
+        let l1 = b"[api] log-door: this fatal-level line reached the wire through rhu_log_write\n";
+        assert!(api::rhu_log_write(1, l1.as_ptr(), l1.len() as u32) == l1.len() as i32, "log-level: the fatal-level write returned the wrong count");
+        assert!(api::rhu_log_write(0, l3.as_ptr(), 4) == sched::ERR_INVAL, "log-level: level 0 not refused EINVAL");
+        assert!(api::rhu_log_write(4, l3.as_ptr(), 4) == sched::ERR_INVAL, "log-level: level 4 not refused EINVAL");
+        assert!(api::rhu_log_write(3, core::ptr::null(), 4) == sched::ERR_INVAL, "log-level: null write not refused EINVAL");
+        assert!(api::rhu_log_write(3, l3.as_ptr(), api::CONSOLE_MAX_WRITE + 1) == sched::ERR_INVAL, "log-level: over-bound write not refused EINVAL");
+        assert!(api::rhu_log_write(3, l3.as_ptr(), 0) == 0, "log-level: zero write not 0");
+        kprintln!("[api] PASS log-level (the level 3 in this image, a verbose and a fatal-level line through the log door with exact counts, levels 0 and 4, a null buffer and an over-bound write refused, a zero write 0)");
+    }
+
+    #[cfg(rhu_uart_cmsdk)]
+    fn uart_witness() -> crate::uart::UartWitness {
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(crate::uart::WITNESS)) }
+    }
+
+    /// A wait on a port's event word with a deadline, the futex recipe: the
+    /// value read first, the wait answering woken, EAGAIN (the word moved) or
+    /// ETIMEDOUT.
+    #[cfg(rhu_uart_cmsdk)]
+    fn uart_wait(word: *const u32, deadline_ns: u64) -> i32 {
+        let v = unsafe { core::ptr::read_volatile(word) };
+        api::rhu_futex_wait(word, v, deadline_ns)
+    }
+
+    #[cfg(rhu_uart_cmsdk)]
+    fn check_uart_enumerate() {
+        kprintln!("[api] uart-enumerate: the count and every row's facts; the console's block refused at the claim, a block the row has not refused");
+        let n = api::rhu_uart_count();
+        assert!(n == 2 && n == crate::uart::PORTS as i32, "uart-enumerate: the count reads {}", n);
+        for (i, row) in board::facts::UART_ROWS.iter().enumerate() {
+            let (mut b, mut tx, mut rx, mut hz) = (9u32, 9u32, 9u32, 9u32);
+            assert!(api::rhu_uart_port(i as u32, &mut b, &mut tx, &mut rx, &mut hz) == 0, "uart-enumerate: row {} refused", i);
+            assert!(
+                b == row.block as u32 && tx == crate::uart::NO_PIN && rx == crate::uart::NO_PIN && hz == board::SYSCLK_HZ,
+                "uart-enumerate: row {} reads block {} pins {} {} clock {}", i, b, tx, rx, hz
+            );
+            kprintln!("[api] uart-enumerate: row {}: UART{} (no pins on this row) at {} Hz", i, b, hz);
+        }
+        let mut scratch = 0u32;
+        let sp = &mut scratch as *mut u32;
+        assert!(api::rhu_uart_port(2, sp, sp, sp, sp) == sched::ERR_INVAL, "uart-enumerate: an index past the count not refused EINVAL");
+        assert!(api::rhu_uart_port(0, core::ptr::null_mut(), sp, sp, sp) == sched::ERR_INVAL, "uart-enumerate: a null pointer not refused EINVAL");
+        assert!(api::rhu_uart_claim(0) == crate::uart::ERR_BUSY, "uart-enumerate: the console's block not refused EBUSY at the claim");
+        assert!(api::rhu_uart_claim(7) == sched::ERR_INVAL, "uart-enumerate: a block the row has not, not refused EINVAL");
+        let w = uart_witness();
+        assert!(w.ports == 2 && w.refused_busy >= 1 && w.last_refused_block == 7 && w.last_refused_code == sched::ERR_INVAL, "uart-enumerate: the witness reads ports {} busy {} last {} code {}", w.ports, w.refused_busy, w.last_refused_block, w.last_refused_code);
+        kprintln!("[api] PASS uart-enumerate (2 rows stated and enumerated with their facts, an index past the count and a null pointer EINVAL, the console's block EBUSY at the claim, a block the row has not EINVAL)");
+    }
+
+    #[cfg(rhu_uart_cmsdk)]
+    fn check_uart_claim_twice() {
+        kprintln!("[api] uart-claim-twice: a claim taken, a second claim refused, the event word given and bumped at the release, bad handles refused");
+        let h = api::rhu_uart_claim(1);
+        assert!(h == 1, "uart-claim-twice: the claim answered {}", h);
+        assert!(api::rhu_uart_claim(1) == crate::uart::ERR_BUSY, "uart-claim-twice: a second claim not refused EBUSY");
+        let word = api::rhu_uart_event_word(h);
+        assert!(!word.is_null(), "uart-claim-twice: the event word is null for the held handle");
+        assert!(api::rhu_uart_event_word(5).is_null(), "uart-claim-twice: the event word of a bad handle is not null");
+        let (mut b, mut tx, mut rx, mut hz) = (9u32, 9u32, 9u32, 9u32);
+        assert!(api::rhu_uart_info(h, &mut b, &mut tx, &mut rx, &mut hz) == 0 && b == 1 && tx == crate::uart::NO_PIN && rx == crate::uart::NO_PIN && hz == board::SYSCLK_HZ, "uart-claim-twice: the info reads block {} pins {} {} clock {}", b, tx, rx, hz);
+        assert!(api::rhu_uart_info(5, &mut b, &mut tx, &mut rx, &mut hz) == sched::ERR_INVAL, "uart-claim-twice: an info on a bad handle not refused EINVAL");
+        let before = unsafe { core::ptr::read_volatile(word) };
+        assert!(api::rhu_uart_release(h) == 0, "uart-claim-twice: the release refused");
+        let after = unsafe { core::ptr::read_volatile(word) };
+        assert!(after == before.wrapping_add(1), "uart-claim-twice: the event word moved by {} at the release", after.wrapping_sub(before));
+        assert!(api::rhu_uart_release(h) == sched::ERR_INVAL, "uart-claim-twice: a second release not refused EINVAL");
+        let x = [0u8; 1];
+        assert!(api::rhu_uart_write(h, x.as_ptr(), 1) == sched::ERR_INVAL && api::rhu_uart_read(h, core::ptr::null_mut(), 0) == sched::ERR_INVAL, "uart-claim-twice: the doors on the released handle not refused EINVAL");
+        assert!(api::rhu_uart_claim(1) == 1 && api::rhu_uart_release(1) == 0, "uart-claim-twice: the claim after the release refused");
+        kprintln!("[api] PASS uart-claim-twice (the claim answered the row's handle, a second claim EBUSY, the event word given for the held handle and null for a bad one, the info door's facts, the release bumped the word once, a second release and the doors on the released handle EINVAL, claimed again)");
+    }
+
+    #[cfg(rhu_uart_cmsdk)]
+    fn check_uart_frame() {
+        kprintln!("[api] uart-frame: the line discipline on this row's part -- 8N1 at the rates the divider reaches, every other frame and an unreachable rate refused");
+        let h = api::rhu_uart_claim(1);
+        assert!(h == 1, "uart-frame: the claim answered {}", h);
+        let clock = board::SYSCLK_HZ;
+        let want = |baud: u32| clock / ((clock + baud / 2) / baud);
+        let mut ach = 0u32;
+        for baud in [115_200u32, 9_600, 921_600] {
+            assert!(api::rhu_uart_configure(h, baud, 8, crate::uart::PARITY_NONE, 1, &mut ach) == 0, "uart-frame: {} 8N1 refused", baud);
+            assert!(ach == want(baud), "uart-frame: {} Bd asked, {} achieved, the divider gives {}", baud, ach, want(baud));
+            kprintln!("[api] uart-frame: {} Bd asked, {} Bd achieved at {} Hz", baud, ach, clock);
+        }
+        assert!(api::rhu_uart_configure(h, 2_000_000, 8, 0, 1, &mut ach) == sched::ERR_INVAL, "uart-frame: a rate past the ceiling not refused EINVAL");
+        assert!(api::rhu_uart_configure(h, 1_520_000, 8, 0, 1, &mut ach) == sched::ERR_INVAL, "uart-frame: a rate the divider misses by more than 2 percent not refused EINVAL");
+        assert!(api::rhu_uart_configure(h, 0, 8, 0, 1, &mut ach) == sched::ERR_INVAL, "uart-frame: a zero rate not refused EINVAL");
+        for (bits, par, stop) in [(7u32, 2u32, 1u32), (8, 0, 2), (8, 1, 1), (5, 0, 1), (9, 0, 1), (8, 5, 1), (8, 0, 3)] {
+            assert!(api::rhu_uart_configure(h, 115_200, bits, par, stop, &mut ach) == sched::ERR_INVAL, "uart-frame: the frame {} {} {} not refused EINVAL on this part", bits, par, stop);
+        }
+        assert!(api::rhu_uart_configure(h, 115_200, 8, 0, 1, core::ptr::null_mut()) == sched::ERR_INVAL, "uart-frame: a null pointer not refused EINVAL");
+        assert!(api::rhu_uart_configure(5, 115_200, 8, 0, 1, &mut ach) == sched::ERR_INVAL, "uart-frame: a bad handle not refused EINVAL");
+        assert!(api::rhu_uart_break(h, 1) == sched::ERR_INVAL && api::rhu_uart_break(h, 2) == sched::ERR_INVAL, "uart-frame: the break door not refused EINVAL on a part without break control");
+        assert!(api::rhu_uart_configure(h, 115_200, 8, 0, 1, &mut ach) == 0, "uart-frame: back to 115200 refused");
+        assert!(api::rhu_uart_release(h) == 0, "uart-frame: the release refused");
+        kprintln!("[api] PASS uart-frame (8N1 at 115200, 9600 and 921600 with the achieved rates as the divider gives them, a rate past the ceiling, a rate the divider misses by more than 2 percent and a zero rate EINVAL, every frame but 8N1 EINVAL on this part, a null pointer and a bad handle EINVAL, the break door EINVAL on a part without break control)");
+    }
+
+    #[cfg(rhu_uart_cmsdk)]
+    fn check_uart_loopback() {
+        kprintln!("[api] uart-loopback: 1500 bytes through the port and back over the wire's echo, byte-equal, nothing lost");
+        let h = api::rhu_uart_claim(1);
+        assert!(h == 1, "uart-loopback: the claim answered {}", h);
+        let word = api::rhu_uart_event_word(h);
+        let w0 = uart_witness();
+        // The echo's connection window: one probe byte, waited for up to ten
+        // seconds (the harness connects its echo after the emulator starts).
+        let probe = [0xA5u8];
+        assert!(api::rhu_uart_write(h, probe.as_ptr(), 1) == 1, "uart-loopback: the probe write refused");
+        let mut got = [0u8; 4];
+        let deadline = api::rhu_now_ns() + 10_000_000_000;
+        loop {
+            let n = api::rhu_uart_read(h, got.as_mut_ptr(), 4);
+            if n == 1 {
+                assert!(got[0] == 0xA5, "uart-loopback: the probe byte came back as {:#04x}", got[0]);
+                break;
+            }
+            assert!(n == 0, "uart-loopback: the probe read answered {}", n);
+            assert!(api::rhu_now_ns() < deadline, "uart-loopback: the probe byte did not come back within ten seconds (the wire's echo is not connected)");
+            let _ = uart_wait(word, deadline);
+        }
+        let mut pat = [0u8; 1500];
+        for (i, b) in pat.iter_mut().enumerate() {
+            *b = ((i * 7 + 3) & 0xFF) as u8;
+        }
+        let mut sent = 0usize;
+        let mut writes = 0u32;
+        let deadline = api::rhu_now_ns() + 5_000_000_000;
+        while sent < pat.len() {
+            let chunk = (pat.len() - sent).min(123) as u32;
+            let t = api::rhu_uart_write(h, pat[sent..].as_ptr(), chunk);
+            assert!(t >= 0 && t as u32 <= chunk, "uart-loopback: the write answered {}", t);
+            if t == 0 {
+                assert!(api::rhu_now_ns() < deadline, "uart-loopback: no room for five seconds");
+                let _ = uart_wait(word, deadline);
+            }
+            sent += t as usize;
+            writes += 1;
+        }
+        let mut back = [0u8; 1500];
+        let mut recv = 0usize;
+        while recv < back.len() {
+            let v = unsafe { core::ptr::read_volatile(word) };
+            let n = api::rhu_uart_read(h, back[recv..].as_mut_ptr(), (back.len() - recv) as u32);
+            assert!(n >= 0, "uart-loopback: the read answered {}", n);
+            recv += n as usize;
+            if recv < back.len() && n == 0 {
+                assert!(api::rhu_now_ns() < deadline, "uart-loopback: {} of 1500 bytes back within five seconds", recv);
+                let _ = api::rhu_futex_wait(word, v, deadline);
+            }
+        }
+        if let Some(i) = (0..pat.len()).find(|&i| pat[i] != back[i]) {
+            panic!("uart-loopback: byte {} differs: {:#04x} sent, {:#04x} back", i, pat[i], back[i]);
+        }
+        let (mut a, mut p, mut r) = (1u32, 1u32, 0u32);
+        let settle = api::rhu_now_ns() + 1_000_000_000;
+        loop {
+            assert!(api::rhu_uart_status(h, &mut a, &mut p, &mut r) == 0, "uart-loopback: the status refused");
+            if p == 0 {
+                break;
+            }
+            assert!(api::rhu_now_ns() < settle, "uart-loopback: {} bytes still pending to transmit a second after the echo", p);
+            api::rhu_sleep_ns(1_000_000);
+        }
+        assert!(a == 0 && r == crate::uart::TX_BYTES as u32, "uart-loopback: the status reads {} to read and {} room after the echo", a, r);
+        let w = uart_witness();
+        assert!(w.overruns == w0.overruns && w.rx_dropped == w0.rx_dropped && w.framing == w0.framing && w.parity == w0.parity, "uart-loopback: the witness counts overruns {} drops {} framing {} parity {}", w.overruns, w.rx_dropped, w.framing, w.parity);
+        assert!(w.bytes_out.wrapping_sub(w0.bytes_out) == 1501 && w.bytes_in.wrapping_sub(w0.bytes_in) == 1501 && w.irqs > w0.irqs, "uart-loopback: the witness counts {} out, {} in, {} interrupts", w.bytes_out.wrapping_sub(w0.bytes_out), w.bytes_in.wrapping_sub(w0.bytes_in), w.irqs.wrapping_sub(w0.irqs));
+        kprintln!("[api] uart-loopback: 1500 bytes in {} writes, {} interrupts taken", writes, w.irqs.wrapping_sub(w0.irqs));
+        assert!(api::rhu_uart_release(h) == 0, "uart-loopback: the release refused");
+        kprintln!("[api] PASS uart-loopback (a probe byte back through the wire's echo, 1500 bytes written in partial writes and read back byte-equal, the status settled to nothing pending, the witness's overrun, framing, parity and drop counts unmoved and its byte counts exact)");
+    }
+
+    #[cfg(rhu_uart_cmsdk)]
+    fn check_uart_status_and_flush() {
+        kprintln!("[api] uart-status-and-flush: the three counts and the flush selectors");
+        let h = api::rhu_uart_claim(1);
+        assert!(h == 1, "uart-status-and-flush: the claim answered {}", h);
+        let word = api::rhu_uart_event_word(h);
+        let (mut a, mut p, mut r) = (1u32, 1u32, 1u32);
+        assert!(api::rhu_uart_status(h, &mut a, &mut p, &mut r) == 0 && a == 0 && p == 0 && r == crate::uart::TX_BYTES as u32, "uart-status-and-flush: the idle status reads {} {} {}", a, p, r);
+        assert!(api::rhu_uart_status(h, core::ptr::null_mut(), &mut p, &mut r) == sched::ERR_INVAL, "uart-status-and-flush: a null pointer not refused EINVAL");
+        assert!(api::rhu_uart_status(5, &mut a, &mut p, &mut r) == sched::ERR_INVAL, "uart-status-and-flush: a bad handle not refused EINVAL");
+        let eight = *b"12345678";
+        assert!(api::rhu_uart_write(h, eight.as_ptr(), 8) == 8, "uart-status-and-flush: the write took fewer than 8");
+        let deadline = api::rhu_now_ns() + 3_000_000_000;
+        loop {
+            assert!(api::rhu_uart_status(h, &mut a, &mut p, &mut r) == 0, "uart-status-and-flush: the status refused");
+            if a == 8 {
+                break;
+            }
+            assert!(a < 8, "uart-status-and-flush: {} bytes to read after 8 written", a);
+            assert!(api::rhu_now_ns() < deadline, "uart-status-and-flush: {} of 8 bytes back within three seconds", a);
+            let _ = uart_wait(word, deadline);
+        }
+        assert!(p == 0, "uart-status-and-flush: {} bytes still pending to transmit after the echo", p);
+        assert!(api::rhu_uart_flush(h, 0) == sched::ERR_INVAL && api::rhu_uart_flush(h, 4) == sched::ERR_INVAL && api::rhu_uart_flush(5, 1) == sched::ERR_INVAL, "uart-status-and-flush: a bad selector or handle not refused EINVAL");
+        assert!(api::rhu_uart_flush(h, crate::uart::FLUSH_RX) == 0, "uart-status-and-flush: the receive flush refused");
+        assert!(api::rhu_uart_status(h, &mut a, &mut p, &mut r) == 0 && a == 0, "uart-status-and-flush: {} bytes to read after the receive flush", a);
+        assert!(api::rhu_uart_write(h, eight.as_ptr(), 8) == 8 && api::rhu_uart_flush(h, crate::uart::FLUSH_BOTH) == 0, "uart-status-and-flush: the write or the flush of both refused");
+        // The bytes the transmitter had already taken echo back later: the
+        // receive side flushed once more after they can have arrived.
+        api::rhu_sleep_ns(300_000_000);
+        assert!(api::rhu_uart_flush(h, crate::uart::FLUSH_RX) == 0, "uart-status-and-flush: the second receive flush refused");
+        assert!(api::rhu_uart_status(h, &mut a, &mut p, &mut r) == 0 && a == 0 && p == 0 && r == crate::uart::TX_BYTES as u32, "uart-status-and-flush: the status after the flushes reads {} {} {}", a, p, r);
+        let mut buf = [0u8; 4];
+        assert!(api::rhu_uart_read(h, core::ptr::null_mut(), 4) == sched::ERR_INVAL && api::rhu_uart_write(h, core::ptr::null(), 4) == sched::ERR_INVAL, "uart-status-and-flush: a null buffer not refused EINVAL");
+        assert!(api::rhu_uart_read(h, buf.as_mut_ptr(), 0) == 0 && api::rhu_uart_write(h, buf.as_ptr(), 0) == 0, "uart-status-and-flush: a zero read or write not 0");
+        assert!(api::rhu_uart_release(h) == 0, "uart-status-and-flush: the release refused");
+        kprintln!("[api] PASS uart-status-and-flush (the idle counts, 8 bytes written and the 8 back counted by the status door with nothing pending to transmit, the receive flush emptying the ring, the flush of both, bad selectors, handles and null buffers EINVAL, zero reads and writes 0)");
+    }
+
+    #[cfg(rhu_uart_cmsdk)]
+    fn check_uart_timeout() {
+        kprintln!("[api] uart-timeout: a wait on the event word of a silent port returns at its deadline, never early");
+        let h = api::rhu_uart_claim(1);
+        assert!(h == 1, "uart-timeout: the claim answered {}", h);
+        let word = api::rhu_uart_event_word(h);
+        let v = unsafe { core::ptr::read_volatile(word) };
+        let t0 = api::rhu_now_ns();
+        let r = api::rhu_futex_wait(word, v, t0 + 300_000_000);
+        let t1 = api::rhu_now_ns();
+        assert!(r == sched::ERR_TIMEDOUT, "uart-timeout: the wait answered {}", r);
+        let ms = (t1 - t0) / 1_000_000;
+        assert!((300..=400).contains(&ms), "uart-timeout: the wait took {} ms", ms);
+        kprintln!("[api] uart-timeout: the wait took {} ms", ms);
+        assert!(api::rhu_uart_release(h) == 0, "uart-timeout: the release refused");
+        kprintln!("[api] PASS uart-timeout (the event word's wait answered ETIMEDOUT at its 300 ms deadline, never early, within the tick's lateness)");
+    }
+
+    #[cfg(not(rhu_uart_cmsdk))]
+    fn check_uart_enumerate() {}
+    #[cfg(not(rhu_uart_cmsdk))]
+    fn check_uart_claim_twice() {}
+    #[cfg(not(rhu_uart_cmsdk))]
+    fn check_uart_frame() {}
+    #[cfg(not(rhu_uart_cmsdk))]
+    fn check_uart_loopback() {}
+    #[cfg(not(rhu_uart_cmsdk))]
+    fn check_uart_status_and_flush() {}
+    #[cfg(not(rhu_uart_cmsdk))]
+    fn check_uart_timeout() {}
+
+    // Check 34: the software-stream door and the declared-quality query.
+    // The query's answer is the row's posture, never a constant: 1 where
+    // a hardware source serves and its last check passed, 0 otherwise
+    // (0 under the build opt-in too). One PASS text per class.
     fn check_entropy() {
         kprintln!("[api] entropy-honesty: software-stream doors armed");
         let mut a = [0u8; 16];
@@ -3507,6 +5230,11 @@ mod api_smoke {
         }
     }
 
+    // Check 34b: the cryptographic door. Three classes, one PASS text
+    // each: the build opt-in (the emulator rows' gate images) serves the
+    // software stream; a row with a serving hardware source serves it
+    // with its health flags clean and the witness's counts moving as
+    // expected; a row with neither refuses RHU_ENODEV and writes nothing.
     fn check_entropy_secure() {
         kprintln!("[api] entropy-secure: the cryptographic door armed (two draws, a null, a zero-length)");
         let mut a = [0u8; 16];
@@ -3976,6 +5704,7 @@ mod api_smoke {
         kprintln!("[api] fp-double: the double-precision forms armed as instructions (the edge table under six FPSCR settings; the digests over results and flags)");
         let e = &FP_EDGES;
         let mut vectors = 0u32;
+        // the two-operand arithmetic and the max/min forms
         let mut h = Fnv::new();
         for &m in &FP_MODES {
             for &a in e {
@@ -3989,6 +5718,7 @@ mod api_smoke {
             }
         }
         kprintln!("[api] fp-double: binary {} vectors digest {:08x}", 7 * 32 * 32 * 6, h.0);
+        // the accumulating forms: the edge table squared over four accumulators, round to nearest
         let mut h = Fnv::new();
         for &d in &[e[0], e[2], e[13], e[24]] {
             for &a in e {
@@ -4002,6 +5732,7 @@ mod api_smoke {
             }
         }
         kprintln!("[api] fp-double: accumulate {} vectors digest {:08x}", 8 * 32 * 32 * 4, h.0);
+        // the one-operand forms under the six settings
         let mut h = Fnv::new();
         for &m in &FP_MODES {
             for &a in e {
@@ -4013,6 +5744,7 @@ mod api_smoke {
             }
         }
         kprintln!("[api] fp-double: unary {} vectors digest {:08x}", 11 * 32 * 6, h.0);
+        // the compares
         let mut h = Fnv::new();
         for &a in e {
             for &b in e {
@@ -4024,6 +5756,7 @@ mod api_smoke {
             }
         }
         kprintln!("[api] fp-double: compare {} vectors digest {:08x}", 4 * 32 * 32, h.0);
+        // the conversions out of a double, under the six settings (the alternative half format as the seventh)
         let mut h = Fnv::new();
         for &m in FP_MODES.iter().chain([1u32 << 26].iter()) {
             for &a in e {
@@ -4036,6 +5769,7 @@ mod api_smoke {
             }
         }
         kprintln!("[api] fp-double: to-single {} vectors digest {:08x}", 12 * 32 * 7, h.0);
+        // the conversions into a double: the edge table's low words as singles, integers and halves
         let mut h = Fnv::new();
         let words: [u32; 16] = [
             0, 0x8000_0000, 0x3F80_0000, 0xBF80_0000, 0x7F80_0000, 0xFF80_0000, 0x7FC0_0000, 0x7F80_0001,
@@ -4051,6 +5785,7 @@ mod api_smoke {
             }
         }
         kprintln!("[api] fp-double: from-single {} vectors digest {:08x}", 5 * 16 * 7, h.0);
+        // the fixed-point conversions, round to nearest (the to-fixed direction rounds toward zero by rule)
         let mut h = Fnv::new();
         for &a in e {
             for op in 0..8 {
@@ -4060,6 +5795,7 @@ mod api_smoke {
             }
         }
         kprintln!("[api] fp-double: fixed {} vectors digest {:08x}", 8 * 32, h.0);
+        // the selects under four compare outcomes, and the immediates
         let mut h = Fnv::new();
         for &(x, y) in &[(1u32, 1u32), (1, 2), (2, 1), (0x8000_0000u32, 1)] {
             for op in 0..4 {
@@ -4075,6 +5811,9 @@ mod api_smoke {
             vectors += 1;
         }
         kprintln!("[api] fp-double: select-imm {} vectors digest {:08x}", 16 + 8, h.0);
+        // the live registers: destinations and operands in D8-D15, the destination preset to a
+        // quiet NaN so a write the handler lost shows in the read-back (the fused form's
+        // accumulator preset 1.0); four operand pairs of finite normals over the twelve forms
         let mut h = Fnv::new();
         for &(a, b) in &[(e[2], e[4]), (e[6], e[7]), (e[8], e[5]), (e[13], e[15])] {
             for i in 0..12 {
@@ -4084,6 +5823,9 @@ mod api_smoke {
             }
         }
         kprintln!("[api] fp-double: live {} vectors digest {:08x}", 12 * 4, h.0);
+        // a form inside an IT block under a failing and a passing condition: the result register
+        // preset (3.0), unchanged under the failure and the sum 1.5 under the pass -- the same on
+        // every row; on the emulated row the witness says whether the failed form faulted at all
         let mut h = Fnv::new();
         #[cfg(feature = "fpemul")]
         let (t_before, _, _) = crate::fpemul::counts();
@@ -4104,6 +5846,7 @@ mod api_smoke {
         {
             let (traps, promotions, refusals) = crate::fpemul::counts();
             let skipped = crate::fpemul::skipped();
+            // the failed conditional form is a vector executed; it came through the funnel only if it faulted
             let expected = vectors - if failed_faulted { 0 } else { 1 };
             assert!(refusals == 0, "fp-double: {} forms refused by the emulation", refusals);
             assert!(traps == expected, "fp-double: {} forms through the funnel, {} expected of {} vectors", traps, expected, vectors);
@@ -4180,6 +5923,10 @@ mod api_smoke {
         let in_form = FP_BAND.in_form.load(Ordering::Acquire);
         let lspact = FP_BAND.lspact.load(Ordering::Acquire);
         assert!(hits >= 1, "fp-band: the band exception never fired");
+        // the lazy save pending at the body's first read is a report, not an assertion: this handler's
+        // own prologue saves d8 before the body runs, and that push is the first floating-point
+        // instruction of the context -- it completes the pending save itself, so the word reads 0
+        // on a handler that saves a callee-saved register, which is the mechanism under test
         let _ = lspact;
         #[cfg(feature = "fpemul")]
         {
@@ -4193,6 +5940,8 @@ mod api_smoke {
         assert!(w1 == 0, "fp-band: {} abandoned lazy floating-point states after the armed group (fpcar {:#010x}, psp {:#010x})", w1, fpcar, psp);
         kprintln!("[api] fp-band: binary {} vectors digest {:08x} under preemption", 7 * 32 * 32 * 6, armed);
         kprintln!("[api] fp-band: a tick landed while the group ran armed (the group repeated until one did, the wait bounded by the kernel's own tick count)");
+        // The doctored flavor's silence ends with the check: were its refusal
+        // ever missed, the image would not walk on with the tick hook silent.
         #[cfg(feature = "test-fp-band-doctored")]
         FP_BAND_SILENT.store(0, Ordering::Release);
         #[cfg(feature = "fpemul")]
@@ -4256,6 +6005,10 @@ mod api_smoke {
         pub in_form: AtomicU32,
         pub lspact: AtomicU32,
     }
+
+    /// The rezero band's control: the control line's hits that landed while a
+    /// rezero's memset was in flight (the kernel band served inside it).
+    static REZERO_BAND_HITS: AtomicU32 = AtomicU32::new(0);
 
     #[unsafe(export_name = "__rhu_fp_band_witness")]
     pub static FP_BAND: FpBandWitness = FpBandWitness {
@@ -4338,6 +6091,9 @@ mod api_smoke {
             let shcsr = read_volatile(SCB_SHCSR);
             let fpccr = read_volatile(FPCCR);
             FP_BAND.hits.fetch_add(1, Ordering::AcqRel);
+            if arena::rezero_in_flight() != 0 {
+                REZERO_BAND_HITS.fetch_add(1, Ordering::AcqRel);
+            }
             if shcsr & SHCSR_USGFAULTACT != 0 {
                 FP_BAND.in_form.fetch_add(1, Ordering::AcqRel);
             }
@@ -4417,6 +6173,7 @@ mod api_smoke {
         FP_FRAME_DONE.store(1, Ordering::Release);
     }
 
+    // ---- the cost of one double-precision form on a row with a cycle counter (the feature fp-cost) ----
 
     /// The cycle counter's word read before and after ONE instruction, the two
     /// reads fenced so nothing else sits between them. On the single-precision
@@ -4456,17 +6213,17 @@ mod api_smoke {
     }
 
     /// The cost per form, sixteen runs each, the smallest and the middle count
-    /// printed: a measurement record for the silicon leg, never a golden (the
+    /// printed: a measurement record, never a golden (the
     /// counts move with the flash's wait states and whatever interrupt lands
     /// inside a run; the smallest of sixteen is the form's own cost). A row
     /// without a cycle counter says so and measures nothing.
     #[cfg(feature = "fp-cost")]
     fn check_fp_cost() {
-        const A: u64 = 0x3FF8_0000_0000_0000;
-        const B: u64 = 0x4002_0000_0000_0000;
-        const A_F32: u64 = 0x3FC0_0000;
-        const A_F16: u64 = 0x3E00;
-        const A_INT: u64 = 12345;
+        const A: u64 = 0x3FF8_0000_0000_0000; // 1.5
+        const B: u64 = 0x4002_0000_0000_0000; // 2.25
+        const A_F32: u64 = 0x3FC0_0000; // 1.5 as a single, in the low word
+        const A_F16: u64 = 0x3E00; // 1.5 as a half, in the low word
+        const A_INT: u64 = 12345; // an integer in the low word
         if !board::CYCLE_COUNTER {
             kprintln!("[api] fp-cost: not counted (no cycle counter on this row)");
             return;
@@ -4507,6 +6264,7 @@ mod api_smoke {
             for c in counts.iter_mut() {
                 *c = run();
             }
+            // an insertion sort: the smallest first, the middle at index eight
             for i in 1..counts.len() {
                 let mut j = i;
                 while j > 0 && counts[j - 1] > counts[j] {
@@ -4521,11 +6279,17 @@ mod api_smoke {
 
     fn check_null_read() {
         kprintln!("[api] OBSERVED null-read: the record of address 0 on this row follows (the observation of record: red by design, not a check)");
+        #[cfg(not(feature = "null-guard-off"))]
+        kprintln!(
+            "[obs] address 0 on this row: no-access -- the first page is denied by the protection unit, so the read is not attempted (the part's own map at 0: {}); a hosted null dereference traps into the funnel here",
+            if board::ADDRESS_ZERO_READABLE { "readable memory" } else { "a bus fault" }
+        );
+        #[cfg(feature = "null-guard-off")]
         if board::ADDRESS_ZERO_READABLE {
             let zero = core::hint::black_box(0usize) as *const u32;
             let word = unsafe { core::ptr::read_volatile(zero) };
             core::hint::black_box(word);
-            kprintln!("[obs] address 0 on this row: readable -- the read returned without a fault; a hosted null dereference does not trap here");
+            kprintln!("[obs] address 0 on this row: readable -- the guard is off (null-guard-off, a control image) and the read returned without a fault; a hosted null dereference does not trap here");
         } else {
             kprintln!("[obs] address 0 on this row: a bus fault -- the board states it (measured on the silicon) and the read is not attempted; a hosted null dereference traps into the funnel here");
         }
@@ -4555,7 +6319,11 @@ mod api_smoke {
         assert!(h == ix as i32, "pwm-claim: the claim of line {} answered {}, its index is {}", l0, h, ix);
         assert!(api::rhu_pwm_claim(l0) == crate::pwm::ERR_BUSY, "pwm-claim: a second claim on the line not refused EBUSY");
         assert!(api::rhu_pwm_claim(board::facts::PWM_CHECK_TWIN) == crate::pwm::ERR_BUSY, "pwm-claim: the line sharing the slice output not refused EBUSY");
-        assert!(api::rhu_pwm_claim(board::facts::CHECK_BOARD) == crate::pwm::ERR_BUSY, "pwm-claim: the board's line not refused EBUSY");
+        if !board::facts::BOARD_CLAIMS.is_empty() {
+            assert!(api::rhu_pwm_claim(board::facts::CHECK_BOARD) == crate::pwm::ERR_BUSY, "pwm-claim: the board's line not refused EBUSY");
+        } else {
+            kprintln!("[api] pwm-claim: no line is claimed by the board on this row by default (the memory console takes no UART pin); the board-line assertion skipped, three busy refusals owed over the walk, not four");
+        }
         assert!(api::rhu_pwm_claim(board::facts::LINE_COUNT as u32) == sched::ERR_INVAL, "pwm-claim: a line past the package not refused EINVAL");
         let mut ns = 0u64;
         assert!(api::rhu_pwm_period(h, &mut ns) == 0 && ns == 0, "pwm-claim: the period before any set reads {}", ns);
@@ -4600,8 +6368,9 @@ mod api_smoke {
         assert!(api::rhu_pwm_release(ix as i32) == 0 && api::rhu_pwm_release(h1) == 0, "pwm-claim: the final releases refused");
         let w = pwm_witness();
         assert!(w.lines == lines.len() as u32 && w.timers == crate::pwm::TIMERS as u32 && w.claims_taken == 3 && w.releases == 3 && w.sets == 2 && w.enables == 1, "pwm-claim: the witness counts {} lines, {} slices, {} claims, {} releases, {} sets, {} enables", w.lines, w.timers, w.claims_taken, w.releases, w.sets, w.enables);
-        assert!(w.refused_busy == 4 && w.refused_inval == 15 && w.last_refused_code == sched::ERR_INVAL, "pwm-claim: the witness counts busy {} inval {}, the last code {}", w.refused_busy, w.refused_inval, w.last_refused_code);
-        kprintln!("[api] PASS pwm-claim ({} lines on {} slices stated and enumerated, line {} claimed and the line sharing its slice output refused, a period of 20000000 ns run as {} ns and tied to the slice's registers, output {} of the slice refused on a different period and served on the same, 4 busy and 15 invalid refusals counted, driven and parked, released)", lines.len(), crate::pwm::TIMERS, l0, want, l1);
+        let busy_want: u32 = if board::facts::BOARD_CLAIMS.is_empty() { 3 } else { 4 };
+        assert!(w.refused_busy == busy_want && w.refused_inval == 15 && w.last_refused_code == sched::ERR_INVAL, "pwm-claim: the witness counts busy {} (want {}) inval {}, the last code {}", w.refused_busy, busy_want, w.refused_inval, w.last_refused_code);
+        kprintln!("[api] PASS pwm-claim ({} lines on {} slices stated and enumerated, line {} claimed and the line sharing its slice output refused, a period of 20000000 ns run as {} ns and tied to the slice's registers, output {} of the slice refused on a different period and served on the same, {} busy and 15 invalid refusals counted, driven and parked, released)", lines.len(), crate::pwm::TIMERS, l0, want, l1, busy_want);
     }
 
     /// The ADC doors against the RP2350's converter: the count and the
@@ -4705,14 +6474,65 @@ mod api_smoke {
         kprintln!("[api] PASS pwm-adc-loop (10, 50 and 90 percent read back as {}, {} and {} of {} within a band of {}, the parked output {}, the inversed 10 percent {})", got[0], got[1], got[2], full, band, parked, inv);
     }
 
+    // The bus checks' modules, on the rows that have a bus alone: an unused
+    // import is a warning on every other row.
     #[cfg(rhu_bus_rows)]
     use crate::{bus, bus_math};
 }
 
-/// The stack-overflow designed death (the v8-M rows' stack limit).
+/// The stack-overflow designed death (the v8-M rows' stack limit; the
+/// v7-M rows' guard block).
 #[cfg(feature = "test-stackovfl")]
 mod stackovfl;
+
+/// The null-page guard's designed death and its deliveries.
+#[cfg(feature = "test-nullpage")]
+mod nullpage;
+
+/// The designed death inside an interrupt handler.
+#[cfg(feature = "test-fault-in-handler")]
+mod fault_in_handler;
+#[cfg(all(feature = "test-fault-in-handler", feature = "api-smoke"))]
+compile_error!("the fault-in-handler flavor and the api flavor share the row's spare interrupt line -- name one of them");
+
+/// The power-management chip's registers read over the family I2C driver
+/// (the power chip's register reading; a flavor of the Portenta rows).
+#[cfg(feature = "test-h7-pmic-read")]
+mod pmic_read;
+#[cfg(all(feature = "test-uart-loopback", feature = "test-uart-jumper"))]
+compile_error!("the UART flight runs one wire per image -- name one of test-uart-loopback and test-uart-jumper");
+#[cfg(all(any(feature = "test-uart-loopback", feature = "test-uart-jumper"), not(feature = "api-smoke")))]
+compile_error!("the UART flights are legs of the api-smoke flavor -- name the flavor beside the leg");
+#[cfg(all(
+    not(feature = "test-nullpage"),
+    any(feature = "test-nullpage-deliver", feature = "test-nullpage-cs", feature = "test-nullpage-fetch", feature = "test-nullpage-header")
+))]
+compile_error!("the nullpage legs are features of the test-nullpage flavor -- name the flavor beside the leg");
+#[cfg(any(
+    all(feature = "test-nullpage-deliver", feature = "test-nullpage-cs"),
+    all(feature = "test-nullpage-deliver", feature = "test-nullpage-fetch"),
+    all(feature = "test-nullpage-deliver", feature = "test-nullpage-header"),
+    all(feature = "test-nullpage-cs", feature = "test-nullpage-fetch"),
+    all(feature = "test-nullpage-cs", feature = "test-nullpage-header"),
+    all(feature = "test-nullpage-fetch", feature = "test-nullpage-header")
+))]
+compile_error!("the nullpage flavor runs one leg per image -- name one of deliver, cs, fetch and header");
 
 /// The RP2350's bus arithmetic and bus rows: no hardware access, covered by the host tests.
 #[cfg(rhu_bus_rp2350)]
 mod rp2350_bus_math;
+
+// The network stack and its arithmetic (net_math.rs), behind the `net`
+// feature alone; declared at the end of this file so that, with the feature
+// off, no line of this file moves and no panic location's line number with
+// it.
+#[cfg(feature = "net")]
+#[allow(dead_code)]
+mod net_math;
+
+// The network doors' bodies (every row: the count 0 and RHU_ENODEV
+// where no medium is), the scripted peer behind the emulator rows' virtual
+// medium (the rows with a medium alone).
+mod net;
+#[cfg(rhu_net_rows)]
+mod net_peer;

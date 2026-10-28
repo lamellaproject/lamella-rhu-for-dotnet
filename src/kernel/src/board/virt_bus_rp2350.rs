@@ -58,10 +58,11 @@ use crate::sched;
 
 const DOCTORED: bool = cfg!(feature = "test-bus-doctored");
 
+// ---------------- the pad seam: the SPI clock line and the I2C recovery's two lines ----------------
 
 /// What the doctored image arms, one event at a time (the module's head
 /// tells each).
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's doctored image
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Doctor {
     Stretch,
@@ -106,7 +107,7 @@ const STRETCH_NS: u64 = 25_000_000;
 const HOLD_NS: u64 = 35_000_000;
 const UNRESTED_NS: u64 = 1_000_000;
 
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's doctored image
 pub fn doctor(what: Doctor) {
     let w = wire();
     match what {
@@ -181,6 +182,7 @@ pub fn spi_clock_at(_d: &SpiBus, high: bool) -> bool {
     spi().clock_high() == high
 }
 
+// ---------------- the reset and register seams ----------------
 
 /// A block cycled through its reset: the block the descriptor's reset bit
 /// names starts over, every register at its model's reset state. The model's
@@ -235,24 +237,25 @@ pub fn wr(addr: usize, v: u32) {
 /// The models' counters the api flavor's doctored image reads: bytes the
 /// SPI receive queue dropped on overrun; the I2C block's resets after the
 /// claim's own.
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's doctored image
 pub fn probe_spi_drops() -> u32 {
     spi().drops
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's doctored image
 pub fn probe_i2c_resets() -> u32 {
     i2c().resets
 }
 
 /// The counts the block holds and the register pair they were written to
 /// last (1 the SS pair, 2 the FS pair, 0 none since the reset).
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's doctored image
 pub fn probe_i2c_counts() -> (u32, u32, u32, u8) {
     let m = i2c();
     (m.lcnt, m.hcnt, m.spklen, m.pair)
 }
 
+// ---------------- the I2C block model and the sensor behind it ----------------
 
 const IC_CON: usize = 0x00;
 const IC_TAR: usize = 0x04;
@@ -446,6 +449,8 @@ impl I2cModel {
         self.source = 0;
         self.active = false;
         self.flight = Flight::None;
+        // The doctored device armed for this reset is left in the middle of
+        // its byte, holding the data line.
         let w = wire();
         if w.next != Held::No {
             w.held = w.next;
@@ -595,9 +600,11 @@ impl I2cModel {
                 return;
             }
             self.tx_pop();
+            // The doctored device holds the clock low once, in this byte.
             let stretch = if core::mem::take(&mut self.doctor_stretch) { STRETCH_NS } else { 0 };
             let from = if self.due_ns > now { self.due_ns } else { now };
             if !self.active || restart || read != self.reading {
+                // A start after a stop: the bus-free time first.
                 assert!(self.active || from >= self.stop_ns + BUS_FREE_NS, "[bus model] an I2C start {} ns after the last stop, under the bus-free time", from.saturating_sub(self.stop_ns));
                 self.active = true;
                 self.reading = read;
@@ -712,6 +719,7 @@ impl I2cModel {
             IC_ENABLE => {
                 self.advance();
                 if v & 2 != 0 {
+                    // The abort request: a block whose clock is held never completes it.
                     if self.enabled && !self.stalled {
                         if let Flight::Read { .. } = self.flight {
                             self.owed = self.owed.saturating_sub(1);
@@ -741,6 +749,7 @@ impl I2cModel {
     }
 }
 
+// ---------------- the SPI block model and the memory behind it ----------------
 
 const SSPCR0: usize = 0x00;
 const SSPCR1: usize = 0x04;
@@ -960,6 +969,9 @@ impl SpiModel {
                         0
                     };
                     self.clock_ns = sched::now_ns() + late;
+                    // What the doctored image armed for this enable: a clock
+                    // line that never reaches its idle level; a receiver
+                    // that shows an overrun.
                     if core::mem::take(&mut self.doctor_clock) {
                         self.clock_ns = u64::MAX;
                     }

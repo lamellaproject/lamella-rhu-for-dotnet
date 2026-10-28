@@ -1,17 +1,19 @@
 //! NUCLEO-L4R5ZI (STM32L4R5ZI, Cortex-M4 with a single-precision FPU):
-//! the STM32L4+ family's first board. Flash-boot at 0x08000000, LPUART1
+//! an STM32L4+ board. Flash-boot at 0x08000000, LPUART1
 //! console on the ST-LINK VCP (PG7 transmits, PG8 receives). Everything
 //! but the board facts below is the family module's (`stm32l4plus.rs`):
 //! the boot posture, the two clock postures (`st-nucleo-l4r5zi-pll120`
 //! selects PLL120, the part's ceiling under the regulator's boost mode),
 //! the console driver, the random source and the calendar facts. Register
 //! addresses per RM0432 and the board's user manual (UM2179). This row
-//! hosts the kernel alone: no hosted-runtime tier exists for its core
+//! hosts the kernel alone: the hosted runtime is not built for its core
 //! class, so the row carries no payload map.
 
 pub use super::stm32l4plus::*;
 
 pub const NAME: &str = "NUCLEO-L4R5ZI";
+/// The chip, as the SDK's facts file names it (the quiet line of the log doors).
+pub const CHIP: &str = "STM32L4R5ZI";
 pub const CONSOLE: &str = "LPUART1 (ST-LINK VCP)";
 
 /// The console's pins on the ST-LINK bridge (UM2179: PG7 LPUART1 TX, PG8
@@ -22,7 +24,7 @@ pub const CONSOLE_PINS: [(usize, u32); 2] = [(6, 7), (6, 8)];
 /// The board's high-speed clock input (UM2179: HSE unused by default, no
 /// crystal fitted; the ST-LINK's 8 MHz clock output is the fitted option):
 /// decode-only, the postures never enable it.
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the family's clock read-back on the PLL posture alone
 pub const HSE_HZ: u32 = 8_000_000;
 
 /// Thread stack pool (lives in .kstacks): 96 KiB on this row's 640 K of
@@ -44,7 +46,7 @@ pub const NIRQ: usize = 95;
 /// request multiplexer's overrun line), implemented on this part, its
 /// peripheral never clocked by the kernel, the line claimed by no kernel
 /// handler.
-#[allow(dead_code)]
+#[allow(dead_code)] // board-facts surface; the api flavor's band-interrupt control is its consumer
 pub const SPARE_IRQ: usize = 94;
 
 /// RAM windows a hardware-pushed exception frame may plausibly live in:

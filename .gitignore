@@ -1,4 +1,9 @@
 # Build output.
 target/
+bin/
+obj/
+*.user
 __pycache__/
 *.pyc
+# Local toolchain pointer files (see docs/VERIFYING.md).
+tools/toolchains/*.local

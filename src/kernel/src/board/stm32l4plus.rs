@@ -39,7 +39,7 @@ pub const KMAIN_STACK_BYTES: usize = 16 * 1024;
 /// gates, never by context-switch code.
 /// The part: the STM32L4R5ZI's Cortex-M4 with a single-precision FPU (its
 /// datasheet: "a single-precision floating-point unit").
-#[allow(dead_code)]
+#[allow(dead_code)] // board-facts surface; the board facade's assert reads it
 pub const FPU_DP: bool = false;
 /// The cycle counter the lost-tick witness reads: the core's data
 /// watchpoint and trace unit counts processor cycles, enabled and
@@ -225,7 +225,7 @@ pub fn clock_init() {
     ring::boot_mark();
 }
 
-/// Boring posture: no clock line in the banner (the banked transcript
+/// Boring posture: no clock line in the banner (the recorded boot transcript
 /// surface stands byte-identical).
 #[cfg(not(stm32l4plus_pll120))]
 pub fn clock_readback() -> Option<crate::board::ClockReadback> {
@@ -256,21 +256,26 @@ pub fn clock_init() {
     unsafe {
         downshift_to_hsi16();
 
+        // PLL off and unlocked before PLLCFGR may be written.
         write_volatile(RCC_CR, read_volatile(RCC_CR) & !CR_PLLON);
         while read_volatile(RCC_CR) & CR_PLLRDY != 0 {}
 
         regulator_range1();
 
+        // The boost sequence: the bus clock halved first, the boost mode
+        // selected, then 5 wait states before anything runs fast.
         write_volatile(RCC_CFGR, read_volatile(RCC_CFGR) | CFGR_HPRE_DIV2);
         write_volatile(PWR_CR5, read_volatile(PWR_CR5) & !CR5_R1MODE);
         let acr = read_volatile(FLASH_ACR) & !ACR_LATENCY;
         write_volatile(FLASH_ACR, acr | ACR_LATENCY_5WS);
         while read_volatile(FLASH_ACR) & ACR_LATENCY != ACR_LATENCY_5WS {}
 
+        // HSI16/2 x30 /2: the VCO in at 8 MHz, out at 240, SYSCLK 120.
         write_volatile(RCC_PLLCFGR, PLLCFGR_VALUE);
         write_volatile(RCC_CR, read_volatile(RCC_CR) | CR_PLLON);
         while read_volatile(RCC_CR) & CR_PLLRDY == 0 {}
 
+        // The switch at the halved bus clock, the settle, the prescaler back.
         let cfgr = read_volatile(RCC_CFGR) & !CFGR_SW;
         write_volatile(RCC_CFGR, cfgr | CFGR_SW_PLL);
         while read_volatile(RCC_CFGR) & CFGR_SWS != CFGR_SWS_PLL {}
@@ -458,13 +463,14 @@ pub fn console_getb() -> Option<u8> {
     }
 }
 
-/// Whether address 0 is readable memory on this row -- the low-address
-/// question's per-row record, MEASURED on the part (a read that returns
+/// Whether address 0 is readable memory on this row (a read that returns
 /// a word, or a bus fault): the api flavor's observation reads it before
-/// it touches the address.
+/// it touches the address. With the null-page guard the protection unit denies the first
+/// page on every row, so a guarded image never attempts the read; the
+/// `null-guard-off` control image alone does.
 /// This family: the first flash bank's boot alias at 0 on every part it
 /// serves.
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the api flavor's observation only
 pub const ADDRESS_ZERO_READABLE: bool = true;
 
 /// The entropy posture of the family's rows: the part's random number
@@ -478,7 +484,7 @@ pub const ENTROPY: super::EntropyPosture = super::EntropyPosture::Source {
 };
 /// Whether this row carries a real-time clock the kernel reads at boot and
 /// writes at an explicit set.
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the api flavor's calendar check
 pub const RTC_PRESENT: bool = false;
 /// The calendar banner's text for the family's rows, constant per image:
 /// the board mounts the 32.768 kHz crystal and carries no backup cell.

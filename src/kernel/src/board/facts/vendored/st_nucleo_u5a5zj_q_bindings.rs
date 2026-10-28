@@ -3,9 +3,9 @@
 //! its board-description generator's Rust emission for this board, the source
 //! `bsp/st-nucleo-u5a5zj-q/rust/st_nucleo_u5a5zj_q_bindings.rs`,
 //! the emission's sha256 14dab9a05024adf4525adf3cf08f7ac48a030e593aad406aeb03715446dde680.
-//! Nothing below the sentinel is edited in this tree: a re-vendoring replaces this whole file at
-//! the generator's next public commit, and the desk check ties the bytes to that commit's blob
-//! and to this header's hash. The facts module beside this file reads the constants the kernel
+//! Nothing below the sentinel is edited by hand: a re-vendoring replaces this whole file from
+//! the generator's public commit, and the recorded hash ties the bytes to that commit's blob
+//! and to this header. The facts module beside this file reads the constants the kernel
 //! needs and states its own.
 //! SPDX-License-Identifier: MIT OR Apache-2.0 -- the public repository's own licenses (LICENSE-MIT,
 //! LICENSE-APACHE at that commit), which these bytes carry; the copyright is the Lamella project's.

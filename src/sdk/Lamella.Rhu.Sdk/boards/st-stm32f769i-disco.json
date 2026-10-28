@@ -3,12 +3,64 @@
   "maker": "STMicroelectronics",
   "product": "STM32F769I-DISCO",
   "chip": "STM32F769NI",
-  "clockHz": 16000000,
+  "clockHz": 216000000,
   "posture": "default",
-  "postureName": "the internal oscillator posture",
+  "postureName": "the PLL posture",
   "pins": 176,
   "labels": "port",
   "functions": "gpio",
+  "pwm": {
+    "chip": 0,
+    "lines": []
+  },
+  "adc": {
+    "converters": []
+  },
   "i2c": [],
-  "spi": []
+  "spi": [],
+  "ram": [
+    {
+      "name": "SRAM",
+      "base": 536870912,
+      "bytes": 524288,
+      "external": false,
+      "cached": false
+    },
+    {
+      "name": "SDRAM",
+      "base": 3221225472,
+      "bytes": 16777216,
+      "external": true,
+      "cached": false
+    }
+  ],
+  "flash": [
+    {
+      "name": "FLASH",
+      "base": 134217728,
+      "bytes": 2097152,
+      "external": false,
+      "mapped": true,
+      "executable": true
+    },
+    {
+      "name": "QSPI",
+      "base": 2415919104,
+      "bytes": 67108864,
+      "external": true,
+      "mapped": true,
+      "executable": true
+    }
+  ],
+  "uart": [],
+  "uartPairs": [],
+  "channels": {
+    "log": "probe",
+    "console": "probe",
+    "legal": [
+      "probe",
+      "memory",
+      "off"
+    ]
+  }
 }

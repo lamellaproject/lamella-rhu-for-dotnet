@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #include "rhu.h"
-#include "rhu_pal_errno_net11_rc1.h"
+#include "rhu_pal_errno_net11_rc2.h"
 #include "rhu_shim.h"
 
 extern int *__errno_location(void);
@@ -77,7 +77,7 @@ static glue_header *glue_check(void *p, const char *who)
     glue_header *h = (glue_header *)((uint8_t *)p - GLUE_HEADER_BYTES);
     if ((h->tag & GLUE_TAG_MASK) != GLUE_TAG_PATTERN) {
         rhu_shim_log("%s: corrupt block header (canary)", who);
-        rhu_shim_exit(134);
+        rhu_abort(134);
     }
     return h;
 }
@@ -163,10 +163,48 @@ int posix_memalign(void **out, size_t align, size_t n)
 
 /* --- the console file descriptors --- */
 
+/* The console door takes at most RHU_CONSOLE_MAX_WRITE bytes a call and
+ * answers the count: a larger write goes out in bounded pieces and the
+ * count written is answered (one call takes at most 0x7FFFFFFF bytes,
+ * a count that stays a positive long). A NULL buffer with a count is
+ * EFAULT; a refusal after some bytes went answers the count so far,
+ * before any EIO. */
+static long console_write_pieces(const void *buf, size_t n)
+{
+    if (n == 0)
+        return 0;
+    if (buf == NULL) {
+        SET_ERRNO(RHU_GERR_EFAULT);
+        return -1;
+    }
+    if (n > 0x7FFFFFFFu)
+        n = 0x7FFFFFFFu;
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t done = 0;
+    while (done < n) {
+        size_t piece = n - done;
+        if (piece > RHU_CONSOLE_MAX_WRITE)
+            piece = RHU_CONSOLE_MAX_WRITE;
+        int32_t rc = rhu_console_write(p + done, (uint32_t)piece);
+        if (rc < 0) {
+            if (done > 0)
+                return (long)done;
+            SET_ERRNO(RHU_GERR_EIO);
+            return -1;
+        }
+        if (rc == 0)
+            break;
+        done += (size_t)rc;
+    }
+    return (long)done;
+}
+
 long write(int fd, const void *buf, size_t n)
 {
     if (fd == 1 || fd == 2)
-        return rhu_console_write(buf, (uint32_t)n);
+        return console_write_pieces(buf, n);
+    if (fd >= RHU_SHIM_FD_TTY_LO && fd < RHU_SHIM_FD_TTY_LO + RHU_SHIM_FD_TTY_COUNT)
+        return rhu_ttydev_write(fd, buf, n);
     SET_ERRNO(RHU_GERR_EBADF);
     return -1;
 }
@@ -175,7 +213,24 @@ long read(int fd, void *buf, size_t n)
 {
     if (fd == 0)
         return rhu_console_read(buf, (uint32_t)n);
+    if (fd >= RHU_SHIM_FD_TTY_LO && fd < RHU_SHIM_FD_TTY_LO + RHU_SHIM_FD_TTY_COUNT)
+        return rhu_ttydev_read(fd, buf, n);
     SET_ERRNO(RHU_GERR_EBADF);
+    return -1;
+}
+
+/* The C library's access, for the standard package's own check of a PWM
+ * channel's directory and for a program's check of an analog input file: a
+ * path under /sys/bus goes to the analog input device files, any other path
+ * under /sys to the PWM device files; this library has no other path to
+ * answer for. */
+int access(const char *path, int mode)
+{
+    if (rhu_iiofs_owns(path))
+        return rhu_iiofs_access(path, mode);
+    if (rhu_pwmfs_owns(path))
+        return rhu_pwmfs_access(path, mode);
+    SET_ERRNO(RHU_GERR_ENOENT);
     return -1;
 }
 
@@ -194,7 +249,7 @@ void exit(int code)
 void abort(void)
 {
     rhu_shim_log("abort() from thread %d", rhu_thread_self());
-    rhu_exit(134);
+    rhu_abort(134);
 }
 
 /* --- the string functions the compiler builtins do not provide --- */
@@ -269,9 +324,7 @@ char *strncpy(char *dst, const char *src, size_t n)
  * reentrant spellings the library's internals call forward to it, so the
  * library's own allocator is never pulled in and there is exactly one heap
  * in the image. The break request below is the guard on that rule: it
- * always refuses, so the library's allocator cannot start even if some
- * future object did pull it in. A refusal here is not a limitation, it is
- * the invariant holding.
+ * always refuses, so the library's allocator can never start.
  *
  * ONE CONSOLE. The descriptor-level calls the library makes route to the
  * same console this image already writes through, so a line printed by the

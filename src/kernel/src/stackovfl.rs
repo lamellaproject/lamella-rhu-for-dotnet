@@ -1,11 +1,12 @@
-//! The stack-overflow designed death, on the rows that carry the v8-M
-//! stack limit registers: a thread spawned with a small stack descends
-//! past its floor, and the limit register must raise the UsageFault the
-//! funnel reports with the overflow line. A survived descent prints the
-//! UNREACHABLE line and exits 3 -- the registered red shape.
-
-#[cfg(not(armv8m))]
-compile_error!("the stack-overflow flavor needs the v8-M stack limit registers: build it for a thumbv8m target");
+//! The stack-overflow designed death: a thread spawned with a small stack
+//! descends past its floor, and the floor must be named -- on the rows
+//! that carry the v8-M stack limit registers by the UsageFault the limit
+//! raises, on the ARMv7-M rows by the MemManage fault the guard block at
+//! the floor raises (the protection unit's 32-byte no-access block
+//! the switch places at the running thread's floor). The funnel reports
+//! either with its overflow line. A survived descent prints the
+//! UNREACHABLE line and exits 3 -- the registered red shape, and what the
+//! `stack-guard-off` control image shows on the v7-M rows.
 
 use core::hint::black_box;
 use core::sync::atomic::AtomicU32;
@@ -39,8 +40,11 @@ extern "C" fn eater(_: usize) {
 }
 
 pub fn run() -> ! {
+    #[cfg(armv8m)]
     kprintln!("[stackovfl] a 4 KB victim parked below a 1 KB eater; the eater descends twelve 256-byte frames past its floor -- expect a UsageFault with the stack-overflow line");
-    sched::spawn("victim", victim, 0, 2, 4096);
+    #[cfg(not(armv8m))]
+    kprintln!("[stackovfl] a 4 KB victim parked below a 1 KB eater; the eater descends twelve 256-byte frames past its floor -- expect a MemManage fault with the stack-overflow line (the guard block at the floor)");
+    sched::spawn("victim", victim, 0, 2, 4096); // runs at once, parks
     sched::spawn("eater", eater, 0, 2, 1024);
     api::rhu_sleep_ns(20_000_000);
     kprintln!("[stackovfl] UNREACHABLE: the descent survived the floor");

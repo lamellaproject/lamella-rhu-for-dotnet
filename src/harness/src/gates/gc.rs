@@ -32,7 +32,7 @@ const TOOL_TIMEOUT_S: u64 = 120;
 /// manifest: doctoring the manifest and
 /// the tree together still cannot move these without failing here.
 const GC_INTERFACE_MAJOR: u32 = 5;
-const GC_INTERFACE_MINOR: u32 = 8;
+const GC_INTERFACE_MINOR: u32 = 9;
 const EE_INTERFACE_MAJOR: u32 = 5;
 
 /// The compile flag set of record for image-tier C++: clang, the compiler
@@ -108,7 +108,9 @@ fn cxx_flags(class: Class) -> &'static [&'static str] {
 /// provides. A name appearing here that the image world does not
 /// satisfy, or a NEW import arriving with a header or source change, is
 /// a world change and must fail loudly, never resolve by accident.
-const IMPORTS_BARE: [&str; 17] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_BARE: [&str; 16] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
     "_ZN15GCToEEInterface24GetFreeObjectMethodTableEv",
@@ -116,16 +118,15 @@ const IMPORTS_BARE: [&str; 17] = [
     "_ZN15GCToEEInterface9GetThreadEv",
     "_ZdlPvj",
     "__aeabi_memclr4",
-    "_impure_ptr",
     "abort",
-    "fflush",
-    "printf",
-    "puts",
     "rhu_futex_wait",
     "rhu_futex_wake",
+    "rhu_log_level",
+    "rhu_log_write",
     "sched_yield",
     "strcmp",
     "strstr",
+    "vsnprintf",
 ];
 
 /// The activation host object's exact import closure: the costume seam
@@ -140,7 +141,9 @@ const IMPORTS_HOST: [&str; 4] = [
 /// The skeleton compiled MGC_HEAP_LIVE: the bare 15 plus the seven
 /// allocator-core entry points it delegates to (satisfied in-image by
 /// the heap object).
-const IMPORTS_SKEL_HEAP: [&str; 24] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_SKEL_HEAP: [&str; 23] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
     "_ZN15GCToEEInterface24GetFreeObjectMethodTableEv",
@@ -148,9 +151,7 @@ const IMPORTS_SKEL_HEAP: [&str; 24] = [
     "_ZN15GCToEEInterface9GetThreadEv",
     "_ZdlPvj",
     "__aeabi_memclr4",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_heap_alloc",
     "mgc_heap_census",
     "mgc_heap_contains",
@@ -158,13 +159,14 @@ const IMPORTS_SKEL_HEAP: [&str; 24] = [
     "mgc_heap_range",
     "mgc_heap_total_alloc_bytes",
     "mgc_heap_used_bytes",
-    "printf",
-    "puts",
     "rhu_futex_wait",
     "rhu_futex_wake",
+    "rhu_log_level",
+    "rhu_log_write",
     "sched_yield",
     "strcmp",
     "strstr",
+    "vsnprintf",
 ];
 
 /// The allocator core's exact import closure at MGC_HEAP_LIVE: four
@@ -173,29 +175,34 @@ const IMPORTS_SKEL_HEAP: [&str; 24] = [
 /// region mmap, the skeleton's census recap, and the console runtime
 /// (`_impure_ptr` is the same stdio reentrancy-pointer artifact the
 /// skeleton carries, satisfied by the host's documented stub).
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
 const IMPORTS_HEAP: [&str; 11] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface17StompWriteBarrierEP22WriteBarrierParameters",
     "_ZN15GCToEEInterface24GetFreeObjectMethodTableEv",
     "_ZN15GCToEEInterface9GetThreadEv",
     "__aeabi_memclr4",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_skel_census",
-    "mmap64",
-    "printf",
+    "rhu_log_level",
+    "rhu_log_write",
+    "rhu_shim_collector_mmap",
+    "vsnprintf",
 ];
 
 /// The driving host object's exact import closure: the costume seam
 /// pair, the kernel console export, and the two arena verbs behind the
 /// mmap bridge.
-const IMPORTS_HOST_DRIVE: [&str; 6] = [
+const IMPORTS_HOST_DRIVE: [&str; 9] = [
     "__aeabi_memset",
     "__mgc_dlopen_hook",
     "__mgc_dlsym_hook",
     "rhu_arena_alloc_at",
+    "rhu_arena_alloc_from",
     "rhu_arena_headroom",
+    "rhu_ram_count",
+    "rhu_ram_range",
     "sh_write0",
 ];
 
@@ -234,7 +241,9 @@ const INVENTORY_DRIVE: [&str; 7] = [
 /// heap-live 22 MINUS mgc_heap_census (GarbageCollect now routes to
 /// the collector instead of the census-then-fail-fast path) PLUS the
 /// four collector entry points it delegates to.
-const IMPORTS_SKEL_COLLECT: [&str; 27] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_SKEL_COLLECT: [&str; 26] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
     "_ZN15GCToEEInterface24GetFreeObjectMethodTableEv",
@@ -242,9 +251,7 @@ const IMPORTS_SKEL_COLLECT: [&str; 27] = [
     "_ZN15GCToEEInterface9GetThreadEv",
     "_ZdlPvj",
     "__aeabi_memclr4",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_collect_count",
     "mgc_collect_init",
     "mgc_collect_total",
@@ -255,13 +262,14 @@ const IMPORTS_SKEL_COLLECT: [&str; 27] = [
     "mgc_heap_range",
     "mgc_heap_total_alloc_bytes",
     "mgc_heap_used_bytes",
-    "printf",
-    "puts",
     "rhu_futex_wait",
     "rhu_futex_wake",
+    "rhu_log_level",
+    "rhu_log_write",
     "sched_yield",
     "strcmp",
     "strstr",
+    "vsnprintf",
 ];
 
 /// The mark stage's exact import closure: the twelve collection-era
@@ -271,7 +279,9 @@ const IMPORTS_SKEL_COLLECT: [&str; 27] = [
 /// arithmetic lowers to (satisfied by the staticlib's
 /// compiler-builtins; the FLOAT `__aeabi_f/d` families stay
 /// forbidden).
-const IMPORTS_COLLECT: [&str; 29] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_COLLECT: [&str; 28] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
     "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
     "_ZN15GCToEEInterface11GcStartWorkEii",
@@ -287,9 +297,7 @@ const IMPORTS_COLLECT: [&str; 29] = [
     "__aeabi_memclr",
     "__aeabi_memclr4",
     "__aeabi_uldivmod",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_heap_census",
     "mgc_heap_counts",
     "mgc_heap_finq_snapshot",
@@ -297,10 +305,11 @@ const IMPORTS_COLLECT: [&str; 29] = [
     "mgc_heap_used_bytes",
     "mgc_skel_frozen_get",
     "mgc_skel_handles_foreach",
-    "mmap64",
-    "printf",
-    "puts",
+    "rhu_log_level",
+    "rhu_log_write",
+    "rhu_shim_collector_mmap",
     "sched_yield",
+    "vsnprintf",
 ];
 
 /// The collector under MGC_BREAK_ROOTS: the root phases are compiled
@@ -309,7 +318,9 @@ const IMPORTS_COLLECT: [&str; 29] = [
 /// closure with them -- the suppression is visible in the OBJECT, not
 /// just the transcript. (The source's `(void)&` anchors do not survive
 /// -O2; the drop is the honest shape.)
-const IMPORTS_COLLECT_BREAK: [&str; 25] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_COLLECT_BREAK: [&str; 24] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
     "_ZN15GCToEEInterface11GcStartWorkEii",
     "_ZN15GCToEEInterface16AfterGcScanRootsEiiP11ScanContext",
@@ -324,29 +335,31 @@ const IMPORTS_COLLECT_BREAK: [&str; 25] = [
     "__aeabi_memclr",
     "__aeabi_memclr4",
     "__aeabi_uldivmod",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_heap_census",
     "mgc_heap_counts",
     "mgc_heap_range",
     "mgc_heap_used_bytes",
-    "mmap64",
-    "printf",
-    "puts",
+    "rhu_log_level",
+    "rhu_log_write",
+    "rhu_shim_collector_mmap",
     "sched_yield",
+    "vsnprintf",
 ];
 
 /// The collect-world host object's exact import closure: the gc.B
 /// drive five plus the six kernel verbs of the suspension world
 /// (spawn/suspend/resume/stack-bounds from the thread family, yield
 /// behind sched_yield, sleep for the deterministic windows).
-const IMPORTS_HOST_COLLECT: [&str; 12] = [
+const IMPORTS_HOST_COLLECT: [&str; 15] = [
     "__aeabi_memset",
     "__mgc_dlopen_hook",
     "__mgc_dlsym_hook",
     "rhu_arena_alloc_at",
+    "rhu_arena_alloc_from",
     "rhu_arena_headroom",
+    "rhu_ram_count",
+    "rhu_ram_range",
     "rhu_sleep_ns",
     "rhu_thread_resume",
     "rhu_thread_spawn",
@@ -378,7 +391,7 @@ const INVENTORY_COLLECT: [&str; 13] = [
 ];
 
 /// The positive gc.C census lines, pinned exact per collection (the
-/// derivation is the gc.C registration's; the same numbers must
+/// derivation is the gc.C case's; the same numbers must
 /// repeat at collection #2 -- the bitmap-reset proof). The break-roots
 /// control proves these very pins ABSENT (the detector bites).
 const CENSUS_ROOTS_LINE: &str = "[mgc-coll] roots: stacks=2 handles=1 (weak_skipped=1) dep_seen=1 dep_marked=1 finq=1 frozen_objs=2 frozen_edges=1";
@@ -388,7 +401,9 @@ const CENSUS_MARK_2: &str = "[mgc-coll] mark census #2: roots=6 marked=7 marked_
 
 /// The sweep-stage skeleton: the collect set plus the four
 /// f-reachable surfaces the finalization-era methods delegate to.
-const IMPORTS_SKEL_SWEEP: [&str; 31] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_SKEL_SWEEP: [&str; 30] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
     "_ZN15GCToEEInterface24GetFreeObjectMethodTableEv",
@@ -396,9 +411,7 @@ const IMPORTS_SKEL_SWEEP: [&str; 31] = [
     "_ZN15GCToEEInterface9GetThreadEv",
     "_ZdlPvj",
     "__aeabi_memclr4",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_collect_count",
     "mgc_collect_init",
     "mgc_collect_total",
@@ -413,13 +426,14 @@ const IMPORTS_SKEL_SWEEP: [&str; 31] = [
     "mgc_heap_range",
     "mgc_heap_total_alloc_bytes",
     "mgc_heap_used_bytes",
-    "printf",
-    "puts",
     "rhu_futex_wait",
     "rhu_futex_wake",
+    "rhu_log_level",
+    "rhu_log_write",
     "sched_yield",
     "strcmp",
     "strstr",
+    "vsnprintf",
 ];
 
 /// The windows-world skeleton: `sched_yield` leaves the import set
@@ -428,7 +442,9 @@ const IMPORTS_SKEL_SWEEP: [&str; 31] = [
 /// consumption of rhu_futex_wait/rhu_futex_wake from src/gc. `mincore`
 /// is asked, page by page, how much of a frozen segment's commit the
 /// board's frozen object heap backs.
-const IMPORTS_SKEL_TUNE: [&str; 33] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_SKEL_TUNE: [&str; 32] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
     "_ZN15GCToEEInterface24GetFreeObjectMethodTableEv",
@@ -436,9 +452,7 @@ const IMPORTS_SKEL_TUNE: [&str; 33] = [
     "_ZN15GCToEEInterface9GetThreadEv",
     "_ZdlPvj",
     "__aeabi_memclr4",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_collect_count",
     "mgc_collect_init",
     "mgc_collect_total",
@@ -456,18 +470,21 @@ const IMPORTS_SKEL_TUNE: [&str; 33] = [
     "mgc_heap_window_fix",
     "mincore",
     "mmap64",
-    "printf",
-    "puts",
     "rhu_futex_wait",
     "rhu_futex_wake",
+    "rhu_log_level",
+    "rhu_log_write",
     "strcmp",
     "strstr",
+    "vsnprintf",
 ];
 
 /// The windows skeleton's closure without the growth (the growth control's
 /// skeleton, MGC_BREAK_HANDLE_GROWTH): the knob compiles the page draw out,
 /// so the shim's mmap leaves the closure.
-const IMPORTS_SKEL_TUNE_BREAK_GROWTH: [&str; 32] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_SKEL_TUNE_BREAK_GROWTH: [&str; 31] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
     "_ZN15GCToEEInterface24GetFreeObjectMethodTableEv",
@@ -475,9 +492,7 @@ const IMPORTS_SKEL_TUNE_BREAK_GROWTH: [&str; 32] = [
     "_ZN15GCToEEInterface9GetThreadEv",
     "_ZdlPvj",
     "__aeabi_memclr4",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_collect_count",
     "mgc_collect_init",
     "mgc_collect_total",
@@ -494,18 +509,21 @@ const IMPORTS_SKEL_TUNE_BREAK_GROWTH: [&str; 32] = [
     "mgc_heap_used_bytes",
     "mgc_heap_window_fix",
     "mincore",
-    "printf",
-    "puts",
     "rhu_futex_wait",
     "rhu_futex_wake",
+    "rhu_log_level",
+    "rhu_log_write",
     "strcmp",
     "strstr",
+    "vsnprintf",
 ];
 
 /// The sweep-stage allocator: the wall's collect-and-retry pulls in
 /// the collector entry, and the alloc lock's preemptive spin brings
 /// the EE mode switches plus yield. The tune-stage object is
 /// IDENTICAL (the window machinery imports nothing).
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
 const IMPORTS_HEAP_SWEEP: [&str; 16] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface17StompWriteBarrierEP22WriteBarrierParameters",
@@ -515,19 +533,21 @@ const IMPORTS_HEAP_SWEEP: [&str; 16] = [
     "_ZN15GCToEEInterface9GetThreadEv",
     "__aeabi_memclr",
     "__aeabi_memclr4",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_heap_collect",
     "mgc_skel_census",
-    "mmap64",
-    "printf",
+    "rhu_log_level",
+    "rhu_log_write",
+    "rhu_shim_collector_mmap",
     "sched_yield",
+    "vsnprintf",
 ];
 
 /// The BREAK_WINDOW_FIX heap object: identical but for `puts` -- the
 /// compiler folds the control's no-argument banner printf into puts.
-const IMPORTS_HEAP_TUNE_BREAK: [&str; 17] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_HEAP_TUNE_BREAK: [&str; 16] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface17StompWriteBarrierEP22WriteBarrierParameters",
     "_ZN15GCToEEInterface18EnablePreemptiveGCEv",
@@ -536,15 +556,14 @@ const IMPORTS_HEAP_TUNE_BREAK: [&str; 17] = [
     "_ZN15GCToEEInterface9GetThreadEv",
     "__aeabi_memclr",
     "__aeabi_memclr4",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_heap_collect",
     "mgc_skel_census",
-    "mmap64",
-    "printf",
-    "puts",
+    "rhu_log_level",
+    "rhu_log_write",
+    "rhu_shim_collector_mmap",
     "sched_yield",
+    "vsnprintf",
 ];
 
 /// The row heap objects' exact import closure: the windows heap's names
@@ -552,6 +571,8 @@ const IMPORTS_HEAP_TUNE_BREAK: [&str; 17] = [
 /// size and the free pages of system memory, and the collector's
 /// `mgc_collect_tables_bytes`, the size of the collector tables for a
 /// managed heap of a given size.
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
 const IMPORTS_HEAP_ROW: [&str; 18] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface17StompWriteBarrierEP22WriteBarrierParameters",
@@ -561,21 +582,23 @@ const IMPORTS_HEAP_ROW: [&str; 18] = [
     "_ZN15GCToEEInterface9GetThreadEv",
     "__aeabi_memclr",
     "__aeabi_memclr4",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_collect_tables_bytes",
     "mgc_heap_collect",
     "mgc_skel_census",
-    "mmap64",
-    "printf",
+    "rhu_log_level",
+    "rhu_log_write",
+    "rhu_shim_collector_mmap",
     "sched_yield",
     "sysconf",
+    "vsnprintf",
 ];
 
 /// The two boot controls' heap objects: the row heap's closure plus
 /// `puts` (the compiler folds the knob's no-argument banner into it).
-const IMPORTS_HEAP_ROW_BREAK: [&str; 19] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_HEAP_ROW_BREAK: [&str; 18] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface17StompWriteBarrierEP22WriteBarrierParameters",
     "_ZN15GCToEEInterface18EnablePreemptiveGCEv",
@@ -584,17 +607,16 @@ const IMPORTS_HEAP_ROW_BREAK: [&str; 19] = [
     "_ZN15GCToEEInterface9GetThreadEv",
     "__aeabi_memclr",
     "__aeabi_memclr4",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_collect_tables_bytes",
     "mgc_heap_collect",
     "mgc_skel_census",
-    "mmap64",
-    "printf",
-    "puts",
+    "rhu_log_level",
+    "rhu_log_write",
+    "rhu_shim_collector_mmap",
     "sched_yield",
     "sysconf",
+    "vsnprintf",
 ];
 
 /// The death-pipeline collector: the finq-snapshot blanket leaves with
@@ -607,7 +629,9 @@ const IMPORTS_HEAP_ROW_BREAK: [&str; 19] = [
 /// heap's bump setter (`mgc_heap_bump_set`) is the sweep's: a dead run at
 /// the top of the managed heap is zeroed and the bump mark set back over
 /// it, so the run rejoins the untouched tail.
-const IMPORTS_COLLECT_SWEEP: [&str; 42] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_COLLECT_SWEEP: [&str; 41] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
     "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
     "_ZN15GCToEEInterface11GcStartWorkEii",
@@ -627,9 +651,7 @@ const IMPORTS_COLLECT_SWEEP: [&str; 42] = [
     "__aeabi_memclr",
     "__aeabi_memclr4",
     "__aeabi_uldivmod",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_finq_at",
     "mgc_finq_bound",
     "mgc_finq_set_state",
@@ -646,14 +668,17 @@ const IMPORTS_COLLECT_SWEEP: [&str; 42] = [
     "mgc_heap_walk_expected",
     "mgc_skel_frozen_get",
     "mgc_skel_handles_foreach",
-    "mmap64",
-    "printf",
-    "puts",
+    "rhu_log_level",
+    "rhu_log_write",
+    "rhu_shim_collector_mmap",
     "sched_yield",
+    "vsnprintf",
 ];
 
 /// The tune-stage collector: the enum-time window retire joins.
-const IMPORTS_COLLECT_TUNE: [&str; 43] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_COLLECT_TUNE: [&str; 42] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
     "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
     "_ZN15GCToEEInterface11GcStartWorkEii",
@@ -673,9 +698,7 @@ const IMPORTS_COLLECT_TUNE: [&str; 43] = [
     "__aeabi_memclr",
     "__aeabi_memclr4",
     "__aeabi_uldivmod",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_finq_at",
     "mgc_finq_bound",
     "mgc_finq_set_state",
@@ -693,10 +716,11 @@ const IMPORTS_COLLECT_TUNE: [&str; 43] = [
     "mgc_heap_window_fix",
     "mgc_skel_frozen_get",
     "mgc_skel_handles_foreach",
-    "mmap64",
-    "printf",
-    "puts",
+    "rhu_log_level",
+    "rhu_log_write",
+    "rhu_shim_collector_mmap",
     "sched_yield",
+    "vsnprintf",
 ];
 
 /// The sweep host consumes ZERO new kernel verbs -- its closure is the
@@ -704,16 +728,19 @@ const IMPORTS_COLLECT_TUNE: [&str; 43] = [
 /// and that reuse IS the registered "no new kernel verbs" fact). The
 /// tune host is the first image-tier C++ consumer of the futex AND
 /// activation pairs.
-const IMPORTS_HOST_TUNE: [&str; 16] = [
+const IMPORTS_HOST_TUNE: [&str; 19] = [
     "__aeabi_memset",
     "__mgc_dlopen_hook",
     "__mgc_dlsym_hook",
     "rhu_activation_register",
     "rhu_activation_send",
     "rhu_arena_alloc_at",
+    "rhu_arena_alloc_from",
     "rhu_arena_headroom",
     "rhu_futex_wait",
     "rhu_futex_wake",
+    "rhu_ram_count",
+    "rhu_ram_range",
     "rhu_sleep_ns",
     "rhu_thread_resume",
     "rhu_thread_spawn",
@@ -746,9 +773,8 @@ const INVENTORY_FREEPAD: [&str; 4] = [
 
 /// The handle-pool drive's pinned lines (gc.handle-pool): the banner, the
 /// counter worker's and the handle workers' spawn lines, the workers' books
-/// and wall time (the workers' 358 and 357 ms on the segmented pool;
-/// 340 on the fixed pool before it -- the deterministic profile times the
-/// pool's code path), the pool's census after the storm, the verdict; and the
+/// and wall time (the deterministic profile times the pool's code path and
+/// the lines inside the timed window), the pool's census after the storm, the verdict; and the
 /// control's knob banner, the pool's growth line and the drive's growth
 /// check (the detector is the drive's -- an unlocked pool loses
 /// free-list entries until it grows, which the drive refuses). The case runs on the
@@ -759,12 +785,34 @@ const HP_COUNTER_SPAWN: &str = "[gc-host] worker spawned: tid=3 prio=0xE0 stack=
 const HP_SPAWN: &str = "[gc-host] handle workers spawned: tid=4 and tid=5 prio=0xC0 stack=4096 (rotation at one level above the counter; the host parks until both finish)";
 const HP_WORKER_0: &str = "[gc-host] handle worker 0 (tid 4): 800000 creates, 800000 destroys, 0 aliases (every handle read its own object, twice)";
 const HP_WORKER_1: &str = "[gc-host] handle worker 1 (tid 5): 800000 creates, 800000 destroys, 0 aliases (every handle read its own object, twice)";
-const HP_RAN_0: &str = "[gc-host] handle worker 0 ran 358 ms";
-const HP_RAN_1: &str = "[gc-host] handle worker 1 ran 357 ms";
+const HP_RAN_0: &str = "[gc-host] handle worker 0 ran 366 ms";
+const HP_RAN_1: &str = "[gc-host] handle worker 1 ran 366 ms";
 const HP_CENSUS: &str = "[mgc-skel] handles: created=1600200 live=0 of 64 (reused=1600184 live_hw=16) (types: ws=0 wl=0 strong=16 pinned=0 var=0 rc=0 dep=0 ap=0 sr=0 com=0 wip=0 xref=0)";
 const HP_DONE: &str = "[gc-host] GC HANDLE POOL EXERCISE OK (two threads, 3200000 pool operations at once, no slot aliased, the workers' books exact; the census above carries the pool's)";
 const HP_KNOB: &str = "[mgc-skel] BREAK_HANDLE_LOCK: the pool lock is compiled out (the negative control's knob)";
-const HP_GROWTH: &str = "[mgc-skel] handle pool grew: segment 1 of 256 slots (18 live; the row's 64 full)";
+
+/// The growth line's shape: the segment, the slot count and the row's fullness are tied exactly; the live count
+/// between the head and the tail is read, not pinned (it follows the tick's timing).
+const HP_GROWTH_HEAD: &str = "[mgc-skel] handle pool grew: segment 1 of 256 slots (";
+const HP_GROWTH_TAIL: &str = " live; the row's 64 full)";
+
+/// The handle-pool control's growth line read for its shape: the live count the line prints, when a line carries
+/// the head, a run of digits and the tail in that order; None when no line does.
+fn hp_growth_live(raw: &[u8]) -> Option<u32> {
+    let text = String::from_utf8_lossy(raw);
+    for line in text.lines() {
+        if let Some(i) = line.find(HP_GROWTH_HEAD) {
+            let rest = &line[i + HP_GROWTH_HEAD.len()..];
+            if let Some(j) = rest.find(HP_GROWTH_TAIL) {
+                let mid = &rest[..j];
+                if !mid.is_empty() && mid.bytes().all(|b| b.is_ascii_digit()) {
+                    return mid.parse().ok();
+                }
+            }
+        }
+    }
+    None
+}
 const HP_CHECK: &str = "[gc-host] ALLOC DRIVE CHECK FAILED: the pool grew under two threads -- the free list lost entries";
 /// The handle-pool boot's call inventory: the init-time calls, the two
 /// handle entries the workers drive, and the census collection with its
@@ -818,12 +866,15 @@ const MO_FAILFAST: &str = "[mgc-coll] FAIL-FAST: mark stack overflow";
 /// verbs less the activation pair, the waiter's and the futex pair (no
 /// activation is sent, no thread exits, nothing parks: the host sleeps
 /// through the counter's windows), plus memset for the drive's books.
-const IMPORTS_HOST_MARKOVF: [&str; 12] = [
+const IMPORTS_HOST_MARKOVF: [&str; 15] = [
     "__aeabi_memset",
     "__mgc_dlopen_hook",
     "__mgc_dlsym_hook",
     "rhu_arena_alloc_at",
+    "rhu_arena_alloc_from",
     "rhu_arena_headroom",
+    "rhu_ram_count",
+    "rhu_ram_range",
     "rhu_sleep_ns",
     "rhu_thread_resume",
     "rhu_thread_spawn",
@@ -881,14 +932,17 @@ const HG_EXHAUSTED: &str = "[mgc-skel] FAIL-FAST: handle slot pool exhausted (ra
 /// The handle-growth host object's EXACT import closure: the mark-overflow
 /// host's verbs plus the skeleton's two doors (the segment count and the
 /// test cap).
-const IMPORTS_HOST_HANDLE_GROWTH: [&str; 14] = [
+const IMPORTS_HOST_HANDLE_GROWTH: [&str; 17] = [
     "__aeabi_memset",
     "__mgc_dlopen_hook",
     "__mgc_dlsym_hook",
     "mgc_skel_handle_cap",
     "mgc_skel_handle_segments",
     "rhu_arena_alloc_at",
+    "rhu_arena_alloc_from",
     "rhu_arena_headroom",
+    "rhu_ram_count",
+    "rhu_ram_range",
     "rhu_sleep_ns",
     "rhu_thread_resume",
     "rhu_thread_spawn",
@@ -923,12 +977,15 @@ const INVENTORY_HANDLE_GROWTH_BREAK: [&str; 4] = [
 /// less the worker's (no thread is spawned, no futex waited on, no
 /// activation sent) -- the arena, the sleep, the resume and yield the
 /// activation host keeps, the two hooks, memset and the console.
-const IMPORTS_HOST_NOGC: [&str; 9] = [
+const IMPORTS_HOST_NOGC: [&str; 12] = [
     "__aeabi_memset",
     "__mgc_dlopen_hook",
     "__mgc_dlsym_hook",
     "rhu_arena_alloc_at",
+    "rhu_arena_alloc_from",
     "rhu_arena_headroom",
+    "rhu_ram_count",
+    "rhu_ram_range",
     "rhu_sleep_ns",
     "rhu_thread_resume",
     "rhu_thread_yield",
@@ -1084,12 +1141,15 @@ const GATE_HEAP_BYTES: u32 = 2 * 1024 * 1024;
 /// line are pinned by their words: their numbers follow the image's
 /// static data, so the gate recomputes the rule from them (`boot_rule`,
 /// `sysmem_rule`) instead of pinning them. The cover-line buffer totals
-/// are cover/1024 + 64 (4160 for the row's 4M, 2112 for the control's
-/// doctored 2M).
-const ROW_CENSUS: &str = "[gc-row] board=mps2-an500 profile=suite basis=boot managed_heap_min_guaranteed=1572864 cover=4194304 native_heap=65536 thread_stack=16384/24576 handles=64 frozen_object_heap=65536 system_memory_unallocated=65536";
-const ROW_SIZING: &str = "[gc-row] sizing: markstack=8192 finq=2048 out_of_memory_reserve=65536 window=4096/256 retries=4 frozen=8";
-const ROW_CONTAIN_PREFIX: &str = "[gc-row] containment: floor=0x20000000 cover_end=0x20400000 statics=[";
-const ROW_CONTAIN_VERDICT: &str = "[gc-row] containment VERDICT: INSIDE (statics + arena window inside the cover granule -- every legal bulk-move destination covered)";
+/// are cover/1024 + 64 (16448 for the row's 16M -- the an500's PSRAM
+/// bank, the managed heap's window under the external posture -- and
+/// 2112 for the control's doctored 2M). The containment floor is the
+/// bank's base, 0x60000000: the heap's cover line and the host's
+/// containment line must agree on it.
+const ROW_CENSUS: &str = "[gc-row] board=mps2-an500 profile=suite basis=boot managed_heap_min_guaranteed=1572864 cover=16777216 native_heap=65536 thread_stack=16384/24576 handles=64 frozen_object_heap=65536 system_memory_unallocated=65536";
+const ROW_SIZING: &str = "[gc-row] sizing: markstack=8192 finq=2048/16 out_of_memory_reserve=65536 window=4096/256 retries=4 frozen=8";
+const ROW_CONTAIN_PREFIX: &str = "[gc-row] containment: floor=0x60000000 cover_end=0x61000000 heap window=[";
+const ROW_CONTAIN_VERDICT: &str = "[gc-row] containment VERDICT: INSIDE (the managed heap's window inside the cover granule -- every in-bounds bulk-move destination covered; a static destination lies outside the heap bounds and marks no card)";
 const ROW_BOOT_PREFIX: &str = "[mgc-heap] managed heap sized at boot: system memory free ";
 const ROW_SYSMEM_PREFIX: &str = "[gc-row] system memory: free before the collector ";
 const ROW_SYSMEM_VERDICT: &str = "[gc-row] system memory VERDICT: FILLED (the managed heap took all the rule gives; ";
@@ -1117,7 +1177,7 @@ const TUNE_DRIVE_PINS: &[&str] = &[
     "[gc-host] waiter spawned: tid=4 prio=0xC0 stack=4096 (parks on a go futex between epochs)",
     "[gc-host] epoch signal: woken 1 waiter (it was genuinely futex-blocked)",
     "[mgc-heap] allocs=12 bytes=4416 pads=1 null_returns=0 max_size=24 (flags=0x0 at alloc #1)",
-    "[mgc-heap] finq: registered_total=6 live=6 freach=0(+0 crit) lost=0 (cap=2048, bound=6)",
+    "[mgc-heap] finq: registered_total=6 live=6 freach=0(+0 crit) lost=0 (cap=2048, reserve=16, bound=6)",
     "[mgc-heap] free list: runs=0 free=0 KB; reuse: allocs=0 bytes=0 KB (exact=0 split=0); walk_expected=22",
     TN_WINDOWS_1,
     TN_HANDLES_1,
@@ -1168,17 +1228,20 @@ const TUNE_DRIVE_PINS: &[&str] = &[
 /// verbs less the activation pair (the drive that used them is compiled out
 /// under the handle-pool drive) plus the clock, the thread exit and the
 /// 64-bit division the workers' wall-time line needs.
-const IMPORTS_HOST_HANDLES: [&str; 18] = [
+const IMPORTS_HOST_HANDLES: [&str; 21] = [
     "__aeabi_memset",
     "__aeabi_uldivmod",
     "__mgc_dlopen_hook",
     "__mgc_dlsym_hook",
     "mgc_skel_handle_segments",
     "rhu_arena_alloc_at",
+    "rhu_arena_alloc_from",
     "rhu_arena_headroom",
     "rhu_futex_wait",
     "rhu_futex_wake",
     "rhu_now_ns",
+    "rhu_ram_count",
+    "rhu_ram_range",
     "rhu_sleep_ns",
     "rhu_thread_exit",
     "rhu_thread_resume",
@@ -1194,7 +1257,7 @@ const IMPORTS_HOST_HANDLES: [&str; 18] = [
 /// link by the payload map, never by code) and the collector's
 /// `mgc_collect_tables_bytes`, with which the host recomputes the rule at
 /// boot for its system-memory verdict.
-const IMPORTS_HOST_ROW: [&str; 23] = [
+const IMPORTS_HOST_ROW: [&str; 26] = [
     "__aeabi_memset",
     "__ebss",
     "__edata",
@@ -1208,9 +1271,12 @@ const IMPORTS_HOST_ROW: [&str; 23] = [
     "rhu_activation_register",
     "rhu_activation_send",
     "rhu_arena_alloc_at",
+    "rhu_arena_alloc_from",
     "rhu_arena_headroom",
     "rhu_futex_wait",
     "rhu_futex_wake",
+    "rhu_ram_count",
+    "rhu_ram_range",
     "rhu_sleep_ns",
     "rhu_thread_resume",
     "rhu_thread_spawn",
@@ -1223,12 +1289,15 @@ const IMPORTS_HOST_ROW: [&str; 23] = [
 /// The alloc-bound and finalize-full hosts' exact import closure: the
 /// windows host's names less the activation and futex pairs (their drives
 /// park no waiter and send no activation).
-const IMPORTS_HOST_DRIVE_BOUND: [&str; 12] = [
+const IMPORTS_HOST_DRIVE_BOUND: [&str; 15] = [
     "__aeabi_memset",
     "__mgc_dlopen_hook",
     "__mgc_dlsym_hook",
     "rhu_arena_alloc_at",
+    "rhu_arena_alloc_from",
     "rhu_arena_headroom",
+    "rhu_ram_count",
+    "rhu_ram_range",
     "rhu_sleep_ns",
     "rhu_thread_resume",
     "rhu_thread_spawn",
@@ -1241,13 +1310,16 @@ const IMPORTS_HOST_DRIVE_BOUND: [&str; 12] = [
 /// The tail-rejoin and window-keep hosts' exact import closure: the
 /// alloc-bound host's names plus the heap's free-bytes reading
 /// (`mgc_heap_free_bytes`), which their drives print.
-const IMPORTS_HOST_DRIVE_REJOIN: [&str; 13] = [
+const IMPORTS_HOST_DRIVE_REJOIN: [&str; 16] = [
     "__aeabi_memset",
     "__mgc_dlopen_hook",
     "__mgc_dlsym_hook",
     "mgc_heap_free_bytes",
     "rhu_arena_alloc_at",
+    "rhu_arena_alloc_from",
     "rhu_arena_headroom",
+    "rhu_ram_count",
+    "rhu_ram_range",
     "rhu_sleep_ns",
     "rhu_thread_resume",
     "rhu_thread_spawn",
@@ -1259,12 +1331,15 @@ const IMPORTS_HOST_DRIVE_REJOIN: [&str; 13] = [
 
 /// The frozen-bound host's exact import closure: the alloc-bound host's
 /// names less three thread verbs (the drive spawns no worker).
-const IMPORTS_HOST_DRIVE_FROZEN: [&str; 9] = [
+const IMPORTS_HOST_DRIVE_FROZEN: [&str; 12] = [
     "__aeabi_memset",
     "__mgc_dlopen_hook",
     "__mgc_dlsym_hook",
     "rhu_arena_alloc_at",
+    "rhu_arena_alloc_from",
     "rhu_arena_headroom",
+    "rhu_ram_count",
+    "rhu_ram_range",
     "rhu_sleep_ns",
     "rhu_thread_resume",
     "rhu_thread_yield",
@@ -1274,7 +1349,9 @@ const IMPORTS_HOST_DRIVE_FROZEN: [&str; 9] = [
 /// The frozen-bound control's skeleton (MGC_BREAK_FROZEN_BOUND): the
 /// windows skeleton's closure less `mincore` -- the knob compiles out the
 /// question of how much of a frozen segment's commit is backed.
-const IMPORTS_SKEL_TUNE_BREAK_FROZEN: [&str; 32] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_SKEL_TUNE_BREAK_FROZEN: [&str; 31] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
     "_ZN15GCToEEInterface24GetFreeObjectMethodTableEv",
@@ -1282,9 +1359,7 @@ const IMPORTS_SKEL_TUNE_BREAK_FROZEN: [&str; 32] = [
     "_ZN15GCToEEInterface9GetThreadEv",
     "_ZdlPvj",
     "__aeabi_memclr4",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_collect_count",
     "mgc_collect_init",
     "mgc_collect_total",
@@ -1301,18 +1376,21 @@ const IMPORTS_SKEL_TUNE_BREAK_FROZEN: [&str; 32] = [
     "mgc_heap_used_bytes",
     "mgc_heap_window_fix",
     "mmap64",
-    "printf",
-    "puts",
     "rhu_futex_wait",
     "rhu_futex_wake",
+    "rhu_log_level",
+    "rhu_log_write",
     "strcmp",
     "strstr",
+    "vsnprintf",
 ];
 
 /// The tail-rejoin control's collector (MGC_BREAK_TAIL_REJOIN): the
 /// windows collector's closure less the heap's bump setter -- the knob
 /// compiles the rejoin of a dead run at the top out.
-const IMPORTS_COLLECT_TUNE_BREAK_REJOIN: [&str; 42] = [
+/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+const IMPORTS_COLLECT_TUNE_BREAK_REJOIN: [&str; 41] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
     "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
     "_ZN15GCToEEInterface11GcStartWorkEii",
@@ -1332,9 +1410,7 @@ const IMPORTS_COLLECT_TUNE_BREAK_REJOIN: [&str; 42] = [
     "__aeabi_memclr",
     "__aeabi_memclr4",
     "__aeabi_uldivmod",
-    "_impure_ptr",
     "abort",
-    "fflush",
     "mgc_finq_at",
     "mgc_finq_bound",
     "mgc_finq_set_state",
@@ -1351,10 +1427,11 @@ const IMPORTS_COLLECT_TUNE_BREAK_REJOIN: [&str; 42] = [
     "mgc_heap_window_fix",
     "mgc_skel_frozen_get",
     "mgc_skel_handles_foreach",
-    "mmap64",
-    "printf",
-    "puts",
+    "rhu_log_level",
+    "rhu_log_write",
+    "rhu_shim_collector_mmap",
     "sched_yield",
+    "vsnprintf",
 ];
 
 /// One drive case of the windows world with its negative control: what the
@@ -1399,6 +1476,26 @@ struct DriveCase {
     ctl_absent: &'static [&'static str],
     ctl_inventory: &'static [&'static str],
     ctl_pass: &'static str,
+    /// A second control, where the case has one: another object built
+    /// under a knob, linked in the positive host's image.
+    ctl2: Option<SecondControl>,
+}
+
+/// A drive case's second control: its four objects (one built under a
+/// knob), its image and transcript names, what the knob breaks, the lines
+/// its transcript must carry, the positive lines that must be absent from
+/// it, and its call inventory. Its run ends with exit 134, the host's abort.
+#[derive(Clone, Copy)]
+struct SecondControl {
+    name: &'static str,
+    objects: [&'static str; 4],
+    image: &'static str,
+    run: &'static str,
+    broke: &'static str,
+    pins: &'static [&'static str],
+    absent: &'static [&'static str],
+    inventory: &'static [&'static str],
+    pass: &'static str,
 }
 
 const DRIVE_ACTIVATION: &str = "[gc-host] GC ACTIVATION OK (heap + handle manager live; the allocator drive follows)";
@@ -1412,16 +1509,21 @@ const TR_REJOIN_1: &str = "[mgc-coll] sweep: the dead run at the top (1004108 B)
 const TR_SERVED: &str = "[gc-host] the request of 1500000 bytes: served after 1 collection(s); the free list holds 0 bytes";
 const TR_REJOIN_2: &str = "[mgc-coll] sweep: the dead run at the top (1500000 B) rejoined the untouched tail of the managed heap (zeroed, the bump mark set back)";
 const TR_DONE: &str = "[gc-host] GC TAIL REJOIN EXERCISE OK (the request of 1500000 bytes served after one collection where the dead run began, every byte zero; a second collection walked the heap)";
-const FF_BANNER: &str = "[gc-host] gc.finalize-full drive: 2048 finalizable objects, every one kept alive, fill the finalization table; the next finalizable request must be answered no memory after one collection, never handed out unregistered";
-const FF_REGISTERED: &str = "[gc-host] 2048 finalizable objects registered, each held by a strong handle";
-const FF_ONE_COLLECTION_1: &str = "[mgc-heap] finalization table full (2048 entries): one collection before the request is answered (alloc #2050 size=16)";
-const FF_REFUSED: &str = "[mgc-heap] finalization table FULL: all 2048 entries hold finalizable objects that are live or not yet finalized; the request of 16 bytes is answered no memory (no finalizable object is handed out unregistered)";
-const FF_NO_MEMORY: &str = "[gc-host] the finalizable request past the table: no memory after 1 collection(s)";
-const FF_SERVED_AT_ONCE: &str = "[gc-host] the holders dropped and 2048 finalizers run: the same request served with no collection";
-const FF_ONE_COLLECTION_2: &str = "[mgc-heap] finalization table full (2048 entries): one collection before the request is answered (alloc #4098 size=16)";
+const FF_BANNER: &str = "[gc-host] gc.finalize-full drive: 2032 finalizable objects, every one kept alive, fill the finalization table to its bound (2048 entries, 16 held back for an exception's own); the next finalizable request must be answered no memory after one collection through the out-of-memory report, never handed out unregistered, and the exception's own request then served from the slots held back with no collection";
+const FF_REGISTERED: &str = "[gc-host] 2032 finalizable objects registered, each held by a strong handle";
+const FF_ONE_COLLECTION_1: &str = "[mgc-heap] finalization table at its bound (2032 of 2048 entries taken, 16 held back for an exception's own): one collection before the request is answered (alloc #2034 size=16)";
+const FF_REFUSED: &str = "[mgc-heap] finalization table FULL: 2032 of its 2048 entries hold finalizable objects live or not yet finalized (16 held back for an exception's own); the request of 16 bytes is answered no memory, none handed out unregistered";
+const FF_REPORT: &str = "[mgc-heap] OOM at alloc #2034: size=16 flags=0x1 -> NULL (managed protocol); headroom reserve OPEN (64 KB) for exception dispatch";
+const FF_NO_MEMORY: &str = "[gc-host] the finalizable request past the table's bound: no memory after 1 collection(s)";
+const FF_OWN_SERVED: &str = "[gc-host] the exception's own finalizable request with the grace open: served from the slots held back after 0 collection(s)";
+const FF_GRACE_CLOSED: &str = "[mgc-heap] grace CLOSED: sweep recovered ";
+const FF_SERVED_AT_ONCE: &str = "[gc-host] the holders dropped and 2033 finalizers run: the same request served with no collection";
+const FF_ONE_COLLECTION_2: &str = "[mgc-heap] finalization table at its bound (2032 of 2048 entries taken, 16 held back for an exception's own): one collection before the request is answered (alloc #4067 size=16)";
 const FF_YIELD: &str = "[gc-host] sched_yield -> rhu_thread_yield (contended path reached)";
-const FF_SERVED_AFTER_WAIT: &str = "[gc-host] the table full of dead objects not yet finalized: the request served after 1 collection(s); the finalizer thread took 1 object(s) while it waited";
-const FF_DONE: &str = "[gc-host] GC FINALIZE FULL EXERCISE OK (2048 live finalizable objects filled the table: no memory after one collection, none handed out unregistered; the holders dropped and the finalizers run: served; the table full of dead objects: served after one collection and one object taken by the finalizer thread)";
+const FF_SERVED_AFTER_WAIT: &str = "[gc-host] the table at its bound with dead objects not yet finalized: the request served after 1 collection(s); the finalizer thread took 1 object(s) while it waited";
+const FF_DONE: &str = "[gc-host] GC FINALIZE FULL EXERCISE OK (2032 live finalizable objects filled the table to its bound: no memory after one collection through the out-of-memory report, none handed out unregistered; the exception's own request served from the 16 slots held back with no collection; the holders dropped and the finalizers run: served; the table at its bound with dead objects: served after one collection and one object taken by the finalizer thread)";
+const FF_HANDED_OUT: &str = "[gc-host] the finalizable request past the table's bound: HANDED OUT after 0 collection(s)";
+const FF_CHECK_FAILED: &str = "[gc-host] ALLOC DRIVE CHECK FAILED: a finalizable request past the table's bound was handed out: with no slot taken before its memory (its finalizer would never run), or from the slots held back for an exception's own allocation";
 const WK_BANNER: &str = "[gc-host] gc.window-keep drive: 29 rounds of two ordinary small objects and one 8-byte-aligned small object, every one kept alive, then a request of 4108 bytes; the aligned objects must be served inside the thread's allocation window, so the request is served with no collection";
 const WK_BIRTHS: &str = "[gc-host] births: 87 objects in 29 rounds (58 ordinary from the window, 0 ordinary through the interface; 29 of 29 aligned served inside the outstanding window)";
 const WK_SERVED: &str = "[gc-host] the request of 4108 bytes: served after 0 collection(s); the free list holds 0 bytes";
@@ -1511,6 +1613,7 @@ const DRIVE_CASES: [DriveCase; 5] = [
         ctl_absent: &["exceeds the managed heap", "was answered no memory", AB_DONE],
         ctl_inventory: &["IGCHandleManager::GetGlobalHandleStore", "IGCHandleManager::Initialize", "IGCHeap::Initialize"],
         ctl_pass: "with the bound compiled out the request wrapped to a fit and was served 24 bytes past the parity object; the drive's check refused it and the host aborted",
+        ctl2: None,
     },
     DriveCase {
         name: "gc.tail-rejoin",
@@ -1587,12 +1690,13 @@ const DRIVE_CASES: [DriveCase; 5] = [
             "IGCHeap::SetWaitForGCEvent",
         ],
         ctl_pass: "with the rejoin compiled out the dead run stayed apart from the tail: no memory after four collections with 1004108 bytes in the free list; the drive's check refused it and the host aborted",
+        ctl2: None,
     },
     DriveCase {
         name: "gc.finalize-full",
-        title: "a full finalization table means one collection, a bounded wait for the finalizer thread, then a loud refusal -- never an object handed out unregistered; the Parity profile",
-        closures: &[("host-finalize-full.o", &IMPORTS_HOST_DRIVE_BOUND), ("heap-tune-break-finalize.o", &IMPORTS_HEAP_TUNE_BREAK)],
-        closure_note: "host-finalize-full (== the alloc-bound host's); heap-tune-break-finalize (the windows heap's plus puts, the banner fold)",
+        title: "a finalization table at its bound means one collection, a bounded wait for the finalizer thread, then a refusal through the out-of-memory report, whose grace makes the slots held back usable for the exception's own finalizable allocation -- never an object handed out unregistered; the Parity profile",
+        closures: &[("host-finalize-full.o", &IMPORTS_HOST_DRIVE_BOUND), ("heap-tune-break-finalize.o", &IMPORTS_HEAP_TUNE_BREAK), ("heap-tune-break-finq-reserve.o", &IMPORTS_HEAP_SWEEP)],
+        closure_note: "host-finalize-full (== the alloc-bound host's); heap-tune-break-finalize (the windows heap's plus puts, the banner fold); heap-tune-break-finq-reserve (== the windows heap's: a constant-only object)",
         objects: ["goldens/gc/skel-tune.o", "goldens/gc/heap-tune.o", "goldens/gc/collect-tune.o", "goldens/gc/host-finalize-full.o"],
         image: "gc-finalize-full-rhu",
         run: "gc-finalize-full",
@@ -1603,23 +1707,29 @@ const DRIVE_CASES: [DriveCase; 5] = [
             FF_BANNER,
             FF_REGISTERED,
             FF_ONE_COLLECTION_1,
-            "[mgc-heap] finq: registered_total=2048 live=2048 freach=0(+0 crit) lost=0 (cap=2048, bound=2048)",
-            "[mgc-coll] death #1: ws_null=0 wl_null=0 dep_clear=0 odd=0 | finq kept=2048 eager=0 suppressed=0 promoted=0(+0 crit) freach_pending=0",
+            "[mgc-heap] finq: registered_total=2032 live=2032 freach=0(+0 crit) lost=0 (cap=2048, reserve=16, bound=2032)",
+            "[mgc-coll] death #1: ws_null=0 wl_null=0 dep_clear=0 odd=0 | finq kept=2032 eager=0 suppressed=0 promoted=0(+0 crit) freach_pending=0",
             FF_REFUSED,
+            FF_REPORT,
+            "[mgc-heap] === census (first OOM report) ===",
             FF_NO_MEMORY,
-            "[gc-host] the table full of live objects: the request answered no memory after one collection, every held object in place",
-            "[mgc-coll] death #2: ws_null=0 wl_null=0 dep_clear=0 odd=0 | finq kept=0 eager=0 suppressed=0 promoted=2048(+0 crit) freach_pending=2048",
+            "[gc-host] the table at its bound with live objects: the request answered no memory after one collection through the out-of-memory report, every held object in place",
+            FF_OWN_SERVED,
+            "[mgc-coll] death #2: ws_null=0 wl_null=0 dep_clear=0 odd=0 | finq kept=0 eager=0 suppressed=0 promoted=2033(+0 crit) freach_pending=2033",
+            FF_GRACE_CLOSED,
             FF_SERVED_AT_ONCE,
             FF_ONE_COLLECTION_2,
+            "[mgc-coll] death #3: ws_null=0 wl_null=0 dep_clear=0 odd=0 | finq kept=0 eager=0 suppressed=0 promoted=2032(+0 crit) freach_pending=2032",
             FF_YIELD,
             FF_SERVED_AFTER_WAIT,
             "[mgc-coll] counters: gen0=3 gen1=3 gen2=3 total=3",
             FF_DONE,
             DRIVE_MAIN_DONE,
         ],
-        order: &[FF_BANNER, FF_REGISTERED, FF_ONE_COLLECTION_1, FF_REFUSED, FF_NO_MEMORY, FF_SERVED_AT_ONCE, FF_ONE_COLLECTION_2, FF_YIELD, FF_SERVED_AFTER_WAIT, FF_DONE],
+        order: &[FF_BANNER, FF_REGISTERED, FF_ONE_COLLECTION_1, FF_REFUSED, FF_REPORT, FF_NO_MEMORY, FF_OWN_SERVED, FF_GRACE_CLOSED, FF_SERVED_AT_ONCE, FF_ONE_COLLECTION_2, FF_YIELD, FF_SERVED_AFTER_WAIT, FF_DONE],
         forbidden: &[
             "finalize list FULL",
+            "RESERVE EXHAUSTED",
             "HANDED OUT",
             "BREAK_FINALIZE_FULL",
             "DRIVE CHECK FAILED",
@@ -1645,21 +1755,20 @@ const DRIVE_CASES: [DriveCase; 5] = [
             "IGCHeap::ResetWaitForGCEvent",
             "IGCHeap::SetWaitForGCEvent",
         ],
-        pass: "a table of 2048 live finalizable objects answered no memory after one collection, none handed out unregistered; with the holders dropped and the finalizers run the same request was served at once; a table of dead objects was served after one collection and one object taken by the finalizer thread during the wait",
+        pass: "a table of 2032 live finalizable objects at its bound answered no memory after one collection through the out-of-memory report, none handed out unregistered; with the grace open the exception's own request was served from the slots held back with no collection; with the holders dropped and the finalizers run the same request was served at once; a table of dead objects was served after one collection and one object taken by the finalizer thread during the wait",
         ctl_objects: ["goldens/gc/skel-tune.o", "goldens/gc/heap-tune-break-finalize.o", "goldens/gc/collect-tune.o", "goldens/gc/host-finalize-full.o"],
         ctl_image: "gc-finalize-full-break-rhu",
         ctl_run: "gc-finalize-full-break",
-        broke: "the slot before the memory compiled out (MGC_BREAK_FINALIZE_FULL): a finalizable request past a full table is handed out unregistered, which the drive's check must refuse",
+        broke: "the slot before the memory compiled out (MGC_BREAK_FINALIZE_FULL): a finalizable request past the table's bound is handed out unregistered, which the drive's check must refuse",
         ctl_pins: &[
             "[mgc-heap] BREAK_FINALIZE_FULL: a finalizable request takes no slot before its memory and a full table is ignored (the negative control)",
             FF_BANNER,
             FF_REGISTERED,
-            "[mgc-heap] finalize list FULL at 2048 -- counting only from here",
-            "[gc-host] the finalizable request past the table: HANDED OUT after 0 collection(s)",
-            "[gc-host] ALLOC DRIVE CHECK FAILED: a finalizable object was handed out with no slot in the finalization table (its finalizer would never run)",
+            FF_HANDED_OUT,
+            FF_CHECK_FAILED,
             DRIVE_ABORT,
         ],
-        ctl_absent: &["finalization table full (2048 entries)", "finalization table FULL", "no memory after 1 collection(s)", FF_DONE],
+        ctl_absent: &["finalization table at its bound", "finalization table FULL", "no memory after 1 collection(s)", FF_DONE],
         ctl_inventory: &[
             "IGCHandleManager::GetGlobalHandleStore",
             "IGCHandleManager::Initialize",
@@ -1667,7 +1776,24 @@ const DRIVE_CASES: [DriveCase; 5] = [
             "IGCHeap::CollectionCount",
             "IGCHeap::Initialize",
         ],
-        ctl_pass: "with the slot-before-memory compiled out the request past the full table was handed out with no slot; the drive's check refused it and the host aborted",
+        ctl_pass: "with the slot-before-memory compiled out the request past the table's bound was handed out with no slot; the drive's check refused it and the host aborted",
+        ctl2: Some(SecondControl {
+            name: "gc.finq-reserve-break",
+            objects: ["goldens/gc/skel-tune.o", "goldens/gc/heap-tune-break-finq-reserve.o", "goldens/gc/collect-tune.o", "goldens/gc/host-finalize-full.o"],
+            image: "gc-finq-reserve-break-rhu",
+            run: "gc-finq-reserve-break",
+            broke: "no slot held back (MGC_FINQ_RESERVE=0u): the bound is the whole table, so the request past the bound is served from the slots an exception's own allocation needs, which the drive's check must refuse",
+            pins: &[FF_BANNER, FF_REGISTERED, FF_HANDED_OUT, FF_CHECK_FAILED, DRIVE_ABORT],
+            absent: &["BREAK_FINALIZE_FULL", "finalization table at its bound", "finalization table FULL", "no memory after 1 collection(s)", FF_DONE],
+            inventory: &[
+                "IGCHandleManager::GetGlobalHandleStore",
+                "IGCHandleManager::Initialize",
+                "IGCHandleStore::CreateHandleOfType",
+                "IGCHeap::CollectionCount",
+                "IGCHeap::Initialize",
+            ],
+            pass: "with no slot held back the request past the bound was served from the table; the drive's check refused it and the host aborted",
+        }),
     },
     DriveCase {
         name: "gc.window-keep",
@@ -1750,6 +1876,7 @@ const DRIVE_CASES: [DriveCase; 5] = [
             "IGCHeap::SetWaitForGCEvent",
         ],
         ctl_pass: "with the window never kept the request of one page was answered no memory after four collections with 118988 bytes free in 29 runs; the drive's check refused it and the host aborted",
+        ctl2: None,
     },
     DriveCase {
         name: "gc.frozen-bound",
@@ -1764,7 +1891,7 @@ const DRIVE_CASES: [DriveCase; 5] = [
             "flavor: payload",
             DRIVE_ACTIVATION,
             FB_BANNER,
-            "[gc-host] mmap64: anon RW len=65536 -> served from the kernel arena (page-aligned, zero-born; headroom delta OK)",
+            "[gc-host] collector mmap: anon RW len=65536 -> served from the kernel's RAM range 1 (page-aligned, zero-born)",
             FB_BACKED,
             FB_FULL,
             FB_STOP,
@@ -1811,6 +1938,7 @@ const DRIVE_CASES: [DriveCase; 5] = [
             "IGCHeap::UpdateFrozenSegment[0]",
         ],
         ctl_pass: "with the bound compiled out nothing stopped the drive: its own check reported object 256, which would end at 4100, past the pool's 4096, and the host aborted",
+        ctl2: None,
     },
 ];
 
@@ -1831,6 +1959,14 @@ fn drive_case_fault(c: &DriveCase) -> Option<String> {
     if c.ctl_absent.is_empty() {
         return Some(format!("{}: the control names no positive line that must be absent from it (it cannot bite)", c.name));
     }
+    if let Some(c2) = &c.ctl2 {
+        if c2.objects == c.objects || c2.objects == c.ctl_objects || c2.image == c.image || c2.image == c.ctl_image || c2.run == c.run || c2.run == c.ctl_run {
+            return Some(format!("{}: the second control is the positive image or the first control's", c.name));
+        }
+        if c2.pins.is_empty() || c2.absent.is_empty() {
+            return Some(format!("{}: the second control pins no line, or names no positive line that must be absent from it", c.name));
+        }
+    }
     None
 }
 
@@ -1839,9 +1975,6 @@ fn drive_case_fault(c: &DriveCase) -> Option<String> {
 /// and soft-float helpers (the hard-float ABI contract).
 const FORBIDDEN_IMPORT_FAMILIES: [&str; 5] = ["_Unwind", "__cxa", "_ZSt", "__aeabi_f", "__aeabi_d"];
 
-/// Cases registered by the gate design, not yet armed. Reported as
-/// pending on every run so the ladder's state is visible where the gate
-/// runs -- a pending case contributes nothing to the verdict.
 const PENDING: [&str; 1] = [
     "gc.C remainder: managed value-set battery + doctored-golden control (rt world)",
 ];
@@ -1857,9 +1990,8 @@ const INTERNAL_CASES: [&str; 2] = [
 /// goldens/gc/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest (the payload-gate idiom, one level up -- doctoring the
 /// manifest and the objects together still cannot pass without editing
-/// this reviewed surface). A re-freeze updates objects + manifest + this
-/// pin together in one reviewed commit.
-const SHA_FROZEN_MANIFEST: &str = "7c997a731f808b92ece5cdbfe6bf0e1968988a3086226b942ed7705609d8c95d";
+/// this reviewed surface).
+const SHA_FROZEN_MANIFEST: &str = "ed993df0212923341938ae884d1a4e4da8eb5b7aa096b2e5d237488944b75ed8";
 
 /// The frozen-object plan of record: file name under goldens/gc/, source
 /// TU, extra defines beyond the class's flag set, and the class (the
@@ -1867,71 +1999,145 @@ const SHA_FROZEN_MANIFEST: &str = "7c997a731f808b92ece5cdbfe6bf0e1968988a3086226
 /// those). The manifest's records must tie this table by name both
 /// directions; 'rhu-gate gc rederive' recompiles every row under its
 /// class's flag set and byte-asserts the output against the frozen bytes.
-/// Worlds stage these files where they once compiled them -- the bytes
-/// are frozen inputs, produced by ONE recorded build, never rebuilt by
-/// a consumer.
-const FROZEN_PLAN: [(&str, &str, &[&str], Class); 60] = [
+/// The bytes are frozen inputs, produced by ONE recorded build, never
+/// rebuilt by a consumer.
+const FROZEN_PLAN: [(&str, &str, &[&str], Class); 62] = [
     ("skel-bare.o", "src/gc/mgc_skeleton.cpp", &[], Class::CortexM7),
     ("skel-bad.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_SKEL_BAD_VERSION"], Class::CortexM7),
     ("host.o", "src/gc/host/mgc_host.cpp", &[], Class::CortexM7),
     ("probe.o", "src/gc/mgc_ee_probe.cpp", &[], Class::CortexM7),
     ("skel-heap.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE"], Class::CortexM7),
-    ("heap.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_HEAP_BYTES=2097152u"], Class::CortexM7),
+    ("heap.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_FINQ_RESERVE=16u"], Class::CortexM7),
     ("host-drive.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC"], Class::CortexM7),
     ("skel-collect.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE"], Class::CortexM7),
-    ("heap-collect.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_HEAP_BYTES=2097152u"], Class::CortexM7),
+    ("heap-collect.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_FINQ_RESERVE=16u"], Class::CortexM7),
     ("collect.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE"], Class::CortexM7),
     ("collect-break.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_BREAK_ROOTS"], Class::CortexM7),
     ("host-collect.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT"], Class::CortexM7),
     ("skel-sweep.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE"], Class::CortexM7),
-    ("heap-sweep.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_HEAP_BYTES=2097152u"], Class::CortexM7),
+    ("heap-sweep.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_FINQ_RESERVE=16u"], Class::CortexM7),
     ("collect-sweep.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE"], Class::CortexM7),
     ("collect-sweep-break.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_BREAK_WEAK"], Class::CortexM7),
     ("host-sweep.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP"], Class::CortexM7),
     ("skel-tune.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64"], Class::CortexM7),
-    ("heap-tune.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u"], Class::CortexM7),
-    ("heap-tune-break.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_BREAK_WINDOW_FIX"], Class::CortexM7),
+    ("heap-tune.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_FINQ_RESERVE=16u"], Class::CortexM7),
+    ("heap-tune-break.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_BREAK_WINDOW_FIX"], Class::CortexM7),
     ("collect-tune.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE"], Class::CortexM7),
     ("host-tune.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE"], Class::CortexM7),
     ("skel-row.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64"], Class::CortexM7),
-    ("heap-row.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1572864u", "-DMGC_ARENA_COVER_BYTES=4194304u"], Class::CortexM7),
-    ("heap-row-break-cover.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1572864u", "-DMGC_ARENA_COVER_BYTES=2097152u"], Class::CortexM7),
+    ("heap-row.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1572864u", "-DMGC_ARENA_COVER_BYTES=16777216u", "-DMGC_FINQ_RESERVE=16u"], Class::CortexM7),
+    ("heap-row-break-cover.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1572864u", "-DMGC_ARENA_COVER_BYTES=2097152u", "-DMGC_FINQ_RESERVE=16u"], Class::CortexM7),
     ("collect-row.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE"], Class::CortexM7),
     ("host-row.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_ROW_AN500"], Class::CortexM7),
-    ("heap-row-f769.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=24576u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=131072u", "-DMGC_ARENA_COVER_BYTES=524288u", "-DMGC_FINQ_CAP=256u", "-DMGC_OOM_RESERVE=8192u", "-DMGC_WINDOW_BYTES=4096u", "-DMGC_WINDOW_FLOOR=256u", "-DMGC_WALL_RETRIES=4u"], Class::CortexM7),
+    // The STM32F769 row's two collector objects for the hosted-runtime image on
+    // that board: the row's fields as the collector's knob macros, read off
+    // the rows header (the heap object takes the rule at boot with what the
+    // row keeps and its guaranteed least, the cover, the finalization cap
+    // and the slots held back in it, the out-of-memory reserve and the
+    // window knobs; the collector object the mark stack and that reserve).
+    // The skeleton is shared with
+    // the an500 row: the rederive leg proves it byte-identical under this
+    // row's defines at every run.
+    ("heap-row-f769.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=24576u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=98304u", "-DMGC_ARENA_COVER_BYTES=16777216u", "-DMGC_FINQ_CAP=2048u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_OOM_RESERVE=8192u", "-DMGC_WINDOW_BYTES=4096u", "-DMGC_WINDOW_FLOOR=256u", "-DMGC_WALL_RETRIES=4u"], Class::CortexM7),
     ("collect-row-f769.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_MARK_STACK_ENTRIES=2048u", "-DMGC_OOM_RESERVE=8192u"], Class::CortexM7),
     ("host-freepad.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_FREEPAD"], Class::CortexM7),
-    ("heap-sweep-break-freepad.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_BREAK_FREE_PAD"], Class::CortexM7),
+    ("heap-sweep-break-freepad.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_BREAK_FREE_PAD"], Class::CortexM7),
+    // The handle-pool case's two objects: the windows-world host with the
+    // handle-pool drive (its iteration count a plan fact), and the windows
+    // skeleton built with the knob that compiles the pool lock out (the
+    // negative control).
     ("host-handles.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_HANDLES", "-DMGC_HANDLES_ITER=100000u"], Class::CortexM7),
     ("skel-tune-break-lock.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64", "-DMGC_BREAK_HANDLE_LOCK"], Class::CortexM7),
+    // The no-GC region case's two objects: the windows-world host with the
+    // no-GC drive (no worker spawned), and the windows skeleton built with
+    // the knob that claims an entry with nothing entered (the negative
+    // control).
     ("host-nogc.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_NOGC"], Class::CortexM7),
     ("skel-tune-break-nogc.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64", "-DMGC_BREAK_NOGC_CLAIM"], Class::CortexM7),
     ("skel-row-an505.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64"], Class::CortexM33),
-    ("heap-row-an505.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1572864u", "-DMGC_ARENA_COVER_BYTES=4194304u"], Class::CortexM33),
+    ("heap-row-an505.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1572864u", "-DMGC_ARENA_COVER_BYTES=16777216u", "-DMGC_FINQ_RESERVE=16u"], Class::CortexM33),
     ("collect-row-an505.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE"], Class::CortexM33),
-    ("heap-row-u5a5.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1048576u", "-DMGC_ARENA_COVER_BYTES=4194304u"], Class::CortexM33),
-    ("heap-row-rp2350.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=24576u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=131072u", "-DMGC_ARENA_COVER_BYTES=1048576u", "-DMGC_FINQ_CAP=256u", "-DMGC_OOM_RESERVE=8192u", "-DMGC_WINDOW_BYTES=4096u", "-DMGC_WINDOW_FLOOR=256u", "-DMGC_WALL_RETRIES=4u"], Class::CortexM33),
+    ("heap-row-u5a5.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1048576u", "-DMGC_ARENA_COVER_BYTES=4194304u", "-DMGC_FINQ_RESERVE=16u"], Class::CortexM33),
+    // The RP2350 rows' collector objects: the four Pico boards' rows
+    // (the Raspberry Pi Pico 2 and Pico 2 W, the Pimoroni Pico Plus 2 and
+    // Pico Plus 2 W) declare one mini row each with the same fields -- the
+    // same chip, the same 520K window, the same 160K map floor: the least
+    // managed heap 96K, the frozen object heap 16K, 8K unallocated, mark
+    // stack 2048, reserve 8K, 16 finalization slots held back -- but for
+    // the cover and the finalization table: the two Raspberry Pi rows' 1M
+    // holds their SRAM window and their table holds 256 entries, the
+    // Pimoroni pair's 8M holds the PSRAM window their managed heap lives
+    // in and their table holds 2048. So the collect object those fields
+    // reach is frozen once, under
+    // the Pico 2's declaration, named for the chip, and the four rows name
+    // it; the heap object is frozen under the Pico 2's declaration for the
+    // two Raspberry Pi rows and under the Pimoroni Pico Plus 2's for the
+    // pair (heap-row-picoplus2.o below); the skeleton is the an505 row's.
+    // The rederive leg's row tie proves the sharing at every run.
+    ("heap-row-rp2350.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=24576u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=98304u", "-DMGC_ARENA_COVER_BYTES=1048576u", "-DMGC_FINQ_CAP=256u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_OOM_RESERVE=8192u", "-DMGC_WINDOW_BYTES=4096u", "-DMGC_WINDOW_FLOOR=256u", "-DMGC_WALL_RETRIES=4u"], Class::CortexM33),
     ("collect-row-rp2350.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_MARK_STACK_ENTRIES=2048u", "-DMGC_OOM_RESERVE=8192u"], Class::CortexM33),
+    ("heap-row-picoplus2.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=24576u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=98304u", "-DMGC_ARENA_COVER_BYTES=8388608u", "-DMGC_FINQ_CAP=2048u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_OOM_RESERVE=8192u", "-DMGC_WINDOW_BYTES=4096u", "-DMGC_WINDOW_FLOOR=256u", "-DMGC_WALL_RETRIES=4u"], Class::CortexM33),
+    // The mark-overflow case's three objects: the windows collector
+    // compiled with a 64-entry mark stack (the cap the case overflows), the
+    // same with the recovery compiled out (the negative control), and the
+    // windows host with the mark-overflow drive.
     ("collect-tune-stk64.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_MARK_STACK_ENTRIES=64u"], Class::CortexM7),
     ("collect-tune-stk64-break.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_MARK_STACK_ENTRIES=64u", "-DMGC_BREAK_MARK_OVERFLOW"], Class::CortexM7),
     ("host-markovf.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_MARKOVF"], Class::CortexM7),
+    // The handle-growth case's two objects: the windows host with the
+    // handle-growth drive, and the windows skeleton built with the knob that
+    // compiles the pool's growth out and the fixed pool's fail-fast back in
+    // (the negative control).
     ("host-handle-growth.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_HANDLE_GROWTH"], Class::CortexM7),
     ("skel-tune-break-growth.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64", "-DMGC_BREAK_HANDLE_GROWTH"], Class::CortexM7),
+    // The alloc-bound case's two objects: the windows host with the drive
+    // that asks for more bytes than a 32-bit size holds beside its alignment
+    // pad, and the windows heap built with the knob that compiles the bound
+    // before the fit out (the negative control).
     ("host-alloc-bound.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_ALLOC_BOUND"], Class::CortexM7),
-    ("heap-tune-break-bound.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_BREAK_ALLOC_BOUND"], Class::CortexM7),
+    ("heap-tune-break-bound.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_BREAK_ALLOC_BOUND"], Class::CortexM7),
+    // The tail-rejoin case's two objects: the windows host with the drive
+    // whose request fits only across a dead run at the top of the managed
+    // heap and the untouched tail behind it, and the windows collector built
+    // with the knob that leaves that run in the free list (the negative
+    // control).
     ("host-tail-rejoin.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_TAIL_REJOIN"], Class::CortexM7),
     ("collect-tune-break-rejoin.o", "src/gc/mgc_collect.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_BREAK_TAIL_REJOIN"], Class::CortexM7),
+    // The finalize-full case's three objects: the windows host with the drive
+    // that fills the finalization table to its bound, the windows heap built
+    // with the knob under which a finalizable request takes no slot before
+    // its memory (the negative control), and the windows heap built with no
+    // slot held back for an exception's own finalizable allocation (the
+    // second control: a request past the bound is served from the table).
     ("host-finalize-full.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_FINALIZE_FULL"], Class::CortexM7),
-    ("heap-tune-break-finalize.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_BREAK_FINALIZE_FULL"], Class::CortexM7),
+    ("heap-tune-break-finalize.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_BREAK_FINALIZE_FULL"], Class::CortexM7),
+    ("heap-tune-break-finq-reserve.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_FINQ_RESERVE=0u"], Class::CortexM7),
+    // The window-keep case's three objects: the windows host with the drive
+    // of ordinary and 8-byte-aligned small objects, a windows heap of 128 KB
+    // with an 8 KB reserve (the size at which the remainders of retired
+    // windows starve a request of one page), and that heap built with the
+    // knob that retires the thread's window on every slow call (the negative
+    // control).
     ("host-window-keep.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_WINDOW_KEEP"], Class::CortexM7),
-    ("heap-tune-128k.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=131072u", "-DMGC_OOM_RESERVE=8192u"], Class::CortexM7),
-    ("heap-tune-128k-break.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=131072u", "-DMGC_OOM_RESERVE=8192u", "-DMGC_BREAK_WINDOW_KEEP"], Class::CortexM7),
+    ("heap-tune-128k.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=131072u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_OOM_RESERVE=8192u"], Class::CortexM7),
+    ("heap-tune-128k-break.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=131072u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_OOM_RESERVE=8192u", "-DMGC_BREAK_WINDOW_KEEP"], Class::CortexM7),
+    // The frozen-bound case's two objects: the windows host with the drive
+    // that fills a frozen segment committed past a pool of one page, and the
+    // windows skeleton built with the knob that never asks how much of a
+    // segment's commit is backed (the negative control).
     ("host-frozen-bound.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_FROZEN_BOUND"], Class::CortexM7),
     ("skel-tune-break-frozen.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64", "-DMGC_BREAK_FROZEN_BOUND"], Class::CortexM7),
-    ("heap-tune-break-keep.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_BREAK_WINDOW_KEEP"], Class::CortexM7),
-    ("heap-row-break-less.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1572864u", "-DMGC_ARENA_COVER_BYTES=4194304u", "-DMGC_BREAK_BOOT_LESS"], Class::CortexM7),
-    ("heap-row-break-more.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1572864u", "-DMGC_ARENA_COVER_BYTES=4194304u", "-DMGC_BREAK_BOOT_MORE"], Class::CortexM7),
+    // gc.D's second control: the windows heap at the gate's size built with
+    // the window-keep knob, under which the drive's flag-routed small objects
+    // retire the first window and the layout the drive's tail asserts is
+    // another.
+    ("heap-tune-break-keep.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_BREAK_WINDOW_KEEP"], Class::CortexM7),
+    // gc.E's two boot controls: the an500 row's heap object built to take
+    // one page less, and one page more, than the rule at boot gives.
+    ("heap-row-break-less.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1572864u", "-DMGC_ARENA_COVER_BYTES=16777216u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_BREAK_BOOT_LESS"], Class::CortexM7),
+    ("heap-row-break-more.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1572864u", "-DMGC_ARENA_COVER_BYTES=16777216u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_BREAK_BOOT_MORE"], Class::CortexM7),
 ];
+
 
 /// Parse VENDORED.md's per-file sha bullets: a line whose trimmed form is
 /// "- `<relpath>`" followed by a line whose trimmed form is
@@ -2039,12 +2245,22 @@ struct BoardRow {
     foh: u64,
     markstack: u64,
     finq: u64,
+    /// The slots of the finalization table held back for an out-of-memory
+    /// exception's own finalizable allocation (inside the cap).
+    finq_reserve: u64,
     reserve: u64,
     window: u64,
     wfloor: u64,
     retries: u64,
     frozen: u64,
 }
+
+/// The rows the board-rows header declares today, the one count the gate's
+/// board-rows check and the selfcheck's genuine-input probe both read:
+/// the two emulator rows, the Pico 2 and the Pico 2 W, the Pico Plus 2 and
+/// the Pico Plus 2 W, the Nucleo U5A5, the STM32F769 board, the two Feather
+/// RP2350 rows, the Pico LiPo 2 and the Pico LiPo 2 XL W.
+const DECLARED_ROWS: usize = 12;
 
 /// Parse the row header's per-board blocks: each opens with
 /// `defined(MGC_HOST_ROW_<NAME>)` and carries one `#define MGC_ROW_*`
@@ -2057,6 +2273,7 @@ fn parse_board_rows(text: &str) -> Result<Vec<BoardRow>, String> {
         if (t.starts_with("#if ") || t.starts_with("#elif ")) && t.contains("defined(MGC_HOST_ROW_") {
             blocks.push(Vec::new());
         } else if t.starts_with("#else") || (t.starts_with("#endif") && !blocks.is_empty() && t.contains("MGC_BOARD_ROWS_H")) {
+            // the selector's #else / the include guard's #endif close the row region
         } else if let Some(b) = blocks.last_mut() {
             b.push(t);
         }
@@ -2075,6 +2292,7 @@ fn parse_board_rows(text: &str) -> Result<Vec<BoardRow>, String> {
                 if let Some(rest) = l.strip_prefix(&format!("#define {key}\t")) {
                     return Ok(rest.trim().trim_matches('"').to_string());
                 }
+                // tolerate multiple spaces between key and value
                 if l.starts_with("#define ") {
                     let mut it = l["#define ".len()..].split_whitespace();
                     if it.next() == Some(key) {
@@ -2105,6 +2323,7 @@ fn parse_board_rows(text: &str) -> Result<Vec<BoardRow>, String> {
             foh: n(s("MGC_ROW_FOH_POOL_BYTES")?)?,
             markstack: n(s("MGC_ROW_MARKSTACK_ENTRIES")?)?,
             finq: n(s("MGC_ROW_FINQ_CAP")?)?,
+            finq_reserve: n(s("MGC_ROW_FINQ_RESERVE")?)?,
             reserve: n(s("MGC_ROW_OOM_RESERVE")?)?,
             window: n(s("MGC_ROW_WINDOW_BYTES")?)?,
             wfloor: n(s("MGC_ROW_WINDOW_FLOOR")?)?,
@@ -2233,6 +2452,54 @@ fn parse_map_geometry(text: &str) -> Result<(u64, u64, u64), String> {
     }
 }
 
+/// The map's external RAM region, where the map places the rehydrated-data
+/// section in it (the external posture: the managed heap and its collector
+/// tables live in the arena's window 1 after that section): the region's
+/// base and length from its MEMORY line, and the window's floor -- the
+/// map's `RHU_ARENA1_MIN` where the map states one, the region's whole
+/// length until it does. None for a map without the section in an
+/// external region (the internal posture).
+fn parse_map_external(text: &str) -> Option<(u64, u64, u64)> {
+    let mut region: Option<String> = None;
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix(".rhu_hydrated ORIGIN(") {
+            let name = rest.split(')').next()?.trim();
+            if name != "DATA" {
+                region = Some(name.to_string());
+            }
+        }
+    }
+    let region = region?;
+    let mut geometry: Option<(u64, u64)> = None;
+    let mut floor: Option<u64> = None;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with(&region) && t.contains("ORIGIN =") && t.contains("LENGTH =") {
+            let origin = t
+                .split("ORIGIN =")
+                .nth(1)
+                .and_then(|r| r.split(',').next())
+                .map(str::trim)
+                .and_then(|h| h.strip_prefix("0x"))
+                .and_then(|h| u64::from_str_radix(h, 16).ok());
+            let length = t
+                .split("LENGTH =")
+                .nth(1)
+                .map(str::trim)
+                .and_then(parse_size_token);
+            if let (Some(o), Some(l)) = (origin, length) {
+                geometry = Some((o, l));
+            }
+        }
+        if let Some(rest) = t.strip_prefix("RHU_ARENA1_MIN = ") {
+            floor = parse_size_token(rest.trim_end_matches(';'));
+        }
+    }
+    let (base, len) = geometry?;
+    Some((base, len, floor.unwrap_or(len)))
+}
+
 /// Parse a board module's `pub const KHEAP_BYTES: usize = <a> * <b>;`
 /// (or a plain value).
 fn parse_kheap_const(text: &str) -> Result<u64, String> {
@@ -2266,10 +2533,12 @@ fn minimal_cover(base: u64, len: u64) -> u64 {
     p
 }
 
+
 /// Bytes rounded up to whole 4096-byte pages, the unit every draw of
-/// system memory is made in.
-fn pages_up(bytes: u64) -> u64 {
-    bytes.div_ceil(4096) * 4096
+/// system memory is made in; None when the rounding overflows (a size
+/// parsed from a header, never trusted).
+fn pages_up(bytes: u64) -> Option<u64> {
+    bytes.div_ceil(4096).checked_mul(4096)
 }
 
 /// One row against its map geometry + board module: the table-check
@@ -2281,8 +2550,15 @@ fn pages_up(bytes: u64) -> u64 {
 /// collector tables for the least heap (its mark bitmap, the heap / 32,
 /// and its mark stack), the frozen object heap and the unallocated
 /// amount, each in whole pages. The frozen object heap and the
-/// unallocated amount are themselves draws of whole pages.
-fn row_check(row: &BoardRow, data_base: u64, data_len: u64, arena_min: u64, kheap_const: u64) -> Result<(), String> {
+/// unallocated amount are themselves draws of whole pages. Under the
+/// external posture (`ext`: the map's external region and the window's
+/// floor) the rule splits in two: the SRAM half -- the native heap, the
+/// alignment, the early mappings, the frozen object heap and the
+/// unallocated amount against the map's floor of system memory -- and
+/// the external half -- the least heap and its collector tables against
+/// the external window's floor -- and the cover is the minimal granule
+/// holding the external region, where the managed heap lives.
+fn row_check(row: &BoardRow, data_base: u64, data_len: u64, arena_min: u64, kheap_const: u64, ext: Option<(u64, u64, u64)>) -> Result<(), String> {
     if row.kheap != kheap_const {
         return Err(format!(
             "row {}: kheap_carve {} != the board module's KHEAP_BYTES {}",
@@ -2308,12 +2584,21 @@ fn row_check(row: &BoardRow, data_base: u64, data_len: u64, arena_min: u64, khea
             row.board, row.profile, row.heap_min
         ));
     }
-    let want_cover = minimal_cover(data_base, data_len);
+    let want_cover = match ext {
+        Some((eb, el, _)) => minimal_cover(eb, el),
+        None => minimal_cover(data_base, data_len),
+    };
     if row.cover != want_cover {
-        return Err(format!(
-            "row {}: cover {} != minimal granule {} for DATA [0x{:x},+0x{:x})",
-            row.board, row.cover, want_cover, data_base, data_len
-        ));
+        return Err(match ext {
+            Some((eb, el, _)) => format!(
+                "row {}: cover {} != minimal granule {} for the external region [0x{:x},+0x{:x}) the managed heap lives in",
+                row.board, row.cover, want_cover, eb, el
+            ),
+            None => format!(
+                "row {}: cover {} != minimal granule {} for DATA [0x{:x},+0x{:x})",
+                row.board, row.cover, want_cover, data_base, data_len
+            ),
+        });
     }
     if row.basis != "boot" {
         return Err(format!(
@@ -2321,14 +2606,47 @@ fn row_check(row: &BoardRow, data_base: u64, data_len: u64, arena_min: u64, khea
             row.board, row.basis
         ));
     }
-    let ask = pages_up(row.kheap)
-        + 4096
-        + 8192
-        + pages_up(row.heap_min)
-        + pages_up(row.heap_min / 32)
-        + pages_up(row.markstack * 4)
-        + row.foh
-        + row.unallocated;
+    // Checked arithmetic throughout: a size that wraps the sum small
+    // would pass the floor, so an overflow refuses the row.
+    if let Some((_, _, efloor)) = ext {
+        let sram = (|| pages_up(row.kheap)?.checked_add(4096)?.checked_add(8192)?.checked_add(row.foh)?.checked_add(row.unallocated))();
+        let Some(sram) = sram else {
+            return Err(format!("row {}: the sum of the SRAM's boot draws overflows (a declared size is absurd)", row.board));
+        };
+        if sram > arena_min {
+            return Err(format!(
+                "row {}: native heap + alignment + early mappings + frozen object heap + unallocated = {} overflows the map's guaranteed floor of system memory {} (the external posture's SRAM half)",
+                row.board, sram, arena_min
+            ));
+        }
+        let external = (|| pages_up(row.heap_min)?.checked_add(pages_up(row.heap_min / 32)?)?.checked_add(pages_up(row.markstack.checked_mul(4)?)?))();
+        let Some(external) = external else {
+            return Err(format!("row {}: the sum of the external window's boot draws overflows (a declared size is absurd)", row.board));
+        };
+        if external > efloor {
+            return Err(format!(
+                "row {}: least managed heap + its collector tables = {} overflows the external window's floor {} (the external posture's external half)",
+                row.board, external, efloor
+            ));
+        }
+        return Ok(());
+    }
+    let ask = (|| {
+        pages_up(row.kheap)?
+            .checked_add(4096)?
+            .checked_add(8192)?
+            .checked_add(pages_up(row.heap_min)?)?
+            .checked_add(pages_up(row.heap_min / 32)?)?
+            .checked_add(pages_up(row.markstack.checked_mul(4)?)?)?
+            .checked_add(row.foh)?
+            .checked_add(row.unallocated)
+    })();
+    let Some(ask) = ask else {
+        return Err(format!(
+            "row {}: the sum of the boot's draws overflows (a declared size is absurd)",
+            row.board
+        ));
+    };
     if ask > arena_min {
         return Err(format!(
             "row {}: native heap + alignment + early mappings + least managed heap + its collector tables + frozen object heap + unallocated = {} overflows the map's guaranteed floor of system memory {}",
@@ -2444,7 +2762,11 @@ fn parse_sysmem_line(raw: &[u8]) -> Result<Vec<u64>, String> {
 /// mark stack holds `markstack` entries: the mark bitmap (the heap / 32)
 /// and the mark stack (four bytes an entry), each in whole pages.
 fn collector_tables(heap: u64, markstack: u64) -> u64 {
-    pages_up(heap / 32) + pages_up(markstack * 4)
+    // Saturating: an absurd number from a transcript line reads as more
+    // than any floor, never as a small sum.
+    pages_up(heap / 32)
+        .unwrap_or(u64::MAX)
+        .saturating_add(pages_up(markstack.saturating_mul(4)).unwrap_or(u64::MAX))
 }
 
 /// The rule at boot, recomputed from the boot line's four numbers (free,
@@ -2545,8 +2867,8 @@ fn call_union(raw: &[u8]) -> Vec<String> {
 /// Method names declared on the flat GCToEEInterface class in the
 /// vendored header: inside the class block, every trimmed
 /// `static <ret> <Name>(...)` line contributes `<Name>` (the token
-/// immediately before the first parenthesis). One leg of the gc.B
-/// three-way surface tie.
+/// immediately before the first parenthesis). One leg of the three-way
+/// surface tie.
 fn gctoee_decl_names(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut in_class = false;
@@ -2891,7 +3213,7 @@ impl Gc {
             Ok(s) => s,
             Err(e) => self.fail(
                 "frozen-inputs",
-                &format!("goldens/gc/MANIFEST.md unreadable: {e} (the frozen tier's record; a drop copy without goldens/gc runs the chain with this tier DECLARED, never this gate)"),
+                &format!("goldens/gc/MANIFEST.md unreadable: {e} (the frozen tier's record; a published copy without goldens/gc runs the chain with this tier DECLARED, never this gate)"),
             ),
         };
         if msha != SHA_FROZEN_MANIFEST {
@@ -3207,6 +3529,9 @@ impl Gc {
     fn run_activation(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
         println!("== case gc.A (activation) ==");
 
+        // Build the staticlib the images link against (feature payload:
+        // the hosting entry sequence + sh_write0 + memset via
+        // compiler-builtins).
         let log = self.out.join("build-staticlib.log");
         let ok = match crate::tools::cargo_build_kernel(&self.repo, &["--lib", "--features", "payload,entropy-accept-software"], &log) {
             Ok(ok) => ok,
@@ -3220,6 +3545,10 @@ impl Gc {
             self.fail("gc.A", "kernel staticlib build error");
         }
 
+        // The world objects are FROZEN committed artifacts (goldens/gc,
+        // sha-verified before the first case); the gate stages them in
+        // place of compiling. Derivation: 'rhu-gate gc rederive'.
+        // Import-closure pins on the objects (the world-change tripwire).
         let bare = self.undefined_of(facts, "gc.A", "goldens/gc/skel-bare.o");
         if !imports_match(&bare, &IMPORTS_BARE) {
             self.fail(
@@ -3255,6 +3584,7 @@ impl Gc {
             IMPORTS_HOST.len()
         );
 
+        // Link both images.
         let (sha_ok, rel_ok) = self.link_image(
             ld,
             "gc.A",
@@ -3268,6 +3598,8 @@ impl Gc {
             "gcA-doctored-rhu",
         );
 
+        // Artifact contract by nm: the managed entry, the costume seam
+        // pair, the layout contract, and the five flat EE definitions.
         let nm = match llvm_tool(facts, "llvm-nm") {
             Ok(p) => p,
             Err(e) => self.fail("gc.A", &e),
@@ -3296,6 +3628,7 @@ impl Gc {
             }
         }
 
+        // The positive run: activation on bare metal.
         let (raw, code) = self.run_qemu(qemu, "gcA", &rel_ok);
         let enter_line = "[mgc-skel] GC_VersionInfo ENTER (EE passed major=0 minor=0 build=0 name=0x0)";
         let report_line = format!(
@@ -3356,6 +3689,9 @@ impl Gc {
         self.results.tally("pass", "positive");
         println!("== case gc.A: PASS (exit 0; handshake printed before it reported; tuple == pinned constants; init-time calls live) ==");
 
+        // The negative control: the doctored-version build must be
+        // refused loudly, with the pre-handshake print already on the
+        // wire, exiting through the refusal class.
         println!("== case gc.A-doctored-version (negative control) ==");
         let broke = "doctored GC interface major version (MGC_SKEL_BAD_VERSION)";
         let (rawb, codeb) = self.run_qemu(qemu, "gcA-doctored", &rel_bad);
@@ -3436,6 +3772,8 @@ impl Gc {
     fn run_skeleton_alloc(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
         println!("== case gc.B (skeleton inventory + probe + the allocator) ==");
 
+        // (1) The probe artifact check: read the frozen probe object's
+        // undefined set, tie the surface three ways at the name level.
         let probe_undef = self.undefined_of(facts, "gc.B", "goldens/gc/probe.o");
         if probe_undef.len() != EE_SURFACE {
             self.fail(
@@ -3522,6 +3860,8 @@ impl Gc {
             println!("   the seam's spellings: NOT TIED (the rt-m7 tier's frozen merged object is absent: {merged_rel})");
         }
 
+        // (2) The allocator world (frozen objects); pin every closure
+        // exactly.
         let skel_heap = self.undefined_of(facts, "gc.B", "goldens/gc/skel-heap.o");
         if !imports_match(&skel_heap, &IMPORTS_SKEL_HEAP) {
             self.fail(
@@ -3571,6 +3911,7 @@ impl Gc {
             IMPORTS_HOST_DRIVE.len()
         );
 
+        // (3) Link the allocator boot and the bare-skeleton control.
         let (sha_ok, rel_ok) = self.link_image(
             ld,
             "gc.B",
@@ -3591,6 +3932,8 @@ impl Gc {
             "gcB-bare-alloc-rhu",
         );
 
+        // (4) The allocator boot: activation held, then the drive --
+        // every deterministic counter pinned exact, the wall honest.
         let (raw, code) = self.run_qemu(qemu, "gcB", &rel_ok);
         let ok_line = "[gc-host] GC ACTIVATION OK (heap + handle manager live; the allocator drive follows)";
         let banner = "[gc-host] gc.B allocator drive: exercising IGCHeap::Alloc over the live region";
@@ -3602,10 +3945,10 @@ impl Gc {
         for m in [
             "flavor: payload",
             "[mgc-skel] GC_VersionInfo ENTER (EE passed major=0 minor=0 build=0 name=0x0)",
-            "[gc-host] handshake accepted: GC {5,8} == the pinned header constants",
+            "[gc-host] handshake accepted: GC {5,9} == the pinned header constants",
             "[mgc-skel] GC_Initialize EXIT rc=0",
             "[mgc-skel] EE probe: free-object MT shape OK",
-            "[gc-host] mmap64: anon RW len=2097152 -> served from the kernel arena (page-aligned, zero-born; headroom delta OK)",
+            "[gc-host] collector mmap: anon RW len=2097152 -> served from the kernel's RAM range 1 (page-aligned, zero-born)",
             "2048 KB via shim mmap (pre-zeroed, plug skew +4",
             "[gc-host] EE StompWriteBarrier: op=Initialize suspended=1 eph_low=~0 eph_high=~0 card+bounds present (no compiled barriers in this world; shape asserted)",
             "[mgc-heap] STOMP write barrier: Initialize bounds=[",
@@ -3699,6 +4042,8 @@ impl Gc {
                 self.fail_run("gc.B", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
             }
         }
+        // The inventory pins: this boot's union, and the activation
+        // boot's union off gc.A's stored transcript.
         let drive_union = call_union(&raw);
         if !imports_match(&drive_union, &INVENTORY_DRIVE) {
             self.fail_run(
@@ -3746,6 +4091,9 @@ impl Gc {
             INVENTORY_DRIVE.len()
         );
 
+        // (5) The registered control: the same driving host against the
+        // BARE skeleton -- the first object allocation must fail-fast
+        // with the skeleton's distinct marker and die through abort.
         println!("== case gc.B-bare-alloc (negative control) ==");
         let broke = "no allocator behind the interface (bare skeleton): the first object allocation must fail-fast";
         let (rawc, codec) = self.run_qemu(qemu, "gcB-bare-alloc", &rel_ctl);
@@ -3830,6 +4178,8 @@ impl Gc {
     fn run_collect(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
         println!("== case gc.C (suspension + mark over the kernel verbs) ==");
 
+        // (1) The collection world (frozen objects); pin every closure
+        // exactly.
         for (name, obj_rel, want) in [
             ("skel-collect.o", "goldens/gc/skel-collect.o", &IMPORTS_SKEL_COLLECT[..]),
             ("heap-collect.o", "goldens/gc/heap-collect.o", &IMPORTS_HEAP[..]),
@@ -3861,6 +4211,7 @@ impl Gc {
             IMPORTS_HOST_COLLECT.len()
         );
 
+        // (2) Link the collection boot and the break-roots control.
         let (sha_ok, rel_ok) = self.link_image(
             ld,
             "gc.C",
@@ -3884,6 +4235,9 @@ impl Gc {
             "gcC-break-roots-rhu",
         );
 
+        // (3) The collection boot: activation held, the schedule and
+        // root world built, then TWO collections with every census
+        // number pinned exact and the callback bracket order-asserted.
         let (raw, code) = self.run_qemu(qemu, "gcC", &rel_ok);
         let ok_line = "[gc-host] GC ACTIVATION OK (heap + handle manager live; the allocator drive follows)";
         let banner = "[gc-host] gc.C suspension+mark drive: allocation schedule, then two collections over the real interface";
@@ -3896,12 +4250,12 @@ impl Gc {
         }
         for m in [
             "flavor: payload",
-            "[gc-host] handshake accepted: GC {5,8} == the pinned header constants",
+            "[gc-host] handshake accepted: GC {5,9} == the pinned header constants",
             "[mgc-skel] GC_Initialize EXIT rc=0",
-            "[gc-host] mmap64: anon RW len=2097152 -> served from the kernel arena (page-aligned, zero-born; headroom delta OK)",
+            "[gc-host] collector mmap: anon RW len=2097152 -> served from the kernel's RAM range 1 (page-aligned, zero-born)",
             "2048 KB via shim mmap (pre-zeroed, plug skew +4",
-            "[gc-host] mmap64: anon RW len=65536 -> served from the kernel arena (page-aligned, zero-born; headroom delta OK)",
-            "[gc-host] mmap64: anon RW len=32768 -> served from the kernel arena (page-aligned, zero-born; headroom delta OK)",
+            "[gc-host] collector mmap: anon RW len=65536 -> served from the kernel's RAM range 1 (page-aligned, zero-born)",
+            "[gc-host] collector mmap: anon RW len=32768 -> served from the kernel's RAM range 1 (page-aligned, zero-born)",
             "init: mark bitmap 64 KB @",
             "mark stack 8192 entries (32 KB) @",
             ok_line,
@@ -3966,6 +4320,8 @@ impl Gc {
                 self.fail_run("gc.C", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
             }
         }
+        // The callback bracket is an ORDER claim on collection
+        // #1's wire (first occurrences).
         if !in_order(
             &raw,
             &[
@@ -3996,6 +4352,7 @@ impl Gc {
                 "callback bracket order violated (SuspendEE .. RestartEE is the required ORDER)",
             );
         }
+        // Drive-level order: build the world, then collect twice.
         if !in_order(
             &raw,
             &[
@@ -4078,6 +4435,11 @@ impl Gc {
             INVENTORY_COLLECT.len()
         );
 
+        // (4) The registered control: MGC_BREAK_ROOTS -- root scanning
+        // suppressed, census deterministically zeroed, suspension still
+        // real, exit 0 (mark-only: nothing dies either way). The gate's
+        // own positive census pins must FAIL against this transcript --
+        // the detector provably bites.
         println!("== case gc.C-break-roots (negative control) ==");
         let broke = "ALL root scanning suppressed (MGC_BREAK_ROOTS): the census detector must bite";
         let (rawc, codec) = self.run_qemu(qemu, "gcC-break-roots", &rel_ctl);
@@ -4112,6 +4474,7 @@ impl Gc {
                 );
             }
         }
+        // The detector bites: the positive census pins must be ABSENT.
         for m in [CENSUS_ROOTS_LINE, CENSUS_QUALS_LINE, CENSUS_MARK_1, CENSUS_MARK_2] {
             if contains_fixed(&rawc, m) {
                 self.fail_run(
@@ -4227,7 +4590,7 @@ impl Gc {
         }
         for m in [
             "flavor: payload",
-            "[gc-host] handshake accepted: GC {5,8} == the pinned header constants",
+            "[gc-host] handshake accepted: GC {5,9} == the pinned header constants",
             "[mgc-skel] GC_Initialize EXIT rc=0",
             ok_line,
             banner,
@@ -4248,7 +4611,7 @@ impl Gc {
             "[mgc-heap] === census (GarbageCollect #1) ===",
             "[mgc-heap] allocs=17 bytes=304 pads=1 null_returns=0 max_size=28 (flags=0x0 at alloc #2)",
             "[mgc-heap] flags: finalize=6 contains_ref=1 align8=1 align8_bias=1 zero_opt=0 loh=0 poh=0",
-            "[mgc-heap] finq: registered_total=6 live=6 freach=0(+0 crit) lost=0 (cap=2048, bound=6)",
+            "[mgc-heap] finq: registered_total=6 live=6 freach=0(+0 crit) lost=0 (cap=2048, reserve=16, bound=6)",
             "[mgc-heap] free list: runs=0 free=0 KB; reuse: allocs=0 bytes=0 KB (exact=0 split=0); walk_expected=18",
             "[mgc-heap] oom: reserve=64 KB grace=0 grace_allocs=0 collect_retries=0 oom_reports=0",
             "[mgc-heap] alloc contexts seen=1 identity: match=17 mismatch=0",
@@ -4311,6 +4674,7 @@ impl Gc {
                 self.fail_run("gc.C-sweep", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
             }
         }
+        // The death-pipeline ORDER on collection #1's wire.
         if !in_order(
             &raw,
             &[
@@ -4338,6 +4702,8 @@ impl Gc {
                 "death-pipeline order violated (short-weak .. partition .. GcDhReScan .. long-weak .. sweep .. RestartEE .. EnableFinalization is the required ORDER)",
             );
         }
+        // Drive-level order: cast -> #1 -> probes/drain -> #2 -> reuse ->
+        // wall retired -> OOM -> grace closed -> verdict.
         if !in_order(
             &raw,
             &[
@@ -4459,6 +4825,7 @@ impl Gc {
                 );
             }
         }
+        // The detectors bite: the positive weak pins must be ABSENT.
         for m in [
             SW_DEATH_1,
             SW_DEATH_2,
@@ -4522,8 +4889,8 @@ impl Gc {
     /// word reads intact after each sweep, the walk model counts the pad,
     /// and a 12-byte first fit on the second run leaves its remainder as a
     /// pad. The negative control links the heap object built with
-    /// MGC_BREAK_FREE_PAD (the run linked as before): the live header word
-    /// reads as the second run's address and the drive dies at its check.
+    /// MGC_BREAK_FREE_PAD: the live header word reads as the second run's
+    /// address and the drive dies at its check.
     fn run_free_pad(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
         println!("== case gc.free-pad (a 12-byte dead space before a live object's header word; the sweep's pad rule) ==");
         for (name, obj_rel, want) in [
@@ -4854,13 +5221,19 @@ impl Gc {
             INVENTORY_HANDLES.len()
         );
 
+        // The registered control: MGC_BREAK_HANDLE_LOCK -- the pool unlocked,
+        // exactly the race the lock closes. On the deterministic profile the
+        // free list loses entries under two threads until the pool grows a
+        // segment (the pool no longer runs dry); the workers finish and
+        // the drive's growth check refuses the grown pool, exit 134, before
+        // the census collection.
         println!("== case gc.handle-pool-break (negative control) ==");
         let broke = "the pool lock compiled out (MGC_BREAK_HANDLE_LOCK): two threads must lose free-list entries until the pool grows, which the drive's growth check refuses";
         let (rawc, codec) = self.run_qemu_profile(qemu, "gc-handles-break", &rel_ctl, ExecProfile::Deterministic);
         if cr_count(&rawc) == 0 {
             self.fail_run("gc.handle-pool-break", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
         }
-        for m in [HP_KNOB, HP_BANNER, HP_SPAWN, HP_GROWTH, HP_CHECK] {
+        for m in [HP_KNOB, HP_BANNER, HP_SPAWN, HP_CHECK] {
             if !contains_fixed(&rawc, m) {
                 self.fail_run(
                     "gc.handle-pool-break",
@@ -4874,6 +5247,20 @@ impl Gc {
                 );
             }
         }
+        let live = match hp_growth_live(&rawc) {
+            Some(n) => n,
+            None => self.fail_run(
+                "gc.handle-pool-break",
+                codec,
+                134,
+                "negative",
+                broke,
+                &sha_ctl,
+                &rel_ctl,
+                &format!("control pin '{HP_GROWTH_HEAD}<n>{HP_GROWTH_TAIL}' not found (the pool must grow one segment of 256 slots past the row's 64; the live count is read, not pinned)"),
+            ),
+        };
+        println!("   the growth line read: segment 1 of 256 slots, the row's 64 full, {live} live (the live count follows the tick's timing and is read, not pinned)");
         for m in [HP_CENSUS, HP_DONE] {
             if contains_fixed(&rawc, m) {
                 self.fail_run(
@@ -5057,6 +5444,9 @@ impl Gc {
             INVENTORY_MARKOVF.len()
         );
 
+        // The registered control: MGC_BREAK_MARK_OVERFLOW -- the recovery
+        // compiled out and the fail-fast back. The first collection's array
+        // scan fills the stack and the collector fail-fasts; no readback.
         println!("== case gc.mark-overflow-break (negative control) ==");
         let broke = "the overflow recovery compiled out (MGC_BREAK_MARK_OVERFLOW): the first collection must fail-fast at the 64-entry cap";
         let (rawc, codec) = self.run_qemu(qemu, "gc-markovf-break", &rel_ctl);
@@ -5261,6 +5651,9 @@ impl Gc {
             INVENTORY_HANDLE_GROWTH.len()
         );
 
+        // The registered control: MGC_BREAK_HANDLE_GROWTH -- the growth
+        // compiled out and the fixed pool's fail-fast back. The sixty-fifth
+        // create finds the row's 64 spent and the skeleton fail-fasts.
         println!("== case gc.handle-growth-break (negative control) ==");
         let broke = "the pool's growth compiled out (MGC_BREAK_HANDLE_GROWTH): the sixty-fifth create must fail-fast at the row's 64";
         let (rawc, codec) = self.run_qemu(qemu, "gc-handle-growth-break", &rel_ctl);
@@ -5419,6 +5812,37 @@ impl Gc {
         ));
         self.results.tally("pass", "negative");
         println!("== case {ctl_name}: PASS ({}, exit 134) ==", c.ctl_pass);
+
+        let Some(c2) = &c.ctl2 else { return };
+        println!("== case {} (the second negative control) ==", c2.name);
+        let (sha2, rel2) = self.link_image(ld, c.name, &c2.objects, c2.image);
+        let (raw2, code2) = self.run_qemu(qemu, c2.run, &rel2);
+        if cr_count(&raw2) == 0 {
+            self.fail_run(c2.name, code2, 134, "negative", c2.broke, &sha2, &rel2, "no CR bytes in raw capture");
+        }
+        for m in c2.pins {
+            if !contains_fixed(&raw2, m) {
+                self.fail_run(c2.name, code2, 134, "negative", c2.broke, &sha2, &rel2, &format!("control pin '{m}' not found (the knob must be loud and the break must be caught)"));
+            }
+        }
+        for m in c2.absent {
+            if contains_fixed(&raw2, m) {
+                self.fail_run(c2.name, code2, 134, "negative", c2.broke, &sha2, &rel2, &format!("positive pin '{m}' PRESENT under the knob -- the detector does not bite"));
+            }
+        }
+        let union2 = call_union(&raw2);
+        if !imports_match(&union2, c2.inventory) {
+            self.fail_run(c2.name, code2, 134, "negative", c2.broke, &sha2, &rel2, &format!("control call inventory moved: got [{}]", union2.join(" ")));
+        }
+        if code2 != 134 {
+            self.fail_run(c2.name, code2, 134, "negative", c2.broke, &sha2, &rel2, &format!("exit {code2}, wanted 134 (the host's abort)"));
+        }
+        self.results.emit(&format!(
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"{}\",\"verdict\":\"pass\",\"exit\":134,\"exit_want\":134,\"control\":\"negative\",\"broke\":\"{}\",\"image\":{{\"path\":\"{rel2}\",\"sha256\":\"{sha2}\"}}}}",
+            c2.name, c2.broke
+        ));
+        self.results.tally("pass", "negative");
+        println!("== case {}: PASS ({}, exit 134) ==", c2.name, c2.pass);
     }
 
     /// The no-GC region's contract at the interface (gc.no-gc-region):
@@ -5688,6 +6112,8 @@ impl Gc {
                 self.fail_run("gc.D", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
             }
         }
+        // The epoch-1 weave: armed inside SuspendEE, parked in its
+        // window, released by RestartEE's Set+wake -- all unique strings.
         if !in_order(
             &raw,
             &[
@@ -5714,6 +6140,9 @@ impl Gc {
                 "epoch-1 order violated (arm inside SuspendEE -> park -> death pipeline -> Set+wake inside RestartEE -> woken is the ORDER claim)",
             );
         }
+        // The epoch-2 elimination: park -> send -> handler -> woken, and
+        // NO SetWaitForGCEvent inside the parked window (slice check --
+        // duplicate strings make in_order insufficient here).
         if !in_order(
             &raw,
             &[
@@ -5816,7 +6245,7 @@ impl Gc {
         let broke = "window plug+count suppressed (MGC_BREAK_WINDOW_FIX): the heap-walk cross-check must die loudly";
         let (rawc, codec) = self.run_qemu(qemu, "gcD-break-window-fix", &rel_ctl);
         if cr_count(&rawc) == 0 {
-            self.fail_run("gc.D-break-window-fix", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
+            self.fail_run("gc.D-break-window-fix", codec, 2, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
         }
         for m in [
             ok_line,
@@ -5827,24 +6256,24 @@ impl Gc {
             "[mgc-skel] call IGCHeap::ResetWaitForGCEvent",
             parking1,
             suspend_line,
-            "[mgc-coll] heap walk CORRUPT at 0x",
-            "[mgc-coll] FAIL-FAST: heap walk corrupt (size formula vs layout)",
-            "[mgc-heap] === census (collector fail-fast) ===",
-            "[gc-host] abort() -- structurally broken path, exiting 134",
+            "[fault] *** EXCEPTION: MemManage (IPSR=4) ***",
+            "[fault] null access: read at 0x00000000 from thread 2 kmain (the first page is no-access; not delivered: no hosting layer has armed the delivery)",
+            "[fault] *** halted ***",
         ] {
             if !contains_fixed(&rawc, m) {
                 self.fail_run(
                     "gc.D-break-window-fix",
                     codec,
-                    134,
+                    2,
                     "negative",
                     broke,
                     &sha_ctl,
                     &rel_ctl,
-                    &format!("control pin '{m}' not found (the corruption must be caught loudly AFTER real suspension + event-arm)"),
+                    &format!("control pin '{m}' not found (the corruption must be caught loudly AFTER real suspension + event-arm: by the null-page guard's death line)"),
                 );
             }
         }
+        // The detector bites: the positive pins must be ABSENT.
         for m in [
             TN_BOOKS,
             TN_MARK_1,
@@ -5858,7 +6287,7 @@ impl Gc {
                 self.fail_run(
                     "gc.D-break-window-fix",
                     codec,
-                    134,
+                    2,
                     "negative",
                     broke,
                     &sha_ctl,
@@ -5872,7 +6301,7 @@ impl Gc {
             self.fail_run(
                 "gc.D-break-window-fix",
                 codec,
-                134,
+                2,
                 "negative",
                 broke,
                 &sha_ctl,
@@ -5880,24 +6309,31 @@ impl Gc {
                 &format!("control call inventory moved: got [{}] (banked {} heads)", ctl_union.join(" "), INVENTORY_TUNE_BREAK.len()),
             );
         }
-        if codec != 134 {
+        if codec != 2 {
             self.fail_run(
                 "gc.D-break-window-fix",
                 codec,
-                134,
+                2,
                 "negative",
                 broke,
                 &sha_ctl,
                 &rel_ctl,
-                &format!("exit {codec}, wanted 134 (the abort class: the walk cross-check is the deterministic detector)"),
+                &format!("exit {codec}, wanted 2 (the funnel's fault class: the null-page guard is the deterministic detector)"),
             );
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.D-break-window-fix\",\"verdict\":\"pass\",\"exit\":134,\"exit_want\":134,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.D-break-window-fix\",\"verdict\":\"pass\",\"exit\":2,\"exit_want\":2,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
         ));
         self.results.tally("pass", "negative");
-        println!("== case gc.D-break-window-fix: PASS (heap walk died loudly at the un-plugged gap, exit 134, suspension + event-arm real first, the positive detector bites) ==");
+        println!("== case gc.D-break-window-fix: PASS (the corrupted walk's first null read died loudly at the null-page guard, exit 2, suspension + event-arm real first, the positive detector bites) ==");
 
+        // The second control: the windows heap built with the window-keep
+        // knob (MGC_BREAK_WINDOW_KEEP), under which the drive's three
+        // flag-routed small objects retire the first window, as every slow
+        // call does there. The drive's tail asserts the layout the kept
+        // window leaves (the free-run window lands at alloc #5's address),
+        // so its first check fails and the host aborts (exit 134): the
+        // tail's expectations are held by a control.
         println!("== case gc.D-break-window-keep (negative control) ==");
         let got = self.undefined_of(facts, "gc.D-break-window-keep", "goldens/gc/heap-tune-break-keep.o");
         if !imports_match(&got, &IMPORTS_HEAP_TUNE_BREAK) {
@@ -5963,6 +6399,8 @@ impl Gc {
     fn run_row(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
         println!("== case gc.E (the board knob table: rows declared per board, asserted in-artifact) ==");
 
+        // ---- the TABLE CHECK: every declared row against its payload
+        // map and board module, before any image exists.
         let hdr_rel = "src/gc/host/mgc_board_rows.h";
         let hdr_text = match std::fs::read_to_string(self.repo.join(hdr_rel.replace('/', std::path::MAIN_SEPARATOR_STR))) {
             Ok(t) => t,
@@ -5972,8 +6410,8 @@ impl Gc {
             Ok(r) => r,
             Err(e) => self.fail("gc.E", &e),
         };
-        if rows.len() != 8 {
-            self.fail("gc.E", &format!("expected 8 declared rows, parsed {}", rows.len()));
+        if rows.len() != DECLARED_ROWS {
+            self.fail("gc.E", &format!("expected {DECLARED_ROWS} declared rows, parsed {}", rows.len()));
         }
         if let Err(e) = rows_uniform(&rows) {
             self.fail("gc.E", &e);
@@ -5998,17 +6436,25 @@ impl Gc {
                 Ok(v) => v,
                 Err(e) => self.fail("gc.E", &format!("{brd_rel}: {e}")),
             };
-            if let Err(e) = row_check(row, base, len, amin, kheap) {
+            let ext = parse_map_external(&map_text);
+            if let Err(e) = row_check(row, base, len, amin, kheap, ext) {
                 self.fail("gc.E", &e);
             }
             println!(
-                "   row {}: {}/{} least managed heap={} cover={} native heap={} thread stack={}/{} handles={} frozen object heap={} unallocated={} markstack={} finq={} reserve={} (DATA 0x{:x}+{}K floor {}K)",
+                "   row {}: {}/{} least managed heap={} cover={} native heap={} thread stack={}/{} handles={} frozen object heap={} unallocated={} markstack={} finq={} reserve={} (DATA 0x{:x}+{}K floor {}K{})",
                 row.board, row.profile, row.basis, row.heap_min, row.cover, row.kheap,
                 row.stack_default, row.stack_clamp, row.handles, row.foh, row.unallocated,
-                row.markstack, row.finq, row.reserve, base, len / 1024, amin / 1024
+                row.markstack, row.finq, row.reserve, base, len / 1024, amin / 1024,
+                match ext {
+                    Some((eb, el, ef)) => format!("; the managed heap in the external region 0x{:x}+{}M, the window's floor {}K", eb, el / (1024 * 1024), ef / 1024),
+                    None => String::new(),
+                }
             );
         }
 
+        // ---- the row world: the tune drive under the declared an500 row
+        // (frozen objects; the cover knobs are baked into the frozen
+        // heap-row pair -- 4 MiB positive, the control's doctored 2 MiB).
         for (name, obj_rel, want) in [
             ("skel-row.o", "goldens/gc/skel-row.o", &IMPORTS_SKEL_TUNE[..]),
             ("heap-row.o", "goldens/gc/heap-row.o", &IMPORTS_HEAP_ROW[..]),
@@ -6017,12 +6463,25 @@ impl Gc {
             ("heap-row-break-more.o", "goldens/gc/heap-row-break-more.o", &IMPORTS_HEAP_ROW_BREAK[..]),
             ("collect-row.o", "goldens/gc/collect-row.o", &IMPORTS_COLLECT_TUNE[..]),
             ("host-row.o", "goldens/gc/host-row.o", &IMPORTS_HOST_ROW[..]),
+            // The mps2-an505 row's Cortex-M33 objects carry the an500 row
+            // objects' closures: pinned against the same arrays.
             ("skel-row-an505.o", "goldens/gc/skel-row-an505.o", &IMPORTS_SKEL_TUNE[..]),
             ("heap-row-an505.o", "goldens/gc/heap-row-an505.o", &IMPORTS_HEAP_ROW[..]),
             ("collect-row-an505.o", "goldens/gc/collect-row-an505.o", &IMPORTS_COLLECT_TUNE[..]),
+            // The U5A5 row's heap object carries the same closure: the least
+            // it guarantees is a constant of the object, not an import.
             ("heap-row-u5a5.o", "goldens/gc/heap-row-u5a5.o", &IMPORTS_HEAP_ROW[..]),
+            // The RP2350 rows' two objects carry the same closures (the
+            // least, what the row keeps, the mark stack and the reserve are
+            // constants of the objects, not imports).
             ("heap-row-rp2350.o", "goldens/gc/heap-row-rp2350.o", &IMPORTS_HEAP_ROW[..]),
             ("collect-row-rp2350.o", "goldens/gc/collect-row-rp2350.o", &IMPORTS_COLLECT_TUNE[..]),
+            // The Pimoroni pair's own heap object carries the same closure
+            // (the cover is a constant of the object, not an import).
+            ("heap-row-picoplus2.o", "goldens/gc/heap-row-picoplus2.o", &IMPORTS_HEAP_ROW[..]),
+            // The STM32F769 row's two objects carry the same closures: the
+            // row's fields are constants of the objects, as the RP2350
+            // rows' are.
             ("heap-row-f769.o", "goldens/gc/heap-row-f769.o", &IMPORTS_HEAP_ROW[..]),
             ("collect-row-f769.o", "goldens/gc/collect-row-f769.o", &IMPORTS_COLLECT_TUNE[..]),
         ] {
@@ -6057,7 +6516,7 @@ impl Gc {
             IMPORTS_COLLECT_TUNE.len()
         );
         println!("   the U5A5 row's own Cortex-M33 heap object: heap-row-u5a5 {} pinned against the same closure", IMPORTS_HEAP_ROW.len());
-        println!("   the RP2350 rows' own Cortex-M33 objects: heap-row-rp2350 {} / collect-row-rp2350 {} pinned against the same closures", IMPORTS_HEAP_ROW.len(), IMPORTS_COLLECT_TUNE.len());
+        println!("   the RP2350 rows' own Cortex-M33 objects: heap-row-rp2350 {} / collect-row-rp2350 {} / the Pimoroni pair's heap-row-picoplus2 {} pinned against the same closures", IMPORTS_HEAP_ROW.len(), IMPORTS_COLLECT_TUNE.len(), IMPORTS_HEAP_ROW.len());
 
         let (sha_ok, rel_ok) = self.link_image(
             ld,
@@ -6124,6 +6583,9 @@ impl Gc {
                 self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("row pin '{m}' not found"));
             }
         }
+        // The row world's declaration precedes the activation it
+        // configures; the managed heap sizes itself inside init, and the
+        // two verdicts land after init, before the drive.
         if !in_order(
             &raw,
             &[
@@ -6146,6 +6608,11 @@ impl Gc {
                 "row order violated (census -> handshake -> the heap sized at boot -> containment -> system memory -> activation OK is the declaration-then-proof order)",
             );
         }
+        // The rule at boot, recomputed from the boot line's four numbers
+        // against the row's declaration, then the host's system-memory
+        // line against the boot line: the heap computes the rule, the host
+        // recomputes it inside the image, and the gate a third time from
+        // the wire.
         let boot = match parse_boot_line(&raw) {
             Ok(b) => b,
             Err(e) => self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &e),
@@ -6161,20 +6628,26 @@ impl Gc {
             }
             Err(e) => self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &e),
         }
+        // The heap's own cover arithmetic, recomputed from the printed
+        // line: buffer total = the row cover's 4160, cards affordable,
+        // cards == span + 64, and the heap's floor == the host's
+        // containment floor (two computations, one truth).
         match parse_cover_line(&raw) {
             Ok((floor, span, cards, of)) => {
-                if of != 4160 {
-                    self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("cover buffer total {of}, wanted 4160 (the row cover did not reach the heap TU)"));
+                if of != 16448 {
+                    self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("cover buffer total {of}, wanted 16448 (the row cover did not reach the heap TU)"));
                 }
                 if cards != span + 64 || cards > of {
                     self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("cover arithmetic broken: span={span} cards={cards} of={of}"));
                 }
-                if floor != "0x20000000" {
-                    self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("heap cover floor {floor} != the host containment floor 0x20000000"));
+                if floor != "0x60000000" {
+                    self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("heap cover floor {floor} != the host containment floor 0x60000000"));
                 }
             }
             Err(e) => self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &e),
         }
+        // The drive carries verbatim: every address-free tune pin, both
+        // epoch weaves, and the EINTR elimination slice.
         for &m in TUNE_DRIVE_PINS {
             if !contains_fixed(&raw, m) {
                 self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("carried tune pin '{m}' not found"));
@@ -6251,6 +6724,9 @@ impl Gc {
             rows.len()
         );
 
+        // ---- the cover control: the guard's own loud boot death
+        // at a doctored 2 MiB cover ("a bad board knob dies at boot,
+        // loudly" -- the guard comment's own words).
         println!("== case gc.E-break-cover (negative control) ==");
         let broke = "card cover doctored to 2 MiB (region placement spans past the granule): the heap's coverage guard must die loudly at boot";
         let (rawc, codec) = self.run_qemu(qemu, "gcE-break-cover", &rel_ctl);
@@ -6281,6 +6757,10 @@ impl Gc {
             }
             Err(e) => self.fail_run("gc.E-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &e),
         }
+        // The death is AT BOOT: nothing after heap init may exist. (The
+        // handle-reuse self-test line IS present -- the skeleton
+        // runs it inside GC_Initialize, BEFORE the heap vcall that
+        // trips the cover guard; the death point is heap init itself.)
         for m in [
             "[gc-host] GC ACTIVATION OK",
             ROW_CONTAIN_VERDICT,
@@ -6301,6 +6781,11 @@ impl Gc {
         self.results.tally("pass", "negative");
         println!("== case gc.E-break-cover: PASS (the unaffordable cover died loudly at boot, exit 134, before any allocation; the guard's arithmetic recomputed) ==");
 
+        // ---- the two boot controls: the heap object built to take one
+        // page less, and one page more, than the rule at boot gives. The
+        // image's own system-memory verdict refuses each and the host
+        // aborts (exit 134); the gate's recomputation refuses each boot
+        // line too.
         println!("== case gc.E-break-boot-less (negative control) ==");
         let (rawl, codel) = self.run_qemu(qemu, "gcE-break-boot-less", &rel_less);
         self.judge_boot_control(
@@ -6386,12 +6871,12 @@ impl Gc {
     /// and the collect object), and each must be the object the row's OWN
     /// declaration compiles to -- its source under the fields of the header
     /// block that names the row, passed as the collector's knob macros (the
-    /// form the F769 row's frozen objects are built in), with the row's
+    /// form the STM32F769 row's frozen objects are built in), with the row's
     /// class flag set, tying the frozen object the row names apart from the
     /// producer stamp. A row may share another row's object only where the
     /// bytes agree. The doctored table -- the U5A5 row naming the emulator
-    /// row's heap object again, the defect this case was written after --
-    /// must be refused by the same routine, naming the row and the object.
+    /// row's heap object again -- must be refused by the same routine,
+    /// naming the row and the object.
     fn run_sdk_row_tie(&mut self, gxx: &ToolCmd, facts: &RustcFacts, stripped: &Path) {
         const CASE: &str = "gc.sdk-rows-tie-their-row";
         const CONTROL: &str = "gc.sdk-rows-tie-control-borrowed-object";
@@ -6463,6 +6948,7 @@ impl Gc {
                         format!("-DMGC_HEAP_MIN_GUARANTEED_BYTES={}u", h.heap_min),
                         format!("-DMGC_ARENA_COVER_BYTES={}u", h.cover),
                         format!("-DMGC_FINQ_CAP={}u", h.finq),
+                        format!("-DMGC_FINQ_RESERVE={}u", h.finq_reserve),
                         format!("-DMGC_OOM_RESERVE={}u", h.reserve),
                         format!("-DMGC_WINDOW_BYTES={}u", h.window),
                         format!("-DMGC_WINDOW_FLOOR={}u", h.wfloor),
@@ -6518,9 +7004,7 @@ impl Gc {
     /// The re-derivation leg ('rhu-gate gc rederive'): recompile
     /// every frozen-plan object from src/gc with the compiler of record and
     /// byte-assert it against goldens/gc, then run the compile-tier
-    /// posture control. This is the machinery consumers never run: a
-    /// source, flag or kit change re-runs it and updates goldens +
-    /// MANIFEST + the in-code pin together in one reviewed commit.
+    /// posture control. This is the machinery consumers never run.
     fn run_rederive(&mut self, gxx: &ToolCmd) {
         println!("== rederive: {} frozen-plan objects from src/gc with the compiler of record, compared apart from the producer stamp (each sha256 the object's with its comment section removed) ==", FROZEN_PLAN.len());
         let obj_dir = self.out.join("obj");
@@ -6534,6 +7018,8 @@ impl Gc {
         let stripped = obj_dir.join("stripped");
         let mut stamps_frozen: Vec<String> = Vec::new();
         let mut stamps_fresh: Vec<String> = Vec::new();
+        // The heap-bytes define rides the plan as a literal; tie it to
+        // the gate's constant so the two cannot drift apart silently.
         let heap_bytes_flag = format!("-DMGC_HEAP_BYTES={GATE_HEAP_BYTES}u");
         if !FROZEN_PLAN.iter().any(|(_, _, defs, _)| defs.contains(&heap_bytes_flag.as_str())) {
             self.fail(
@@ -6544,6 +7030,9 @@ impl Gc {
         for (name, src_rel, defines, class) in FROZEN_PLAN {
             let out_rel = format!("src/kernel/target/gc-gate/obj/{name}");
             let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            // The freshen/compile-assert guard: a stale output is deleted
+            // BEFORE the compile, and a missing output after a "green"
+            // compile is a loud failure, never a silently reused object.
             let _ = std::fs::remove_file(&out_abs);
             self.compile(gxx, "rederive.objects", src_rel, defines, &out_rel, class);
             if !out_abs.is_file() {
@@ -6582,6 +7071,10 @@ impl Gc {
         self.results.tally("pass", "positive");
         println!("== rederive: {}/{} objects byte-identical to goldens/gc apart from the producer stamp ==", FROZEN_PLAN.len(), FROZEN_PLAN.len());
 
+        // ---- the shared-object control: the skeleton compiled under the
+        // STM32F769 row's defines must tie the frozen an500 skeleton byte for
+        // byte (its handle tables are 64 slots on every row), which is the
+        // fact that lets one skel-row.o serve both rows' images.
         println!("== case gc.f769-shared-control (compile-tier control) ==");
         let shared_rel = "src/kernel/target/gc-gate/obj/skel-row-f769-control.o";
         let shared_abs = self.repo.join(shared_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -6596,7 +7089,7 @@ impl Gc {
         );
         let shared_got = match sha256_without_stamp(&facts, &shared_abs, &stripped.join("f769-control.o")) {
             Ok(s) => s,
-            Err(e) => self.fail("gc.f769-shared-control", &format!("the skeleton's compile under the F769 row produced no object, or the copier refused it ({e})")),
+            Err(e) => self.fail("gc.f769-shared-control", &format!("the skeleton's compile under the STM32F769 row produced no object, or the copier refused it ({e})")),
         };
         let frozen_abs = self.repo.join("goldens").join("gc").join("skel-row.o");
         let shared_want = match sha256_without_stamp(&facts, &frozen_abs, &stripped.join("skel-row.o")) {
@@ -6604,11 +7097,11 @@ impl Gc {
             Err(e) => self.fail("gc.f769-shared-control", &format!("goldens/gc/skel-row.o unreadable, or the copier refused it: {e}")),
         };
         println!("   the frozen skeleton's producer stamp (report-only): '{}'", producer_stamp_of(&frozen_abs));
-        println!("   the F769 compile's producer stamp (report-only): '{}'", producer_stamp_of(&shared_abs));
+        println!("   the STM32F769 compile's producer stamp (report-only): '{}'", producer_stamp_of(&shared_abs));
         if shared_got != shared_want {
             self.fail(
                 "gc.f769-shared-control",
-                &format!("the skeleton under the F769 row's defines compiled to {shared_got}, not the frozen an500 skel-row.o {shared_want}, apart from the producer stamp: the rows no longer share the skeleton, so the F769 image needs its own frozen skeleton object"),
+                &format!("the skeleton under the STM32F769 row's defines compiled to {shared_got}, not the frozen an500 skel-row.o {shared_want}, apart from the producer stamp: the rows no longer share the skeleton, so the STM32F769 image needs its own frozen skeleton object"),
             );
         }
         let frozen_bytes = match std::fs::read(&frozen_abs) {
@@ -6642,7 +7135,7 @@ impl Gc {
             "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc-rederive\",\"case\":\"gc.f769-shared-control\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"shared_sha\":\"{shared_want}\"}}}}"
         ));
         self.results.tally("pass", "positive");
-        println!("== case gc.f769-shared-control: PASS (the skeleton under the F769 row's defines ties the frozen an500 skel-row.o {} apart from the producer stamp: one skeleton object serves both rows; a copy with one code byte moved refused) ==", &shared_want[..16]);
+        println!("== case gc.f769-shared-control: PASS (the skeleton under the STM32F769 row's defines ties the frozen an500 skel-row.o {} apart from the producer stamp: one skeleton object serves both rows; a copy with one code byte moved refused) ==", &shared_want[..16]);
 
         self.run_sdk_row_tie(gxx, &facts, &stripped);
 
@@ -6742,7 +7235,7 @@ pub fn run(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "{DISPLAY}: PASS (37/37 cases incl. 19 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        "{DISPLAY}: PASS (38/38 cases incl. 20 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
         PENDING.len(),
         INTERNAL_CASES.len(),
         qemu_v,
@@ -6752,8 +7245,8 @@ pub fn run(repo: &Path) -> ! {
     exit(0);
 }
 
-/// The re-derivation leg: the only place the image-tier C++
-/// compiler is needed since the objects were committed.
+/// The re-derivation leg: the only place the image-tier C++ compiler is
+/// needed.
 /// Recompiles the full frozen plan and byte-asserts it against
 /// goldens/gc, then runs the compile-tier posture control. Needs the
 /// compiler of record (RHU_CLANG -> tools/toolchains/clang.local -> refuse);
@@ -6791,6 +7284,9 @@ pub fn rederive(repo: &Path) -> ! {
         std::process::id(),
         gxx.version
     ));
+    // The manifest pin is verified FIRST so the byte-assert target is
+    // itself of-record (a drifted golden must fail as a moved frozen
+    // artifact, not masquerade as a compile delta).
     let mpath = repo.join("goldens").join("gc").join("MANIFEST.md");
     match sha256_file(&mpath) {
         Ok(s) if s == SHA_FROZEN_MANIFEST => {}
@@ -6810,7 +7306,7 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "GC REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; the F769 row's shared skeleton ties the an500 object apart from the stamp, a copy with one code byte moved refused; every row of the SDK's board table names collector objects that tie their own row's declaration, the table with a borrowed heap object refused; posture control refused at compile)  [{}]",
+        "GC REDERIVE: PASS ({}/{} frozen objects re-derived byte-identical apart from the producer stamp; the STM32F769 row's shared skeleton ties the an500 object apart from the stamp, a copy with one code byte moved refused; every row of the SDK's board table names collector objects that tie their own row's declaration, the table with a borrowed heap object refused; posture control refused at compile)  [{}]",
         FROZEN_PLAN.len(),
         FROZEN_PLAN.len(),
         gxx.version
@@ -6861,6 +7357,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         facts.version
     ));
 
+    // Doctored bytes vs a recorded sha: flip one byte of a real vendored
+    // file into a fixture and hash it -- the comparison must reject.
     let real = repo
         .join("src")
         .join("vendor")
@@ -6906,6 +7404,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         sc.probe(id, broke, !parse_vendored_manifest(&format!("{bullet}\n  `{tok_sha}`\n")).is_empty());
     }
 
+    // Doctored manifest sha: a well-formed record with a wrong sha for the
+    // real file must mismatch.
     let fake = parse_vendored_manifest(
         "- `gcinterface/gcinterface.h`\n  `0000000000000000000000000000000000000000000000000000000000000000`\n",
     );
@@ -6919,6 +7419,11 @@ pub fn selfcheck(repo: &Path) -> ! {
         fake_matches,
     );
 
+    // Frozen-object armor (the payload gate's sha family on this gate's
+    // tier): a frozen world object with one appended byte must be
+    // rejected against its manifest record; the untouched object must be
+    // accepted. The record comes from the REAL manifest via the same
+    // parser the gate runs.
     let gc_manifest_path = repo.join("goldens").join("gc").join("MANIFEST.md");
     let gc_manifest_text = std::fs::read_to_string(&gc_manifest_path).unwrap_or_default();
     let gc_records = parse_vendored_manifest(&gc_manifest_text);
@@ -6944,6 +7449,9 @@ pub fn selfcheck(repo: &Path) -> ! {
         !bare_row.is_empty() && frozen_real_sha == bare_row,
     );
 
+    // Frozen-manifest armor: the manifest's own bytes tie an in-code pin
+    // (the independent anchor); one flipped byte must be rejected, the
+    // real file accepted.
     let mut gc_manifest_bytes = std::fs::read(&gc_manifest_path).unwrap_or_default();
     if let Some(b) = gc_manifest_bytes.first_mut() {
         *b ^= 0x01;
@@ -6962,6 +7470,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         sha256_file(&gc_manifest_path).map(|h| h == SHA_FROZEN_MANIFEST).unwrap_or(false),
     );
 
+    // Coverage: a file on disk with no record must be reported. Model it
+    // on the parsed real manifest vs a synthetic listing with an extra.
     let manifest_text = std::fs::read_to_string(repo.join("src").join("VENDORED.md")).unwrap_or_default();
     let records = parse_vendored_manifest(&manifest_text);
     let mut with_extra: Vec<String> = records.iter().map(|(p, _)| p.clone()).collect();
@@ -6973,6 +7483,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         extra_covered,
     );
 
+    // Version macro doctored: a header text with the wrong major must not
+    // read as the pinned value.
     let doctored_hdr = "#define GC_INTERFACE_MAJOR_VERSION 4\n#define GC_INTERFACE_MINOR_VERSION 8\n";
     sc.probe(
         "version-major-doctored",
@@ -6980,6 +7492,9 @@ pub fn selfcheck(repo: &Path) -> ! {
         extract_define(doctored_hdr, "GC_INTERFACE_MAJOR_VERSION") == Some(GC_INTERFACE_MAJOR),
     );
 
+    // Import-closure pin: an extra import must break the exact-set match,
+    // and a vanished import must too (both directions of the world-change
+    // tripwire).
     let mut with_extra_import: Vec<String> = IMPORTS_BARE.iter().map(|s| s.to_string()).collect();
     with_extra_import.push("malloc".to_string());
     with_extra_import.sort();
@@ -6997,6 +7512,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         imports_match(&missing, &IMPORTS_BARE),
     );
 
+    // Forbidden-family sweep: an unwind import must be caught.
     let unwindy = vec!["_Unwind_Resume".to_string(), "abort".to_string()];
     sc.probe(
         "forbidden-family-unwind",
@@ -7004,12 +7520,15 @@ pub fn selfcheck(repo: &Path) -> ! {
         forbidden_import(&unwindy).is_none(),
     );
 
+    // Order assert: a transcript with the report BEFORE the version print
+    // must be rejected (the prints-before-it-reports property).
     let reversed = b"[mgc-skel] GC_VersionInfo reporting major=5 minor=8\n[mgc-skel] GC_VersionInfo ENTER (EE passed\n".to_vec();
     sc.probe(
         "handshake-order-reversed",
         "a report-before-print transcript satisfying the order assert",
         in_order(&reversed, &["GC_VersionInfo ENTER", "GC_VersionInfo reporting"]),
     );
+    // ... and a transcript missing a marker entirely must be rejected.
     let missing_marker = b"[mgc-skel] GC_VersionInfo ENTER (EE passed\n".to_vec();
     sc.probe(
         "handshake-order-missing",
@@ -7017,6 +7536,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         in_order(&missing_marker, &["GC_VersionInfo ENTER", "GC_VersionInfo reporting"]),
     );
 
+    // The positive case's forbidden sweep must catch a refusal line.
     let refused = b"[gc-host] GC ACTIVATION REFUSED: reported {4,8}\n".to_vec();
     sc.probe(
         "positive-with-refusal",
@@ -7024,6 +7544,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         !contains_fixed(&refused, "REFUSED"),
     );
 
+    // The control's tuple pin: a doctored transcript reporting the GOOD
+    // major must not satisfy the control's bad-report pin.
     let good_report = b"[mgc-skel] GC_VersionInfo reporting major=5 minor=8 build=0\n".to_vec();
     let bad_report = format!(
         "[mgc-skel] GC_VersionInfo reporting major={} minor={GC_INTERFACE_MINOR} build=0",
@@ -7035,6 +7557,9 @@ pub fn selfcheck(repo: &Path) -> ! {
         contains_fixed(&good_report, &bad_report),
     );
 
+    // Accept side: the real manifest parses to a non-empty record set that
+    // exactly covers src/vendor on disk, every sha ties, and the real
+    // header yields the pinned tuple.
     sc.accept_probe(
         "manifest-parses",
         "the real src/VENDORED.md parses to a non-empty record set",
@@ -7063,6 +7588,7 @@ pub fn selfcheck(repo: &Path) -> ! {
             && extract_define(&header_text, "GC_INTERFACE_MINOR_VERSION") == Some(GC_INTERFACE_MINOR)
             && extract_define(&header_text, "EE_INTERFACE_MAJOR_VERSION") == Some(EE_INTERFACE_MAJOR),
     );
+    // The import pin and order assert accept their genuine shapes.
     let genuine_imports: Vec<String> = {
         let mut v: Vec<String> = IMPORTS_BARE.iter().map(|s| s.to_string()).collect();
         v.sort();
@@ -7083,6 +7609,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         ),
     );
 
+    // gc.B checkers: the call-inventory union pin, both directions.
     let mut inv_extra: Vec<String> = INVENTORY_DRIVE.iter().map(|s| s.to_string()).collect();
     inv_extra.push("IGCHeap::Alloc".to_string());
     inv_extra.sort();
@@ -7099,6 +7626,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         "a vanished call head satisfying the exact-inventory pin",
         imports_match(&inv_missing, &INVENTORY_DRIVE),
     );
+    // The union parser on a genuine-shaped transcript: paren form,
+    // space form, a throttled rider, a duplicate, CRLF wire bytes.
     let inv_raw = b"[mgc-skel] call IGCHeap::Initialize -> S_OK\r\n[mgc-skel] call IGCHeap::WhichGeneration(0x20035004) -> 0 (heap)\r\n[mgc-skel] call IGCHeap::GetTotalBytesInUse -> 116 (call #1024)\r\n[mgc-skel] call IGCHeap::WhichGeneration(0x20014b08) -> 2147483647 (not on heap)\r\n[mgc-skel] IGCHeap::Alloc(ctx=0x0 size=24 flags=0x0)\r\n".to_vec();
     let inv_got = call_union(&inv_raw);
     sc.accept_probe(
@@ -7112,6 +7641,8 @@ pub fn selfcheck(repo: &Path) -> ! {
             ],
     );
 
+    // The surface censuses: a deleted declaration must move the header
+    // count; the REF parser must never count the macro's define line.
     let header_text_ee =
         std::fs::read_to_string(repo.join("src").join("vendor").join("gcenv").join("gcenv.ee.h")).unwrap_or_default();
     let real_decls = gctoee_decl_names(&header_text_ee);
@@ -7149,6 +7680,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         real_decls.len() == EE_SURFACE && real_decls == real_refs,
     );
 
+    // The mangled-name extractor: alien and malformed symbols must not
+    // blend into the surface; the genuine shape must extract exactly.
     sc.probe(
         "mangled-alien",
         "a non-flat-interface import reading as a surface method",
@@ -7166,6 +7699,8 @@ pub fn selfcheck(repo: &Path) -> ! {
             == Some("StompWriteBarrier"),
     );
 
+    // The seam's spelling tie: a demand the archive spells otherwise, or
+    // does not define at all, must be caught; the genuine pair passes.
     let spelled: Vec<String> = [
         "_ZN15GCToEEInterface9GetThreadEv",
         "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
@@ -7194,6 +7729,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         seam_spelling_fault(&absent, &spelled).is_none(),
     );
 
+    // The control's negative-space check: a heap line in the
+    // bare-skeleton control transcript must be caught.
     let ctl_with_heap = b"[gc-host] GC ACTIVATION OK\n[mgc-heap] region [0x0,0x0) 2048 KB via shim mmap\n[mgc-skel] FAIL-FAST: first object allocation\n".to_vec();
     sc.probe(
         "control-heap-line",
@@ -7201,6 +7738,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         !contains_fixed(&ctl_with_heap, "[mgc-heap]"),
     );
 
+    // The census-counters pin: a moved counter must not satisfy the
+    // exact pinned line.
     let census_doctored = b"[mgc-heap] allocs=6 bytes=112 pads=1 null_returns=0 max_size=28 (flags=0x0 at alloc #2)\n".to_vec();
     sc.probe(
         "census-counters-doctored",
@@ -7211,6 +7750,10 @@ pub fn selfcheck(repo: &Path) -> ! {
         ),
     );
 
+    // gc.C checkers. The union parser must carry the skeleton's slot
+    // index inside a bracketed head exactly as printed (a bare
+    // RegisterFrozenSegment head would be a DIFFERENT head and must
+    // mismatch the pinned inventory).
     let frozen_raw =
         b"[mgc-skel] call IGCHeap::RegisterFrozenSegment[0](mem=0x20014000 firstObj=+4 allocated=28 commit=32 reserved=32)\r\n"
             .to_vec();
@@ -7232,6 +7775,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         imports_match(&inv_bare_bracket, &INVENTORY_COLLECT),
     );
 
+    // The mark-census detector must BITE the break-roots transcript:
+    // none of the positive census pins may match the zeroed lines.
     let break_fixture = b"[mgc-coll] BREAK_ROOTS: ALL root scanning SUPPRESSED (negative control)\r\n[mgc-coll] roots: stacks=0 handles=0 (weak_skipped=0) dep_seen=0 dep_marked=0 finq=0 frozen_objs=0 frozen_edges=0\r\n[mgc-coll] mark census #1: roots=0 marked=0 marked_bytes=0 used_bytes=144 live_ratio~0% stack_hw=0 of 8192\r\n".to_vec();
     sc.probe(
         "break-census-passes-positive",
@@ -7246,6 +7791,8 @@ pub fn selfcheck(repo: &Path) -> ! {
             && contains_fixed(&break_fixture, "mark census #1: roots=0 marked=0"),
     );
 
+    // The callback bracket is an ORDER claim: a RestartEE-before-
+    // SuspendEE transcript must be rejected by the order assert.
     let bracket_reversed =
         b"[gc-host] EE RestartEE: worker resumed; counter ADVANCED within the bounded window\r\n[gc-host] EE SuspendEE(reason=1): worker tid=2 suspended\r\n"
             .to_vec();
@@ -7255,6 +7802,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         in_order(&bracket_reversed, &["EE SuspendEE(reason=1)", "EE RestartEE:"]),
     );
 
+    // The suspension-verdict pin: a transcript whose SuspendEE line
+    // lacks the counter-frozen verdict must not satisfy it.
     let no_verdict = b"[gc-host] EE SuspendEE(reason=1): worker tid=2 suspended\r\n".to_vec();
     sc.probe(
         "suspend-without-verdict",
@@ -7265,6 +7814,9 @@ pub fn selfcheck(repo: &Path) -> ! {
         ),
     );
 
+    // The collect closures: the break object's shrunken import set
+    // (GcScanRoots and the skeleton root surfaces compiled out) must
+    // not satisfy the full mark-stage pin, and vice versa.
     let break_set: Vec<String> = IMPORTS_COLLECT_BREAK.iter().map(|s| s.to_string()).collect();
     sc.probe(
         "collect-break-closure-crossmatch",
@@ -7282,6 +7834,9 @@ pub fn selfcheck(repo: &Path) -> ! {
     );
 
 
+    // The death-line detector must BITE the BREAK_WEAK transcript: the
+    // zeroed-nulling line may not satisfy the positive death pin, and
+    // the stale-slot probe line may not satisfy the dead-True pin.
     let weak_fixture = b"[mgc-coll] BREAK_WEAK: weak nulling SUPPRESSED (negative control)\r\n[mgc-coll] death #1: ws_null=0 wl_null=0 dep_clear=0 odd=0 | finq kept=1 eager=1 suppressed=1 promoted=2(+1 crit) freach_pending=3\r\n[gc-host] weak probe ws(#13): slot STALE non-null (dead=False)\r\n".to_vec();
     sc.probe(
         "break-weak-passes-positive",
@@ -7310,6 +7865,9 @@ pub fn selfcheck(repo: &Path) -> ! {
         imports_match(&sweep_dropped, &IMPORTS_COLLECT_SWEEP),
     );
 
+    // The window-fix detector: the corrupt-walk line must be caught by
+    // the positive forbidden sweep, and the control fixture must read
+    // as itself (loud, attributed, abort-class).
     let corrupt_fixture = b"[mgc-heap] BREAK_WINDOW_FIX: window plug+count SUPPRESSED (negative control)\r\n[mgc-coll] heap walk CORRUPT at 0x2100a038 (object #3, step=536873432, MT=0x0)\r\n[mgc-coll] FAIL-FAST: heap walk corrupt (size formula vs layout)\r\n".to_vec();
     sc.probe(
         "positive-with-corrupt-walk",
@@ -7323,6 +7881,10 @@ pub fn selfcheck(repo: &Path) -> ! {
             && contains_fixed(&corrupt_fixture, "FAIL-FAST: heap walk corrupt (size formula vs layout)"),
     );
 
+    // The EINTR elimination slice: a doctored transcript with a Set
+    // BETWEEN parking and waking must be caught by the slice check
+    // (in_order alone cannot see it -- the Set string also appears
+    // legitimately earlier, which is exactly why the slice exists).
     let parking2 = "[gc-host] waiter: parking on the GC-done event (epoch 2)";
     let woken2 = "[gc-host] waiter: woken (epoch 2)";
     let doctored_eintr = format!(
@@ -7352,12 +7914,16 @@ pub fn selfcheck(repo: &Path) -> ! {
         genuine_clean,
     );
 
+    // The refund-visibility pair: the control's unrefunded books line
+    // must not satisfy the positive posture-books pin.
     sc.probe(
         "break-books-pass-positive",
         "the refund-suppressed posture books satisfying the positive books pin",
         TN_BOOKS_BREAK == TN_BOOKS || contains_fixed(TN_BOOKS_BREAK.as_bytes(), TN_BOOKS),
     );
 
+    // The knob'd handle pool: a census claiming the 4096 default must
+    // not satisfy the gc.D 64-slot pin.
     let big_pool = TN_HANDLES_1.replace("of 64", "of 4096");
     sc.probe(
         "handle-pool-knob-doctored",
@@ -7365,45 +7931,61 @@ pub fn selfcheck(repo: &Path) -> ! {
         contains_fixed(big_pool.as_bytes(), TN_HANDLES_1),
     );
 
+    // ---- gc.E checkers: the row-header parser, the table-check rules,
+    // the cover-line recompute, and the posture-refusal detector.
 
+    // The real header parses to exactly the rows the gate expects
+    // (DECLARED_ROWS, the gate's own count -- one number for the gate and
+    // this probe, so a row added to the header moves both together).
     let hdr_text = std::fs::read_to_string(
         repo.join("src").join("gc").join("host").join("mgc_board_rows.h"),
     )
     .unwrap_or_default();
     sc.accept_probe(
         "row-parse-genuine",
-        "the real board-rows header parses to exactly 8 rows",
-        matches!(parse_board_rows(&hdr_text), Ok(ref r) if r.len() == 8),
+        &format!("the real board-rows header parses to exactly {DECLARED_ROWS} rows"),
+        matches!(parse_board_rows(&hdr_text), Ok(ref r) if r.len() == DECLARED_ROWS),
     );
 
+    // A synthetic one-row header, doctorable per probe.
     let mk = |heap_min: u64, cover: u64, kheap: u64, profile: &str, basis: &str| {
         format!(
-            "#if defined(MGC_HOST_ROW_TEST)\n#define MGC_ROW_BOARD \"st-stm32f769i-disco\"\n#define MGC_ROW_PROFILE \"{profile}\"\n#define MGC_ROW_BASIS \"{basis}\"\n#define MGC_ROW_HEAP_MIN_GUARANTEED_BYTES {heap_min}u\n#define MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES 8192u\n#define MGC_ROW_COVER_BYTES {cover}u\n#define MGC_ROW_KHEAP_BYTES {kheap}u\n#define MGC_ROW_STACK_DEFAULT 16384u\n#define MGC_ROW_STACK_CLAMP 24576u\n#define MGC_ROW_HANDLE_SLOTS 64u\n#define MGC_ROW_FOH_POOL_BYTES 16384u\n#define MGC_ROW_MARKSTACK_ENTRIES 2048u\n#define MGC_ROW_FINQ_CAP 256u\n#define MGC_ROW_OOM_RESERVE 8192u\n#define MGC_ROW_WINDOW_BYTES 4096u\n#define MGC_ROW_WINDOW_FLOOR 256u\n#define MGC_ROW_WALL_RETRIES 4u\n#define MGC_ROW_FROZEN_SEGS 8u\n#endif\n"
+            "#if defined(MGC_HOST_ROW_TEST)\n#define MGC_ROW_BOARD \"st-stm32f769i-disco\"\n#define MGC_ROW_PROFILE \"{profile}\"\n#define MGC_ROW_BASIS \"{basis}\"\n#define MGC_ROW_HEAP_MIN_GUARANTEED_BYTES {heap_min}u\n#define MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES 8192u\n#define MGC_ROW_COVER_BYTES {cover}u\n#define MGC_ROW_KHEAP_BYTES {kheap}u\n#define MGC_ROW_STACK_DEFAULT 16384u\n#define MGC_ROW_STACK_CLAMP 24576u\n#define MGC_ROW_HANDLE_SLOTS 64u\n#define MGC_ROW_FOH_POOL_BYTES 16384u\n#define MGC_ROW_MARKSTACK_ENTRIES 2048u\n#define MGC_ROW_FINQ_CAP 256u\n#define MGC_ROW_FINQ_RESERVE 16u\n#define MGC_ROW_OOM_RESERVE 8192u\n#define MGC_ROW_WINDOW_BYTES 4096u\n#define MGC_ROW_WINDOW_FLOOR 256u\n#define MGC_ROW_WALL_RETRIES 4u\n#define MGC_ROW_FROZEN_SEGS 8u\n#endif\n"
         )
     };
-    let gutted = mk(131072, 524288, 16384, "mini", "boot").replace("#define MGC_ROW_HEAP_MIN_GUARANTEED_BYTES 131072u\n", "");
+    let gutted = mk(98304, 524288, 16384, "mini", "boot").replace("#define MGC_ROW_HEAP_MIN_GUARANTEED_BYTES 98304u\n", "");
     sc.probe(
         "row-parse-gutted",
         "a row block missing the define of its least managed heap parsing as a row",
         parse_board_rows(&gutted).is_ok(),
     );
 
+    // The table-check rules against the STM32F769I-DISCO's geometry
+    // (DATA 0x20000000 + 512K, the map's floor of system memory 160K, the
+    // board's native heap 16K): the genuine small row sits exactly at the
+    // floor, so every doctored row below is refused by its own rule alone.
     let parse_one = |t: &str| parse_board_rows(t).ok().and_then(|r| r.into_iter().next());
-    let f769 = |r: &BoardRow| row_check(r, 0x2000_0000, 512 * 1024, 192 * 1024, 16384);
-    let genuine = parse_one(&mk(131072, 524288, 16384, "mini", "boot"));
+    let f769 = |r: &BoardRow| row_check(r, 0x2000_0000, 512 * 1024, 160 * 1024, 16384, None);
+    let genuine = parse_one(&mk(98304, 524288, 16384, "mini", "boot"));
     sc.accept_probe(
         "row-check-genuine-mini",
         "the mini row passes the table check against its own map geometry",
         matches!(genuine, Some(ref r) if f769(r).is_ok()),
     );
-    let fat = parse_one(&mk(196608, 524288, 16384, "mini", "boot"));
+    let fat = parse_one(&mk(131072, 524288, 16384, "mini", "boot"));
     sc.probe(
         "row-floor-overflow",
         "a least managed heap that does not fit the map's floor of system memory beside the other draws passing the floor rule",
         matches!(fat, Some(ref r) if f769(r).is_ok()),
     );
+    // The frozen object heap is a per-row draw inside the floor inequality
+    // and whole pages, and so is the unallocated amount: the small geometry
+    // with a 64K pool (over the floor), with a 5120-byte pool and with a
+    // 5120-byte unallocated amount (each under the floor, not paged) must
+    // be refused; two rows differing only in their pools must pass the
+    // uniform check, two rows differing in a uniform field must not.
     let unbudgeted = parse_one(
-        &mk(131072, 524288, 16384, "mini", "boot").replace("MGC_ROW_FOH_POOL_BYTES 16384u", "MGC_ROW_FOH_POOL_BYTES 65536u"),
+        &mk(98304, 524288, 16384, "mini", "boot").replace("MGC_ROW_FOH_POOL_BYTES 16384u", "MGC_ROW_FOH_POOL_BYTES 65536u"),
     );
     sc.probe(
         "row-foh-unbudgeted",
@@ -7411,7 +7993,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         matches!(unbudgeted, Some(ref r) if f769(r).is_ok()),
     );
     let unpaged = parse_one(
-        &mk(131072, 524288, 16384, "mini", "boot").replace("MGC_ROW_FOH_POOL_BYTES 16384u", "MGC_ROW_FOH_POOL_BYTES 5120u"),
+        &mk(98304, 524288, 16384, "mini", "boot").replace("MGC_ROW_FOH_POOL_BYTES 16384u", "MGC_ROW_FOH_POOL_BYTES 5120u"),
     );
     sc.probe(
         "row-foh-not-paged",
@@ -7419,7 +8001,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         matches!(unpaged, Some(ref r) if f769(r).is_ok()),
     );
     let unallocated_unpaged = parse_one(
-        &mk(131072, 524288, 16384, "mini", "boot").replace("MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES 8192u", "MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES 5120u"),
+        &mk(98304, 524288, 16384, "mini", "boot").replace("MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES 8192u", "MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES 5120u"),
     );
     sc.probe(
         "row-unallocated-not-paged",
@@ -7427,12 +8009,12 @@ pub fn selfcheck(repo: &Path) -> ! {
         matches!(unallocated_unpaged, Some(ref r) if f769(r).is_ok()),
     );
     let two_rows = |second: &str| {
-        let first = mk(131072, 524288, 16384, "mini", "boot");
+        let first = mk(98304, 524288, 16384, "mini", "boot");
         let second = second.replace("#if defined(MGC_HOST_ROW_TEST)", "#elif defined(MGC_HOST_ROW_TEST2)");
         parse_board_rows(&format!("{first}{second}")).ok()
     };
     let doctored_uniform = two_rows(
-        &mk(131072, 524288, 16384, "mini", "boot").replace("MGC_ROW_HANDLE_SLOTS 64u", "MGC_ROW_HANDLE_SLOTS 128u"),
+        &mk(98304, 524288, 16384, "mini", "boot").replace("MGC_ROW_HANDLE_SLOTS 64u", "MGC_ROW_HANDLE_SLOTS 128u"),
     );
     sc.probe(
         "rows-uniform-doctored",
@@ -7440,32 +8022,36 @@ pub fn selfcheck(repo: &Path) -> ! {
         matches!(doctored_uniform, Some(ref rows) if rows.len() == 2 && rows_uniform(rows).is_ok()),
     );
     let per_row_foh = two_rows(
-        &mk(131072, 524288, 16384, "mini", "boot").replace("MGC_ROW_FOH_POOL_BYTES 16384u", "MGC_ROW_FOH_POOL_BYTES 65536u"),
+        &mk(98304, 524288, 16384, "mini", "boot").replace("MGC_ROW_FOH_POOL_BYTES 16384u", "MGC_ROW_FOH_POOL_BYTES 65536u"),
     );
     sc.accept_probe(
         "rows-foh-per-row",
         "two rows differing only in their FOH pools accepted by the uniform check",
         matches!(per_row_foh, Some(ref rows) if rows.len() == 2 && rows_uniform(rows).is_ok()),
     );
-    let small_cover = parse_one(&mk(131072, 262144, 16384, "mini", "boot"));
+    let small_cover = parse_one(&mk(98304, 262144, 16384, "mini", "boot"));
     sc.probe(
         "row-cover-not-minimal",
         "a non-minimal cover passing the granule rule",
         matches!(small_cover, Some(ref r) if f769(r).is_ok()),
     );
-    let genuine2 = parse_one(&mk(131072, 524288, 16384, "mini", "boot"));
+    let genuine2 = parse_one(&mk(98304, 524288, 16384, "mini", "boot"));
     sc.probe(
         "row-kheap-mismatch",
         "a row kheap disagreeing with the board module's const passing the tie",
-        matches!(genuine2, Some(ref r) if row_check(r, 0x2000_0000, 512 * 1024, 192 * 1024, 32768).is_ok()),
+        matches!(genuine2, Some(ref r) if row_check(r, 0x2000_0000, 512 * 1024, 160 * 1024, 32768, None).is_ok()),
     );
-    let not_boot = parse_one(&mk(131072, 524288, 16384, "mini", "link"));
+    let not_boot = parse_one(&mk(98304, 524288, 16384, "mini", "link"));
     sc.probe(
         "row-basis-not-boot",
         "a row whose basis is not boot passing the basis rule",
         matches!(not_boot, Some(ref r) if f769(r).is_ok()),
     );
 
+    // The drive cases' table: every entry has the shape its checks need,
+    // and an entry whose control names no positive line that must be absent
+    // is refused; the frozen object heap's stop line carries the count the
+    // arithmetic gives, and a line one object further does not.
     let mut drive_names: Vec<&str> = DRIVE_CASES.iter().map(|c| c.name).collect();
     drive_names.sort_unstable();
     drive_names.dedup();
@@ -7492,6 +8078,10 @@ pub fn selfcheck(repo: &Path) -> ! {
         stop_line(frozen_stop_used(4096, 4, 16, 64) + 16) == FB_FULL,
     );
 
+    // The rule at boot as the gate recomputes it: the boot line's parse,
+    // the rule on the numbers the an500 row image printed, each clause
+    // against numbers doctored in that clause alone, and the host's
+    // system-memory line against the boot line.
     let boot_row = BoardRow {
         board: "mps2-an500".to_string(),
         profile: "suite".to_string(),
@@ -7506,6 +8096,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         foh: 65536,
         markstack: 8192,
         finq: 2048,
+        finq_reserve: 16,
         reserve: 65536,
         window: 4096,
         wfloor: 256,
@@ -7562,6 +8153,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         parse_sysmem_line(&sys_less).map(|l| sysmem_rule(&boot_row, boot_genuine, &l).is_ok()).unwrap_or(true),
     );
 
+    // The cover-line recompute: parse + arithmetic, both verdict shapes.
     let cover_ok = b"[mgc-heap] card cover: floor=0x20000000 span=2196 KB cards=2260 of 4160\r\n".to_vec();
     sc.accept_probe(
         "cover-line-parse",
@@ -7581,6 +8173,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         parse_cover_line(&cover_lie).map(|(_, s, c, _)| c == s + 64).unwrap_or(true),
     );
 
+    // The posture-refusal detector: the designed message both ways.
     let refusal_err = "src/gc/host/mgc_board_rows.h:52:2: error: #error \"evidence postures never ride a row image (census/compact/multirange carry their own images and goldens)\"";
     sc.accept_probe(
         "posture-refusal-text",
@@ -7594,6 +8187,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         clean_err.contains(ROW_REFUSAL_TEXT),
     );
 
+    // The free-pad case's detectors: the header-word readings in drive
+    // order, a CLOBBERED reading offered as intact, the forbidden sweep.
     let fp_ok = format!("{FP_INTACT_1}\r\n{FP_REUSE}\r\n{FP_INTACT_2}\r\n").into_bytes();
     sc.accept_probe(
         "free-pad-readings-in-order",
@@ -7618,6 +8213,9 @@ pub fn selfcheck(repo: &Path) -> ! {
         contains_fixed(&fp_clobbered, "(CLOBBERED)"),
     );
 
+    // The handle-pool case's detectors: the exact worker line against one
+    // alias, the exact census line against a leaked slot, the drive order,
+    // the call inventory against a missing head.
     let hp_alias = b"[gc-host] handle worker 0 (tid 4): 800000 creates, 800000 destroys, 1 aliases\r\n".to_vec();
     sc.probe(
         "handle-pool-alias-as-clean",
@@ -7696,6 +8294,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         stamp_at.is_some() && !stamp_base.is_empty() && stamp_sha == stamp_base && sha256_hex(&stamp_moved) != sha256_hex(&stamp_bytes),
     );
 
+    // The two class flag sets are one list apart from the class's two
+    // words: a copy with a third word moved is refused.
     sc.accept_probe(
         "class-flags-two-words",
         "the Cortex-M33 flag set is the Cortex-M7 set apart from the class's two words",

@@ -19,4 +19,5 @@ PASS shim-fdmap-dir-slash (a trailing slash names the same directory for stat, o
 PASS shim-fdmap-times-range (a nanosecond field outside 0..999999999 is EINVAL; the edges stick)
 PASS shim-fdmap-lock (two threads churning the tables: every read returned its writer's bytes and every name came and went)
 PASS shim-fdmap-bounds (offsets, counts and lengths checked in 64 bits against the stated maximum: EFBIG past it, EINVAL below zero, the bytes and the size untouched)
+PASS shim-fdmap-identity-leak (sixteen refused opens of the identity file past the band, each giving back the slot it took; the file opens and reads once a descriptor is free)
 SHIMTEST-FDMAP: ALL GOOD (explicit descriptor bands; the console never answers for a file)

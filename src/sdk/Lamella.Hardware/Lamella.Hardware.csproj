@@ -1,14 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- Lamella.Hardware: the board class. One class for every board,
-       built by name: the SDK generates the board's facts into a program
-       that references this package (the board table's row, read from the
-       package's boards/<row>.json at publish), and TargetBoard answers
-       them: the name, the maker, the product, the chip, the clock, the
-       pins by the labels printed on the board, the buses with the rates the
-       image serves. No reflection, no native call: the facts arrive through
-       SetBuildFacts from the generated source, before Main. Its one
-       dependency is the standard GPIO package. -->
+       built by name: the SDK generates the board's facts into a friend
+       assembly beside a program that references this package (the board
+       table's row, read from the package's boards/<row>.json at publish),
+       and TargetBoard answers them: the name, the maker, the product, the
+       chip, the clock, the pins by the labels printed on the board, the
+       buses with the rates the image serves. No reflection, no native
+       call: the facts arrive through SetBuildFacts from the generated
+       source, before Main. Its two dependencies are the standard GPIO
+       package and the bindings package whose analog classes the board
+       class returns. -->
   <PropertyGroup>
     <TargetFramework>net11.0</TargetFramework>
     <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">1.0.0-alpha.1</RhuSdkVersion>
@@ -17,6 +19,8 @@
     <AssemblyName>Lamella.Hardware</AssemblyName>
     <RootNamespace>Lamella.Hardware</RootNamespace>
     <Authors>Lamella LLC</Authors>
+    <RepositoryUrl>https://github.com/lamellaproject/lamella-rhu-for-dotnet</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <Company>Lamella LLC</Company>
     <Copyright>Copyright (c) 2026 Lamella LLC</Copyright>
     <Description>Microcontroller board support for .NET runtimes</Description>
@@ -32,11 +36,25 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <IncludeSymbols>false</IncludeSymbols>
     <PathMap>$(MSBuildProjectDirectory)=/rhu/src/sdk/Lamella.Hardware</PathMap>
+    <!-- The package's README beside this project, and its icon from the path
+         RhuIconPath names (the one icon of the three packages, beside the
+         projects), packed only when that file exists. -->
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RhuIconPath Condition="'$(RhuIconPath)' == ''">$(MSBuildThisFileDirectory)../icon.png</RhuIconPath>
+    <PackageIcon Condition="Exists('$(RhuIconPath)')">icon.png</PackageIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="System.Device.Gpio" Version="4.2.0" />
-    <None Include="NOTICE.package" Pack="true" PackagePath="NOTICE" />
+    <PackageReference Include="Iot.Device.Bindings" Version="4.2.0" />
+    <!-- The notice at the package root, under the name every Lamella package uses. -->
+    <None Include="NOTICE.txt" Pack="true" PackagePath="\" />
+    <None Update="README.md" Pack="true" PackagePath="/" />
+    <None Include="$(RhuIconPath)" Pack="true" PackagePath="icon.png" Condition="Exists('$(RhuIconPath)')" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Lamella.Hardware.Facts" />
   </ItemGroup>
 
 </Project>

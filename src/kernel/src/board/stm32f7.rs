@@ -18,7 +18,7 @@ const PCLK2_HZ: u32 = SYSCLK_HZ;
 /// The APB1 bus clock: the clock of the blocks that have no selection of
 /// their own (the family's SPI2 among them); a board's bus facts read it.
 #[cfg(not(stm32f7_pll216))]
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the facts of a board that states such a bus
 pub const PCLK1_HZ: u32 = SYSCLK_HZ;
 
 /// Clock posture 2 (the board's `-pll216` feature): PLL at 216 MHz off
@@ -32,7 +32,7 @@ pub const SYSCLK_HZ: u32 = 216_000_000;
 #[cfg(stm32f7_pll216)]
 const PCLK2_HZ: u32 = SYSCLK_HZ / 2;
 #[cfg(stm32f7_pll216)]
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the facts of a board that states such a bus
 pub const PCLK1_HZ: u32 = SYSCLK_HZ / 4;
 
 /// SysTick rate.
@@ -41,6 +41,10 @@ pub const TICK_HZ: u32 = 1_000;
 /// Stack for the kmain thread (the boot thread's continuation).
 pub const KMAIN_STACK_BYTES: usize = 16 * 1024;
 
+// FPU shape: PER PART, stated in each board file against the part's own
+// datasheet (the F74x/F75x parts single-precision, the STM32F746NG per
+// DS10916; the F76x/F77x parts double-precision, the STM32F769NI per
+// DS11532); the board facade ties each board's fact to its emulation feature.
 /// The cycle counter the lost-tick witness reads: the core's data
 /// watchpoint and trace unit counts processor cycles, enabled and
 /// verified to advance at the scheduler's init.
@@ -81,8 +85,7 @@ const CFGR_PPRE2_DIV2: u32 = 0b100 << 13;
 
 /// PLLCFGR fields: PLLM [5:0], PLLN [14:6], PLLP [17:16] (00 = /2),
 /// PLLSRC [22] (0 = HSI), PLLQ [27:24]. PLLQ 9 taps the 432 MHz VCO to
-/// a well-formed 48 MHz -- the random source's clock on this posture; a
-/// garbage field is not worth the two bits it saves.
+/// a well-formed 48 MHz -- the random source's clock on this posture.
 #[cfg(stm32f7_pll216)]
 const PLLM: u32 = 8;
 #[cfg(stm32f7_pll216)]
@@ -197,7 +200,7 @@ pub fn clock_init() {
     ring::boot_mark();
 }
 
-/// Boring posture: no clock line in the banner (the banked transcript
+/// Boring posture: no clock line in the banner (the recorded boot transcript
 /// surface stands byte-identical).
 #[cfg(not(stm32f7_pll216))]
 pub fn clock_readback() -> Option<crate::board::ClockReadback> {
@@ -218,6 +221,7 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
 #[cfg(stm32f7_pll216)]
 pub fn clock_init() {
     unsafe {
+        // Downshift to a known-safe HSI-16 world.
         write_volatile(RCC_CR, read_volatile(RCC_CR) | CR_HSION);
         while read_volatile(RCC_CR) & CR_HSIRDY == 0 {}
         let cfgr = read_volatile(RCC_CFGR)
@@ -225,27 +229,35 @@ pub fn clock_init() {
         write_volatile(RCC_CFGR, cfgr);
         while read_volatile(RCC_CFGR) & CFGR_SWS != 0 {}
 
+        // PLL off and unlocked before PLLCFGR may be written.
         write_volatile(RCC_CR, read_volatile(RCC_CR) & !CR_PLLON);
         while read_volatile(RCC_CR) & CR_PLLRDY != 0 {}
 
+        // Regulator to Scale 1, stated explicitly (it is the reset
+        // value; a resident may have changed it).
         write_volatile(RCC_APB1ENR, read_volatile(RCC_APB1ENR) | APB1ENR_PWREN);
         let _ = read_volatile(RCC_APB1ENR);
         write_volatile(PWR_CR1, read_volatile(PWR_CR1) | CR1_VOS_SCALE1);
 
+        // 7 wait states before anything runs fast.
         let acr = read_volatile(FLASH_ACR) & !ACR_LATENCY;
         write_volatile(FLASH_ACR, acr | ACR_LATENCY_7WS);
         while read_volatile(FLASH_ACR) & ACR_LATENCY != ACR_LATENCY_7WS {}
 
+        // HSI/8 x216 /2: VCO in at 2 MHz, VCO out at its 432 ceiling,
+        // SYSCLK 216. PLLSRC stays 0 (HSI); PLLP bits 00 = /2.
         write_volatile(RCC_PLLCFGR, PLLCFGR_VALUE);
         write_volatile(RCC_CR, read_volatile(RCC_CR) | CR_PLLON);
         while read_volatile(RCC_CR) & CR_PLLRDY == 0 {}
         while read_volatile(PWR_CSR1) & CSR1_VOSRDY == 0 {}
 
+        // Over-drive, both handshakes, still on HSI.
         write_volatile(PWR_CR1, read_volatile(PWR_CR1) | CR1_ODEN);
         while read_volatile(PWR_CSR1) & CSR1_ODRDY == 0 {}
         write_volatile(PWR_CR1, read_volatile(PWR_CR1) | CR1_ODSWEN);
         while read_volatile(PWR_CSR1) & CSR1_ODSWRDY == 0 {}
 
+        // APB caps first (PCLK1 54 MHz, PCLK2 108 MHz), then the switch.
         let cfgr = read_volatile(RCC_CFGR) & !(CFGR_PPRE1 | CFGR_PPRE2);
         write_volatile(RCC_CFGR, cfgr | CFGR_PPRE1_DIV4 | CFGR_PPRE2_DIV2);
         let cfgr = read_volatile(RCC_CFGR) & !CFGR_SW;
@@ -324,6 +336,7 @@ unsafe fn console_hw_init() {
         route_usart1_pin(rx_port, rx_pin);
 
         write_volatile(USART1_CR1, 0);
+        // Round to nearest: truncation costs 0.6% at 16 MHz, rounding 0.1%.
         write_volatile(USART1_BRR, (PCLK2_HZ + BAUD / 2) / BAUD);
         write_volatile(USART1_CR1, CR1_UE | CR1_TE | CR1_RE);
     }
@@ -338,6 +351,37 @@ unsafe fn console_hw_init() {
 /// so the report that follows goes through the wire synchronously. The
 /// console mirror is not touched here (see `clock_init`), so a panic
 /// transcript appends to the boot's.
+/// The core's cycle counter (the Data Watchpoint and Trace unit), armed for
+/// the SDRAM bring-up's pauses and the card host's timing: the trace enable
+/// first (the unit is clocked by it), then the unit's software lock opened
+/// with the CoreSight key through DWT_LAR -- on the Cortex-M7 a write to
+/// DWT_CTRL from the core is ignored while the lock holds, while a debugger's
+/// write is not, and a counter a debugger once enabled survives every system
+/// reset -- then the counter enable; the counter is read until it advances,
+/// at most 64 reads, else the boot dies loud here instead of pausing forever.
+pub fn arm_cycle_counter() {
+    const DEMCR: *mut u32 = 0xE000_EDFC as *mut u32;
+    const DEMCR_TRCENA: u32 = 1 << 24;
+    const DWT_CTRL: *mut u32 = 0xE000_1000 as *mut u32;
+    const DWT_CTRL_CYCCNTENA: u32 = 1 << 0;
+    const DWT_CYCCNT: *const u32 = 0xE000_1004 as *const u32;
+    const DWT_LAR: *mut u32 = 0xE000_1FB0 as *mut u32;
+    const CORESIGHT_UNLOCK: u32 = 0xC5AC_CE55;
+    unsafe {
+        write_volatile(DEMCR, read_volatile(DEMCR) | DEMCR_TRCENA);
+        write_volatile(DWT_LAR, CORESIGHT_UNLOCK);
+        write_volatile(DWT_CTRL, read_volatile(DWT_CTRL) | DWT_CTRL_CYCCNTENA);
+        let start = read_volatile(DWT_CYCCNT);
+        let mut reads = 0u32;
+        while read_volatile(DWT_CYCCNT) == start {
+            reads += 1;
+            if reads > 64 {
+                panic!("the core's cycle counter does not count (DWT_CTRL reads {:#010x} after the enable): the bring-up's pauses and the card host's timing rest on it", read_volatile(DWT_CTRL));
+            }
+        }
+    }
+}
+
 pub fn console_init() {
     unsafe {
         if ring::mode() == 0 {
@@ -414,12 +458,13 @@ pub fn console_getb() -> Option<u8> {
     }
 }
 
-/// Whether address 0 is readable memory on this row -- the low-address
-/// question's per-row record, MEASURED on the part (a read that returns
+/// Whether address 0 is readable memory on this row (a read that returns
 /// a word, or a bus fault): the api flavor's observation reads it before
-/// it touches the address.
+/// it touches the address. With the null-page guard the protection unit denies the first
+/// page on every row, so a guarded image never attempts the read; the
+/// `null-guard-off` control image alone does.
 /// This family: the ITCM RAM at 0 on every part it serves.
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the api flavor's observation only
 pub const ADDRESS_ZERO_READABLE: bool = true;
 
 /// The entropy posture of the family's rows, feature-selected with the
@@ -443,7 +488,7 @@ pub const ENTROPY: super::EntropyPosture = super::EntropyPosture::AbsentByPostur
 };
 /// Whether this row carries a real-time clock the kernel reads at boot and
 /// writes at an explicit set.
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the api flavor's calendar check
 pub const RTC_PRESENT: bool = false;
 /// The calendar banner's text for the family's rows, constant per image:
 /// both boards mount the 32.768 kHz crystal and carry no backup cell.

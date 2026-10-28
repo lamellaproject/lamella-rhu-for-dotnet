@@ -46,7 +46,7 @@
  *    own -- see the note below the fail-fast helper);
  *  - no exceptions, no RTTI, no thread-safe-static guards, no atexit.
  *
- * Linked ONLY into skeleton-tier gate builds: it provides the strong
+ * Linked only into the collector gate's skeleton images: it provides the strong
  * __mgc_dlopen_hook / __mgc_dlsym_hook pair the host shim's weak seam
  * expects.
  *
@@ -55,8 +55,7 @@
  * write-barrier stomp, GarbageCollect dumps the allocation census
  * before its fail-fast when no collector is linked, and the
  * heap-membership queries answer for the real region. Without the
- * define this file is byte-for-byte the bare skeleton -- the skeleton
- * gate case keeps gating it.
+ * define this file is the bare skeleton.
  */
 
 #include "mgc_env.h"
@@ -65,6 +64,7 @@
 #include "gcenv.object.h" /* ObjHeader/MethodTable/Object mirrors */
 #include "gcdesc.h"       /* CGCDesc series format (compile-proof for the collector) */
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -73,6 +73,8 @@
  * ns), behind the handle pool's lock and, under the windows surface,
  * behind the GC-done event. */
 #include "rhu.h"
+static_assert(RHU_LOG_SILENT == MGC_LOG_SILENT && RHU_LOG_VERBOSE == MGC_LOG_VERBOSE,
+              "the collector's level words are the kernel's");
 
 extern "C" void abort(void);
 extern "C" int  sched_yield(void);
@@ -126,8 +128,30 @@ extern "C" uint32_t mgc_collect_total(void);
 /* logging + fail-fast                                                */
 /* ------------------------------------------------------------------ */
 
-#define SKLOG(fmt, ...) \
-    do { printf("[mgc-skel] " fmt "\n", ##__VA_ARGS__); fflush(stdout); } while (0)
+/* The log-door stage: one line of the collector's log on the kernel's LOG
+ * stream (mgc_env.h): the image's level read once, the line formatted only
+ * when it will print, ONE write through the door. */
+static void mgc_log(uint32_t level, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void mgc_log(uint32_t level, const char *fmt, ...)
+{
+    static int32_t image_level = 0;
+    if (image_level == 0)
+        image_level = rhu_log_level();
+    if ((int32_t)level > image_level)
+        return;
+    char line[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    if (n <= 0)
+        return;
+    if ((size_t)n >= sizeof line)
+        n = (int)sizeof line - 1;
+    rhu_log_write(level, line, (uint32_t)n);
+}
+
+#define SKLOG(fmt, ...) mgc_log(MGC_LOG_VERBOSE, "[mgc-skel] " fmt "\n", ##__VA_ARGS__)
 
 /* One call-inventory line shape, greppable: "call <Iface>::<Method>" */
 #define SKCALL(fmt, ...) SKLOG("call " fmt, ##__VA_ARGS__)
@@ -135,7 +159,7 @@ extern "C" uint32_t mgc_collect_total(void);
 /* The handle entries can be called by the hundred thousand -- by a program
  * that churns handles, and by the gate case that races the pool from two
  * threads -- so their call log keeps the first 32 calls of each entry in
- * full (every boot on record makes fewer) and then every 65536th with the
+ * full (a boot makes fewer than that) and then every 65536th with the
  * running count. The counter is atomic: two threads log through it. */
 #define SKCALL_H(ctr, fmt, ...) \
     do { static uint32_t ctr##_n; \
@@ -160,9 +184,8 @@ extern "C" uint32_t mgc_collect_total(void);
 
 static void mgc_failfast(const char* what)
 {
-    printf("[mgc-skel] FAIL-FAST: %s -- bare skeleton by design: no collector behind the interface\n",
+    mgc_log(MGC_LOG_SILENT, "[mgc-skel] FAIL-FAST: %s -- bare skeleton by design: no collector behind the interface\n",
            what);
-    fflush(stdout);
     abort();
 }
 
@@ -194,8 +217,8 @@ static void mgc_failfast(const char* what)
  * references and task-era handles land here once a live allocator
  * lets the run proceed, and the census records the real high-water
  * for collector sizing. The board rows make it a knob (the default's
- * slot arrays cost 57,344 B; the drive worlds run at 64 with a
- * measured live high-water of 8) and MGC_TUNE_LIVE adds SLOT REUSE --
+ * slot arrays cost 57,344 B; the verification images run at 64 with an
+ * observed live high-water of 8) and MGC_TUNE_LIVE adds SLOT REUSE --
  * without reuse any fixed pool is lifetime-bounded, which no
  * long-running application can accept. */
 #ifndef MGC_HANDLE_SLOTS
@@ -225,8 +248,7 @@ static uint32_t g_pool_lock;
 static void pool_lock(void)
 {
 #ifdef MGC_BREAK_HANDLE_LOCK
-    /* The negative control's knob: the pool runs unlocked, and says so
-     * once. */
+    /* Built with this define, the pool runs unlocked, and says so once. */
     static int said;
     if (!said) {
         said = 1;
@@ -596,12 +618,12 @@ extern "C" void mgc_skel_census(void)
             if (s->live[i]) live++;
             if (s->type[i] < 12) by_type[s->type[i]]++;
         }
-    /* One call per branch: the line's bytes as before when no segment was
-     * grown (the old SKLOG's text), the suffix naming the grown segments
-     * otherwise. (A separate print of the newline alone became a putchar
-     * import under the compiler's rewrite.) */
+    /* One call per branch: the plain line when no segment was grown, the
+     * same line with a suffix naming the grown segments otherwise. (One
+     * call, not the line and then the newline on its own: the compiler
+     * turns a lone newline print into a putchar import.) */
     if (g_seg_count)
-        printf("[mgc-skel] handles: created=%u live=%u of %u (reused=%u live_hw=%u) (types: ws=%u wl=%u strong=%u pinned=%u var=%u rc=%u dep=%u ap=%u sr=%u com=%u wip=%u xref=%u) (+%u grown segments of %u slots)\n",
+        mgc_log(MGC_LOG_VERBOSE, "[mgc-skel] handles: created=%u live=%u of %u (reused=%u live_hw=%u) (types: ws=%u wl=%u strong=%u pinned=%u var=%u rc=%u dep=%u ap=%u sr=%u com=%u wip=%u xref=%u) (+%u grown segments of %u slots)\n",
            g_slot_created, live, (unsigned)MGC_HANDLE_SLOTS,
            g_slot_reused, g_slot_live_hw,
            by_type[0], by_type[1], by_type[2], by_type[3], by_type[4],
@@ -609,13 +631,12 @@ extern "C" void mgc_skel_census(void)
            by_type[10], by_type[11],
                g_seg_count, (unsigned)MGC_SEG_SLOTS);
     else
-        printf("[mgc-skel] handles: created=%u live=%u of %u (reused=%u live_hw=%u) (types: ws=%u wl=%u strong=%u pinned=%u var=%u rc=%u dep=%u ap=%u sr=%u com=%u wip=%u xref=%u)\n",
+        mgc_log(MGC_LOG_VERBOSE, "[mgc-skel] handles: created=%u live=%u of %u (reused=%u live_hw=%u) (types: ws=%u wl=%u strong=%u pinned=%u var=%u rc=%u dep=%u ap=%u sr=%u com=%u wip=%u xref=%u)\n",
            g_slot_created, live, (unsigned)MGC_HANDLE_SLOTS,
            g_slot_reused, g_slot_live_hw,
            by_type[0], by_type[1], by_type[2], by_type[3], by_type[4],
            by_type[5], by_type[6], by_type[7], by_type[8], by_type[9],
            by_type[10], by_type[11]);
-    fflush(stdout);
 #else
     SKLOG("handles: created=%u live=%u of %u (types: ws=%u wl=%u strong=%u pinned=%u var=%u rc=%u dep=%u ap=%u sr=%u com=%u wip=%u xref=%u)",
           g_slot_next, live, (unsigned)MGC_HANDLE_SLOTS,
@@ -1224,8 +1245,8 @@ public:
     {
         (void)lohSizeKnown; (void)lohSize; (void)disallowFullBlockingGC;
 #ifdef MGC_BREAK_NOGC_CLAIM
-        /* The negative control's knob: the entry claims success with
-         * nothing entered, and says so. */
+        /* Built with this define, the entry claims success with nothing
+         * entered, and says so. */
         SKLOG("BREAK_NOGC_CLAIM: the entry claims success with nothing entered (the negative control's knob)");
         SKCALL("IGCHeap::StartNoGCRegion(size=%lu) -> success (claimed; nothing entered)",
                (unsigned long)totalSize);
@@ -1278,8 +1299,8 @@ public:
         return mgc_heap_collect(generation, low_memory_p ? 1 : 0, mode);
 #else
 #ifdef MGC_HEAP_LIVE
-        /* Collection-entry evidence: what the world looked like when the
-         * first collection was demanded. */
+        /* The allocation census at the first collection request, printed
+         * before the fail-fast below. */
         mgc_heap_census("GarbageCollect");
 #endif
         mgc_failfast("collection requested (IGCHeap::GarbageCollect)");
@@ -1523,9 +1544,8 @@ public:
 
     Object* Alloc(gc_alloc_context* acontext, size_t size, uint32_t flags) override
     {
-        printf("[mgc-skel] IGCHeap::Alloc(ctx=%p size=%lu flags=0x%lx)\n",
+        mgc_log(MGC_LOG_VERBOSE, "[mgc-skel] IGCHeap::Alloc(ctx=%p size=%lu flags=0x%lx)\n",
                (void*)acontext, (unsigned long)size, (unsigned long)flags);
-        fflush(stdout);
         mgc_failfast("first object allocation (IGCHeap::Alloc)");
         return nullptr; /* unreachable */
     }
@@ -1834,8 +1854,7 @@ public:
                   (unsigned long)s->allocated, (unsigned long)s->backed);
             /* its own last line: the skeleton's fail-fast words speak of
              * an interface with no collector behind it, which this is not */
-            printf("[mgc-skel] FAIL-FAST: frozen object heap full (the board's pool is smaller than the runtime's commit)\n");
-            fflush(stdout);
+            mgc_log(MGC_LOG_SILENT, "[mgc-skel] FAIL-FAST: frozen object heap full (the board's pool is smaller than the runtime's commit)\n");
             abort();
         }
 #endif
@@ -1909,15 +1928,14 @@ static void mgc_skel_version_info(VersionInfo* v)
 {
     /* PRE-HANDSHAKE PRINT -- must be the first observable act of the
      * mgc library, so a version-mismatch death is attributable. */
-    printf("[mgc-skel] GC_VersionInfo ENTER (EE passed major=%lu minor=%lu build=%lu name=%p)\n",
+    mgc_log(MGC_LOG_VERBOSE, "[mgc-skel] GC_VersionInfo ENTER (EE passed major=%lu minor=%lu build=%lu name=%p)\n",
            (unsigned long)v->MajorVersion, (unsigned long)v->MinorVersion,
            (unsigned long)v->BuildVersion, (const void*)v->Name);
-    fflush(stdout);
 
 #ifdef MGC_SKEL_BAD_VERSION
-    /* Negative control: report a wrong major version.
-     * The EE's check must kill the boot VISIBLY -- and the ENTER print
-     * above must already be on the wire when it does. */
+    /* Built with this define, the skeleton reports a wrong major version;
+     * the EE's check then ends the boot visibly, after the ENTER line above
+     * has reached the wire. */
     v->MajorVersion = GC_INTERFACE_MAJOR_VERSION - 1;
 #else
     v->MajorVersion = GC_INTERFACE_MAJOR_VERSION;
@@ -1926,10 +1944,9 @@ static void mgc_skel_version_info(VersionInfo* v)
     v->BuildVersion = 0;
     v->Name         = "mgc-skeleton";
 
-    printf("[mgc-skel] GC_VersionInfo reporting major=%lu minor=%lu build=%lu name=\"%s\"\n",
+    mgc_log(MGC_LOG_VERBOSE, "[mgc-skel] GC_VersionInfo reporting major=%lu minor=%lu build=%lu name=\"%s\"\n",
            (unsigned long)v->MajorVersion, (unsigned long)v->MinorVersion,
            (unsigned long)v->BuildVersion, v->Name);
-    fflush(stdout);
 }
 
 static HRESULT mgc_skel_initialize(IGCToCLR* clrToGC, IGCHeap** ppHeap,
@@ -2043,9 +2060,8 @@ static int g_mgc_handle_cookie;
 extern "C" void* __mgc_dlopen_hook(const char* f)
 {
     if (!f || !strstr(f, "mgc"))
-        return nullptr; /* not ours -- the shim's honest stub handles it */
-    printf("[mgc] dlopen(\"%s\") -> skeleton costume handle\n", f);
-    fflush(stdout);
+        return nullptr; /* not ours: the shim's own dlopen answers it */
+    mgc_log(MGC_LOG_VERBOSE, "[mgc] dlopen(\"%s\") -> skeleton costume handle\n", f);
     return &g_mgc_handle_cookie;
 }
 
@@ -2053,15 +2069,13 @@ extern "C" void* __mgc_dlsym_hook(void* h, const char* n)
 {
     if (h != (void*)&g_mgc_handle_cookie || !n)
         return nullptr;
-    printf("[mgc] dlsym(\"%s\")\n", n);
-    fflush(stdout);
+    mgc_log(MGC_LOG_VERBOSE, "[mgc] dlsym(\"%s\")\n", n);
     if (strcmp(n, "GC_VersionInfo") == 0)
         return (void*)&mgc_skel_version_info;
     if (strcmp(n, "GC_Initialize") == 0)
         return (void*)&mgc_skel_initialize;
     /* The loader seam has exactly two entry points; a third is a
      * contract change and must fail the gate loudly. */
-    printf("[mgc] dlsym: UNHANDLED entry point \"%s\"\n", n);
-    fflush(stdout);
+    mgc_log(MGC_LOG_VERBOSE, "[mgc] dlsym: UNHANDLED entry point \"%s\"\n", n);
     return nullptr;
 }

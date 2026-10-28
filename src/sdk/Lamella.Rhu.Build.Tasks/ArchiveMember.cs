@@ -61,6 +61,9 @@ namespace Lamella.Rhu.Build
             }
         }
 
+        // Every member's name, contents offset and size, in file order; the
+        // symbol table and the long-name table are skipped, a long name is
+        // resolved through the long-name table.
         private static IEnumerable<(string Name, int Offset, int Size)> Members(byte[] data)
         {
             if (data.Length < 8 || Encoding.ASCII.GetString(data, 0, 8) != "!<arch>\n")

@@ -1,11 +1,12 @@
 /* Lamella RHU -- STM32F769I-DISCO PAYLOAD link map: the kernel staticlib
  * (librhu_kernel.a, feature `payload`) merged with one frozen ILC
  * payload object under an external `ld -T`. Same machine map as
- * link-st-stm32f769i-disco.x -- keep the two in sync BY HAND -- plus the
+ * link-st-stm32f769i-disco.x -- keep the two in sync -- plus the
  * managed sections an ILC object carries: managed code and unboxing stubs
  * bracketed inside text, the __modules table bracketed for the
  * module-initializer walk, frozen/metadata blobs into rodata, the
- * rehydrated-data region zero-filled and bracketed inside .bss, the GOT
+ * rehydrated-data region zero-filled and bracketed at the head of the
+ * external RAM region, the GOT
  * inside the boot copy window, and the ARM unwind tables KEPT (managed
  * code emits them; the base script's panic=abort discard does not apply
  * here).
@@ -31,19 +32,26 @@ MEMORY
    * port; the vendor's own board template treats the three as one
    * region, as this map does. */
   DATA (rwx) : ORIGIN = 0x20000000, LENGTH = 512K
+  /* The board's 16 MB SDRAM part behind the flexible memory controller's
+   * bank 1: brought up and proved by read-back at boot by the
+   * kernel, then offered past the rehydrated-data region to the hosted runtime
+   * as its second RAM range (the arena's window 1, bracketed below);
+   * Normal, execute-never memory by the protection unit's region 3. The
+   * rehydrated-data region alone is placed here (the section below). */
+  SDRAM (rw) : ORIGIN = 0xC0000000, LENGTH = 16M
 }
 
 /* GC-substrate floor: the arena window this board GUARANTEES after
  * statics + .kstacks + the console mirror + the boot-stack reserve
- * (link-enforced by the window asserts at the bottom of this map). PAYLOAD-map value: with
- * the DTCM inside DATA, the window under the FULL hosted image (the
- * runtime, the shim, the collector and the C library beside the
- * kernel) reads ~251K, so 192K -- the kernel map's own floor, the two
- * flavors' floors equal again -- funds the board's GC row (the 16K
- * kernel-heap carve, the 96K region with its bitmap and mark stack,
- * and a frozen-object pool of one stock commit) and leaves ~59K of
- * static growth. */
-RHU_ARENA_MIN = 192K;
+ * (link-enforced by the window asserts at the bottom of this map).
+ * PAYLOAD-map value under the external posture (the managed heap, the
+ * collector's mark bitmap and its mark stack in the SDRAM's window 1):
+ * this window serves the hot small mappings alone -- the 16K kernel-heap
+ * carve, the 4K handle page and the 8K early mappings, the 16K
+ * frozen-object pool and the row's 8K unallocated: 52K -- so the floor
+ * is 64K, and the SRAM beside it (the DTCM inside DATA) holds a hosted
+ * program's statics; the kernel map's own floor stays its own. */
+RHU_ARENA_MIN = 64K;
 
 ENTRY(Reset);
 
@@ -156,7 +164,7 @@ SECTIONS
    * first, then the bits (two named inputs fix the order). No KEEP: an
    * image whose runtime never asks for the kernel arena (the frozen
    * runtime carves its own heap) carries the section EMPTY, section GC
-   * dropping the statics as it always did, its window unmoved. */
+   * dropping the statics, its window unmoved. */
   .rhu_payload_arena ORIGIN(DATA) (NOLOAD) : ALIGN(8)
   {
     __rhu_payload_arena_lo = .;
@@ -250,19 +258,28 @@ SECTIONS
     __edata = .;
   } > DATA AT> CODE
 
+  /* The hosted runtime's rehydrated-data region: zero-filled RAM the
+   * runtime fills at startup from its compact form, bracketed and
+   * 8-aligned as the runtime lays it out. Its own NOLOAD section at the
+   * head of the external RAM region, ahead of .bss in this script so
+   * the inputs land here and nowhere else. Outside the zero-fill
+   * window: the kernel zeroes the bracket at boot, after the external
+   * RAM is brought up and proved (boot.rs). The arena's second window
+   * starts at the section's end (bracketed below). Reference-retained
+   * (the compact form points into it); an empty pair at the region's
+   * origin until a hosted object carries the region. */
+  .rhu_hydrated ORIGIN(SDRAM) (NOLOAD) : ALIGN(8)
+  {
+    __rhu_hydrated_lo = .;
+    *(.hydrated*);
+    . = ALIGN(8);
+    __rhu_hydrated_hi = .;
+  } > SDRAM
+
   .bss (NOLOAD) : ALIGN(4)
   {
     __sbss = .;
     *(.bss .bss.* COMMON);
-    /* The hosted runtime's rehydrated-data region: zero-filled RAM the
-     * runtime fills at startup from its compact form, bracketed and
-     * 8-aligned as the runtime lays it out, inside the zero-fill and
-     * statics windows. Reference-retained (the compact form points into
-     * it); an empty pair until a hosted object carries the region. */
-    . = ALIGN(8);
-    __rhu_hydrated_lo = .;
-    *(.hydrated*);
-    __rhu_hydrated_hi = .;
     . = ALIGN(4);
     __ebss = .;
   } > DATA
@@ -298,13 +315,29 @@ SECTIONS
  * establishes the zero-birth invariant over it at boot. (Top level: the
  * linker rejects a bare ASSERT between output sections and reports the
  * error one command late.) */
-RHU_BOOT_STACK_RESERVE = 64K;
+RHU_BOOT_STACK_RESERVE = 16K;
 __rhu_arena_lo = ALIGN(__rhu_console_log_end, 8);
 __rhu_arena_hi = __stack_start - RHU_BOOT_STACK_RESERVE;
 ASSERT(__rhu_arena_hi >= __rhu_arena_lo,
   "static RAM + .kstacks + the console mirror overflow into the boot-stack reserve (arena window negative)");
 ASSERT(__rhu_arena_hi - __rhu_arena_lo >= RHU_ARENA_MIN,
   "arena window under this board's GC-substrate floor (RHU_ARENA_MIN)");
+
+/* The arena's second window: the external RAM region from the end of
+ * the rehydrated-data region (8-aligned) to the region's end.
+ * Kernel-owned space outside every section, like the first window; the
+ * kernel takes it only when the external RAM has been brought up and
+ * proved at boot, and arena::init() establishes the zero-birth
+ * invariant over it then. A rehydrated-data region that fills the
+ * whole external region refuses the link. */
+__rhu_arena1_lo = ALIGN(__rhu_hydrated_hi, 8);
+__rhu_arena1_hi = ORIGIN(SDRAM) + LENGTH(SDRAM);
+ASSERT(__rhu_arena1_hi > __rhu_arena1_lo,
+  "rehydrated-data region fills the external region (the arena's second window empty)");
+
+/* The rehydrated-data region lies inside the external RAM region. */
+ASSERT(__rhu_hydrated_lo >= ORIGIN(SDRAM) && __rhu_hydrated_hi <= ORIGIN(SDRAM) + LENGTH(SDRAM),
+  "rehydrated-data region outside the external region");
 
 /* The module-0 TLS template rides the boot's single .data copy: its
  * load/run offset must equal .data's, on every board. */
@@ -335,7 +368,10 @@ ASSERT(SIZEOF(.rhu_header) == 64,
  * class, the copied data, the zero-filled data). The regions must hold
  * that demand beside the kernel's own reserves on every board: a region
  * shrunk under it refuses the link whatever the image at hand carries.
- * The kernel reserves are declared allowances, not measurements. */
+ * The kernel reserves are declared allowances, not measurements. The
+ * zero-filled class counts the rehydrated-data region, which this map
+ * places in the external RAM region: the DATA assert keeps counting
+ * it, a floor at least as strict as the SRAM's own demand. */
 RHU_RT_CODE_BYTES = 933510;
 RHU_RT_COPY_BYTES = 6365;
 RHU_RT_ZERO_BYTES = 105936;
@@ -350,13 +386,36 @@ ASSERT(LENGTH(DATA) >= RHU_RT_COPY_BYTES + RHU_RT_ZERO_BYTES + SIZEOF(.kstacks) 
 ASSERT(LOADADDR(.got) - ADDR(.got) == LOADADDR(.data) - ADDR(.data),
   ".got outside the boot copy's single load/run offset");
 
-/* The rehydrated-data region lies inside the zero-fill window. */
-ASSERT(__rhu_hydrated_lo >= __sbss && __rhu_hydrated_hi <= __ebss,
-  "rehydrated-data region outside the zero-fill window");
-
 /* The arena placement: the payload's GC arena and its start bits at the head
  * of DATA, the section's size the golden contract's 96 KB plus the bits. */
 ASSERT(ADDR(.rhu_payload_arena) == ORIGIN(DATA),
   "the payload arena is not at the head of DATA (the collector's count follows its address)");
 ASSERT(SIZEOF(.rhu_payload_arena) == 0 || SIZEOF(.rhu_payload_arena) == 99840,
   "the payload arena section is neither empty (a runtime that never asks for the kernel arena) nor the 96 KB arena plus its 1,536 bytes of start bits");
+
+/* The null-page guard: the protection unit denies the first 4 KB of
+ * the address space on every row, so no code may be placed below it; the
+ * vector table alone may (exception vector reads bypass the unit). */
+ASSERT(__stext >= 0x1000,
+  "code placed inside the first page, which the protection unit denies (the null-page guard)");
+
+/* The console's link-time words. A project's knobs reach this
+ * prebuilt kernel as ABSOLUTE SYMBOLS the kernel reads by address at boot;
+ * an image linked without a knob gets 0 = the row's default (the facts'
+ * channels row; the level's 0 = verbose). The SDK passes --defsym from the
+ * project's properties; build.rs passes the environment's for the kernel's
+ * own images. The pin words are the serial act's (0 = the facts' pair). */
+PROVIDE(__rhu_log_level = 0);
+PROVIDE(__rhu_log_channel = 0);
+PROVIDE(__rhu_console_channel = 0);
+PROVIDE(__rhu_uart0_tx = 0);
+PROVIDE(__rhu_uart0_rx = 0);
+PROVIDE(__rhu_uart1_tx = 0);
+PROVIDE(__rhu_uart1_rx = 0);
+/* The quad-SPI window's brackets: zero, this map declares no window (the
+ * kernel leaves the block disabled, and a touch of 0x90000000 faults). */
+PROVIDE(__rhu_xip_lo = 0);
+PROVIDE(__rhu_xip_hi = 0);
+/* The handler stack's watermark word: 0 = off; 1 = the boot stack reserve is
+ * filled with a pattern at reset and its deepest use printed at the end. */
+PROVIDE(__rhu_stack_watermark = 0);

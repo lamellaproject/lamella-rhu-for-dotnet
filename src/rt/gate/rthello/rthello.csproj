@@ -1,4 +1,4 @@
-<Project Sdk="Lamella.Rhu.Sdk">
+<Project Sdk="Lamella.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -7,6 +7,8 @@
     <RootNamespace>Rhu.Hosted</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
+    <!-- The gate's posture: the kernel's whole boot report, what the goldens measure. -->
+    <RhuLogLevel>verbose</RhuLogLevel>
   </PropertyGroup>
 
 </Project>

@@ -35,8 +35,8 @@ const GCTEST_WORK: u32 = 4;
 const LINK_TIMEOUT_S: u64 = 120;
 
 /// Frozen-input pin table: must equal goldens/payload/MANIFEST.md.
-const SHA_RTSMOKE_O: &str = "e72d824a26cc516190aee0db37b39e7520aa0c4c353fd8ee3837e788b0370a81";
-const SHA_GCTEST_O: &str = "c0a91cd86216595f1a52a0d6088bd26ea1bac656ae33cd639660cdcb3fcb05e4";
+const SHA_RTSMOKE_O: &str = "74f803d5c034ebd77edb64293f76a1ebfb5bfdb2e3abdba101958dce72e87f0e";
+const SHA_GCTEST_O: &str = "01bc57d63506d4569b30bb73e243aa065d3fe6b5f706a8dc1728d8fc7f255601";
 const SHA_RTSMOKE_G: &str = "230e32ad303a37564fdc2093fde03730592113aa3718f533e70adfe547c90eb5";
 const SHA_GCTEST_G: &str = "0eb3d1ba8a9f0fc4be43ee4fe5d626626147d98a9a5605da6d1c8ae2887d8b2c";
 
@@ -46,11 +46,13 @@ const SHA_GCTEST_G: &str = "0eb3d1ba8a9f0fc4be43ee4fe5d626626147d98a9a5605da6d1c
 /// final line remains the expected-free source because the derived value
 /// equals it; a divergent derivation would have moved that expectation
 /// into a gate-owned constant.
+
 const COLLECTIONS_EXACT: &str = "61";
 
 /// The deterministic profile's name in the results surface (additive,
 /// report-only, between "control" and "image"). Emitted only on case
 /// lines at or after a run under the profile: no run, no clock claim.
+
 const TIMING_DET: &str = "icount-shift0";
 
 /// The rt-link family's frozen input: the merged runtime object of each
@@ -62,6 +64,35 @@ const TIMING_DET: &str = "icount-shift0";
 /// brackets read them exactly), the roots the host's initialization
 /// contract names beyond the two the kernel's default entry references,
 /// and the family's linker words.
+/// The frozen merged object with the managed code's unwind tables under the
+/// names the SDK gives a program object's before the merge (.rhu_xip_extab,
+/// .rhu_xip_exidx) and the index retyped to a plain data section -- the
+/// linker gathers every input of the ARM exception-index type into one
+/// table, and a table in CODE cannot reach the window -- by two invocations
+/// of the object copier (it refuses a rename and a retype of one section in
+/// one call): the input of the execute-in-place link.
+fn rename_managed_tables(repo: &Path, facts: &RustcFacts, merged_rel: &str, out_rel: &str) -> Result<(), String> {
+    let objcopy = llvm_tool(facts, "llvm-objcopy")?;
+    let src = repo.join(merged_rel);
+    let dst = repo.join(out_rel);
+    let mid = repo.join(format!("{out_rel}.renamed"));
+    if let Some(d) = dst.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let (src_s, mid_s, dst_s) = (src.to_string_lossy().into_owned(), mid.to_string_lossy().into_owned(), dst.to_string_lossy().into_owned());
+    let steps: [(&str, Vec<&str>); 2] = [
+        ("the rename", vec!["--rename-section", ".ARM.exidx__managedcode=.rhu_xip_exidx", "--rename-section", ".ARM.extab__managedcode=.rhu_xip_extab", &src_s, &mid_s]),
+        ("the retype", vec!["--set-section-type", ".rhu_xip_exidx=1", &mid_s, &dst_s]),
+    ];
+    for (what, args) in steps.iter() {
+        let run = run_captured(&objcopy, args, &dst.with_extension("objcopy.stdout"), &dst.with_extension("objcopy.stderr"), Duration::from_secs(60))?;
+        if run.exit != 0 {
+            return Err(format!("llvm-objcopy failed at {what} of the managed code's tables (exit {})", run.exit));
+        }
+    }
+    Ok(())
+}
+
 fn rt_merged_o(w: &crate::gates::rt::RtWorld) -> String {
     format!("{}/{}", w.tier, crate::gates::rt::MERGED)
 }
@@ -210,9 +241,9 @@ fn payload_verdict(cases: usize, negative: usize, absent: &[(&str, &str)]) -> St
         tiers.join(", ")
     )
 }
-const RT_MANAGED_BYTES: u64 = 389_414;
-const RT_UNBOX_BYTES: u64 = 766;
-const RT_HYDRATED_BYTES: u64 = 77_204;
+const RT_MANAGED_BYTES: u64 = 350_646;
+const RT_UNBOX_BYTES: u64 = 742;
+const RT_HYDRATED_BYTES: u64 = 74_320;
 const RT_TDATA_BYTES: u64 = 152;
 const RT_INIT_ARRAY_BYTES: u64 = 24;
 const RT_MODULES_BYTES: u64 = 4;
@@ -283,6 +314,9 @@ const MANAGED_BYTES_GCTEST: u64 = 5_474;
 /// shim gates link against too) and the an500 payload map of record.
 const AN500_LIB: &str = "src/kernel/target/thumbv7em-none-eabihf/release/librhu_kernel.a";
 const AN500_MAP: &str = "src/kernel/payload-mps2-an500.x";
+/// The STM32F769 row's execute-in-place map and the renamed frozen object its link takes.
+const XIP_MAP: &str = "src/kernel/payload-st-stm32f769i-disco-xip.x";
+const XIP_MERGED: &str = "src/kernel/target/payload-gate/rt/rthello-merged-xip.o";
 
 /// PT_GNU_RELRO: the read-only-after-relocation segment the linker emits
 /// over the GOT, the constructor arrays and the TLS template.
@@ -301,9 +335,13 @@ struct RtBoard {
     world: &'static crate::gates::rt::RtWorld,
 }
 
-const RT_BOARDS: [RtBoard; 8] = [
+const RT_BOARDS: [RtBoard; 12] = [
     RtBoard { board: "mps2-an500", target: "thumbv7em-none-eabihf", features: "qemu-exit,board-mps2-an500,payload", world: &crate::gates::rt::WORLD_M7 },
     RtBoard { board: "mps2-an505", target: "thumbv8m.main-none-eabihf", features: "qemu-exit,board-mps2-an505,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "adafruit-feather-rp2350-hstx", target: "thumbv8m.main-none-eabihf", features: "board-adafruit-feather-rp2350-hstx,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "adafruit-feather-rp2350-hstx-psram", target: "thumbv8m.main-none-eabihf", features: "board-adafruit-feather-rp2350-hstx-psram,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "pimoroni-pico-lipo-2", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-lipo-2,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "pimoroni-pico-lipo-2-xl-w", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-lipo-2-xl-w,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "pimoroni-pico-plus-2", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-plus-2,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "pimoroni-pico-plus-2-w", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-plus-2-w,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "rpi-pico2", target: "thumbv8m.main-none-eabihf", features: "board-rpi-pico2,payload", world: &crate::gates::rt::WORLD_M33 },
@@ -677,6 +715,9 @@ fn check_ctor_image(dump: &[u8], elf: &[u8], expect: &[CtorExpect]) -> Result<Ve
                 .get(at..at + 4)
                 .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64)
                 .ok_or_else(|| format!("{} entry {i} past the end of the artifact", x.section))?;
+            // nm renders a Thumb function's value with the low bit
+            // clear; the linked word carries it set. Compare the
+            // address modulo that bit, then require the bit on the word.
             let v = sym(name)?;
             if (w | 1) != (v | 1) {
                 return Err(format!("{} entry {i} reads {w:#x}, {name} is at {v:#x}", x.section));
@@ -850,6 +891,12 @@ pub(crate) fn map_region(map: &str, name: &str) -> Option<(u64, u64)> {
     None
 }
 
+/// The external RAM region of a payload map, where it declares one (the
+/// Pimoroni rows' and the emulator rows' PSRAM, the STM32F769's SDRAM).
+pub(crate) fn map_external_region(map: &str) -> Option<(u64, u64)> {
+    map_region(map, "PSRAM").or_else(|| map_region(map, "SDRAM"))
+}
+
 /// A linker-script size token: `0x08000000`, `3M`, `1536K`, `64`.
 fn parse_size(t: &str) -> Option<u64> {
     let t = t.trim().trim_end_matches(';').trim();
@@ -900,7 +947,8 @@ fn bracket(dump: &[u8], lo: &str, hi: &str) -> Result<(u64, u64), String> {
 /// program headers, the unresolved names, the frozen demand list sorted,
 /// the map's CODE region): every class the frozen object carries at the
 /// bracket the map declares, exact; the code brackets inside module 0's,
-/// in order; the rehydrated region inside the zero-fill window; the
+/// in order; the rehydrated region inside the zero-fill window, or at the
+/// head of the map's external RAM region before the arena's second window; the
 /// read-only-after-relocation run inside the copy window; the TLS segment
 /// at the template; every unresolved name in the frozen demand list; the
 /// flash image inside CODE; the arena window over the floor.
@@ -910,7 +958,28 @@ pub(crate) fn check_rt_placement(
     unresolved: &[String],
     demand: &[String],
     code: (u64, u64),
+    external: Option<(u64, u64)>,
     want_sizes: &RtBrackets,
+) -> Result<RtFacts, String> {
+    check_rt_placement_in(dump, phdrs, unresolved, demand, code, external, want_sizes, None)
+}
+
+/// The placement check with the map's external flash window where the map
+/// declares one (an execute-in-place map's QSPI region): the managed code,
+/// the unboxing stubs and the frozen pair inside the window's sections past
+/// the 64-byte header, in order; the header's load segment at the region's
+/// base; every load segment that touches the region inside it. Without a
+/// window the managed code and the stubs lie inside module 0's code bracket.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_rt_placement_in(
+    dump: &[u8],
+    phdrs: &[Phdr],
+    unresolved: &[String],
+    demand: &[String],
+    code: (u64, u64),
+    external: Option<(u64, u64)>,
+    want_sizes: &RtBrackets,
+    window: Option<(u64, u64)>,
 ) -> Result<RtFacts, String> {
     let (m_lo, m_hi) = bracket(dump, "__rhu_managedcode_lo", "__rhu_managedcode_hi")?;
     let (u_lo, u_hi) = bracket(dump, "__rhu_unbox_lo", "__rhu_unbox_hi")?;
@@ -919,7 +988,7 @@ pub(crate) fn check_rt_placement(
     let (i_lo, i_hi) = bracket(dump, "__init_array_start", "__init_array_end")?;
     let (mo_lo, mo_hi) = bracket(dump, "__start___modules", "__stop___modules")?;
     let (x_lo, x_hi) = bracket(dump, "__exidx_start", "__exidx_end")?;
-    let _frozen = bracket(dump, "__rhu_frozen_lo", "__rhu_frozen_hi")?;
+    let (f_lo, f_hi) = bracket(dump, "__rhu_frozen_lo", "__rhu_frozen_hi")?;
     let (stext, etext) = bracket(dump, "__stext", "__etext")?;
     let (sdata, edata) = bracket(dump, "__sdata", "__edata")?;
     let (sbss, ebss) = bracket(dump, "__sbss", "__ebss")?;
@@ -942,15 +1011,62 @@ pub(crate) fn check_rt_placement(
     if x_lo >= x_hi {
         return Err(format!("exidx bracket not strictly nonzero ({x_lo:#x} .. {x_hi:#x})"));
     }
-    if m_lo < stext || m_hi > u_lo || u_hi > etext {
-        return Err(format!(
-            "managed code [{m_lo:#x}, {m_hi:#x}) and unboxing stubs [{u_lo:#x}, {u_hi:#x}) not inside module 0's code bracket [{stext:#x}, {etext:#x}) in order"
-        ));
+    match window {
+        None => {
+            if m_lo < stext || m_hi > u_lo || u_hi > etext {
+                return Err(format!(
+                    "managed code [{m_lo:#x}, {m_hi:#x}) and unboxing stubs [{u_lo:#x}, {u_hi:#x}) not inside module 0's code bracket [{stext:#x}, {etext:#x}) in order"
+                ));
+            }
+        }
+        Some((w_org, w_len)) => {
+            let (x_lo, x_hi) = bracket(dump, "__rhu_xip_lo", "__rhu_xip_hi")?;
+            if x_lo != w_org + 64 || x_hi > w_org + w_len {
+                return Err(format!(
+                    "the window's sections [{x_lo:#x}, {x_hi:#x}) not past the 64-byte header inside the external flash region [{w_org:#x}, +{w_len:#x})"
+                ));
+            }
+            if m_lo < x_lo || m_hi > u_lo || u_hi > x_hi {
+                return Err(format!(
+                    "managed code [{m_lo:#x}, {m_hi:#x}) and unboxing stubs [{u_lo:#x}, {u_hi:#x}) not inside the window's sections [{x_lo:#x}, {x_hi:#x}) in order"
+                ));
+            }
+            if f_lo < x_lo || f_hi > x_hi {
+                return Err(format!("frozen brackets [{f_lo:#x}, {f_hi:#x}) outside the window's sections [{x_lo:#x}, {x_hi:#x})"));
+            }
+            if !phdrs.iter().any(|p| p.p_type == PT_LOAD && p.p_paddr == w_org && p.p_filesz >= 64) {
+                return Err(format!("no load segment of at least 64 bytes at the window's base {w_org:#x} (the window header)"));
+            }
+            let w_end = phdrs
+                .iter()
+                .filter(|p| p.p_type == PT_LOAD && p.p_filesz > 0 && p.p_paddr < w_org + w_len && p.p_paddr + p.p_filesz > w_org)
+                .map(|p| p.p_paddr + p.p_filesz)
+                .max()
+                .unwrap_or(w_org);
+            if w_end > w_org + w_len {
+                return Err(format!("the window's image ends at {w_end:#x}, past the external flash region"));
+            }
+        }
     }
-    if h_lo < sbss || h_hi > ebss {
-        return Err(format!(
-            "rehydrated-data region [{h_lo:#x}, {h_hi:#x}) outside the zero-fill window [{sbss:#x}, {ebss:#x})"
-        ));
+    match external {
+        // A map without an external RAM region keeps the region inside .bss.
+        None => {
+            if h_lo < sbss || h_hi > ebss {
+                return Err(format!(
+                    "rehydrated-data region [{h_lo:#x}, {h_hi:#x}) outside the zero-fill window [{sbss:#x}, {ebss:#x})"
+                ));
+            }
+        }
+        // A map with one places the region at its head, the arena's second
+        // window from the region's end rounded to 8 to the region's end.
+        Some((e_org, e_len)) => {
+            let (a1_lo, a1_hi) = bracket(dump, "__rhu_arena1_lo", "__rhu_arena1_hi")?;
+            if h_lo != e_org || h_hi > e_org + e_len || a1_lo != (h_hi + 7) & !7 || a1_hi != e_org + e_len || a1_lo >= a1_hi {
+                return Err(format!(
+                    "rehydrated-data region [{h_lo:#x}, {h_hi:#x}) not at the head of the external region [{e_org:#x}, +{e_len:#x}) with the arena's second window [{a1_lo:#x}, {a1_hi:#x}) after it"
+                ));
+            }
+        }
     }
     let relro = phdrs
         .iter()
@@ -978,9 +1094,12 @@ pub(crate) fn check_rt_placement(
         }
     }
     let (c_org, c_len) = code;
+    // Every load segment whose bytes touch the CODE window counts, a
+    // segment that starts before the window and reaches into or past it
+    // included.
     let code_end = phdrs
         .iter()
-        .filter(|p| p.p_type == PT_LOAD && p.p_paddr >= c_org && p.p_paddr < c_org + c_len)
+        .filter(|p| p.p_type == PT_LOAD && p.p_filesz > 0 && p.p_paddr < c_org + c_len && p.p_paddr + p.p_filesz > c_org)
         .map(|p| p.p_paddr + p.p_filesz)
         .max()
         .unwrap_or(c_org);
@@ -1253,6 +1372,13 @@ impl MPayload {
                 self.fail_case("frozen-inputs", "null", "null", "", "", None, msg);
             }
         }
+        // The two runtime worlds this gate links (each world's merged
+        // runtime object and its demand list) tie their tiers' manifests,
+        // and each manifest its in-code pin: one pin per world, the
+        // re-freeze path shared with that world's gate. A world whose tier
+        // is absent from this checkout is DECLARED here and its rt-link
+        // cases are NOT RUN with the reason on the verdict line; a present
+        // tier is tied whole, so a doctored one never passes as absent.
         let mut ties: Vec<String> = Vec::new();
         let mut counts: Vec<usize> = Vec::new();
         let mut mshas: Vec<String> = Vec::new();
@@ -1313,6 +1439,8 @@ impl MPayload {
                 frozen_inputs_clause(&ties, &self.rt_absent)
             );
         }
+        // Each world's list is its world's (the marker: the sixteen double
+        // helpers), so a row's list can be checked to be its world's below.
         let world_lists = [
             (crate::gates::rt::WORLD_M7.gate, self.rt_demand_m7.clone()),
             (crate::gates::rt::WORLD_M33.gate, self.rt_demand_m33.clone()),
@@ -1431,6 +1559,7 @@ impl MPayload {
             self.emit_case(name, "fail", "null", "0", "", &path_rel, "null", None, None);
             self.ctx.gate_fail(&format!("{name}: link failed (see {name}-ld.log)"));
         }
+        // Linker chatter is surfaced, never silently discarded.
         let chatter = std::fs::read(&ld_log).unwrap_or_default();
         let text = String::from_utf8_lossy(&chatter);
         for line in text
@@ -1444,6 +1573,9 @@ impl MPayload {
             Ok(s) => s,
             Err(e) => self.ctx.gate_fail(&format!("{name}: cannot hash linked artifact: {e}")),
         };
+        // Artifact geometry/contract asserts by nm: the managed entry
+        // resolved and the debug-layout contract present in the merged
+        // image.
         let nm = match llvm_tool(&self.facts, "llvm-nm") {
             Ok(p) => p,
             Err(e) => self.ctx.gate_fail(&format!("{name}: {e}")),
@@ -1456,6 +1588,9 @@ impl MPayload {
             self.fail_case(name, "null", "0", &sha, &path_rel, None, "llvm-nm failed on the linked ELF");
         }
         let dump = std::fs::read(&sym).unwrap_or_default();
+        // The managed entry, the debug-layout contract, and the entry
+        // seam (the entry, its trampoline's alias, the stated-generation
+        // object) resolved in every payload-family image.
         for s in [
             "__managed__Main",
             "__rhu_debug_layout",
@@ -1477,6 +1612,10 @@ impl MPayload {
                 );
             }
         }
+        // The two records the image states about itself: the in-image
+        // header at its load address + 0x400 and the debug-visible
+        // layout record, read off the artifact and tied to each other
+        // and to include/rhu.h -- silent on success, named on refusal.
         let elf_bytes = std::fs::read(&elf).unwrap_or_default();
         if let Err(e) = check_records(&dump, &elf_bytes, self.abi) {
             self.fail_case(name, "null", "0", &sha, &path_rel, None, &format!("image records: {e}"));
@@ -1520,6 +1659,10 @@ impl MPayload {
                 "{name}: tls-template bracket inverted ({tlo:#x} > {thi:#x})"
             ));
         }
+        // The rt-world brackets on a minirt image: managed code exactly the
+        // frozen object's own, no unboxing stubs, no rehydrated data (the
+        // map places the classes; a pair that missed its input reads wrong
+        // here -- the tripwire the exidx pair is).
         let managed_want = if frozen == "gctest" { MANAGED_BYTES_GCTEST } else { MANAGED_BYTES_RTSMOKE };
         if let Err(e) = check_minirt_brackets(&dump, managed_want) {
             self.ctx.gate_fail(&format!("{name}: {e}"));
@@ -1601,6 +1744,8 @@ impl MPayload {
         if !contains_fixed(&run.raw, "[payload] managed Main returned 0") {
             self.fail_case(case, &code_s, "0", &sha, &path_rel, None, "managed Main return marker missing");
         }
+        // The default-path handshake line, at the header's generation:
+        // the compiled kernel tied to include/rhu.h on every run.
         if !contains_fixed(&run.raw, &default_entry_line(self.abi)) {
             self.fail_case(case, &code_s, "0", &sha, &path_rel, None, "the kernel-default handshake line is missing");
         }
@@ -1931,6 +2076,9 @@ impl MPayload {
             self.emit_control_run(case, "pass", run.exit, 4, &sha, &path_rel, broke);
             println!("== control {case}: PASS (refused with its sentence, exit 4, the entry never ran) ==");
         }
+        // The window's floor, ACCEPTED: the strong input built for the
+        // oldest generation the window reaches runs to its exit, and the
+        // handshake line takes its window form.
         let case = "abi-window-control";
         let broke = "a payload entry built for the window's floor (accepted: the entry runs)";
         let floor = strong.replacen(&word, &format!("rhu_payload_abi: .word {compat}"), 1);
@@ -2078,6 +2226,9 @@ impl MPayload {
                 self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("pin '{m}' not found in payload stream"));
             }
         }
+        // The verdict is read on the verdict line: the last summary line
+        // must carry it after its two fields. A bare needle over the whole
+        // stream would accept a diagnostic that merely mentions the words.
         if !final_verdict_has(&stream, "ALL GOOD") {
             self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), "verdict 'ALL GOOD' absent from the final summary line");
         }
@@ -2092,6 +2243,8 @@ impl MPayload {
         if code != 0 {
             self.fail_case(case, &code_s, "0", &sha, &path_rel, Some(TIMING_DET), &format!("exit {code}, wanted 0"));
         }
+        // The golden's own final line is the source of the expected free
+        // value -- no second copy to drift.
         let want_free = final_free(&glf);
         let got_free = final_free(&stream);
         let free_ok = matches!((&got_free, &want_free), (Some(a), Some(b)) if a == b);
@@ -2400,7 +2553,73 @@ impl MPayload {
             );
         } else {
             self.run_rt_link_control();
+            self.run_hydrated_home_control();
+            self.run_rt_link_xip();
+            self.run_xip_home_control();
         }
+    }
+
+    /// The STM32F769 row under its execute-in-place map: the frozen merged
+    /// object with the managed code's tables renamed and the index retyped
+    /// (rename_managed_tables), linked link-only under the map against the
+    /// row's own staticlib; the placement read off the artifact with the
+    /// map's QSPI region as the window.
+    fn run_rt_link_xip(&mut self) {
+        const CASE: &str = "rt-link-st-stm32f769i-disco-xip";
+        let Some(b) = RT_BOARDS.iter().find(|b| b.board == "st-stm32f769i-disco") else {
+            self.ctx.gate_fail(&format!("{CASE}: no STM32F769 row in the rt-link table"));
+        };
+        let lib_rel = Self::rt_staticlib_rel(b);
+        if let Err(e) = rename_managed_tables(&self.ctx.repo, &self.facts, &rt_merged_o(b.world), XIP_MERGED) {
+            self.ctx.gate_fail(&format!("{CASE}: {e}"));
+        }
+        let (ok, ld_log, path_rel) = self.link_raw(CASE, XIP_MERGED, &[], &lib_rel, XIP_MAP, &RT_LD_WORDS);
+        if !ok {
+            let text = String::from_utf8_lossy(&std::fs::read(&ld_log).unwrap_or_default()).into_owned();
+            let (_, other) = split_ld_log(&text);
+            for l in other.iter().take(12) {
+                println!("  | {l}");
+            }
+            self.emit_case(CASE, "fail", "null", "null", "", &path_rel, "null", None, None);
+            self.ctx.gate_fail(&format!("{CASE}: link failed (see {CASE}-ld.log)"));
+        }
+        let (dump, elf_bytes, sha, unresolved, other) = self.rt_artifact(CASE, &ld_log, &path_rel);
+        if !other.is_empty() {
+            for l in other.iter().take(10) {
+                println!("  | {l}");
+            }
+            self.fail_case(CASE, "null", "null", &sha, &path_rel, None, "linker diagnostics beyond the unresolved warnings");
+        }
+        if let Err(e) = check_records(&dump, &elf_bytes, self.abi) {
+            self.fail_case(CASE, "null", "null", &sha, &path_rel, None, &format!("image records: {e}"));
+        }
+        let Some(phdrs) = elf32_phdrs(&elf_bytes) else {
+            self.fail_case(CASE, "null", "null", &sha, &path_rel, None, "program headers not parseable");
+        };
+        let map_text = std::fs::read_to_string(self.ctx.repo.join(XIP_MAP)).unwrap_or_default();
+        let (Some(code), Some(window)) = (map_region(&map_text, "CODE"), map_region(&map_text, "QSPI")) else {
+            self.ctx.gate_fail(&format!("{CASE}: {XIP_MAP} states no CODE or no QSPI region"));
+        };
+        let external = map_external_region(&map_text);
+        let demand = self.rt_demand_for(b.world).to_vec();
+        let facts = match check_rt_placement_in(&dump, &phdrs, &unresolved, &demand, code, external, &RT_HELLO_BRACKETS, Some(window)) {
+            Ok(f) => f,
+            Err(e) => self.fail_case(CASE, "null", "null", &sha, &path_rel, None, &format!("placement: {e}")),
+        };
+        let (x_lo, x_hi) = match bracket(&dump, "__rhu_xip_lo", "__rhu_xip_hi") {
+            Ok(p) => p,
+            Err(e) => self.fail_case(CASE, "null", "null", &sha, &path_rel, None, &e),
+        };
+        println!(
+            "  {CASE}: the window's sections {} B from {x_lo:#x}; managed {} unbox {} hydrated {} exidx {}; unresolved {}, all in the frozen demand list; code free {} B; arena window {} B over the {} B floor",
+            x_hi - x_lo, facts.managed, facts.unbox, facts.hydrated, facts.exidx, facts.unresolved, facts.code_free, facts.arena_window, facts.arena_floor
+        );
+        let stats = format!(
+            "{{\"window\":{},\"managed\":{},\"unbox\":{},\"hydrated\":{},\"exidx\":{},\"unresolved\":{},\"code_free\":{},\"arena_window\":{},\"arena_floor\":{}}}",
+            x_hi - x_lo, facts.managed, facts.unbox, facts.hydrated, facts.exidx, facts.unresolved, facts.code_free, facts.arena_window, facts.arena_floor
+        );
+        self.emit_case(CASE, "pass", "null", "null", &sha, &path_rel, "null", None, Some(&stats));
+        println!("== case {CASE}: PASS (the frozen runtime of the {} world linked under the execute-in-place map, the managed code and the frozen pair in the window past its header; placement asserted off the artifact) ==", b.world.gate);
     }
 
     /// One board: the frozen merged runtime object linked under the
@@ -2451,11 +2670,12 @@ impl MPayload {
         let Some(code) = map_region(&map_text, "CODE") else {
             self.ctx.gate_fail(&format!("{case}: {map_rel} states no CODE region"));
         };
+        let external = map_external_region(&map_text);
         let demand = self.rt_demand_for(b.world).to_vec();
         if let Err(e) = check_world_demand(b.world.gate, &demand) {
             self.fail_case(&case, "null", "null", &sha, &path_rel, None, &format!("the row's demand list: {e}"));
         }
-        let facts = match check_rt_placement(&dump, &phdrs, &unresolved, &demand, code, &RT_HELLO_BRACKETS) {
+        let facts = match check_rt_placement(&dump, &phdrs, &unresolved, &demand, code, external, &RT_HELLO_BRACKETS) {
             Ok(f) => f,
             Err(e) => self.fail_case(&case, "null", "null", &sha, &path_rel, None, &format!("placement: {e}")),
         };
@@ -2477,6 +2697,76 @@ impl MPayload {
             demand.len(),
             if b.world.gate == crate::gates::rt::WORLD_M33.gate { "present" } else { "absent" }
         );
+    }
+
+
+    /// Negative control (link): the an500 map with the rehydrated-data
+    /// section put back inside .bss (the placement before the external
+    /// region) while the region assert stands -- the linker must refuse
+    /// with the assert's words.
+    fn run_hydrated_home_control(&mut self) {
+        const CASE: &str = "hydrated-home-control";
+        const BROKE: &str = "the rehydrated-data section moved back inside .bss of the an500 map (its region assert standing)";
+        let map = std::fs::read_to_string(self.ctx.repo.join(AN500_MAP)).unwrap_or_default();
+        let section = "  .rhu_hydrated ORIGIN(PSRAM) (NOLOAD) : ALIGN(8)\n  {\n    __rhu_hydrated_lo = .;\n    *(.hydrated*);\n    . = ALIGN(8);\n    __rhu_hydrated_hi = .;\n  } > PSRAM\n\n";
+        let bss = "    *(.bss .bss.* COMMON);\n    . = ALIGN(4);\n    __ebss = .;\n";
+        if map.matches(section).count() != 1 || map.matches(bss).count() != 1 {
+            self.ctx.gate_fail(&format!("{CASE}: cannot arm the control -- the map's rehydrated-data section or its .bss tail is not unique"));
+        }
+        let doctored = map.replacen(section, "", 1).replacen(
+            bss,
+            "    *(.bss .bss.* COMMON);\n    . = ALIGN(8);\n    __rhu_hydrated_lo = .;\n    *(.hydrated*);\n    __rhu_hydrated_hi = .;\n    . = ALIGN(4);\n    __ebss = .;\n",
+            1,
+        );
+        let map_rel = "src/kernel/target/payload-gate/rt/hydrated-control.x";
+        write_fixture(&self.ctx.repo.join(map_rel), doctored.as_bytes());
+        let merged = rt_merged_o(&crate::gates::rt::WORLD_M7);
+        let (ok, ld_log, _) = self.link_raw(CASE, &merged, &[], AN500_LIB, map_rel, &RT_LD_WORDS);
+        let text = String::from_utf8_lossy(&std::fs::read(&ld_log).unwrap_or_default()).into_owned();
+        let refusal = text
+            .lines()
+            .find(|l| l.contains("rehydrated-data region outside the external region"))
+            .map(|l| l.trim_end_matches('\r').to_string());
+        if ok || refusal.is_none() {
+            echo_file(&ld_log, "  | ");
+            self.emit_control_case(CASE, "fail", BROKE);
+            self.ctx.gate_fail(&format!("{CASE}: the doctored map was NOT refused by the external-region ASSERT"));
+        }
+        println!("  refused as predicted: {}", refusal.unwrap_or_default());
+        self.emit_control_case(CASE, "pass", BROKE);
+        println!("== control {CASE}: PASS (the linker refused the rehydrated-data region inside .bss) ==");
+    }
+
+    /// Negative control (link): the execute-in-place map with the managed-code
+    /// and unboxing-stub KEEP lines moved back into .text while the window
+    /// asserts stand -- the linker must refuse with the assert's words.
+    fn run_xip_home_control(&mut self) {
+        const CASE: &str = "xip-home-control";
+        const BROKE: &str = "the managed-code and unboxing-stub KEEP lines moved back into .text of the execute-in-place map (its window asserts standing)";
+        let map = std::fs::read_to_string(self.ctx.repo.join(XIP_MAP)).unwrap_or_default();
+        let block = "    __rhu_managedcode_lo = .;\n    KEEP(*(__managedcode*));\n    __rhu_managedcode_hi = .;\n    . = ALIGN(4);\n    __rhu_unbox_lo = .;\n    KEEP(*(__unbox*));\n    __rhu_unbox_hi = .;\n    . = ALIGN(4);\n";
+        let tail = "    . = ALIGN(4);\n    __etext = .;\n";
+        if map.matches(block).count() != 1 || map.matches(tail).count() != 1 {
+            self.ctx.gate_fail(&format!("{CASE}: cannot arm the control -- the map's managed block or its .text tail is not unique"));
+        }
+        let doctored = map.replacen(block, "", 1).replacen(tail, &format!("    . = ALIGN(4);\n{block}    __etext = .;\n"), 1);
+        let map_rel = "src/kernel/target/payload-gate/rt/xip-home-control.x";
+        write_fixture(&self.ctx.repo.join(map_rel), doctored.as_bytes());
+        let Some(b) = RT_BOARDS.iter().find(|b| b.board == "st-stm32f769i-disco") else {
+            self.ctx.gate_fail(&format!("{CASE}: no STM32F769 row in the rt-link table"));
+        };
+        let lib_rel = Self::rt_staticlib_rel(b);
+        let (ok, ld_log, _) = self.link_raw(CASE, XIP_MERGED, &[], &lib_rel, map_rel, &RT_LD_WORDS);
+        let text = String::from_utf8_lossy(&std::fs::read(&ld_log).unwrap_or_default()).into_owned();
+        let refusal = text.lines().find(|l| l.contains("managed code outside the external flash window")).map(|l| l.trim_end_matches('\r').to_string());
+        if ok || refusal.is_none() {
+            echo_file(&ld_log, "  | ");
+            self.emit_control_case(CASE, "fail", BROKE);
+            self.ctx.gate_fail(&format!("{CASE}: the doctored map was NOT refused by the window ASSERT"));
+        }
+        println!("  refused as predicted: {}", refusal.unwrap_or_default());
+        self.emit_control_case(CASE, "pass", BROKE);
+        println!("== control {CASE}: PASS (the linker refused the managed code outside the external flash window) ==");
     }
 
     /// Negative control: the an500 map with its managed-code KEEP line
@@ -2509,8 +2799,9 @@ impl MPayload {
         let phdrs = elf32_phdrs(&elf_bytes).unwrap_or_default();
         let map_text = std::fs::read_to_string(self.ctx.repo.join(AN500_MAP)).unwrap_or_default();
         let code = map_region(&map_text, "CODE").unwrap_or((0, 0));
+        let external = map_external_region(&map_text);
         let demand = self.rt_demand_m7.clone();
-        match check_rt_placement(&dump, &phdrs, &unresolved, &demand, code, &RT_HELLO_BRACKETS) {
+        match check_rt_placement(&dump, &phdrs, &unresolved, &demand, code, external, &RT_HELLO_BRACKETS) {
             Ok(_) => {
                 self.emit_control_case(CASE, "fail", BROKE);
                 self.ctx.gate_fail(&format!(
@@ -2774,6 +3065,9 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     let publish = crate::gates::rt::resolve_publish(repo);
+    // The maintainers' script drives the rebuild in the Linux environment
+    // named; a checkout without the script says so in one line, never a
+    // shell's exit code.
     if publish.is_some() && !repo.join("tools").join("rt-publish").join("payload-rebuild.sh").is_file() {
         println!("{DISPLAY_ID}: NOT RUN (the Linux environment for the publish is named but this checkout carries no tools/rt-publish/payload-rebuild.sh, the maintainers' script that drives the rebuild there; publish the two objects by the documented commands in their directories and run the leg again, which reads each object where the publish wrote it)");
         exit(1);
@@ -2861,6 +3155,9 @@ pub fn rederive(repo: &Path) -> ! {
     g.build_staticlib();
 
     let controls_run = if let Some((_, root)) = publish {
+        // The publish-side script in the Linux environment for the publish: the two programs at the
+        // tree's pin with the tree mapped, the cache inventory, the controls'
+        // scratch copies.
         let case = "rederive-publish";
         let script = format!("{root}/tools/rt-publish/payload-rebuild.sh");
         let out_there = format!("{root}/{OUT_REL}");
@@ -2894,6 +3191,10 @@ pub fn rederive(repo: &Path) -> ! {
         println!("== case {case}: PASS (the two programs published at the tree's pin by the documented command; nothing fetched) ==");
         true
     } else {
+        // The objects a reader published from src/payload by the documented
+        // commands -- read from the directory named, or where the publish
+        // wrote them: the same ties and the same boot read; the controls run
+        // only where the maintainers' script drives the rebuild.
         let case = "rederive-objects";
         let sources: [(&str, PathBuf); 2] = if let Some(d) = objects_dir.clone() {
             let dir = std::path::PathBuf::from(d);
@@ -2923,6 +3224,8 @@ pub fn rederive(repo: &Path) -> ! {
         false
     };
 
+    // The ties: each object published from src/payload against the frozen
+    // one, whole; a difference diagnosed by the loadable identity.
     let short = |s: &str| s.get(..16).unwrap_or(s).to_string();
     let mut moved: Vec<String> = Vec::new();
     for (prog, sha_pin) in [("rtsmoke", SHA_RTSMOKE_O), ("gctest", SHA_GCTEST_O)] {
@@ -2963,6 +3266,8 @@ pub fn rederive(repo: &Path) -> ! {
     let managed_rtsmoke = g.rederive_boot("rtsmoke", ExecProfile::Parity);
     let managed_gctest = g.rederive_boot("gctest", ExecProfile::Deterministic);
 
+    // The controls, each through the real tool in the Linux environment for the publish; NOT
+    // RUN with the reason when the objects came from a directory.
     if controls_run {
         g.rederive_control_doctored_code(&rd);
         g.rederive_control_comment_only(&rd);
@@ -3046,6 +3351,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         ld.version
     ));
 
+    // sha family: a frozen input that moved by one byte must be rejected;
+    // the real artifact with its recorded hash must be accepted.
     let mut doctored = std::fs::read(gold_dir.join("rtsmoke.o")).unwrap_or_default();
     doctored.push(b'x');
     let doctored_path = tmp.join("doctored.o");
@@ -3061,6 +3368,10 @@ pub fn selfcheck(repo: &Path) -> ! {
         sha256_file(&gold_dir.join("rtsmoke.o")).map(|h| h == SHA_RTSMOKE_O).unwrap_or(false),
     );
 
+    // bytes family: the filter must pass payload bytes through untouched
+    // and drop kernel-prefixed/blank lines; a one-byte payload deviation
+    // must fail the compare; a kernel-noise-wrapped genuine stream must
+    // pass it.
     let golden = std::fs::read(gold_dir.join("rtsmoke-mps2.golden.txt")).unwrap_or_default();
     let glf = lf_normalize(&golden);
     let mut genuine: Vec<u8> = Vec::new();
@@ -3094,6 +3405,11 @@ pub fn selfcheck(repo: &Path) -> ! {
         payload_stream(&unfiltered) == glf,
     );
 
+    // pins family: each gctest pin must reject its absence; a final line
+    // at the derived pin with the golden's free value must satisfy every
+    // pin (accept direction). The genuine fixture carries the pin itself,
+    // never a copy of it: the pin is re-derived per image and the golden's
+    // own count is its capture's, not the pin's.
     let goodfinal = format!("gctest: collections={COLLECTIONS_EXACT} free=89016 x ALL GOOD\n").into_bytes();
     let badfree = format!("gctest: collections={COLLECTIONS_EXACT} free=89017 x ALL GOOD\n").into_bytes();
     let badgcs = b"gctest: collections=9 free=89016 x ALL GOOD\n".to_vec();
@@ -3130,6 +3446,9 @@ pub fn selfcheck(repo: &Path) -> ! {
         "golden collections count accepted by the exact pin",
         final_gcs(&goodfinal).as_deref() == Some(COLLECTIONS_EXACT),
     );
+    // The verdict pin is anchored to the verdict line: a stream whose only
+    // "ALL GOOD" sits on a non-verdict line while its summary line carries
+    // no verdict must refuse; the golden's own final line must accept.
     let planted = format!("note: ALL GOOD is what the verdict would say\ngctest: collections={COLLECTIONS_EXACT} free=89016  not yet\n").into_bytes();
     write_fixture(&tmp.join("planted.stream"), &planted);
     sc.probe(
@@ -3143,6 +3462,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         final_verdict_has(&gc_glf, "ALL GOOD"),
     );
 
+    // nm family: managed entry absent must reject.
     let noentry = b"00001568 T InitializeModules\n".to_vec();
     write_fixture(&tmp.join("noentry.nm"), &noentry);
     sc.probe(
@@ -3195,6 +3515,12 @@ pub fn selfcheck(repo: &Path) -> ! {
         ),
     );
 
+    // The module-0 template family: against the mixed probe's contract
+    // (an 8-byte template, w1 at 0 and w2 at 4), the checker must refuse
+    // an image without a PT_TLS, one whose PT_TLS starts past the
+    // bracket, a template past the boot copy window, a load image whose
+    // template bytes differ from the initializer, and a thread-local
+    // symbol off its offset; the genuine shape must accept.
     let probe = &TLS_PROBES[2];
     let good_dump = b"20000000 D __sdata\n20001010 D __edata\n00009000 A __sidata\n20001008 D __rhu_tdata_lo\n20001010 D __rhu_tdata_hi\n00000000 D w1\n00000004 D w2\n".to_vec();
     let load = (PT_LOAD, 0x1000, 0x2000_0000, 0x9000, 0x1010, 0x1010, 8);
@@ -3244,6 +3570,9 @@ pub fn selfcheck(repo: &Path) -> ! {
         check_tls_image(&off, &good_elf, probe).is_ok(),
     );
 
+    // The header's generation: RHU_ABI read from include/rhu.h itself
+    // (the gate refuses to run without it); a header text without the
+    // define must parse to nothing.
     let header = std::fs::read_to_string(repo.join("src/kernel/include/rhu.h")).unwrap_or_default();
     sc.accept_probe(
         "abi-header-genuine",
@@ -3263,6 +3592,13 @@ pub fn selfcheck(repo: &Path) -> ! {
         header_abi("#define RHU_ABI_VERSION 9\n#define RHU_EAGAIN (-11)\n").is_some(),
     );
 
+    // The constructor-array family. A genuine ctor artifact in
+    // miniature: the copy window and brackets of the linked ctor image,
+    // one PT_LOAD carrying the window at its load/run offset, the array
+    // words naming their functions with the Thumb bit; then each
+    // doctored shape.
+    // (nm renders the Thumb functions with the low bit clear, as the
+    // real dump does; the linked words carry it set.)
     let ctor_dump = b"20000000 D __sdata\n200010f0 D __edata\n00009b00 A __sidata\n200010d8 D __preinit_array_start\n200010dc D __preinit_array_end\n200010e0 D __init_array_start\n200010e8 D __init_array_end\n200010e8 D __fini_array_start\n200010ec D __fini_array_end\n000017e2 T ctor_pre\n000017f6 T ctor_100\n0000180a T ctor_200\n0000181e T dtor_fini\n".to_vec();
     let words = |w: [u32; 5]| -> Vec<u8> { w.iter().flat_map(|v| v.to_le_bytes()).collect() };
     let ctor_words = words([0x17e3, 0, 0x17f7, 0x180b, 0x181f]);
@@ -3324,6 +3660,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         check_ctor_image(&ctor_dump, &even_elf, &CTOR_EXPECT).is_ok(),
     );
 
+    // The transcript order family: markers in priority order before the
+    // kernel's constructors line, the destructor silent.
     let markers = [CTOR_MARK_PRE, CTOR_MARK_100, CTOR_MARK_200];
     let order_ok = format!(
         "{CTOR_MARK_PRE}\r\n{CTOR_MARK_100}\r\n{CTOR_MARK_200}\r\n{CTOR_MODULES_LINE}\r\n=== rtsmoke: minirt v2 (alloc/div/casts) ===\r\n"
@@ -3359,6 +3697,9 @@ pub fn selfcheck(repo: &Path) -> ! {
         check_ctor_order(fini_ran.as_bytes(), &markers, CTOR_MODULES_LINE, CTOR_MARK_FINI).is_ok(),
     );
 
+    // The strong-entry family: the handshake names the payload's entry,
+    // the marker and the returned code print, the default and managed
+    // Main stay silent.
     let strong_ok = format!(
         "[boot] x | y | flavor: payload\r\n{}\r\n{ENTRY_MARK}\r\n[payload] managed Main returned {ENTRY_RETURN}\r\n",
         provided_entry_line(abi)
@@ -3388,6 +3729,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         check_entry_strong(wrong_code.as_bytes(), abi).is_ok(),
     );
 
+    // The window family: the strong entry built for the window's floor
+    // -- the handshake line in its window form, then the strong marks.
     let window_ok = format!(
         "[boot] x | y | flavor: payload\r\n{}\r\n{ENTRY_MARK}\r\n[payload] managed Main returned {ENTRY_RETURN}\r\n",
         window_entry_line(compat, abi, compat)
@@ -3403,6 +3746,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         check_entry_window(strong_ok.as_bytes(), compat, abi, compat).is_ok(),
     );
 
+    // The refusal family: the sentence, and nothing after it.
     let sentence = outside_sentence(abi + 1, compat, abi);
     let refused_ok = format!("[boot] x | flavor: payload\r\n{sentence}\r\n");
     write_fixture(&tmp.join("abi-refused.raw"), refused_ok.as_bytes());
@@ -3424,6 +3768,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         check_refusal(main_after.as_bytes(), &sentence).is_ok(),
     );
 
+    // The placement-refusal family: the funnel's panic naming the window.
     let window_ok = format!(
         "{}\r\n[panic] *** KERNEL PANIC ***\r\n[panic] .preinit_array outside the boot copy window\r\n[panic] *** halted ***\r\n",
         default_entry_line(abi)
@@ -3441,8 +3786,10 @@ pub fn selfcheck(repo: &Path) -> ! {
         check_window_refusal(no_msg.as_bytes()).is_ok(),
     );
 
-    let rt_dump = |m: (u64, u64), u: (u64, u64), h: (u64, u64), t: (u64, u64), i: (u64, u64), arena: (u64, u64)| -> Vec<u8> {
-        let syms: [(&str, u64); 25] = [
+    // The dump of a link: an500-shaped, the rehydrated-data region inside .bss; with `a1` the region's home is the map's
+    // external region and the dump carries the arena's second window too.
+    let rt_dump_with = |m: (u64, u64), u: (u64, u64), h: (u64, u64), t: (u64, u64), i: (u64, u64), arena: (u64, u64), a1: Option<(u64, u64)>| -> Vec<u8> {
+        let mut syms: Vec<(&str, u64)> = vec![
             ("__stext", 0x440),
             ("__etext", u.1 + 2),
             ("__rhu_managedcode_lo", m.0),
@@ -3462,19 +3809,24 @@ pub fn selfcheck(repo: &Path) -> ! {
             ("__rhu_tdata_lo", t.0),
             ("__rhu_tdata_hi", t.1),
             ("__sbss", 0x2000_2408),
-            ("__ebss", h.1),
+            ("__ebss", if a1.is_some() { 0x2000_96b8 + RT_HYDRATED_BYTES } else { h.1 }),
             ("__rhu_hydrated_lo", h.0),
             ("__rhu_hydrated_hi", h.1),
             ("__rhu_arena_lo", arena.0),
             ("__rhu_arena_hi", arena.1),
             ("RHU_ARENA_MIN", 0x20_0000),
         ];
+        if let Some(a1) = a1 {
+            syms.push(("__rhu_arena1_lo", a1.0));
+            syms.push(("__rhu_arena1_hi", a1.1));
+        }
         let mut out = String::new();
         for (n, v) in syms {
             out.push_str(&format!("{v:08x} T {n}\n"));
         }
         out.into_bytes()
     };
+    let rt_dump = |m: (u64, u64), u: (u64, u64), h: (u64, u64), t: (u64, u64), i: (u64, u64), arena: (u64, u64)| rt_dump_with(m, u, h, t, i, arena, None);
     let ph = |relro_vaddr: u64| -> Vec<Phdr> {
         vec![
             Phdr { p_type: PT_LOAD, p_offset: 0, p_vaddr: 0, p_paddr: 0, p_filesz: 0x440, p_memsz: 0x440, p_align: 0x10000 },
@@ -3492,7 +3844,8 @@ pub fn selfcheck(repo: &Path) -> ! {
     let demand: Vec<String> = ["SystemNative_Abort", "malloc", "pthread_self"].iter().map(|s| s.to_string()).collect();
     let unresolved: Vec<String> = vec!["malloc".to_string()];
     let code = (0u64, 3u64 << 20);
-    let check = |d: &[u8], p: &[Phdr], u: &[String]| check_rt_placement(d, p, u, &demand, code, &RT_HELLO_BRACKETS).is_ok();
+    let check = |d: &[u8], p: &[Phdr], u: &[String]| check_rt_placement(d, p, u, &demand, code, None, &RT_HELLO_BRACKETS).is_ok();
+    let check_ext = |d: &[u8], p: &[Phdr], u: &[String], ext: Option<(u64, u64)>| check_rt_placement(d, p, u, &demand, code, ext, &RT_HELLO_BRACKETS).is_ok();
     sc.accept_probe(
         "rt-placement-genuine",
         "the frozen runtime's placement as the an500 link states it accepted",
@@ -3512,6 +3865,51 @@ pub fn selfcheck(repo: &Path) -> ! {
         "rt-hydrated-size",
         "rehydrated-data bracket four bytes wide of the object's region",
         check(&rt_dump(g_m, g_u, (0x2000_96b8, 0x2000_96b8 + RT_HYDRATED_BYTES + 4), g_t, g_i, g_a), &ph(0x2000_21d8), &unresolved),
+    );
+    // The window rule: an execute-in-place map places the managed code, the unboxing stubs and the frozen pair past the 64-byte header inside the external flash region, the header's segment at the region's base.
+    let win = Some((0x9000_0000u64, 64u64 << 20));
+    let m_w = (0x9000_0040u64, 0x9000_0040 + RT_MANAGED_BYTES);
+    let u_w = (m_w.1 + 2, m_w.1 + 2 + RT_UNBOX_BYTES);
+    let x_hi_w = u_w.1 + 0x4000;
+    let xip_dump = |m: (u64, u64), u: (u64, u64), frozen: u64| -> Vec<u8> {
+        let text = String::from_utf8_lossy(&rt_dump_with(m, u, g_h, g_t, g_i, g_a, None)).replace("000c70c0 T __rhu_frozen", &format!("{frozen:08x} T __rhu_frozen"));
+        format!("{text}{:08x} T __rhu_xip_lo\n{x_hi_w:08x} T __rhu_xip_hi\n", 0x9000_0040u64).into_bytes()
+    };
+    let ph_w = |header: bool| -> Vec<Phdr> {
+        let mut v = ph(0x2000_21d8);
+        if header {
+            v.push(Phdr { p_type: PT_LOAD, p_offset: 0, p_vaddr: 0x9000_0000, p_paddr: 0x9000_0000, p_filesz: 0x40, p_memsz: 0x40, p_align: 1 });
+        }
+        v.push(Phdr { p_type: PT_LOAD, p_offset: 0, p_vaddr: 0x9000_0040, p_paddr: 0x9000_0040, p_filesz: x_hi_w - 0x9000_0040, p_memsz: x_hi_w - 0x9000_0040, p_align: 4 });
+        v
+    };
+    let check_win = |d: &[u8], p: &[Phdr]| check_rt_placement_in(d, p, &unresolved, &demand, code, None, &RT_HELLO_BRACKETS, win).is_ok();
+    sc.accept_probe(
+        "rt-placement-window-genuine",
+        "the managed code, the unboxing stubs and the frozen pair past the header inside the external flash region, the header's segment at its base, accepted",
+        check_win(&xip_dump(m_w, u_w, u_w.1 + 2), &ph_w(true)),
+    );
+    sc.probe("rt-managed-outside-window", "managed code left in CODE under a map with an external flash window", check_win(&xip_dump(g_m, g_u, u_w.1 + 2), &ph_w(true)));
+    sc.probe("rt-frozen-outside-window", "the frozen pair left in CODE under a map with an external flash window", check_win(&xip_dump(m_w, u_w, 0xc70c0), &ph_w(true)));
+    sc.probe("rt-window-header-missing", "no load segment at the window's base (the window header not in the image)", check_win(&xip_dump(m_w, u_w, u_w.1 + 2), &ph_w(false)));
+    // The external rule: a map with an external RAM region places the region at its head, the arena's second window after it.
+    let ext = Some((0x6000_0000u64, 16u64 << 20));
+    let h_x = (0x6000_0000u64, 0x6000_0000 + RT_HYDRATED_BYTES);
+    let a1_x = ((h_x.1 + 7) & !7, 0x6100_0000u64);
+    sc.accept_probe(
+        "rt-placement-external-genuine",
+        "the rehydrated-data region at the head of the map's external region with the arena's second window after it accepted",
+        check_ext(&rt_dump_with(g_m, g_u, h_x, g_t, g_i, g_a, Some(a1_x)), &ph(0x2000_21d8), &unresolved, ext),
+    );
+    sc.probe(
+        "rt-hydrated-in-bss-external",
+        "the rehydrated-data region left inside .bss under a map with an external region",
+        check_ext(&rt_dump_with(g_m, g_u, g_h, g_t, g_i, g_a, Some(a1_x)), &ph(0x2000_21d8), &unresolved, ext),
+    );
+    sc.probe(
+        "rt-window1-off-external",
+        "the arena's second window eight bytes past the rehydrated-data region's end",
+        check_ext(&rt_dump_with(g_m, g_u, h_x, g_t, g_i, g_a, Some((a1_x.0 + 8, a1_x.1))), &ph(0x2000_21d8), &unresolved, ext),
     );
     sc.probe(
         "rt-tdata-size",
@@ -3539,6 +3937,9 @@ pub fn selfcheck(repo: &Path) -> ! {
         check(&rt_dump(g_m, g_u, g_h, g_t, g_i, (0x2002_c408, 0x2002_c408 + 0x10_0000)), &ph(0x2000_21d8), &unresolved),
     );
 
+    // The demand list's world: the Cortex-M33 world's list carries the
+    // sixteen double helpers and the Cortex-M7 world's none -- the marker
+    // that refuses a row handed the other world's list.
     let m7_list: Vec<String> = ["SystemNative_Abort", "malloc", "pthread_self"].iter().map(|s| s.to_string()).collect();
     let mut m33_list = m7_list.clone();
     m33_list.extend(AEABI_DOUBLE_HELPERS.iter().map(|s| s.to_string()));
@@ -3630,6 +4031,11 @@ pub fn selfcheck(repo: &Path) -> ! {
         debug_class_fault(&planted).is_none(),
     );
 
+    // The hosted-runtime worlds' presence and the tie of a present one, on
+    // fixtures: an absent tier reads absent (declared, never tied); a
+    // present directory reads present and is tied, so a directory without
+    // its manifest is refused, never declared; the tie refuses every
+    // doctored form of the record; the verdict line's three shapes.
     let w7 = &crate::gates::rt::WORLD_M7;
     let absent_root = tmp.join("rt-absent-root");
     let _ = std::fs::remove_dir_all(&absent_root);

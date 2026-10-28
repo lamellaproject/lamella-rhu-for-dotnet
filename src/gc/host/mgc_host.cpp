@@ -14,9 +14,8 @@
  * served from the kernel arena, the write-barrier stomp sink, and
  * mutator thread/context getters at the EE's thread layout -- and
  * drives a deterministic allocation schedule through IGCHeap::Alloc
- * after activation succeeds. Compiled without the knob this file is
- * byte-for-byte the activation-only host, so the activation case's
- * objects do not move when the drive world changes.
+ * after activation succeeds. Compiled without the define this file is
+ * the activation-only host.
  *
  * Under -DMGC_HOST_DRIVE_COLLECT (gate case gc.C; extends the drive
  * world above) the host additionally plays the EE's COLLECTION-era
@@ -48,8 +47,8 @@
  * finalizer thread's drain role (GetNextFinalizable until null,
  * FINALIZER_RUN honored EE-side: clear + skip), and the allocator's
  * reclaim story end-to-end -- free-list reuse with zero-on-reuse, the
- * collect-and-retry wall that replaces a mark-only build's loud
- * region fail-fast, and the honest-NULL OOM protocol with the
+ * collect-and-retry wall at region exhaustion, and the honest-NULL OOM
+ * protocol with the
  * headroom-reserve grace round trip. Weak-death observations are
  * PRINTS, never asserts: the same host must run the collector's
  * MGC_BREAK_WEAK control to exit 0, and the gate is the detector.
@@ -70,9 +69,9 @@
  * deadline; the handler-ran line is the contract's "after the
  * handler has run" clause).
  *
- * This file is gate-world machinery, NOT the product shim: the real
- * execution engine arrives with the runtime archives, and when those
- * are linked this file must LEAVE the image (its EE statics and its
+ * This file is test machinery, not part of a hosted program's image: the
+ * runtime archives carry the real execution engine, and an image that
+ * links them does not link this file (its EE statics and its
  * C++ operator delete would collide with the archives' own; the
  * archives' C++ runtime shim defines operator delete, and the real EE
  * defines the flat interface). It hosts exactly one world: the
@@ -81,9 +80,8 @@
  * Exit taxonomy of this host (travels through the kernel's
  * "managed Main returned N" line and the semihosting exit):
  *   0   activation succeeded (every positive assertion held)
- *   3   version handshake REFUSED (the refusal class: a loud,
- *       attributed no -- the gate's doctored-version control expects
- *       exactly this)
+ *   3   version handshake refused (a loud, attributed no, which the
+ *       collector gate's doctored-version case expects)
  *   134 abort(): a structurally broken path (never expected; the
  *       value mirrors the conventional SIGABRT shell code so it can
  *       never be confused with the kernel's 0-3 verdict codes)
@@ -224,8 +222,26 @@ extern "C" void abort(void);
 static char g_line[512];
 static unsigned g_line_n;
 
+/* The log-door stage: the collector's per-file formatter composes
+ * its line by vsnprintf before one write through the kernel's log door, and
+ * this world links no C library -- so vsnprintf is provided below on the
+ * SAME engine. While a sink is set, line_put stores into the caller's buffer
+ * (bounded by its capacity, the full length counted, nothing dying on a
+ * long line: that is vsnprintf's contract) in place of g_line, so the
+ * enumerated conversion set and its loud death stay the one engine's and no
+ * new import reaches this object. */
+static char*  g_out;    /* the sink: the caller's buffer, or null */
+static size_t g_cap;    /* its capacity, the NUL included */
+static size_t g_out_n;  /* characters produced, stored or not */
+
 static void line_put(char c)
 {
+    if (g_out) {
+        if (g_out_n + 1 < g_cap)
+            g_out[g_out_n] = c;
+        g_out_n++;
+        return;
+    }
     if (g_line_n >= sizeof(g_line) - 1) {
         g_line[sizeof(g_line) - 1] = 0;
         sh_write0(g_line);
@@ -233,6 +249,23 @@ static void line_put(char c)
         abort();
     }
     g_line[g_line_n++] = c;
+}
+
+/* The line so far, for the loud death of an unsupported conversion: the
+ * sink's text when a sink is set (NUL-terminated within its capacity),
+ * else the line under construction. */
+static void line_so_far(void)
+{
+    if (g_out) {
+        if (g_cap) {
+            size_t end = g_out_n < g_cap ? g_out_n : g_cap - 1;
+            g_out[end] = 0;
+            sh_write0(g_out);
+        }
+        return;
+    }
+    g_line[g_line_n] = 0;
+    sh_write0(g_line);
 }
 
 static void line_puts(const char* s)
@@ -260,9 +293,8 @@ static void line_num(unsigned long v, unsigned base, unsigned width, bool pad0)
 
 /* The enumerated conversion set: %s %c %d %i %u %x %p %% with an
  * optional 'l' length and an optional zero-padded width on the integer
- * conversions. Anything else is a loud death: a NEW conversion arriving
- * with a later gate case must be added here deliberately (and lands
- * pinned in that case's transcript), never guessed at. */
+ * conversions. Anything else is a loud death: a conversion is added here
+ * deliberately, never guessed at. */
 static void vformat(const char* fmt, va_list ap)
 {
     for (const char* p = fmt; *p; p++) {
@@ -328,8 +360,7 @@ static void vformat(const char* fmt, va_list ap)
             break;
         }
         default:
-            g_line[g_line_n] = 0;
-            sh_write0(g_line);
+            line_so_far();
             sh_write0("\n[gc-host] FMT UNSUPPORTED conversion in: ");
             sh_write0(fmt);
             sh_write0("\n");
@@ -348,6 +379,28 @@ extern "C" int printf(const char* fmt, ...)
     g_line[g_line_n] = 0;
     sh_write0(g_line);
     return (int)g_line_n;
+}
+
+/* vsnprintf on the same engine (the log-door stage): the
+ * collector's per-file formatter composes its line here before one write
+ * through the log door. The full length is returned and the text is
+ * NUL-terminated within cap (a capacity of zero stores nothing); the
+ * conversions are the enumerated set above, a new one the same loud death. */
+extern "C" int vsnprintf(char* out, size_t cap, const char* fmt, va_list ap)
+{
+    g_out = out;
+    g_cap = cap;
+    g_out_n = 0;
+    vformat(fmt, ap);
+    if (cap) {
+        size_t end = g_out_n < cap ? g_out_n : cap - 1;
+        out[end] = 0;
+    }
+    int n = (int)g_out_n;
+    g_out = 0;
+    g_cap = 0;
+    g_out_n = 0;
+    return n;
 }
 
 extern "C" int puts(const char* s)
@@ -373,7 +426,8 @@ extern "C" int fflush(void*)
  * from it. No C library is linked here: the symbol points at a zeroed
  * block large enough for any early field, the loaded value (0) goes to
  * fflush above, and fflush ignores its argument entirely. Nothing else
- * may ever consume this symbol -- linking a real C library replaces it. */
+ * consumes this symbol; an image that links a real C library gets the
+ * library's own. */
 static char g_reent_stub[64];
 extern "C" {
 void* _impure_ptr = g_reent_stub;
@@ -472,10 +526,9 @@ extern "C" int sched_yield(void)
 
 /* The IGCHandleStore vtable's deleting destructor references sized
  * operator delete. Nothing may ever heap-delete the skeleton's
- * placement-new'd singletons; reaching this is a broken world. (When
- * the runtime archives join the link, their C++ runtime shim owns this
- * operator and this definition must leave the image with the rest of
- * the file.) */
+ * placement-new'd singletons; reaching this is a broken world. (An image
+ * that links the runtime archives takes operator delete from their C++
+ * runtime shim and does not link this file.) */
 void operator delete(void*, size_t)
 {
     sh_write0("[gc-host] operator delete reached -- nothing may heap-delete GC singletons\n");
@@ -611,6 +664,46 @@ void GCToEEInterface::StompWriteBarrier(WriteBarrierParameters* args)
 #define HOST_PROT_RW       0x3  /* PROT_READ|PROT_WRITE */
 #define HOST_MAP_ANON_PRIV 0x22 /* MAP_PRIVATE|MAP_ANONYMOUS */
 
+/* The window the managed heap lives in, chosen once by the shim's rule
+ * (the collector's mapping entry below states it): 1 -- the external
+ * RAM's -- when the image serves a second RAM range and the map's
+ * rehydrated-data brackets lie inside it, 0 -- the chip's own SRAM --
+ * otherwise. The brackets are weak references: an image whose map leaves
+ * them undefined reads NULL. */
+extern "C" char __rhu_hydrated_lo[] __attribute__((weak));
+extern "C" char __rhu_hydrated_hi[] __attribute__((weak));
+static uint32_t g_heap_window = ~0u;
+static uint32_t heap_window(void)
+{
+    if (g_heap_window != ~0u)
+        return g_heap_window;
+    g_heap_window = 0u;
+    rhu_ram_desc r;
+    if (rhu_ram_count() >= 2 && rhu_ram_range(1u, &r) == 0
+        && __rhu_hydrated_lo != nullptr && __rhu_hydrated_hi != nullptr) {
+        uint32_t lo = (uint32_t)(uintptr_t)__rhu_hydrated_lo;
+        uint32_t hi = (uint32_t)(uintptr_t)__rhu_hydrated_hi;
+        if (lo <= hi && lo >= r.base && hi - r.base <= r.bytes)
+            g_heap_window = 1u;
+    }
+    printf("[gc-host] the managed heap's window: %u (%s)\n", (unsigned)g_heap_window,
+           g_heap_window == 1u ? "external: the rehydrated-data brackets lie inside RAM range 1"
+                               : "internal: one range served, or the brackets lie outside range 1");
+    return g_heap_window;
+}
+
+/* The heap window's headroom at the call: range 1's record under the
+ * external posture, the arena's headroom otherwise. */
+static uint32_t heap_window_free(void)
+{
+    if (heap_window() == 1u) {
+        rhu_ram_desc r;
+        if (rhu_ram_range(1u, &r) == 0)
+            return r.free;
+    }
+    return rhu_arena_headroom();
+}
+
 extern "C" void* mmap64(void* addr, size_t len, int prot, int flags,
                         int fd, uint64_t off)
 {
@@ -637,6 +730,36 @@ extern "C" void* mmap64(void* addr, size_t len, int prot, int flags,
     printf("[gc-host] mmap64: anon RW len=%lu -> served from the kernel arena (page-aligned, zero-born; headroom delta OK)\n",
            (unsigned long)len);
 #ifdef MGC_HOST_ROW_AN500
+    if (heap_window() == 0u)
+        g_row_drawn += (unsigned long)rounded;
+#endif
+    return p;
+}
+
+/* The collector's own mapping entry, as the shim defines it for the hosted
+ * runtime: the managed heap's region, its mark bitmap and its mark stack
+ * are served from the window the heap lives in (heap_window above). A
+ * draw from window 1 goes through the kernel's named-range door,
+ * page-rounded and page-aligned, zero-born by the arena's law; a draw
+ * from window 0 is mmap64's, with its audit and its line. Exhaustion of
+ * the chosen window is MAP_FAILED, which the collector turns into its own
+ * loud init refusal; a zero length is a contract change and dies loud. */
+extern "C" void* rhu_shim_collector_mmap(size_t len)
+{
+    if (!len) {
+        sh_write0("[gc-host] collector mmap: a zero length\n");
+        abort();
+    }
+    if (heap_window() != 1u)
+        return mmap64(nullptr, len, HOST_PROT_RW, HOST_MAP_ANON_PRIV, -1, 0);
+    uint32_t rounded = ((uint32_t)len + 4095u) & ~4095u;
+    void* p = rhu_arena_alloc_from(1u, rounded, 4096u,
+                                   (uint32_t)(uintptr_t)__builtin_return_address(0));
+    if (!p)
+        return (void*)-1;
+    printf("[gc-host] collector mmap: anon RW len=%lu -> served from the kernel's RAM range 1 (page-aligned, zero-born)\n",
+           (unsigned long)len);
+#ifdef MGC_HOST_ROW_AN500
     g_row_drawn += (unsigned long)rounded;
 #endif
     return p;
@@ -644,15 +767,15 @@ extern "C" void* mmap64(void* addr, size_t len, int prot, int flags,
 
 #ifdef MGC_HOST_ROW_AN500
 /* sysconf -- the C library's two questions the row's managed heap asks
- * at boot: the page size, and the pages of system memory still free
- * (the kernel's headroom, whole pages). Any other name is a contract
- * change and dies loud. */
+ * at boot: the page size, and the pages of system memory still free in
+ * the window the managed heap lives in (that window's headroom, whole
+ * pages). Any other name is a contract change and dies loud. */
 extern "C" long sysconf(int name)
 {
     if (name == 30)
         return 4096;
     if (name == 86)
-        return (long)(rhu_arena_headroom() / 4096u);
+        return (long)(heap_window_free() / 4096u);
     printf("[gc-host] sysconf: unexpected name %d\n", name);
     abort();
     return -1;
@@ -1151,9 +1274,8 @@ static void drive_check(bool ok, const char* what)
 {
     if (!ok) {
         printf("[gc-host] ALLOC DRIVE CHECK FAILED: %s\n", what);
-#ifdef MGC_HOST_DIAG_CONTINUE /* diagnostic knob: every failing check of a
-                               * drive listed in one run; never a plan
-                               * object */
+#ifdef MGC_HOST_DIAG_CONTINUE /* a diagnostic build: every failing check of
+                               * a drive is listed in one run */
         return;
 #endif
         abort();
@@ -1586,7 +1708,7 @@ static void spawn_counter(IGCHeap* heap, Object* park)
 /* the mark-overflow drive (gate case gc.mark-overflow): an array of    */
 /* MO_ARRAY references -- small pairs, and at the last index the head   */
 /* of a chain of MO_CHAIN pairs reachable through the array alone --    */
-/* collected under a collector whose mark stack the plan caps at 64     */
+/* collected under a collector whose mark stack is capped at 64         */
 /* entries; every object read back by checksum and link after the       */
 /* first collection, the even elements dropped, collected again.        */
 /* ------------------------------------------------------------------ */
@@ -1957,16 +2079,25 @@ static int32_t drive_tail_rejoin(IGCHeap* heap)
 /* ------------------------------------------------------------------ */
 /* the finalize-full drive (gate case gc.finalize-full): finalizable    */
 /* objects, every one kept alive, fill the finalization table of the    */
-/* heap object the image links; the next finalizable request is         */
-/* answered no memory after one collection -- never handed out          */
-/* unregistered, where its finalizer would never run.                   */
+/* heap object the image links to its bound -- the table less the slots */
+/* held back for an out-of-memory exception's own finalizable           */
+/* allocation; the next finalizable request is answered no memory after */
+/* one collection through the out-of-memory report (never handed out    */
+/* unregistered, where its finalizer would never run), and under the    */
+/* grace that report opens the exception's own request is served from   */
+/* the slots held back with no collection.                              */
 /* ------------------------------------------------------------------ */
 #ifndef MGC_HOST_FINALIZE_CAP   /* the finalization capacity of the heap object the image links */
 #define MGC_HOST_FINALIZE_CAP 2048u
 #endif
+#ifndef MGC_HOST_FINALIZE_RESERVE   /* the slots that heap object holds back for an exception's own finalizable allocation */
+#define MGC_HOST_FINALIZE_RESERVE 16u
+#endif
+/* the table's bound for a request while the out-of-memory grace is closed */
+#define MGC_HOST_FINALIZE_BOUND (MGC_HOST_FINALIZE_CAP - MGC_HOST_FINALIZE_RESERVE)
 
-static Object*      g_ff_obj[MGC_HOST_FINALIZE_CAP];
-static OBJECTHANDLE g_ff_h[MGC_HOST_FINALIZE_CAP];
+static Object*      g_ff_obj[MGC_HOST_FINALIZE_BOUND];
+static OBJECTHANDLE g_ff_h[MGC_HOST_FINALIZE_BOUND];
 
 static unsigned g_ff_turns;
 
@@ -1991,71 +2122,85 @@ static Object* ff_birth(IGCHeap* heap, gc_alloc_context* acx)
 
 static int32_t drive_finalize_full(IGCHeap* heap)
 {
-    printf("[gc-host] gc.finalize-full drive: %u finalizable objects, every one kept alive, fill the finalization table; the next finalizable request must be answered no memory after one collection, never handed out unregistered\n",
-           (unsigned)MGC_HOST_FINALIZE_CAP);
+    printf("[gc-host] gc.finalize-full drive: %u finalizable objects, every one kept alive, fill the finalization table to its bound (%u entries, %u held back for an exception's own); the next finalizable request must be answered no memory after one collection through the out-of-memory report, never handed out unregistered, and the exception's own request then served from the slots held back with no collection\n",
+           (unsigned)MGC_HOST_FINALIZE_BOUND, (unsigned)MGC_HOST_FINALIZE_CAP,
+           (unsigned)MGC_HOST_FINALIZE_RESERVE);
     gc_alloc_context* acx = &g_mutator.acx;
     (void)drive_open_parked(heap, acx);
     IGCHandleStore* store = g_handle_mgr->GetGlobalHandleStore();
     drive_check(store != nullptr, "global handle store missing at the drive");
 
-    for (unsigned i = 0; i < MGC_HOST_FINALIZE_CAP; i++) {
+    for (unsigned i = 0; i < MGC_HOST_FINALIZE_BOUND; i++) {
         g_ff_obj[i] = ff_birth(heap, acx);
-        drive_check(g_ff_obj[i] != nullptr, "a finalizable allocation returned NULL while the table had room");
+        drive_check(g_ff_obj[i] != nullptr, "a finalizable allocation returned NULL while the table had room under its bound");
         g_ff_h[i] = store->CreateHandleOfType(g_ff_obj[i], HNDTYPE_STRONG);
         drive_check(g_ff_h[i] != nullptr, "the store answered no handle for a finalizable object");
     }
     printf("[gc-host] %u finalizable objects registered, each held by a strong handle\n",
-           (unsigned)MGC_HOST_FINALIZE_CAP);
+           (unsigned)MGC_HOST_FINALIZE_BOUND);
 
     size_t before = heap->CollectionCount(2, 0);
     Object* over = ff_birth(heap, acx);
     unsigned ran = (unsigned)(heap->CollectionCount(2, 0) - before);
-    printf("[gc-host] the finalizable request past the table: %s after %u collection(s)\n",
+    printf("[gc-host] the finalizable request past the table's bound: %s after %u collection(s)\n",
            over ? "HANDED OUT" : "no memory", ran);
-    drive_check(over == nullptr, "a finalizable object was handed out with no slot in the finalization table (its finalizer would never run)");
+    drive_check(over == nullptr, "a finalizable request past the table's bound was handed out: with no slot taken before its memory (its finalizer would never run), or from the slots held back for an exception's own allocation");
     drive_check(ran == 1, "the refusal did not come after exactly one collection");
-    for (unsigned i = 0; i < MGC_HOST_FINALIZE_CAP; i++)
+    for (unsigned i = 0; i < MGC_HOST_FINALIZE_BOUND; i++)
         drive_check(*(Object* volatile*)g_ff_h[i] == g_ff_obj[i],
                     "a held finalizable object moved across the collection");
-    printf("[gc-host] the table full of live objects: the request answered no memory after one collection, every held object in place\n");
+    printf("[gc-host] the table at its bound with live objects: the request answered no memory after one collection through the out-of-memory report, every held object in place\n");
 
-    /* The holders dropped, one collection (every object dead: queued for
-     * its finalizer), the finalizer's work done by the drive: every slot
-     * is free again and the same request is served with no collection. */
-    for (unsigned i = 0; i < MGC_HOST_FINALIZE_CAP; i++)
+    /* The grace the report opened: the exception's own finalizable
+     * request finds a slot among those held back and is served with no
+     * collection (nobody holds it: it dies with the rest below). */
+    before = heap->CollectionCount(2, 0);
+    Object* own = ff_birth(heap, acx);
+    ran = (unsigned)(heap->CollectionCount(2, 0) - before);
+    printf("[gc-host] the exception's own finalizable request with the grace open: %s from the slots held back after %u collection(s)\n",
+           own ? "served" : "ANSWERED NO MEMORY", ran);
+    drive_check(own != nullptr && ran == 0, "the exception's own finalizable request was not served from the slots held back with no collection");
+
+    /* The holders dropped, one collection (every object dead, the
+     * exception's own with them: queued for its finalizer; the sweep's
+     * slack closes the grace), the finalizer's work done by the drive:
+     * every slot is free again and the same request is served with no
+     * collection. */
+    for (unsigned i = 0; i < MGC_HOST_FINALIZE_BOUND; i++)
         g_handle_mgr->DestroyHandleOfType(g_ff_h[i], HNDTYPE_STRONG);
     drive_check(heap->GarbageCollect(2, false, 0) == 0, "GarbageCollect after the holders dropped rc != S_OK");
     unsigned drained = 0;
     while (heap->GetNextFinalizable() != nullptr)
         drained++;
-    drive_check(drained == MGC_HOST_FINALIZE_CAP, "the finalizer's queue did not hold every dropped object");
+    drive_check(drained == MGC_HOST_FINALIZE_BOUND + 1u, "the finalizer's queue did not hold every dropped object and the exception's own");
     before = heap->CollectionCount(2, 0);
     Object* again = ff_birth(heap, acx);
     ran = (unsigned)(heap->CollectionCount(2, 0) - before);
     drive_check(again != nullptr && ran == 0, "the request was not served at once after the finalizers ran");
     printf("[gc-host] the holders dropped and %u finalizers run: the same request served with no collection\n", drained);
 
-    /* The table filled again with objects nobody holds: dead, but not
-     * collected and not finalized. The next request collects once, and
-     * while it waits the finalizer thread takes one object (the yield
-     * hook plays it): served after that one collection. */
-    for (unsigned i = 1; i < MGC_HOST_FINALIZE_CAP; i++)
-        drive_check(ff_birth(heap, acx) != nullptr, "a finalizable allocation returned NULL while the table had room");
+    /* The table filled to its bound again with objects nobody holds:
+     * dead, but not collected and not finalized. The next request
+     * collects once, and while it waits the finalizer thread takes one
+     * object (the yield hook plays it): served after that one
+     * collection. */
+    for (unsigned i = 1; i < MGC_HOST_FINALIZE_BOUND; i++)
+        drive_check(ff_birth(heap, acx) != nullptr, "a finalizable allocation returned NULL while the table had room under its bound");
     g_ff_finalizer_on_yield = 1;
     before = heap->CollectionCount(2, 0);
     Object* waited = ff_birth(heap, acx);
     ran = (unsigned)(heap->CollectionCount(2, 0) - before);
     g_ff_finalizer_on_yield = 0;
-    printf("[gc-host] the table full of dead objects not yet finalized: the request %s after %u collection(s); the finalizer thread took %u object(s) while it waited\n",
+    printf("[gc-host] the table at its bound with dead objects not yet finalized: the request %s after %u collection(s); the finalizer thread took %u object(s) while it waited\n",
            waited ? "served" : "ANSWERED NO MEMORY", ran, g_ff_turns);
     drive_check(waited != nullptr, "a finalizable request was refused while dead objects waited for their finalizers");
     drive_check(ran == 1 && g_ff_turns == 1, "the wait did not end after one collection and one object taken by the finalizer thread");
     drained = 0;
     while (heap->GetNextFinalizable() != nullptr)
         drained++;
-    drive_check(drained == MGC_HOST_FINALIZE_CAP - 1u, "the finalizer's queue did not hold the rest of the dead objects");
-    printf("[gc-host] GC FINALIZE FULL EXERCISE OK (%u live finalizable objects filled the table: no memory after one collection, none handed out unregistered; the holders dropped and the finalizers run: served; the table full of dead objects: served after one collection and one object taken by the finalizer thread)\n",
-           (unsigned)MGC_HOST_FINALIZE_CAP);
+    drive_check(drained == MGC_HOST_FINALIZE_BOUND - 1u, "the finalizer's queue did not hold the rest of the dead objects");
+    printf("[gc-host] GC FINALIZE FULL EXERCISE OK (%u live finalizable objects filled the table to its bound: no memory after one collection through the out-of-memory report, none handed out unregistered; the exception's own request served from the %u slots held back with no collection; the holders dropped and the finalizers run: served; the table at its bound with dead objects: served after one collection and one object taken by the finalizer thread)\n",
+           (unsigned)MGC_HOST_FINALIZE_BOUND, (unsigned)MGC_HOST_FINALIZE_RESERVE);
     return 0;
 }
 #endif /* MGC_HOST_DRIVE_FINALIZE_FULL */
@@ -2426,10 +2571,10 @@ static int32_t drive_allocator(IGCHeap* heap)
     printf("[gc-host] cast handles: underlying-ws(#1) ws(#13) wl(#14) dependent(#15 -> #16) created\n");
 
 #ifdef MGC_HOST_DRIVE_TUNE
-    /* Printed, not asserted: the BREAK_WINDOW_FIX control suppresses
-     * the fix-time refunds, so these numbers are exactly where that
-     * suppression first shows -- the gate pins the positive values and
-     * lets the control walk on to its own detector. */
+    /* Printed, not asserted: the build with MGC_BREAK_WINDOW_FIX suppresses
+     * the fix-time refunds, so these numbers are where that suppression
+     * first shows; the collector gate compares the values of the unbroken
+     * build and lets the broken one run on to its own check. */
     printf("[gc-host] posture books: alloc_count=%d alloc_bytes=%d; in_use=%u allocated=%u (window charges minus refunds = the fast-born bytes)\n",
            (int)acx->alloc_count, (int)acx->alloc_bytes,
            (unsigned)heap->GetTotalBytesInUse(),
@@ -2591,10 +2736,10 @@ static int32_t drive_allocator(IGCHeap* heap)
                 "reuse did not land at the first fitting run (address-ordered first-fit)");
     printf("[gc-host] reuse landed at alloc #8's old address (first-fit, split)\n");
 
-    /* The retired wall: a rooted 1.9 MB object is marked through a
-     * collection, dropped, and the SAME ask that fail-fasts a
-     * mark-only build now collects-and-retries to an exact-fit serve
-     * at the dead object's own address. */
+    /* The region wall: a rooted 1.9 MB object is marked through a
+     * collection, dropped, and the same request then collects and retries
+     * to an exact-fit serve at the dead object's own address (a mark-only
+     * build fails fast at that request). */
     Object* bigA = drive_alloc(heap, acx, 1900000, 0, 19);
     g_root_big = bigA;
     drive_check(heap->GarbageCollect(2, false, 0) == 0,
@@ -2745,9 +2890,9 @@ extern "C" int32_t __managed__Main(int32_t argc, const uint8_t* const* argv)
            (unsigned)MGC_ROW_STACK_CLAMP, (unsigned)MGC_ROW_HANDLE_SLOTS,
            (unsigned)MGC_ROW_FOH_POOL_BYTES,
            (unsigned)MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES);
-    printf("[gc-row] sizing: markstack=%u finq=%u out_of_memory_reserve=%u window=%u/%u retries=%u frozen=%u\n",
+    printf("[gc-row] sizing: markstack=%u finq=%u/%u out_of_memory_reserve=%u window=%u/%u retries=%u frozen=%u\n",
            (unsigned)MGC_ROW_MARKSTACK_ENTRIES, (unsigned)MGC_ROW_FINQ_CAP,
-           (unsigned)MGC_ROW_OOM_RESERVE, (unsigned)MGC_ROW_WINDOW_BYTES,
+           (unsigned)MGC_ROW_FINQ_RESERVE, (unsigned)MGC_ROW_OOM_RESERVE, (unsigned)MGC_ROW_WINDOW_BYTES,
            (unsigned)MGC_ROW_WINDOW_FLOOR, (unsigned)MGC_ROW_WALL_RETRIES,
            (unsigned)MGC_ROW_FROZEN_SEGS);
 #endif
@@ -2802,7 +2947,7 @@ extern "C" int32_t __managed__Main(int32_t argc, const uint8_t* const* argv)
     IGCHandleManager* mgr = nullptr;
     GcDacVars dac;
 #ifdef MGC_HOST_ROW_AN500
-    g_row_free_before = rhu_arena_headroom();
+    g_row_free_before = heap_window_free();
 #endif
     HRESULT rc = init_fn((IGCToCLR*)(void*)&clr_cookie, &heap, &mgr, &dac);
     if (rc != 0 || !heap || !mgr) {
@@ -2834,15 +2979,41 @@ extern "C" int32_t __managed__Main(int32_t argc, const uint8_t* const* argv)
      *
      * Containment: the cover granule is anchored by masking any
      * covered address down to the cover's power-of-two boundary (the
-     * heap's guard masks the region base; the statics window and the
-     * region are served from the same DATA window, so masking the
-     * statics base lands on the same floor whenever the verdict
-     * holds -- the gate cross-ties the two printed floors). Every
-     * legal bulk-move destination -- the statics window and the
-     * whole arena window any heap range is served from -- must sit
-     * inside the granule, or the cover is a lie and this image
-     * refuses to exist. */
-    {
+     * heap's guard masks the region base). Under the external posture
+     * the managed heap lives in RAM range 1's window, so the whole
+     * window -- every address a heap range can be served from -- must
+     * sit inside the granule anchored at the window's base; the statics
+     * window lies outside the cover and outside the write barrier's
+     * bounds, so a bulk move into a static marks no card, and the
+     * runtime reports the statics' references as roots at every
+     * collection. Under the internal posture the statics window and
+     * the region are served from the same DATA window, so masking the
+     * statics base lands on the same floor whenever the verdict holds
+     * (the gate cross-ties the two printed floors), and every legal
+     * bulk-move destination -- the statics window and the whole arena
+     * window any heap range is served from -- must sit inside the
+     * granule. Either way a cover that does not hold is a lie and this
+     * image refuses to exist. */
+    if (heap_window() == 1u) {
+        rhu_ram_desc r1;
+        if (rhu_ram_range(1u, &r1) != 0) {
+            sh_write0("[gc-row] containment: RAM range 1 unreadable under the external posture\n");
+            abort();
+        }
+        uintptr_t floor_ = (uintptr_t)r1.lo
+            & ~((uintptr_t)MGC_ROW_COVER_BYTES - 1u);
+        uintptr_t cend = floor_ + (uintptr_t)MGC_ROW_COVER_BYTES;
+        printf("[gc-row] containment: floor=0x%08lx cover_end=0x%08lx heap window=[0x%08lx,0x%08lx) statics=[0x%08lx,0x%08lx) outside the cover\n",
+               (unsigned long)floor_, (unsigned long)cend,
+               (unsigned long)r1.lo, (unsigned long)r1.hi,
+               (unsigned long)(uintptr_t)__sdata,
+               (unsigned long)(uintptr_t)__ebss);
+        if ((uintptr_t)r1.lo < floor_ || (uintptr_t)r1.hi > cend) {
+            printf("[gc-row] containment REFUSED: the managed heap's window lies outside the cover granule\n");
+            abort();
+        }
+        printf("[gc-row] containment VERDICT: INSIDE (the managed heap's window inside the cover granule -- every in-bounds bulk-move destination covered; a static destination lies outside the heap bounds and marks no card)\n");
+    } else {
         uintptr_t floor_ = (uintptr_t)__sdata
             & ~((uintptr_t)MGC_ROW_COVER_BYTES - 1u);
         uintptr_t cend = floor_ + (uintptr_t)MGC_ROW_COVER_BYTES;
@@ -2860,6 +3031,8 @@ extern "C" int32_t __managed__Main(int32_t argc, const uint8_t* const* argv)
             abort();
         }
         printf("[gc-row] containment VERDICT: INSIDE (statics + arena window inside the cover granule -- every legal bulk-move destination covered)\n");
+    }
+    {
 
         /* System memory: the row's managed heap is sized at boot, so
          * the rule is recomputed here, independently of the heap, from
@@ -2880,7 +3053,7 @@ extern "C" int32_t __managed__Main(int32_t argc, const uint8_t* const* argv)
                         break;
                 }
             }
-            uint32_t after = rhu_arena_headroom();
+            uint32_t after = heap_window_free();
             printf("[gc-row] system memory: free before the collector %lu B, free after init %lu B, the row keeps %lu B (the rule: managed heap %lu B, collector tables %lu B; drawn %lu B)\n",
                    (unsigned long)free0, (unsigned long)after, (unsigned long)keep,
                    (unsigned long)h, (unsigned long)tables, g_row_drawn);

@@ -4,8 +4,9 @@
  * all. Minimal on purpose: a futex pair plus a nanosecond clock and
  * sleep is the entire blocking surface of the kernel, and every richer
  * primitive (mutex, event, semaphore, condition variable) is a recipe
- * over these four in the layer above. No signals exist or ever will.
+ * over these four in the layer above. No signals exist.
  */
+
 #ifndef RHU_H
 #define RHU_H
 
@@ -22,13 +23,17 @@ extern "C" {
 /* The hosting-API contract generation this header describes, and the
  * window of generations a kernel built from it serves.
  *
- * RHU_ABI is the generation. An ADDITIVE change -- a function added at
- * the end of this header, nothing a compiled consumer could feel moved
- * -- raises RHU_ABI by one and leaves RHU_ABI_COMPAT where it stands. A
- * BREAKING change -- a signature, a struct layout, an error value, a
- * function removed or reordered -- raises both to the same new number.
- * (Through generation 31 the value was the header's function count; it
- * is a generation number from 32 on.)
+ * RHU_ABI is the generation. A door ADDED at the end of this header
+ * leaves it where it stands: a program links against the kernel
+ * statically, so a program that calls a door its kernel lacks fails at
+ * the link with an undefined symbol, and no generation check is needed
+ * to refuse it. The generation moves when a door's shape or meaning
+ * changes -- a signature, a struct layout, an error value, what an
+ * argument or a result means -- since a program compiled against the
+ * older header links all the same and would call the door wrongly, and
+ * when a door is removed. A change an older program still runs under
+ * raises RHU_ABI by one and leaves RHU_ABI_COMPAT where it stands; one
+ * an older program cannot run under raises both to the same new number.
  *
  * A payload that provides its own entry states the RHU_ABI of the header
  * it compiled against and nothing else (rhu_payload_abi, at the end of
@@ -39,7 +44,7 @@ extern "C" {
  *     [payload] entry REFUSED: the payload was built for hosting-API
  *     contract generation N, outside this kernel's window C..A
  * where C is RHU_ABI_COMPAT and A is RHU_ABI. */
-#define RHU_ABI 35
+#define RHU_ABI 41
 #define RHU_ABI_COMPAT 31
 
 /* Error surface (RHU-owned values, errno-mirroring by convention). */
@@ -117,14 +122,17 @@ int32_t rhu_futex_wake(const uint32_t *addr, uint32_t n);
 /* --- The arena: the GC's memory substrate. One arena per
  * image; bump-only (individual frees never exist); rezero is the
  * recycling story. Every byte ever handed out was zero at the moment
- * of hand-out (the zero-birth invariant). All verbs run under the
- * kernel critical section: single-core, short, never blocking. */
+ * of hand-out (the zero-birth invariant: zeroed at boot or at the
+ * hand-out by the image's init mode; the door returns after). All verbs
+ * run under the kernel critical section: single-core, short, never
+ * blocking. */
 
 /* Aligned bump allocation attributed to `site` (an opaque caller key;
  * C callers use the rhu_arena_alloc macro and get their return address
  * for free). Returns NULL on honest EXHAUSTION only. A wild argument
- * (align not a power of two, align > 4096, or bytes == 0) is a caller
- * BUG and dies loud through the funnel -- never a quiet NULL. Sizes
+ * (align not a power of two or over the window's size, or bytes == 0)
+ * is a caller BUG and dies loud through the funnel -- never a quiet
+ * NULL. Any power of two up to the window's size is honoured. Sizes
  * round up to 8; the returned block satisfies `align`. */
 void *rhu_arena_alloc_at(uint32_t bytes, uint32_t align, uint32_t site);
 #define rhu_arena_alloc(b, a) \
@@ -133,8 +141,10 @@ void *rhu_arena_alloc_at(uint32_t bytes, uint32_t align, uint32_t site);
 /* Re-establish the zero-birth invariant over [p, p+bytes): after a 0
  * return the range reads zero, the address stays the caller's, and no
  * new address space was consumed (headroom and the next hand-out
- * address are untouched). The range must lie inside handed-out arena
- * space; anything else returns RHU_EINVAL and touches nothing. */
+ * address are untouched). The zeroing runs with the kernel's interrupt
+ * band live: no critical section is held across it, however long the
+ * range. The range must lie inside handed-out arena space; anything
+ * else returns RHU_EINVAL and touches nothing. */
 int32_t rhu_arena_rezero(void *p, uint32_t bytes);
 
 /* Bytes an immediately following 8-aligned allocation could still get,
@@ -142,7 +152,7 @@ int32_t rhu_arena_rezero(void *p, uint32_t bytes);
 uint32_t rhu_arena_headroom(void);
 
 /* Dump the per-site allocation audit table to the console. Diagnostic:
- * noisy by design, never called by ship flavors or gated images. */
+ * noisy by design, never called by a shipped image. */
 void rhu_arena_report(void);
 
 /* --- Kheap, N-module TLS, the thread C-ABI, the module
@@ -296,7 +306,10 @@ int32_t rhu_thread_stack_bounds(int32_t tid, uint32_t *lo,
  * safe form is the only form); bit 0 of a written pc is cleared (the
  * Thumb bit lives in xpsr.T). flags bit 0 = FP-extended frame
  * present; FP state stays in-frame untouched either way (references
- * never live in FP registers). */
+ * never live in FP registers). flags bit 8 = the context is a delivered
+ * fault context (rhu_fault_ctx, below: the activation handler is also
+ * the fault funnel's delivery entry once a hosting layer has armed it
+ * through rhu_fault_register), its kind in bits 15:12. */
 typedef struct rhu_ctx {
     uint32_t r[13];         /* r0-r12 */
     uint32_t sp, lr, pc, xpsr;
@@ -364,7 +377,7 @@ int32_t rhu_activation_send(int32_t tid);
 
 /* --- Modules/exidx plumbing -- the registry's query doors,
  * completing module 0 (frozen + exidx wired at boot from the link
- * brackets; every board map now defines the bracket symbols:
+ * brackets; every board map defines the bracket symbols:
  * section-exact in payload maps, zero-length in base maps -- one
  * registration code path, both families). Queries copy the stored
  * desc under the kernel critical section and never block; no new
@@ -415,17 +428,87 @@ int32_t rhu_console_write(const void *buf, uint32_t n);
  * count -- 0 means no input, and the call NEVER waits for any (a
  * blocking read is a recipe: poll; no readiness word is exported
  * for a futex wait). Bytes are raw wire
- * bytes: no echo, no line editing, no CR/LF translation. Refusals
- * mirror rhu_console_write. */
+ * bytes: no echo, no line editing, no CR/LF translation. Refusals:
+ * RHU_EINVAL for NULL buf with n > 0; n is not bounded (the drain
+ * stops at the pending bytes, at most the receive ring's depth). */
 int32_t rhu_console_read(void *buf, uint32_t n);
 
-/* Terminate the machine with an exit code. On a hosted-emulator
- * world the code reaches the host's exit status; on silicon the
- * machine parks in low-power idle (the terminal state -- there is
- * nothing to return the code to). Never returns; runs NO destructors
- * or atexit machinery of its own (the layer above owns shutdown
- * ceremony). */
+/* --- The two streams, their channels and the kernel's output level.
+ * The kernel's console carries TWO STREAMS: the
+ * LOG stream (the kernel's diagnostic lines, and a hosting layer's through
+ * rhu_log_write) and the CONSOLE stream (the program's standard output and
+ * standard error through rhu_console_write, its input through
+ * rhu_console_read). Each stream is routed at BUILD TIME to a channel by a
+ * link-time word the prebuilt kernel reads at boot (PROVIDE(... = 0) in
+ * every link and payload script = the row's default; the SDK passes
+ * --defsym from the project's properties):
+ *   __rhu_log_channel, __rhu_console_channel:
+ *     0        the row's default (the facts file's `channels` row)
+ *     1        off     the stream discarded whole
+ *     2        memory  no wire: the 16 KB memory console read over the
+ *                      debug port (the Pico rows' default; no MCU pin taken)
+ *     3        probe   the ST-Link boards' virtual COM port (their default)
+ *     0x10 + n uart n  a UART of the row's facts table, held by the kernel
+ *                      (the emulator rows' default is uart 0, QEMU's stdio)
+ *   The 16 KB memory console `__rhu_console_log` is a TEE: every line of
+ *   either stream lands in it on every row whatever the channel says, and
+ *   the channel names the wire. Its header carries the program's end: the
+ *   fourth word (offset 12) is the exit code, 0 while the program runs and
+ *   the door's code whole at the end, stored first; then, after a barrier,
+ *   the magic word (offset 0) turns from "RLOG" into "RRET" (returned) or
+ *   "RABT" (aborted) in one write by the exit doors and the fault funnel
+ *   after the transcript's last byte. A value illegal for the row is refused at
+ *   the SDK's build; an image that reaches the kernel with one boots on the
+ *   row's default and says so in one line.
+ *   __rhu_uart<n>_tx, __rhu_uart<n>_rx: a project's pin override for a UART
+ *     row's pre-defined pair (the UART doors below): 0x100 | gpio when a pin
+ *     is named (bit 8 the valid flag, the low byte the GPIO number), 0 = the
+ *     facts' pair, any other value malformed and refused as an illegal pair;
+ *     validated against the chip's legal pin sets (the facts' uartPairs: any
+ *     TX-capable pin with any RX-capable pin of the block, the two
+ *     different) at the SDK's build and again at the claim.
+ *   __rhu_stack_watermark: 0 = off (every map's default) | 1 = the boot
+ *     stack reserve (the main stack: the boot's, then every handler's) is
+ *     filled with a pattern at reset and its deepest use is printed at the
+ *     program's end as one verbose line of the log stream, beside the
+ *     reserve's size. The kernel feature `stack-watermark` turns it on in
+ *     the kernel's own test images.
+ *   __rhu_log_level: 1 silent | 2 quiet | 3 verbose (0 = unset = verbose).
+ *     A line of the log stream carries the level of the quietest image
+ *     that still prints it: silent prints nothing but a fatal error's last
+ *     words (the funnel's reports); quiet, the SDK's default, prints one
+ *     line naming the version, the board and its clock; verbose prints
+ *     everything (the boot report, the flavors' lines, a hosting layer's).
+ *     The console stream is never filtered. */
+#define RHU_LOG_SILENT 1
+#define RHU_LOG_QUIET 2
+#define RHU_LOG_VERBOSE 3
+
+/* The image's output level, 1 to 3: a hosting layer skips formatting a
+ * line it would drop. */
+int32_t rhu_log_level(void);
+
+/* Write n bytes of the LOG stream at a level, as ONE atomic write through
+ * the wire grammar (the lock, the bound and the back-pressure of
+ * rhu_console_write): printed when level <= rhu_log_level(), dropped
+ * otherwise; returns n either way. Refusals: RHU_EINVAL for a level
+ * outside 1..3, for NULL buf with n > 0, or n beyond RHU_CONSOLE_MAX_WRITE;
+ * n == 0 writes nothing and returns 0. */
+int32_t rhu_log_write(uint32_t level, const void *buf, uint32_t n);
+
+/* The program's end, two doors. rhu_exit: the program returned or
+ * exited with code. rhu_abort: the program ended without returning (an
+ * exception nothing caught, a fail-fast); code is the ending path's.
+ * Either door stores the program's end into the console mirror's header
+ * (the exit code whole, then the end magic; the channels' note above)
+ * and ends the machine:
+ * on a hosted-emulator world the code reaches the host's exit status;
+ * on silicon the machine parks in low-power idle (the terminal state --
+ * there is nothing to return the code to). Neither returns; neither
+ * runs destructors or atexit machinery of its own (the layer above owns
+ * shutdown ceremony). */
 void rhu_exit(int32_t code);
+void rhu_abort(int32_t code);
 
 /* Random bytes, two doors. rhu_entropy fills buf[0..n) from the
  * kernel's software stream -- well mixed, entirely predictable from its
@@ -533,7 +616,7 @@ int32_t rhu_entropy_is_hardware(void);
  * the clock then at the fastest rate at or below the request that keeps the mode's
  * minimum times; another rate, or one the block cannot make, is refused RHU_ENOTSUP,
  * judged before the bus's state and so on a claimed bus too; a bus the board has none
- * of RHU_ENODEV. A claimed bus lives for the boot: this generation has no release
+ * of RHU_ENODEV. A claimed bus lives for the boot: there is no release
  * call; a second claim of the same bus at its rate answers 0 and changes nothing, at
  * another rate RHU_EBUSY. rhu_i2c_transfer runs one combined transaction over a list
  * of message records (the layout below: the address, the flags with bit 0 the read
@@ -580,7 +663,7 @@ int32_t rhu_i2c_transfer(uint32_t bus, const rhu_i2c_msg *msgs, uint32_t count, 
  * whole run: its three pins become the board's (a program holding one refuses
  * the claim RHU_EBUSY, nothing programmed), the block is enabled; 0 when
  * taken, RHU_ENODEV for a bus the board has none of; a claimed bus lives for
- * the boot (no release verb in this generation) and a second claim answers 0.
+ * the boot (no release verb) and a second claim answers 0.
  * rhu_spi_transfer runs one full-duplex exchange with THE DEVICE'S OWN
  * SETTINGS: the mode (RHU_SPI_MODE_0 to RHU_SPI_MODE_3) and the rate in Hz are
  * applied to the block for this transfer, the clock at the fastest rate the
@@ -640,8 +723,11 @@ int32_t rhu_spi_transfer(uint32_t bus, uint32_t select, uint32_t mode, uint32_t 
  * the output (1) or parks it at its inactive level (0): RHU_EINVAL before
  * any set. rhu_pwm_release parks the output and frees the channel and the
  * line. rhu_pwm_info answers the timer's number and the channel's index
- * (the chip-and-channel numbering the device files present) and the
- * timer's input clock in Hz. A refusal programs nothing. */
+ * within that timer, and the timer's input clock in Hz. The device files
+ * a hosting layer presents (the Linux PWM class's /sys/class/pwm) number
+ * a channel by the LINE NUMBER: pwmchip0/pwm<N> drives GPIO N, and the
+ * timer's channel index above is never the channel number on that
+ * surface. A refusal programs nothing. */
 #define RHU_PWM_POLARITY_NORMAL 0
 #define RHU_PWM_POLARITY_INVERSED 1
 int32_t rhu_pwm_count(void);
@@ -666,6 +752,9 @@ int32_t rhu_pwm_info(int32_t h, uint32_t *timer, uint32_t *channel, uint32_t *cl
  * count. rhu_adc_read runs ONE conversion and answers the raw sample, 0 to
  * 2^bits - 1, polled against a budget from the block's clock and never
  * waiting longer: RHU_ETIMEDOUT past the budget with the block reset;
+ * a conversion the block flags as erroneous is discarded (its result is
+ * undefined) and another started, at most eight in one read -- RHU_EIO
+ * when every one of the eight was flagged, with no sample answered;
  * RHU_EINVAL for a handle the program does not hold. rhu_adc_reference
  * answers a block's reference voltage in millivolts, a fact of the board
  * (RHU_ENODEV for a block the board has none of; RHU_EINVAL for a NULL
@@ -679,6 +768,393 @@ int32_t rhu_adc_read(int32_t h);
 int32_t rhu_adc_reference(uint32_t block, uint32_t *millivolts);
 int32_t rhu_adc_release(int32_t h);
 
+/* The UART doors: a program's serial port on a UART block of the
+ * board's facts table -- every UART the board pre-defines, numbered by the
+ * chip's own block number (UART0 is port 0) with its two pins where the row
+ * has pins. rhu_uart_count answers how many rows, rhu_uart_port the index-th
+ * row's facts: the block, the TX and RX lines a claim would take -- the
+ * project's pin words' pair when they name a legal pair for the block, else
+ * the row's pre-defined pair (RHU_UART_NO_PIN on a row
+ * whose UARTs have no pins, the emulator rows, and for a block with no
+ * default pair -- the Pico rows' UART1, which has no maker-given pair and
+ * is claimable once the project's pin words name a legal pair of the chip)
+ * and the UART's input clock in Hz (RHU_EINVAL past the count or for a NULL
+ * pointer); a row with no
+ * UART row answers 0 and RHU_ENODEV at every other door (the ST-Link boards).
+ * A block the kernel's console holds as a stream's
+ * wire (the channel words above) is IN the table and REFUSED at the claim,
+ * so a program enumerates every UART and learns which one it may open.
+ * rhu_uart_claim takes the block for the program's run and answers a handle:
+ * RHU_EBUSY when the block is the console's or already claimed (its two
+ * lines are taken in the claims table under one critical section, all or
+ * nothing, so a GPIO claim of either after it is refused); RHU_EINVAL for a
+ * block the row has not, for a project pin override that is not a legal
+ * pair of the chip, or for a block with no default pair when the project's
+ * words name no legal pair. The claim's state is 115200 8N1, the FIFOs on, the
+ * receiver on, no break. rhu_uart_configure sets the line discipline live
+ * -- the rate, 5 to 8 data bits, the parity (RHU_UART_PARITY_*), 1 or 2 stop
+ * bits -- once the pending transmit has left at the old rate (the door
+ * discards nothing): the rate rule is the part's divisor rounded to nearest,
+ * and a rate the divisor misses by more than 2 percent, or that needs a
+ * divisor the part cannot hold, is refused RHU_EINVAL with nothing moved (on
+ * the Picos' 12 MHz peripheral clock the ceiling is 750,000 Bd: 921,600 is
+ * refused, 460,800 lands 0.16 percent high and is taken); the achieved rate
+ * is answered; the emulator rows take 8N1 alone and refuse every other
+ * frame. rhu_uart_write takes the bytes the transmit ring has room for, 0 to
+ * n, and primes the transmitter -- it NEVER blocks (a blocking write is a
+ * recipe on the event word); rhu_uart_read answers the bytes pending in the
+ * receive ring, 0 to n, never waiting -- raw bytes, no echo, no translation.
+ * rhu_uart_status answers the bytes pending to read, the bytes pending to
+ * transmit (the ring AND the transmitter: 0 means the wire is idle) and the
+ * transmit ring's room. rhu_uart_event_word answers the port's futex word
+ * (NULL for a handle not held): bumped once per interrupt pass that moved a
+ * byte in or made room out, and once more at the release so a waiter on a
+ * closed port wakes (the word's storage stays readable); a thread waits on
+ * it through rhu_futex_wait with the value it read. rhu_uart_flush discards
+ * the receive ring and FIFO (RHU_UART_FLUSH_RX), the transmit ring (the
+ * transmitter's FIFO finishes on the wire; RHU_UART_FLUSH_TX) or both.
+ * rhu_uart_break holds (1) or releases (0) the break condition (RHU_EINVAL
+ * for on > 1, or on a part without break control: the emulator rows).
+ * rhu_uart_release disables the block and holds it in reset, drops the
+ * rings (pending transmit discarded: drain first), returns the two pads and
+ * the two lines, and bumps the event word. rhu_uart_info answers the held
+ * port's block, lines and clock. Every refusal moves no byte. The error
+ * counters (overruns, framing, parity, breaks, the rings' drops, the bytes
+ * in and out, the interrupts) are the witness record __rhu_uart_witness,
+ * read by symbol. */
+#define RHU_UART_NO_PIN 0xFFFFFFFFu
+#define RHU_UART_PARITY_NONE 0
+#define RHU_UART_PARITY_ODD 1
+#define RHU_UART_PARITY_EVEN 2
+#define RHU_UART_PARITY_MARK 3
+#define RHU_UART_PARITY_SPACE 4
+#define RHU_UART_FLUSH_RX 1
+#define RHU_UART_FLUSH_TX 2
+#define RHU_UART_FLUSH_BOTH 3
+int32_t rhu_uart_count(void);
+int32_t rhu_uart_port(uint32_t index, uint32_t *block, uint32_t *tx_line, uint32_t *rx_line, uint32_t *clock_hz);
+int32_t rhu_uart_claim(uint32_t block);
+int32_t rhu_uart_configure(int32_t h, uint32_t baud, uint32_t data_bits, uint32_t parity, uint32_t stop_bits, uint32_t *achieved_baud);
+int32_t rhu_uart_write(int32_t h, const void *buf, uint32_t n);
+int32_t rhu_uart_read(int32_t h, void *buf, uint32_t n);
+int32_t rhu_uart_status(int32_t h, uint32_t *rx_avail, uint32_t *tx_pending, uint32_t *tx_room);
+const uint32_t *rhu_uart_event_word(int32_t h);
+int32_t rhu_uart_flush(int32_t h, uint32_t which);
+int32_t rhu_uart_break(int32_t h, uint32_t on);
+int32_t rhu_uart_release(int32_t h);
+int32_t rhu_uart_info(int32_t h, uint32_t *block, uint32_t *tx_line, uint32_t *rx_line, uint32_t *clock_hz);
+
+/* --- The network doors: a program's sockets over the kernel's own
+ * TCP/IP stack on the medium the board has (the STM32F769's wired controller,
+ * the Pico W rows' wireless module -- each with its driver -- and a
+ * VIRTUAL medium in kernel memory on the emulator rows, where the whole
+ * family needs no network). Handles are small
+ * non-negative integers from a per-row pool; every door answers 0 or a
+ * positive count on success and a negative errno-mirroring code otherwise.
+ * NO DOOR BLOCKS: every wait is a hosting layer's recipe over
+ * rhu_futex_wait on a word the kernel bumps -- a socket's event word
+ * (moved when the socket's readiness mask changes, and at its close), the
+ * one global word for all sockets (moved after any socket's mask changed,
+ * and by rhu_net_events_bump), the medium's word (the link and the lease),
+ * a resolution's word (its answer). The blocking recipe: call the door;
+ * on RHU_EAGAIN snapshot the word, call the door again, then
+ * rhu_futex_wait(word, snapshot, deadline) and loop. A row with no medium
+ * answers 0 from rhu_net_count and RHU_ENODEV from every other door
+ * (rhu_net_events_word and rhu_net_events_bump stand on every row).
+ *
+ * The codes joining the surface for this family: */
+#define RHU_EMFILE (-24)          /* the socket pool is full                             */
+#define RHU_EPIPE (-32)           /* send after the stream closed                        */
+#define RHU_EMSGSIZE (-90)        /* a datagram larger than the socket's buffer          */
+#define RHU_EPROTONOSUPPORT (-93) /* a socket type or protocol the row does not serve    */
+#define RHU_EAFNOSUPPORT (-97)    /* an address family the row does not serve (IPv6)     */
+#define RHU_EADDRINUSE (-98)      /* the local port is bound already                     */
+#define RHU_ENETDOWN (-100)       /* the medium's link is down                           */
+#define RHU_ENETUNREACH (-101)    /* no route: no address yet, or off the segment with no gateway, or no name server */
+#define RHU_ECONNABORTED (-103)   /* the connection was aborted                          */
+#define RHU_ECONNRESET (-104)     /* the peer reset the connection                       */
+#define RHU_EISCONN (-106)        /* connect on a connected stream                       */
+#define RHU_ENOTCONN (-107)       /* send or receive on a stream that is not connected   */
+#define RHU_ECONNREFUSED (-111)   /* the peer refused the connection with a reset        */
+#define RHU_EHOSTUNREACH (-113)   /* the connect's budget passed with no answer from the peer (its hardware address, or its reply) */
+#define RHU_EALREADY (-114)       /* connect on a stream already connecting              */
+#define RHU_EINPROGRESS (-115)    /* the handshake started; wait on the event word       */
+/* (RHU_EAGAIN, RHU_EINVAL, RHU_ETIMEDOUT, RHU_ENODEV, RHU_ENOTSUP as they stand.) */
+
+/* The records. rhu_net_addr is sized for both families: family 2 is
+ * IPv4 (the Linux value) with the four octets in the first bytes of addr
+ * in the wire's order and the port in the host's order; family 0 is no
+ * address (an unconnected peer half); IPv6 (family 10) is refused at
+ * every door. rhu_net_lease_desc carries each address as
+ * its four octets in the wire's order read as one word (the first octet
+ * in the word's lowest byte, as sin_addr.s_addr holds it). */
+typedef struct rhu_net_addr   { uint32_t family; uint32_t port; uint8_t addr[16]; uint32_t scope; } rhu_net_addr;
+typedef struct rhu_net_medium { uint32_t kind; uint32_t link; uint8_t hw[6]; uint16_t reserved; } rhu_net_medium_desc; /* kind: RHU_NET_MEDIUM_*; link 0 down / 1 up */
+typedef struct rhu_net_lease  { uint32_t ip4, mask, gateway, dns[2]; uint32_t source; } rhu_net_lease_desc;        /* source: RHU_NET_LEASE_* */
+typedef struct rhu_net_limits { uint32_t streams, datagrams, stream_rx, stream_tx, datagram_buf, resolve_slots; } rhu_net_limits_desc;
+#define RHU_NET_FAMILY_IPV4 2u
+#define RHU_NET_FAMILY_IPV6 10u
+#define RHU_NET_STREAM 1u
+#define RHU_NET_DATAGRAM 2u
+#define RHU_NET_MEDIUM_NONE 0u
+#define RHU_NET_MEDIUM_WIRELESS 1u
+#define RHU_NET_MEDIUM_WIRED 2u
+#define RHU_NET_MEDIUM_VIRTUAL 3u
+#define RHU_NET_LEASE_NONE 0u
+#define RHU_NET_LEASE_DHCP 1u
+#define RHU_NET_LEASE_STATIC 2u
+#define RHU_NET_READABLE 1
+#define RHU_NET_WRITABLE 2
+#define RHU_NET_ERROR 4
+#define RHU_NET_HANGUP 8
+#define RHU_NET_PEEK 1u
+#define RHU_NET_SHUT_RD 0u
+#define RHU_NET_SHUT_WR 1u
+#define RHU_NET_SHUT_RDWR 2u
+#define RHU_NET_OPT_NODELAY 1u
+#define RHU_NET_OPT_KEEPALIVE 2u
+#define RHU_NET_OPT_REUSEADDR 3u
+
+/* The media and the address. rhu_net_count answers how many media the row
+ * has (0 or 1). rhu_net_medium answers a medium's
+ * kind, link state and hardware address (RHU_EINVAL past the count or for
+ * a NULL or misaligned pointer); rhu_net_medium_word its futex word, moved
+ * at every link change and lease change (NULL past the count).
+ * rhu_net_configure with NULL arms the DHCP client (the default: the
+ * lease arrives on the network thread and moves the medium's word; a
+ * program never waits for a lease before it starts); with a record it
+ * sets a static address, mask, gateway (0 = none) and name servers
+ * (0 = none) and stops the client (RHU_EINVAL for an address of 0 or a
+ * mask that is not a prefix). rhu_net_lease answers the current record
+ * with its source; RHU_EAGAIN while none. rhu_net_limits answers the row's
+ * pool as numbers: the stream and datagram socket counts, the stream
+ * receive and transmit buffer bytes, the datagram buffer bytes, the
+ * resolver's slots (RHU_EINVAL for a bad pointer). */
+int32_t rhu_net_count(void);
+int32_t rhu_net_medium(uint32_t medium, rhu_net_medium_desc *out);
+const uint32_t *rhu_net_medium_word(uint32_t medium);
+int32_t rhu_net_configure(uint32_t medium, const rhu_net_lease_desc *fixed);
+int32_t rhu_net_lease(uint32_t medium, rhu_net_lease_desc *out);
+int32_t rhu_net_limits(rhu_net_limits_desc *out);
+
+/* Name resolution: a request with a handle, never a wait. rhu_net_resolve
+ * files a query for a name of len bytes (letters, digits, hyphens and
+ * dots; RHU_EINVAL otherwise or past 253 bytes) through the stack's
+ * resolver into one of the row's slots and answers the slot's handle at
+ * once: RHU_EAGAIN when no slot is free, RHU_ENETUNREACH when the row
+ * has no name server (no lease yet, or a static record naming none).
+ * rhu_net_resolve_result answers the address records (family 2, the port
+ * 0) written into out, at most max: the count written; RHU_EAGAIN while
+ * the answer is pending; RHU_EHOSTUNREACH for a name the server does not
+ * have; RHU_ETIMEDOUT when the stack's retry budget passed with no
+ * answer; RHU_EINVAL for a handle not in use. THE SLOT's LIFETIME: a slot
+ * is taken by rhu_net_resolve and released by the first
+ * rhu_net_resolve_result that answers anything but RHU_EAGAIN -- a
+ * program that files a query and never reads its result holds the slot.
+ * rhu_net_resolve_word answers the request's futex word (moved once when
+ * the answer or the failure arrives; NULL for a handle not in use). */
+int32_t rhu_net_resolve(const char *name, uint32_t len);
+int32_t rhu_net_resolve_result(int32_t handle, rhu_net_addr *out, uint32_t max);
+const uint32_t *rhu_net_resolve_word(int32_t handle);
+
+/* Sockets. rhu_net_socket answers a handle for a stream (RHU_NET_STREAM,
+ * TCP; protocol 0 or 6) or a datagram socket (RHU_NET_DATAGRAM, UDP;
+ * protocol 0 or 17) of family RHU_NET_FAMILY_IPV4, its receive and
+ * transmit buffers carved from the row's pool here: RHU_EMFILE when the
+ * pool of handles or of sockets of that kind is spent, RHU_EAFNOSUPPORT
+ * for another family (IPv6 included, which turns a hosted runtime's
+ * dual-mode default off), RHU_EPROTONOSUPPORT for another type or
+ * protocol. rhu_net_bind records a stream's local port or binds a
+ * datagram socket (the address 0.0.0.0 or the row's own; the port not 0):
+ * RHU_EADDRINUSE when another socket of the kind holds the port (unless
+ * both set reuse-address), RHU_EINVAL for a bound, connecting or connected
+ * socket or a foreign address. rhu_net_listen puts a bound stream to
+ * listening with up to backlog connections pre-listening behind the one
+ * handle, bounded by the pool (fewer sockets than asked is not a
+ * refusal): RHU_EINVAL for an unbound stream, a datagram socket or a
+ * backlog of 0. rhu_net_accept moves the first completed connection
+ * behind a listener to a new handle, writes the peer's address when peer
+ * is not NULL, and arms a fresh socket in its place where the pool has
+ * one: the new handle; RHU_EAGAIN when none completed; RHU_EMFILE when no
+ * handle is free. rhu_net_connect on a stream starts the handshake and
+ * answers RHU_EINPROGRESS on every medium (the loopback included; the
+ * readiness word reports its end), with RHU_EALREADY while one is in
+ * flight, RHU_EISCONN after one ended, RHU_ENETDOWN with the link down and
+ * RHU_ENETUNREACH with no address, a port of 0 or a destination off the
+ * segment with no gateway; on a datagram socket it sets the default peer
+ * (binding an unbound socket to a port of the row's choosing) and answers
+ * 0. rhu_net_send takes the bytes a stream's transmit buffer has room for
+ * (0 to n, never waiting; a room of 0 answers RHU_EAGAIN) or a datagram
+ * whole (to the record, or the default peer with to NULL; RHU_EMSGSIZE
+ * past the buffer, RHU_ENOTCONN with neither address, RHU_ENETUNREACH off
+ * the segment): a PENDING ERROR is answered first and consumed; a stream
+ * that is not connected answers RHU_ENOTCONN (RHU_EAGAIN while
+ * connecting), one whose peer or own side closed RHU_EPIPE. rhu_net_recv
+ * answers the bytes read, 0 to n, from a stream (0 = the peer closed) or
+ * one datagram whole (RHU_EMSGSIZE when the buffer is smaller than the
+ * datagram, which is discarded), with the peer's address into from when
+ * it is not NULL; flags RHU_NET_PEEK reads without consuming (the health
+ * peek a hosted runtime's HTTP handler takes); RHU_EAGAIN while nothing
+ * is queued; a pending error first; RHU_EINVAL for another flag.
+ * rhu_net_available answers a stream's queued receive bytes or a datagram
+ * socket's next datagram length, 0 when none. rhu_net_shutdown with
+ * RHU_NET_SHUT_RD makes later reads answer 0 (a slot flag: the stack has
+ * no read half-close), with RHU_NET_SHUT_WR sends the stream's close
+ * (FIN), RHU_NET_SHUT_RDWR both; 0 on any valid handle, connected or not.
+ * rhu_net_close releases the handle at once and wakes its waiters; a
+ * stream's close handshake and its buffer pair stay on the network thread
+ * until the stack removes the connection (the pool counts the pair until
+ * then); a listener's sockets are aborted. rhu_net_readiness answers the
+ * poll-shaped mask -- RHU_NET_READABLE, RHU_NET_WRITABLE, RHU_NET_ERROR,
+ * RHU_NET_HANGUP -- as the LEVEL (take 0) or as THE RISEN BITS since the
+ * last take (take 1; cleared), the edge an event port reports: a
+ * connecting stream reports no bit until the handshake ends; at
+ * establishment WRITABLE rises; a failed connect raises WRITABLE, ERROR
+ * and HANGUP with the code pending (RHU_ECONNREFUSED on the peer's reset,
+ * RHU_EHOSTUNREACH at the budget); the peer's close raises READABLE and
+ * HANGUP and a read answers 0; a reset raises ERROR with RHU_ECONNRESET
+ * pending; a listener with a completed connection reports READABLE; a
+ * datagram socket reports READABLE with a datagram queued and WRITABLE
+ * when bound with room. rhu_net_error answers the pending code, read once
+ * and cleared, 0 when none. rhu_net_event_word answers the socket's futex
+ * word (NULL for a handle not in use); rhu_net_events_word the one word
+ * for all sockets; rhu_net_events_bump moves that word and wakes its
+ * waiters (a hosting layer's self-wake: an event port's registration
+ * changed under a waiter, or the port closed) -- the one bump that is not
+ * a mask change. rhu_net_name writes the local half always (a bound or
+ * connected socket's address and port, the port of the row's choosing
+ * included; 0.0.0.0 and 0 before any) and the peer half when peer is not
+ * NULL (family 0 when unconnected). rhu_net_option with set 1 writes an
+ * option's value and answers 0; with set 0 answers the value: no-delay
+ * (1), keep-alive (2; its interval a row fact) and reuse-address (3);
+ * RHU_ENOTSUP for any other option, and for the stream options on a
+ * datagram socket (the timeouts and linger are a hosting layer's own
+ * records). Every refusal moves no byte; the counters are the witness
+ * record __rhu_net_witness, read by symbol. */
+int32_t rhu_net_socket(uint32_t family, uint32_t type, uint32_t protocol);
+int32_t rhu_net_bind(int32_t h, const rhu_net_addr *local);
+int32_t rhu_net_listen(int32_t h, uint32_t backlog);
+int32_t rhu_net_accept(int32_t h, rhu_net_addr *peer);
+int32_t rhu_net_connect(int32_t h, const rhu_net_addr *peer);
+int32_t rhu_net_send(int32_t h, const void *buf, uint32_t n, const rhu_net_addr *to);
+int32_t rhu_net_recv(int32_t h, void *buf, uint32_t n, uint32_t flags, rhu_net_addr *from);
+int32_t rhu_net_available(int32_t h);
+int32_t rhu_net_shutdown(int32_t h, uint32_t how);
+int32_t rhu_net_close(int32_t h);
+int32_t rhu_net_readiness(int32_t h, uint32_t take);
+int32_t rhu_net_error(int32_t h);
+const uint32_t *rhu_net_event_word(int32_t h);
+const uint32_t *rhu_net_events_word(void);
+void    rhu_net_events_bump(void);
+int32_t rhu_net_name(int32_t h, rhu_net_addr *local, rhu_net_addr *peer);
+int32_t rhu_net_option(int32_t h, uint32_t option, uint32_t set, int32_t value);
+
+/* The RAM-range doors: the board's RAM as this image offers it to the
+ * hosted runtime, so a heap can span more than the chip's own SRAM. A
+ * row's ranges are a TABLE in the board's facts (the SDK's per-board file
+ * and the kernel's mirror of it, kept equal by the verification chain):
+ * range 0 is ALWAYS the internal SRAM -- the arena every door above draws
+ * from, the behaviour unchanged -- and range 1 an external RAM where a
+ * board has one and the image brought it up and proved it by read-back at
+ * boot (the Pimoroni Pico Plus 2 boards' 8 MB PSRAM behind the flash
+ * interface's second chip select; a boot whose part refuses dies loud
+ * before any door answers). rhu_ram_count answers how many ranges THIS
+ * IMAGE serves (at least 1; the emulator rows and the boards without an
+ * external part answer 1; a clock posture at which the part's limits
+ * cannot be met builds without the window and answers 1 too).
+ * rhu_ram_range fills the index-th range's record: `base` and `bytes` the
+ * physical range as the facts state it; `lo` and `hi` the arena window
+ * inside it the runtime may be handed (the first byte and one past the
+ * last); `free` that window's headroom at the call: the bytes an
+ * allocation at any alignment up to 8 could still take from it (hi minus
+ * the next hand-out address; the available memory a hosting layer
+ * answers is the sum over the ranges; for range 0 the same number
+ * rhu_arena_headroom answers); `flags` the bits below. RHU_EINVAL
+ * past the count or for a NULL or misaligned record, writing nothing.
+ * rhu_arena_alloc_from is rhu_arena_alloc_at drawn from the named range,
+ * under the arena's laws: NULL on THAT range's honest exhaustion only;
+ * a wild argument -- the align, the size, or a range past the count --
+ * is a caller BUG and dies loud through the funnel; any power-of-two
+ * align up to the range's window is honoured (a collector's region
+ * alignment among them). Range 0 behaves exactly as
+ * rhu_arena_alloc_at. The zero-birth invariant holds per
+ * range (zeroed at boot or at the hand-out by the image's init mode;
+ * the door returns after), and rhu_arena_rezero accepts a pointer
+ * inside any range's handed-out space.
+ *
+ * The flags: EXTERNAL, behind a memory controller rather than the chip's
+ * own SRAM; CACHED, reached through a cache the kernel manages (the
+ * RP2350's flash-interface cache for its PSRAM); EXEC, the memory
+ * protection lets code run from it; DMA, a bus master reaches it
+ * coherently (clear on every range: no door drives a bus master). */
+#define RHU_RAM_EXTERNAL 1u
+#define RHU_RAM_CACHED 2u
+#define RHU_RAM_EXEC 4u
+#define RHU_RAM_DMA 8u
+typedef struct rhu_ram_desc {
+    uint32_t base, bytes;       /* the physical range, as the facts state it */
+    uint32_t lo, hi;            /* the arena window inside it, half-open      */
+    uint32_t free;              /* that window's headroom at the call         */
+    uint32_t flags;             /* RHU_RAM_* bits                             */
+} rhu_ram_desc;
+int32_t rhu_ram_count(void);
+int32_t rhu_ram_range(uint32_t index, rhu_ram_desc *out);
+void *rhu_arena_alloc_from(uint32_t range, uint32_t bytes, uint32_t align, uint32_t site);
+
+/* The block-device doors: a board's block devices as this
+ * image serves them, enumerated by index -- the one device is the
+ * STM32F769 Discovery board's microSD socket on the chip's SDMMC2
+ * controller, named "mmcblk0" as Linux names the first MMC/SD block
+ * device; every other row serves none (the count 0, RHU_ENODEV at every
+ * other door). rhu_blk_count answers how many devices THIS IMAGE serves.
+ * rhu_blk_device fills the index-th device's record, read AT THE CALL (the
+ * detect line and the card's identification: a program may poll it for an
+ * insertion): block_bytes 512; blocks the card's capacity in blocks, 0 with
+ * no card seated or a card refused; flags the bits below -- REMOVABLE on a
+ * socket, PRESENT with a card seated (identified or not), WRITE_PROTECTED
+ * from the card's own register, HIGH_CAPACITY when the card itself
+ * addresses by block (every card is addressed by block NUMBER at these
+ * doors either way); name the device's name, NUL-terminated. RHU_EINVAL
+ * past the count or for a NULL or misaligned record, writing nothing.
+ * rhu_blk_read and rhu_blk_write move whole blocks by number -- `blocks`
+ * blocks from block `lba` -- and answer the count moved, or a code with
+ * nothing moved: RHU_ENODEV for a device past the count or no card seated;
+ * RHU_EINVAL for a NULL or misaligned buffer (4-byte alignment), a count of
+ * 0 or over RHU_BLK_MAX, a range past the card's end; RHU_EROFS for a write
+ * on a write-protected card; RHU_EIO for a card that refused its
+ * identification or a transfer (after the kernel's one retry of a transfer
+ * refused by its CRC); RHU_ETIMEDOUT for a transfer past its budget. The
+ * buffer is the caller's, in RAM the controller's engine reaches (every RAM
+ * range the ram doors state on this row). A card is identified at the first
+ * door call after its insertion (that call carries the identification's
+ * cost); a card removed drops the identification and the next door call
+ * reads the socket anew (the hot-swap policy). A
+ * door that finds the device busy with another thread's transfer waits for
+ * it, never RHU_EBUSY. No door runs under the kernel's critical section.
+ * rhu_blk_sync waits for the card's programming of the last write to end
+ * (every write at these doors is synchronous already; the door is the seam
+ * for an engine that queues) and answers 0, or RHU_ENODEV.
+ * RHU_EROFS is this family's code; RHU_ENOENT is declared here for the
+ * filesystem doors that follow (Linux's values, both). */
+#define RHU_BLK_MAX 128u                 /* blocks per call: 64 KB            */
+#define RHU_BLK_REMOVABLE 1u
+#define RHU_BLK_PRESENT 2u
+#define RHU_BLK_WRITE_PROTECTED 4u
+#define RHU_BLK_HIGH_CAPACITY 8u
+#define RHU_EROFS (-30)     /* a write on a write-protected card         */
+#define RHU_ENOENT (-2)     /* no such path (the filesystem doors')      */
+typedef struct rhu_blk_desc {
+    uint32_t block_bytes;
+    uint32_t blocks;
+    uint32_t flags;
+    char name[16];
+} rhu_blk_desc;
+int32_t rhu_blk_count(void);
+int32_t rhu_blk_device(uint32_t index, rhu_blk_desc *out);
+int32_t rhu_blk_read(uint32_t dev, uint32_t lba, uint32_t blocks, void *buf);
+int32_t rhu_blk_write(uint32_t dev, uint32_t lba, uint32_t blocks, const void *buf);
+int32_t rhu_blk_sync(uint32_t dev);
+
 /* --- The payload entry seam: the one member of this surface the
  * kernel CALLS rather than serves. After the platform is up (the
  * initialized data copied, the arena, the kernel heap, module 0, the
@@ -689,6 +1165,52 @@ int32_t rhu_adc_release(int32_t h);
  * every thread the payload starts at that value -- and it takes the
  * kernel's own urgency back when the entry returns; one console line
  * ("[payload] host thread: ...") states both values at every boot. */
+
+/* --- The fault funnel's delivery (the null-page guard). The kernel
+ * programs the core's memory protection unit so the first 4 KB of the
+ * address space is no-access on every row: a data read or write through
+ * a null reference (any offset below 0x1000, the window the compiler
+ * leaves unchecked) raises a MemManage fault instead of returning a
+ * word. Until a hosting layer arms the delivery, that fault is a designed
+ * death naming the access. A hosting layer that owns the runtime's
+ * signal handler arms it here, once, and the kernel then delivers a null
+ * DATA access taken from a program's thread through the activation
+ * costume: the thread resumes on its own stack inside the registered
+ * activation handler with a pointer to an rhu_fault_ctx -- the rhu_ctx of
+ * the faulting instruction (pc = the instruction, sp = the fault site's)
+ * with flags bit 8 (RHU_CTX_FAULT) set and the kind in bits 15:12
+ * (RHU_FAULT_KIND(flags) == RHU_FAULT_NULL), followed by the faulting
+ * address and the fault status word (the MemManage status bits). The two
+ * trailing words exist only in a delivered fault context: rhu_ctx stays
+ * 72 bytes and rhu_thread_suspend's out_ctx does not change. The handler
+ * edits r0-r12, lr and pc under the activation rules (sp is never
+ * written back: an upward stack-pointer edit is the hosting layer's to
+ * honour on the thread's own stack) and returns; the thread resumes at
+ * the edited pc. A handler that returns with the pc UNCHANGED has
+ * declined the fault: the access would only fault again, so the kernel
+ * ends the program through its terminal path with the null-access line
+ * -- never a loop. Never delivered, each a designed death with one line:
+ * an instruction fetch below the page (no managed frame to throw from), a
+ * null access from idle, from handler mode, under the kernel's interrupt
+ * mask (a forced HardFault: the kernel's own bug), inside the activation
+ * handler itself, or from a thread with too little stack above its floor
+ * for the delivery. An activation send that lands while the fault handler
+ * runs is re-delivered after it, on the edited context, as a plain
+ * activation. The cost on the faulting thread's stack: 80 (the fault
+ * context) + 68 (the frame pair) = 148 bytes, plus the handler's own
+ * need; the handler runs on the faulting thread's stack, as the runtime's
+ * signal handler does on Linux without an alternate stack. Refusals:
+ * RHU_EINVAL for a bit outside the kinds below. Sticky for the process's
+ * life; arming twice is fine. */
+#define RHU_FAULT_NULL 1u                      /* kinds bit 0: a data access below 0x1000 */
+#define RHU_CTX_FAULT (1u << 8)                /* rhu_ctx.flags: the context is an rhu_fault_ctx */
+#define RHU_FAULT_KIND(flags) (((flags) >> 12) & 0xFu)
+typedef struct rhu_fault_ctx {
+    rhu_ctx ctx;
+    uint32_t fault_addr;    /* the faulting data address */
+    uint32_t fault_status;  /* the MemManage status bits (CFSR[7:0]) */
+} rhu_fault_ctx;
+int32_t rhu_fault_register(uint32_t kinds);
 
 /* The entry. The kernel provides a WEAK default that runs, in order:
  * the placement check on the constructor and destructor arrays (the

@@ -1,0 +1,162 @@
+{
+  "name": "adafruit-feather-rp2350-hstx",
+  "maker": "Adafruit",
+  "product": "Feather RP2350 with HSTX",
+  "chip": "RP2350A",
+  "clockHz": 150000000,
+  "posture": "default",
+  "postureName": "the PLL posture",
+  "pins": 30,
+  "labels": "feather",
+  "functions": "rp2350a",
+  "pwm": {
+    "chip": 0,
+    "lines": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29
+    ]
+  },
+  "adc": {
+    "converters": [
+      {
+        "number": 0,
+        "bits": 12,
+        "referenceMillivolts": 3300,
+        "channels": [
+          {
+            "number": 0,
+            "pin": 26
+          },
+          {
+            "number": 1,
+            "pin": 27
+          },
+          {
+            "number": 2,
+            "pin": 28
+          },
+          {
+            "number": 3,
+            "pin": 29
+          },
+          {
+            "number": 4,
+            "pin": null
+          }
+        ]
+      }
+    ]
+  },
+  "i2c": [
+    {
+      "block": 1,
+      "sda": 2,
+      "scl": 3,
+      "rates": [
+        100000,
+        400000,
+        1000000
+      ]
+    }
+  ],
+  "spi": [
+    {
+      "block": 0,
+      "sck": 22,
+      "mosi": 23,
+      "miso": 20,
+      "cs": [],
+      "min": 184,
+      "max": 6000000
+    }
+  ],
+  "ram": [
+    {
+      "name": "SRAM",
+      "base": 536870912,
+      "bytes": 532480,
+      "external": false,
+      "cached": false
+    }
+  ],
+  "uart": [
+    {
+      "block": 0,
+      "tx": 0,
+      "rx": 1
+    },
+    {
+      "block": 1
+    }
+  ],
+  "uartPairs": [
+    {
+      "block": 0,
+      "tx": [
+        0,
+        12,
+        16,
+        28
+      ],
+      "rx": [
+        1,
+        13,
+        17,
+        29
+      ]
+    },
+    {
+      "block": 1,
+      "tx": [
+        4,
+        8,
+        20,
+        24
+      ],
+      "rx": [
+        5,
+        9,
+        21,
+        25
+      ]
+    }
+  ],
+  "channels": {
+    "log": "memory",
+    "console": "memory",
+    "legal": [
+      "memory",
+      "off",
+      "uart0",
+      "uart1"
+    ]
+  }
+}

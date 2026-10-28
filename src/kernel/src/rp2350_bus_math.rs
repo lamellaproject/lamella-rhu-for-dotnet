@@ -4,7 +4,26 @@
 //! block's transmit abort, and the bus rows every board of this chip
 //! shares. No hardware access and no state, covered by the host tests; the drivers and the board facts cite the
 //! datasheet for the numbers here.
-#![allow(dead_code)]
+//!
+//! The RP2350 datasheet: section 12.2 (two Synopsys DW_apb_i2c blocks on
+//! clk_sys); 12.2.14.1 (the low period is LCNT + 1 cycles and LCNT must
+//! exceed the spike length plus 7; the high period is HCNT plus the spike
+//! length plus 7 cycles and HCNT must exceed the spike length plus 5);
+//! 12.2.14.3 and Table 1053 (the minimum low and high times of the three
+//! modes -- standard 4700 and 4000 ns, fast 1300 and 600 ns, fast mode plus
+//! 500 and 500 ns -- and the block clock under which a mode's counts cannot
+//! be made: 2.7, 12 and 32 MHz; 12.2.14.1's rule read strictly, so 400 kHz
+//! at 12 MHz is served at 387 kHz); 12.2.11
+//! (spikes up to 50 ns suppressed, the length at least one cycle); the
+//! IC_SDA_HOLD register (the transmit hold no larger than the low period
+//! less two cycles); the IC_TX_ABRT_SOURCE register (the abort's sources and
+//! the count of commands the block flushed); section 12.3 (two Arm PL022
+//! blocks; the bit rate is the block's clock over CPSDVSR x (1 + SCR),
+//! CPSDVSR even from 2 to 254, SCR 0 to 255; the block's clock is clk_peri,
+//! which the kernel runs from the crystal on both clock postures); section
+//! 9.4, Table 645 (function 1 is SPI and function 3 is I2C on every line);
+//! section 7.5, Table 535 (the reset bits: I2C0 4, I2C1 5, SPI0 18, SPI1 19).
+#![allow(dead_code)] // the host tier and the emulator row's models compile the module unused in part
 
 use crate::bus_math::{I2cBus, I2cMsg, Pad, PadRole, SpiBus, SpiFile};
 
@@ -65,6 +84,7 @@ pub const SPI_FUNCTION: u8 = 1;
 pub const I2C_QUEUE: u32 = 16;
 pub const SPI_QUEUE: u32 = 8;
 
+// ---------------- the I2C block's counts ----------------
 
 /// The four numbers the I2C block is programmed with for a rate: the low
 /// count, the high count, the spike length and the transmit data hold, all
@@ -172,6 +192,7 @@ pub const fn i2c_counts(kernel_hz: u32, rate_hz: u32) -> Option<I2cCounts> {
     }
 }
 
+// ---------------- the SPI block's ladder ----------------
 
 /// The prescaler pair for a rate at the block's clock: the pair whose rate is
 /// the HIGHEST at or below the request, packed as CPSDVSR in bits 7:0 and
@@ -185,6 +206,8 @@ pub const fn spi_pair(kernel_hz: u32, rate_hz: u32) -> Option<(u32, u32)> {
     if rate_hz == 0 || kernel_hz == 0 {
         return None;
     }
+    // The achieved rate, in whole Hz, is at or below the request exactly when
+    // the product is above the clock over (the request plus one).
     let floor = (kernel_hz as u64 / (rate_hz as u64 + 1)) as u32 + 1;
     let mut best = 0u32;
     let mut pair = 0u32;
@@ -218,6 +241,7 @@ pub const fn spi_pair_rate(kernel_hz: u32, pair: u32) -> u32 {
     }
 }
 
+// ---------------- the function table's rule ----------------
 
 /// The I2C block a line's function 3 belongs to: bit 1 of the line number.
 pub const fn i2c_block_of(line: u32) -> u32 {
@@ -288,6 +312,7 @@ pub const fn rows_sound(i2c: &[I2cBus], spi: &[SpiBus]) -> bool {
     true
 }
 
+// ---------------- the bus rows every board of this chip shares ----------------
 
 /// The pins of the first bus of each family: the ones the board maker's
 /// datasheet marks as that block's default (the Raspberry Pi Pico 2
@@ -295,9 +320,7 @@ pub const fn rows_sound(i2c: &[I2cBus], spi: &[SpiBus]) -> bool {
 /// I2C0's data on GPIO 4 and its clock on GPIO 5; SPI0's clock on GPIO 18,
 /// its output on GPIO 19, its input on GPIO 16 and its chip select on GPIO
 /// 17. The datasheet marks no default for the chip's second I2C block or
-/// its second SPI block, so no row carries them: the constructors and the
-/// drivers serve either block, and a second bus follows once a program can
-/// choose a bus's pins.
+/// its second SPI block, so no row carries them.
 pub const I2C0_PADS: [Pad; 2] =
     [Pad { line: 4, alternate: I2C_FUNCTION, role: PadRole::I2cData }, Pad { line: 5, alternate: I2C_FUNCTION, role: PadRole::I2cClock }];
 pub const SPI0_PADS: [Pad; 3] = [
@@ -354,6 +377,7 @@ pub const fn spi_buses() -> [SpiBus; 1] {
 
 const _: () = assert!(rows_sound(&i2c_buses(SPI_CLOCK_HZ), &spi_buses()), "a bus row's pad does not carry its role on the chip's function table");
 
+// ---------------- the I2C block's transmit abort ----------------
 
 /// The abort's source bits the driver tells apart, and where the count of
 /// flushed commands starts.

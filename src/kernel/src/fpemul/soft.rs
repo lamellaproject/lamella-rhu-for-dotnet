@@ -3,7 +3,7 @@
 //! floating-point type. The kernel's double-precision emulation computes
 //! with it after the fault funnel catches a double-precision form on a
 //! single-precision FPU (the M33 class), and the host tier tests it on the
-//! desk machine. Every operation takes the context the frame's FPSCR
+//! development machine. Every operation takes the context the frame's FPSCR
 //! describes -- the rounding mode, default-NaN, flush-to-zero and the
 //! alternative half-precision format -- and accumulates the cumulative
 //! exception flags the way the hardware does (invalid, division by zero,

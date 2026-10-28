@@ -29,10 +29,16 @@
 #define RHU_SHIM_FD_FILE_LO 3
 #endif
 #define RHU_SHIM_FD_FILE_COUNT 13 /* 3 .. 15 */
+#define RHU_SHIM_FD_TTY_LO 16     /* the serial device files: 16 .. 31 */
+#define RHU_SHIM_FD_TTY_COUNT 16
 #define RHU_SHIM_FD_SOCKET_LO 32  /* reserved: 32 .. 47 */
 #define RHU_SHIM_FD_DEVICE_LO 64  /* the bus device nodes: 64 .. 79 */
 #define RHU_SHIM_FD_DEVICE_COUNT 16
 #define RHU_SHIM_FD_STORAGE_LO 80 /* reserved: 80 .. 95 */
+#define RHU_SHIM_FD_SYSFS_LO 96   /* the PWM device files under /sys: 96 .. 127 */
+#define RHU_SHIM_FD_SYSFS_COUNT 32
+#define RHU_SHIM_FD_IIO_LO 128    /* the analog input device files under /sys/bus/iio: 128 .. 143 */
+#define RHU_SHIM_FD_IIO_COUNT 16
 
 /* Every hosted thread the shim spawns runs at the one flat priority the
  * kernel names for the hosted band (rhu.h): the level the payload host
@@ -52,6 +58,68 @@ int rhu_busdev_open(const char *path, int flags);
 int rhu_busdev_ioctl(int fd, unsigned long request, void *arg);
 int rhu_busdev_close(int fd);
 
+/* The PWM device files (rhu_pwmfs.c): the tree under /sys the standard
+ * package's PWM class reads and writes, over the kernel's PWM API. The
+ * runtime's portability layer hands a /sys path and every descriptor of the
+ * sysfs band here; the C library's access does the same for a /sys path. */
+struct rhu_pal_filestatus;
+int rhu_pwmfs_owns(const char *path);
+intptr_t rhu_pwmfs_open(const char *path, int32_t flags);
+int32_t rhu_pwmfs_stat(const char *path, struct rhu_pal_filestatus *output);
+int32_t rhu_pwmfs_access(const char *path, int32_t mode);
+int rhu_pwmfs_fd(intptr_t fd);
+int32_t rhu_pwmfs_close(intptr_t fd);
+int32_t rhu_pwmfs_pread(intptr_t fd, void *buffer, int32_t bufferSize, int64_t offset, int use_pos);
+int32_t rhu_pwmfs_pwrite(intptr_t fd, const void *buffer, int32_t bufferSize, int64_t offset, int use_pos);
+int64_t rhu_pwmfs_lseek(intptr_t fd, int64_t offset, int32_t whence);
+int32_t rhu_pwmfs_fstat(intptr_t fd, struct rhu_pal_filestatus *output);
+int32_t rhu_pwmfs_ftruncate(intptr_t fd, int64_t length);
+int32_t rhu_pwmfs_flock(intptr_t fd, int32_t operation);
+int32_t rhu_pwmfs_fsync(intptr_t fd);
+int32_t rhu_pwmfs_fcntl_setfd(intptr_t fd, int32_t flags);
+intptr_t rhu_pwmfs_dup(intptr_t fd);
+
+/* The analog input device files (rhu_iiofs.c): the tree under /sys/bus/iio
+ * the board package's analog input class reads, over the kernel's ADC calls.
+ * The runtime's portability layer hands a /sys/bus path and every descriptor
+ * of the analog band here; the C library's access does the same for a
+ * /sys/bus path. */
+int rhu_iiofs_owns(const char *path);
+intptr_t rhu_iiofs_open(const char *path, int32_t flags);
+int32_t rhu_iiofs_stat(const char *path, struct rhu_pal_filestatus *output);
+int32_t rhu_iiofs_access(const char *path, int32_t mode);
+int rhu_iiofs_fd(intptr_t fd);
+int32_t rhu_iiofs_close(intptr_t fd);
+int32_t rhu_iiofs_pread(intptr_t fd, void *buffer, int32_t bufferSize, int64_t offset, int use_pos);
+int32_t rhu_iiofs_pwrite(intptr_t fd, const void *buffer, int32_t bufferSize, int64_t offset, int use_pos);
+int64_t rhu_iiofs_lseek(intptr_t fd, int64_t offset, int32_t whence);
+int32_t rhu_iiofs_fstat(intptr_t fd, struct rhu_pal_filestatus *output);
+int32_t rhu_iiofs_ftruncate(intptr_t fd, int64_t length);
+int32_t rhu_iiofs_flock(intptr_t fd, int32_t operation);
+int32_t rhu_iiofs_fsync(intptr_t fd);
+int32_t rhu_iiofs_fcntl_setfd(intptr_t fd, int32_t flags);
+intptr_t rhu_iiofs_dup(intptr_t fd);
+
+/* The serial device files (rhu_ttydev.c): /dev/ttyS<n> and the alias
+ * /dev/ttyAMA<n> over the kernel's UART doors, the Linux termios shape the
+ * standard serial port class's native layer (compiled unchanged from the
+ * vendored sources) drives through the C library. The core's open hands it
+ * a path it owns; the core's ioctl and close and the glue's read and write
+ * hand it every descriptor of the tty band. Each answers as the C library's
+ * call would: the result, or -1 with errno set. The layer's other C-library
+ * names (poll, fcntl, shutdown, the termios family, the error string) are
+ * defined in the unit itself. The file system's two doors: whether a name
+ * the unit owns is a port of this board, and the index-th row's leaf name
+ * for a listing of /dev (the alias is never listed). */
+int rhu_ttydev_owns_path(const char *path);
+int rhu_ttydev_exists(const char *path);
+int rhu_ttydev_name(uint32_t index, char *buf, size_t cap);
+int rhu_ttydev_open(const char *path, int flags);
+int rhu_ttydev_close(int fd);
+int rhu_ttydev_ioctl(int fd, unsigned long request, void *arg);
+long rhu_ttydev_read(int fd, void *buf, size_t n);
+long rhu_ttydev_write(int fd, const void *buf, size_t n);
+
 /* Initialization, called once on the main thread before any other shim
  * entry: registers the per-thread block with the kernel's module registry
  * and builds the environment table. Returns 0; a second call is a no-op. */
@@ -69,6 +137,11 @@ uint32_t rhu_shim_activation_count(void);
  * an unsupported conversion is a loud death, never a silent wrong line. */
 void rhu_shim_log(const char *fmt, ...);
 
+/* The same line at RHU_LOG_SILENT: the last words of a path that ends the
+ * program (a refusal at init, a fault the layer cannot deliver, a draw of
+ * entropy refused), printed whatever the image's output level. */
+void rhu_shim_last_words(const char *fmt, ...);
+
 /* The diagnostic line's conversion core over a caller's buffer: the same
  * conversion set as rhu_shim_log, written into buf up to cap - 1 bytes and
  * terminated when cap is not 0 (cap 0 measures without writing), the full
@@ -80,6 +153,15 @@ int32_t rhu_shim_vformat(char *buf, uint32_t cap, const char *fmt, va_list ap);
 /* The environment table the shim built at initialization, as the C
  * library's environ: the rows in the order stated, then a null. */
 char **rhu_shim_environ(void);
+
+/* The collector's own mapping entry: the managed heap's one region, its
+ * mark bitmap and its mark stack, served from the window the managed
+ * heap lives in -- window 1, the external RAM, when the link map placed
+ * the runtime's rehydrated type data inside it; window 0 otherwise, as
+ * mmap64 serves every other mapping. Page-rounded, page-aligned,
+ * zero-born; (void *)-1 with ENOMEM when that window is exhausted, with
+ * EINVAL for a zero length. */
+void *rhu_shim_collector_mmap(size_t len);
 
 /* Spawn a hosted thread on the shim's thread path: a stack request of 0
  * means the board row's default; a request above the row's clamp is

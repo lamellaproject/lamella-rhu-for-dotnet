@@ -8,14 +8,24 @@ rustflags = [
   "-C", "link-arg=--nmagic",
 ]
 
-# The ARMv8-M mainline leg (QEMU an505, Cortex-M33) -- same flags; the
-# board linker script still arrives from build.rs.
-# The Cortex-M33 target's key in the form cargo reads: cargo looks a target up as a dotted
-# path, so a quoted dotted triple is one name it never walks and the flags under it never
-# reached the M33 links (measured on the toolchain of record: the M33 compiler lines
-# carried no --nmagic under the quoted key and carry it under this one; the images' loadable
-# bytes and program headers identical either way).
+# The ARMv8-M mainline target (QEMU an505, Cortex-M33) -- the same flags; the
+# board linker script still arrives from build.rs. The target's key is in the
+# form cargo reads: cargo looks a target up as a dotted path, so a quoted
+# dotted triple is a name it never walks.
 [target.thumbv8m.main-none-eabihf]
 rustflags = [
   "-C", "link-arg=--nmagic",
 ]
+
+# The vendored crates. Every registry crate the
+# kernel takes (smoltcp 0.14.0 behind the `net` feature and its six
+# dependencies, fetched fresh from the crates.io release archives under
+# src/VENDORED.md's discipline) is read from src/vendor/crates, and the
+# registry is never consulted: a build is the tree's bytes alone. The
+# directory source carries each crate's per-file hashes
+# (.cargo-checksum.json), which cargo checks at every build.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "../vendor/crates"

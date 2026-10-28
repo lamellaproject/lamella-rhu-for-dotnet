@@ -4,7 +4,7 @@
 //! achieved period back from them, the duty's compare value, the
 //! shared-period comparison and the tables' soundness. No hardware access and no state, covered by the host tests;
 //! the drivers cite the manuals for the numbers here.
-#![allow(dead_code)]
+#![allow(dead_code)] // a row without a PWM line, and the host tier, compile the module unused in part
 
 /// A timer as a board's facts state it: its NUMBER (the chip's own: TIM1 is
 /// timer 1, a slice its index; the number the info door answers and the

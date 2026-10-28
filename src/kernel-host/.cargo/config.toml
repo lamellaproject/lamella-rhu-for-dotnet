@@ -1,0 +1,10 @@
+# The host tier's cargo config: the one
+# registry crate the host tier (the kernel's pure modules, built and tested as an ordinary program on the build host) takes (smoltcp 0.14.0, the parser its net_math
+# cases pin the kernel's checksum arithmetic against) is read from
+# src/vendor/crates, the same vendored copy the kernel builds from, and the
+# registry is never consulted.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "../vendor/crates"

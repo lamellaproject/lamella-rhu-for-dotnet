@@ -16,8 +16,8 @@
 #include <stdint.h>
 
 #ifdef RHU_SHIM_BREAK_FD_BASE
-/* A test knob: places the file band at the console's base to reproduce the
- * failure the bands exist to prevent. Never set in a hosted image. */
+/* Built with this define, the file band starts at the console's base, so the
+ * two overlap. Never set in a hosted image. */
 #define RHU_SHIM_FD_FILE_LO 0
 #endif
 
@@ -26,19 +26,19 @@
 #include "mgc_board_rows.h"
 #include "rhu.h"
 #include "rhu_glibc_arm32.h"
-#include "rhu_pal_console_net11_rc1.h"
-#include "rhu_pal_environment_net11_rc1.h"
-#include "rhu_pal_errno_net11_rc1.h"
-#include "rhu_pal_io_net11_rc1.h"
-#include "rhu_pal_log_net11_rc1.h"
-#include "rhu_pal_memory_net11_rc1.h"
-#include "rhu_pal_process_net11_rc1.h"
-#include "rhu_pal_random_net11_rc1.h"
-#include "rhu_pal_signal_net11_rc1.h"
-#include "rhu_pal_surface_net11_rc1.h"
-#include "rhu_pal_threading_net11_rc1.h"
-#include "rhu_pal_time_net11_rc1.h"
-#include "rhu_pal_uid_net11_rc1.h"
+#include "rhu_pal_console_net11_rc2.h"
+#include "rhu_pal_environment_net11_rc2.h"
+#include "rhu_pal_errno_net11_rc2.h"
+#include "rhu_pal_io_net11_rc2.h"
+#include "rhu_pal_log_net11_rc2.h"
+#include "rhu_pal_memory_net11_rc2.h"
+#include "rhu_pal_process_net11_rc2.h"
+#include "rhu_pal_random_net11_rc2.h"
+#include "rhu_pal_signal_net11_rc2.h"
+#include "rhu_pal_surface_net11_rc2.h"
+#include "rhu_pal_threading_net11_rc2.h"
+#include "rhu_pal_time_net11_rc2.h"
+#include "rhu_pal_uid_net11_rc2.h"
 
 #ifndef RHU_SHIM_BREAK_FD_BASE
 _Static_assert(RHU_SHIM_FD_FILE_LO >= RHU_SHIM_FD_CONSOLE_HI, "the file band starts above the console band");
@@ -102,14 +102,12 @@ int32_t SystemNative_ConvertErrorPalToPlatform(int32_t error)
     }
 }
 
-/* The errno doors carry the RAW platform errno: the PAL's contract at the
- * pin (pal_errno.c returns errno as it is), with the managed side
- * converting the number to its own code through ConvertErrorPlatformToPal
- * itself. A P/Invoke marked SetLastError saves what GetErrNo answers, and
- * a caller's Marshal.GetLastPInvokeError() must read the platform number
- * -- the standard GPIO library's driver compares it with 4 for EINTR
- * (the converted code was measured on the wire as 65581 for a
- * refused open, where the contract gives 2). */
+/* The errno doors carry the RAW platform errno, as the runtime's own
+ * pal_errno.c does, and the managed side converts the number to its own
+ * code through ConvertErrorPlatformToPal itself. A P/Invoke marked
+ * SetLastError saves what GetErrNo answers, and a caller's
+ * Marshal.GetLastPInvokeError() must read the platform number: the
+ * standard GPIO library's driver compares it with 4 for EINTR. */
 int32_t SystemNative_GetErrNo(void)
 {
     return ERRNO;
@@ -315,7 +313,7 @@ static int file_find(const char *path)
 /* The implicit roots exist without being made. */
 static int dir_exists(const char *path)
 {
-    if (strcmp(path, "/") == 0 || strcmp(path, "/tmp") == 0)
+    if (strcmp(path, "/") == 0 || strcmp(path, "/tmp") == 0 || strcmp(path, "/dev") == 0)
         return 1;
     for (int i = 0; i < RFS_DIRS; i++) {
         if (g_dirs[i].used != 0 && strcmp(g_dirs[i].path, path) == 0)
@@ -457,9 +455,9 @@ static int32_t file_pwrite(rfs_fd *h, const void *buf, int32_t count, int64_t at
     /* The offset against the maximum first, then the count against what
      * remains: neither sum can wrap, and the narrowing below happens only
      * once both fit. The summed form under the define is the one an offset
-     * near the top of the range wraps past in the C; the compiler of record
-     * folds it into the same safe comparison, so no built object carries it
-     * and no control is built from it. */
+     * near the top of the range wraps past in the C; the compiler folds it
+     * into the same safe comparison, so a built object is the same with
+     * or without the define. */
 #ifdef RHU_SHIM_BREAK_STORE_OVERFLOW
     if (at + (int64_t)count > RFS_MAX_FILE) {
 #else
@@ -488,8 +486,8 @@ static int32_t file_pwrite(rfs_fd *h, const void *buf, int32_t count, int64_t at
     return count;
 }
 
-/* A positioned transfer's offset arrives whole; the store as it stood
- * cut it to 32 bits, and the control restores that cut. */
+/* A positioned transfer's offset arrives whole; built with the define
+ * below, it is cut to 32 bits, as a flawed store would cut it. */
 static int64_t positioned(int64_t fileOffset)
 {
 #ifdef RHU_SHIM_BREAK_STORE_BOUNDS
@@ -570,8 +568,11 @@ static intptr_t open_locked(const char *path, int32_t flags, int32_t mode)
         return -1;
     }
     int fi = file_find(path);
-    if (fi < 0)
+    int identity = 0;
+    if (fi < 0) {
         fi = identity_file(path, access);
+        identity = fi >= 0;
+    }
     if (fi < 0) {
         if ((flags & RHU_PAL_O_CREAT) == 0) {
             ERRNO = RHU_GERR_ENOENT;
@@ -596,6 +597,14 @@ static intptr_t open_locked(const char *path, int32_t flags, int32_t mode)
     }
 #ifndef RHU_SHIM_BREAK_STORE_OPEN_ORDER
     if (di < 0) {
+#ifndef RHU_SHIM_BREAK_IDENTITY_LEAK
+        /* The identity object materialized above is given back when no
+         * descriptor can hold it; a refused open leaves the store as it was. */
+        if (identity)
+            memset(&g_files[fi], 0, sizeof g_files[fi]);
+#else
+        (void)identity; /* built with this define, the object stays in the store */
+#endif
         ERRNO = RHU_GERR_EMFILE;
         return -1;
     }
@@ -625,6 +634,8 @@ static intptr_t open_locked(const char *path, int32_t flags, int32_t mode)
     }
 #ifdef RHU_SHIM_BREAK_STORE_OPEN_ORDER
     if (di < 0) {
+        if (identity)
+            memset(&g_files[fi], 0, sizeof g_files[fi]);
         ERRNO = RHU_GERR_EMFILE;
         return -1;
     }
@@ -640,6 +651,10 @@ static intptr_t open_locked(const char *path, int32_t flags, int32_t mode)
 
 intptr_t SystemNative_Open(const char *path, int32_t flags, int32_t mode)
 {
+    if (rhu_iiofs_owns(path))
+        return rhu_iiofs_open(path, flags);
+    if (rhu_pwmfs_owns(path))
+        return rhu_pwmfs_open(path, flags);
     store_lock();
     intptr_t r = open_locked(path, flags, mode);
     store_unlock();
@@ -650,6 +665,10 @@ int32_t SystemNative_Close(intptr_t fd)
 {
     if (fd_is_console(fd))
         return 0;
+    if (rhu_iiofs_fd(fd))
+        return rhu_iiofs_close(fd);
+    if (rhu_pwmfs_fd(fd))
+        return rhu_pwmfs_close(fd);
     store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
@@ -668,6 +687,10 @@ intptr_t SystemNative_Dup(intptr_t oldfd)
 {
     if (fd_is_console(oldfd))
         return oldfd;
+    if (rhu_iiofs_fd(oldfd))
+        return rhu_iiofs_dup(oldfd);
+    if (rhu_pwmfs_fd(oldfd))
+        return rhu_pwmfs_dup(oldfd);
     store_lock();
     int is_file = fd_file(oldfd) != NULL;
     store_unlock();
@@ -684,6 +707,10 @@ int32_t SystemNative_Read(intptr_t fd, void *buffer, int32_t bufferSize)
 {
     if (fd == 0)
         return rhu_console_read(buffer, (uint32_t)bufferSize);
+    if (rhu_iiofs_fd(fd))
+        return rhu_iiofs_pread(fd, buffer, bufferSize, 0, 1);
+    if (rhu_pwmfs_fd(fd))
+        return rhu_pwmfs_pread(fd, buffer, bufferSize, 0, 1);
     store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
@@ -698,10 +725,51 @@ int32_t SystemNative_Read(intptr_t fd, void *buffer, int32_t bufferSize)
     return n;
 }
 
+/* The console door takes at most RHU_CONSOLE_MAX_WRITE bytes a call and
+ * answers the count: a larger write goes out in bounded pieces and the
+ * count written is answered. A NULL buffer with a count is EFAULT, a
+ * negative count EINVAL; a refusal after some bytes went answers the
+ * count so far, before any EIO. */
+static int32_t console_write_pieces(const void *buffer, int32_t count)
+{
+    if (count < 0) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    if (count == 0)
+        return 0;
+    if (buffer == NULL) {
+        ERRNO = RHU_GERR_EFAULT;
+        return -1;
+    }
+    const uint8_t *p = (const uint8_t *)buffer;
+    int32_t done = 0;
+    while (done < count) {
+        uint32_t piece = (uint32_t)(count - done);
+        if (piece > RHU_CONSOLE_MAX_WRITE)
+            piece = RHU_CONSOLE_MAX_WRITE;
+        int32_t rc = rhu_console_write(p + done, piece);
+        if (rc < 0) {
+            if (done > 0)
+                return done;
+            ERRNO = RHU_GERR_EIO;
+            return -1;
+        }
+        if (rc == 0)
+            break;
+        done += rc;
+    }
+    return done;
+}
+
 int32_t SystemNative_Write(intptr_t fd, const void *buffer, int32_t bufferSize)
 {
     if (fd == 1 || fd == 2)
-        return rhu_console_write(buffer, (uint32_t)bufferSize);
+        return console_write_pieces(buffer, bufferSize);
+    if (rhu_iiofs_fd(fd))
+        return rhu_iiofs_pwrite(fd, buffer, bufferSize, 0, 1);
+    if (rhu_pwmfs_fd(fd))
+        return rhu_pwmfs_pwrite(fd, buffer, bufferSize, 0, 1);
     store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
@@ -718,6 +786,10 @@ int32_t SystemNative_Write(intptr_t fd, const void *buffer, int32_t bufferSize)
 
 int32_t SystemNative_PRead(intptr_t fd, void *buffer, int32_t bufferSize, int64_t fileOffset)
 {
+    if (rhu_iiofs_fd(fd))
+        return rhu_iiofs_pread(fd, buffer, bufferSize, fileOffset, 0);
+    if (rhu_pwmfs_fd(fd))
+        return rhu_pwmfs_pread(fd, buffer, bufferSize, fileOffset, 0);
     store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
@@ -732,6 +804,10 @@ int32_t SystemNative_PRead(intptr_t fd, void *buffer, int32_t bufferSize, int64_
 
 int32_t SystemNative_PWrite(intptr_t fd, void *buffer, int32_t bufferSize, int64_t fileOffset)
 {
+    if (rhu_iiofs_fd(fd))
+        return rhu_iiofs_pwrite(fd, buffer, bufferSize, fileOffset, 0);
+    if (rhu_pwmfs_fd(fd))
+        return rhu_pwmfs_pwrite(fd, buffer, bufferSize, fileOffset, 0);
     store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
@@ -751,6 +827,36 @@ static int64_t vectored(intptr_t fd, rhu_pal_iovector *v, int32_t n, int64_t at,
     if (v == NULL || n < 0) {
         ERRNO = RHU_GERR_EFAULT;
         return -1;
+    }
+    if (rhu_iiofs_fd(fd)) {
+        /* An analog input device file takes its vectors one by one: each a
+         * slice of the text, the offsets as the plain forms take them. */
+        int64_t total = 0;
+        for (int32_t i = 0; i < n; i++) {
+            int32_t r = writing ? rhu_iiofs_pwrite(fd, v[i].Base, (int32_t)v[i].Count, at + total, !positional)
+                                : rhu_iiofs_pread(fd, v[i].Base, (int32_t)v[i].Count, at + total, !positional);
+            if (r < 0)
+                return total > 0 ? total : -1;
+            total += r;
+            if ((uintptr_t)r < v[i].Count)
+                break;
+        }
+        return total;
+    }
+    if (rhu_pwmfs_fd(fd)) {
+        /* A PWM device file takes its vectors one by one: each a value or a
+         * slice of the text, the offsets as the plain forms take them. */
+        int64_t total = 0;
+        for (int32_t i = 0; i < n; i++) {
+            int32_t r = writing ? rhu_pwmfs_pwrite(fd, v[i].Base, (int32_t)v[i].Count, at + total, !positional)
+                                : rhu_pwmfs_pread(fd, v[i].Base, (int32_t)v[i].Count, at + total, !positional);
+            if (r < 0)
+                return total > 0 ? total : -1;
+            total += r;
+            if ((uintptr_t)r < v[i].Count)
+                break;
+        }
+        return total;
     }
     /* A positional transfer's offset is judged before any vector, so an
      * empty transfer at an impossible offset refuses like a full one. */
@@ -806,6 +912,10 @@ int64_t SystemNative_PWriteV(intptr_t fd, rhu_pal_iovector *vectors, int32_t vec
  * the gap) but never past the maximum file size, and never below zero. */
 int64_t SystemNative_LSeek(intptr_t fd, int64_t offset, int32_t whence)
 {
+    if (rhu_iiofs_fd(fd))
+        return rhu_iiofs_lseek(fd, offset, whence);
+    if (rhu_pwmfs_fd(fd))
+        return rhu_pwmfs_lseek(fd, offset, whence);
     store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
@@ -859,10 +969,32 @@ static void status_of_dir(rhu_pal_filestatus *st)
     st->HardLinkCount = 1;
 }
 
+/* A serial device file's status: a character device (mode 0660) for a
+ * name the serial unit owns and the board has a port for, ENOENT for an
+ * owned name without one. The standard serial port class lists /dev and
+ * keeps the entries under its five prefixes; a listing shows them as
+ * character devices and a status read agrees. */
+static int32_t ttydev_stat(const char *path, rhu_pal_filestatus *st)
+{
+    memset(st, 0, sizeof *st);
+    if (!rhu_ttydev_exists(path)) {
+        ERRNO = RHU_GERR_ENOENT;
+        return -1;
+    }
+    st->Mode = (int32_t)(RHU_PAL_S_IFCHR | 0x1B0u);
+    st->Dev = 1;
+    st->HardLinkCount = 1;
+    return 0;
+}
+
 /* The console answers only for the console band; a descriptor from any
  * other band is asked of its own owner, and a closed one is invalid. */
 int32_t SystemNative_FStat(intptr_t fd, rhu_pal_filestatus *output)
 {
+    if (rhu_iiofs_fd(fd))
+        return rhu_iiofs_fstat(fd, output);
+    if (rhu_pwmfs_fd(fd))
+        return rhu_pwmfs_fstat(fd, output);
     if (fd_is_console(fd)) {
         memset(output, 0, sizeof *output);
         output->Mode = (int32_t)(RHU_PAL_S_IFCHR | 0x1B6u);
@@ -884,6 +1016,12 @@ int32_t SystemNative_FStat(intptr_t fd, rhu_pal_filestatus *output)
 
 int32_t SystemNative_Stat(const char *path, rhu_pal_filestatus *output)
 {
+    if (rhu_iiofs_owns(path))
+        return rhu_iiofs_stat(path, output);
+    if (rhu_pwmfs_owns(path))
+        return rhu_pwmfs_stat(path, output);
+    if (rhu_ttydev_owns_path(path))
+        return ttydev_stat(path, output);
     char nb[RFS_PATH];
     path = path_norm(path, nb);
     store_lock();
@@ -1047,6 +1185,10 @@ int32_t SystemNative_FSync(intptr_t fd)
 {
     if (fd_is_console(fd))
         return 0;
+    if (rhu_iiofs_fd(fd))
+        return rhu_iiofs_fsync(fd);
+    if (rhu_pwmfs_fd(fd))
+        return rhu_pwmfs_fsync(fd);
     store_lock();
     int ok = fd_file(fd) != NULL;
     store_unlock();
@@ -1105,6 +1247,10 @@ static int32_t flock_locked(intptr_t fd, int32_t operation)
 
 int32_t SystemNative_FLock(intptr_t fd, int32_t operation)
 {
+    if (rhu_iiofs_fd(fd))
+        return rhu_iiofs_flock(fd, operation);
+    if (rhu_pwmfs_fd(fd))
+        return rhu_pwmfs_flock(fd, operation);
     store_lock();
     int32_t r = flock_locked(fd, operation);
     store_unlock();
@@ -1148,6 +1294,23 @@ char *realpath(const char *path, char *resolved)
 
 int32_t SystemNative_Access(const char *path, int32_t mode)
 {
+    if (rhu_iiofs_owns(path))
+        return rhu_iiofs_access(path, mode);
+    if (rhu_pwmfs_owns(path))
+        return rhu_pwmfs_access(path, mode);
+    if (rhu_ttydev_owns_path(path)) {
+        /* A serial device file: present when the board has the port,
+         * readable and writable, never executable. */
+        if (!rhu_ttydev_exists(path)) {
+            ERRNO = RHU_GERR_ENOENT;
+            return -1;
+        }
+        if ((mode & RHU_PAL_X_OK) != 0) {
+            ERRNO = RHU_GERR_EACCES;
+            return -1;
+        }
+        return 0;
+    }
     char nb[RFS_PATH];
     (void)mode;
     path = path_norm(path, nb);
@@ -1195,6 +1358,10 @@ static int32_t ftruncate_locked(intptr_t fd, int64_t length)
 
 int32_t SystemNative_FTruncate(intptr_t fd, int64_t length)
 {
+    if (rhu_iiofs_fd(fd))
+        return rhu_iiofs_ftruncate(fd, length);
+    if (rhu_pwmfs_fd(fd))
+        return rhu_pwmfs_ftruncate(fd, length);
     store_lock();
     int32_t r = ftruncate_locked(fd, length);
     store_unlock();
@@ -1204,6 +1371,7 @@ int32_t SystemNative_FTruncate(intptr_t fd, int64_t length)
 typedef struct rfs_iter {
     char dir[RFS_PATH];
     int idx;
+    uint32_t tty; /* under /dev: the serial device files listed so far */
     char name[RFS_PATH];
 } rfs_iter;
 
@@ -1239,7 +1407,9 @@ int32_t SystemNative_CloseDir(void *dir)
     return 0;
 }
 
-/* The entry's name lives in the iterator until the next call; the index
+/* The entry's name lives in the iterator until the next call. Under /dev
+ * the serial device files come first, in the board's row order, as
+ * character devices; then the index
  * walks the file table (the named objects), then the directory table.
  * Returns 0 with an entry, -1 at the end of the stream, and an errno
  * value on a broken iterator. */
@@ -1249,6 +1419,13 @@ int32_t SystemNative_ReadDir(void *dir, rhu_pal_directoryentry *outputEntry)
     if (it == NULL) {
         memset(outputEntry, 0, sizeof *outputEntry);
         return RHU_GERR_EBADF;
+    }
+    if (strcmp(it->dir, "/dev") == 0 && rhu_ttydev_name(it->tty, it->name, sizeof it->name)) {
+        it->tty++;
+        outputEntry->Name = it->name;
+        outputEntry->NameLength = -1;
+        outputEntry->InodeType = RHU_PAL_DT_CHR;
+        return 0;
     }
     store_lock();
     while (it->idx < RFS_FILES + RFS_DIRS) {
@@ -1762,7 +1939,7 @@ void SystemNative_Exit(int32_t exitCode)
 void SystemNative_Abort(void)
 {
     rhu_shim_log("Abort() on thread %d", rhu_thread_self());
-    rhu_exit(134);
+    rhu_abort(134);
     __builtin_unreachable();
 }
 
@@ -1797,8 +1974,8 @@ int64_t SystemNative_GetLowResolutionTimestamp(void)
 int64_t SystemNative_GetSystemTimeAsTicks(void)
 {
 #ifdef RHU_SHIM_BREAK_CALENDAR_CLOCK
-    /* A test knob: the boot clock in place of the calendar, the answer of a
-     * shim that has no calendar. Never set in a hosted image. */
+    /* Built with this define, the boot clock answers in place of the calendar,
+     * as a shim without a calendar would answer. Never set in a hosted image. */
     return (int64_t)(rhu_now_ns() / 100ull);
 #else
     return rhu_shim_calendar_unix_ticks();
@@ -1862,8 +2039,8 @@ int32_t SystemNative_GetCryptographicallySecureRandomBytes(uint8_t *buffer, int3
             piece = RHU_ENTROPY_SECURE_MAX;
         int32_t r = rhu_entropy_secure(buffer == NULL ? NULL : buffer + off, piece);
 #ifdef RHU_SHIM_BREAK_ENTROPY_REFUSAL
-        /* A test knob: the door's answer ignored, every draw reported as
-         * served. Never set in a hosted image. */
+        /* Built with this define, the door's answer is ignored and every draw
+         * is reported as served. Never set in a hosted image. */
         r = 0;
 #endif
         if (r != 0) {
@@ -2216,22 +2393,20 @@ char *SystemNative_GetEnv(const char *variable)
 
 /* The two log streams are the console: the bytes go out as given, no
  * line ending added, exactly as the library function this row stands
- * for writes them. */
+ * for writes them, a long message in the door's pieces. */
 void SystemNative_Log(uint8_t *buffer, int32_t length)
 {
-    if (length > 0)
-        rhu_console_write(buffer, (uint32_t)length);
+    (void)console_write_pieces(buffer, length);
 }
 
 void SystemNative_LogError(uint8_t *buffer, int32_t length)
 {
-    if (length > 0)
-        rhu_console_write(buffer, (uint32_t)length);
+    (void)console_write_pieces(buffer, length);
 }
 
 /* ------------------------------------------------------------------ */
-/* the surface beyond the gate programs' demand: the answers           */
-/* RHU serves, over the store, the calendar and the kernel             */
+/* further SystemNative_* functions: the process, file-system and     */
+/* loader queries, answered over the store, the calendar and the kernel */
 /* ------------------------------------------------------------------ */
 
 void *dlopen(const char *file, int mode);
@@ -2419,8 +2594,8 @@ int32_t SystemNative_GetUnixVersion(char *version, int *capacity)
 }
 
 /* The PAL's architecture word for ARM: the third member (0-based 2) of
- * the enumeration in pal_runtimeinformation.c at the pin (x86, x64, ARM,
- * ARM64, ...), read off the source and stated here. */
+ * the enumeration in the runtime's pal_runtimeinformation.c (x86, x64, ARM,
+ * ARM64, ...). */
 #define RHU_SHIM_PAL_ARCH_ARM 2
 
 int32_t SystemNative_GetOSArchitecture(void)
@@ -2618,6 +2793,10 @@ int32_t SystemNative_FcntlSetFD(intptr_t fd, int32_t flags)
 {
     if (fd_is_console(fd))
         return 0;
+    if (rhu_iiofs_fd(fd))
+        return rhu_iiofs_fcntl_setfd(fd, flags);
+    if (rhu_pwmfs_fd(fd))
+        return rhu_pwmfs_fcntl_setfd(fd, flags);
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
         ERRNO = RHU_GERR_EBADF;

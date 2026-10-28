@@ -24,7 +24,7 @@ const TIMEOUT_S: u64 = 900;
 /// The cases pinned, in the order cargo's single-threaded runner reports
 /// them (alphabetical by name). A case added to the host crate joins this
 /// list in the same change, or the gate refuses the run.
-pub const CASES: [&str; 32] = [
+pub const CASES: [&str; 78] = [
     "tests::abi_window_judges_the_window",
     "tests::adc_math_budget_mask_and_channels",
     "tests::arena_overflow_refused_headroom_intact",
@@ -38,6 +38,32 @@ pub const CASES: [&str; 32] = [
     "tests::claims_board_claim_at_open",
     "tests::claims_board_fold_and_program_claims",
     "tests::claims_irq_slots_and_tenants",
+    "tests::exit_word_encodes_the_contracts_numbers",
+    "tests::exit_word_refuses_the_words_outside_the_contract",
+    "tests::fat_alias_generation_unique_within_a_directory",
+    "tests::fat_append_and_truncate",
+    "tests::fat_bpb_refuses_the_doctored_boot_sectors",
+    "tests::fat_card_sized_geometry_over_a_sparse_device",
+    "tests::fat_chain_walk_bounded_and_a_loop_refused",
+    "tests::fat_create_write_sync_and_the_reread_after_a_remount",
+    "tests::fat_deep_tree_and_the_thousand_entries",
+    "tests::fat_directory_grows_past_one_cluster",
+    "tests::fat_entries_at_all_three_widths",
+    "tests::fat_fat_copies_and_the_fsinfo_written_in_order",
+    "tests::fat_free_count_from_the_fsinfo_or_the_pass",
+    "tests::fat_mounts_behind_a_partition_table",
+    "tests::fat_path_rules_and_the_fold",
+    "tests::fat_reads_every_file_byte_exact_against_the_recipe",
+    "tests::fat_root_walk_lists_every_entry_with_its_long_name",
+    "tests::fat_second_reader_agrees_after_every_write_scenario",
+    "tests::fat_sector_cache_write_back_and_eviction",
+    "tests::fat_seek_and_partial_reads",
+    "tests::fat_stale_long_name_sets_served_by_the_short_name",
+    "tests::fat_timestamps_from_the_calendar",
+    "tests::fat_type_by_the_cluster_count_on_the_three_goldens",
+    "tests::fat_unlink_mkdir_rmdir_and_rename",
+    "tests::fat_volume_filled_to_no_space",
+    "tests::fat_write_returns_the_bytes_moved_before_a_refusal",
     "tests::fpemul_arithmetic_matches_the_host_in_round_to_nearest",
     "tests::fpemul_compare_max_min_match_the_host",
     "tests::fpemul_conversions_match_the_host",
@@ -48,11 +74,31 @@ pub const CASES: [&str; 32] = [
     "tests::kheap_largest_fits_and_one_more_byte_does_not",
     "tests::kheap_rounding_wraps_refused",
     "tests::kheap_wrapping_request_refused_null_heap_intact",
+    "tests::net_math_icmpv4_verified_by_the_parser",
+    "tests::net_math_ipv4_header_verified_by_the_parser",
+    "tests::net_math_rfc1071_sum_matches_the_parsers",
+    "tests::net_math_tcp_pseudo_header_verified_by_the_parser",
+    "tests::net_math_udp_pseudo_header_verified_by_the_parser",
+    "tests::net_peer_arp_reply_parsed_by_the_stack",
+    "tests::net_peer_dhcp_offer_and_ack_parsed_by_the_stack",
+    "tests::net_peer_dns_answer_and_name_error_parsed_by_the_stack",
+    "tests::net_peer_icmp_echo_reply_parsed_by_the_stack",
+    "tests::net_peer_passes_what_it_does_not_answer",
+    "tests::net_peer_tcp_reset_parsed_by_the_stack",
     "tests::pwm_math_quantization_and_shared_period",
     "tests::rp2350_bus_math_counts_and_ladder",
     "tests::rp2350_bus_math_i2c_modes",
     "tests::rp2350_bus_math_reserved_addresses",
     "tests::rp2350_bus_math_rows_roles_and_aborts",
+    "tests::sdcard_crc7_and_crc16_match_the_fact_sheets_frames",
+    "tests::sdcard_csd_decoders_and_both_capacity_formulas",
+    "tests::sdcard_identify_high_capacity_over_the_scripted_host",
+    "tests::sdcard_identify_refuses_the_doctored_scripts",
+    "tests::sdcard_identify_standard_capacity_over_the_scripted_host",
+    "tests::sdcard_read_and_write_address_by_capacity_class",
+    "tests::sdcard_transfer_refusals_recover_by_cmd12_before_any_retry",
+    "tests::uart_math_effective_pair_on_the_rp2350_rows",
+    "tests::uart_math_pin_words_refused_with_the_words",
     "tests::wake_arm_across_the_32bit_wrap",
     "tests::wake_arm_beyond_window_clamps_and_rearms",
     "tests::wake_arm_inside_window_is_exact",
@@ -67,6 +113,9 @@ pub fn parse_run(text: &str) -> Result<Vec<String>, String> {
     let mut summary: Option<&str> = None;
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
+        // The summary line starts with "test " too: read it first, and
+        // only the first one (the unit tests'; the run asks for the lib
+        // target alone, so there is exactly one).
         if line.starts_with("test result: ") {
             if summary.is_none() {
                 summary = Some(line);
@@ -140,6 +189,10 @@ pub fn run(repo: &Path) -> ! {
         chain_json_from_env(),
         facts.version
     ));
+    // The run: cargo test of the lib target in the host crate (one
+    // summary, no doc-test pass), its own target dir, one thread (the
+    // case order is then the runner's alphabetical order), stdout and
+    // stderr to files, bounded.
     let log_path = out.join("cargo-test.log");
     let err_path = out.join("cargo-test.stderr");
     let (log, err) = match (std::fs::File::create(&log_path), std::fs::File::create(&err_path)) {

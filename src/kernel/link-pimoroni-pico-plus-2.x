@@ -30,6 +30,16 @@ MEMORY
    * without touching CODE sectors. */
   APP  (rx)  : ORIGIN = 0x10c00000, LENGTH = 4M
   DATA (rwx) : ORIGIN = 0x20000000, LENGTH = 520K
+  /* The board's 8 MB PSRAM part behind the flash interface's second chip
+   * select (GPIO 47), shown through the chip's cached window for that
+   * select (the RP2350 datasheet's address map: the lower half of the
+   * XIP space holds two 16 MB windows, one per chip select). The PSRAM
+   * crate brings the part up and proves it at boot; the kernel then
+   * offers the region past the rehydrated-data region to the hosted
+   * runtime as its second RAM range (the arena's window 1, bracketed
+   * below). The rehydrated-data region alone is placed here (the
+   * section below). */
+  PSRAM (rwx) : ORIGIN = 0x11000000, LENGTH = 8M
 }
 
 /* GC-substrate floor: the arena window this board GUARANTEES after
@@ -37,7 +47,7 @@ MEMORY
  * (link-enforced by the window asserts at the bottom of this map). The
  * 512 K-class floor: the mini GC row fits it beside the hosted runtime's
  * declared demand (the payload map's asserts). */
-RHU_ARENA_MIN = 192K;
+RHU_ARENA_MIN = 160K;
 
 ENTRY(Reset);
 
@@ -142,6 +152,22 @@ SECTIONS
     __edata = .;
   } > DATA AT> CODE
 
+  /* The hosted runtime's rehydrated-data region's section, placed as
+   * the payload map places it (the two maps kept in sync), so the api
+   * flavor reads the same geometry back: empty in a kernel image but
+   * for the api flavor's own test static. Its own NOLOAD section at the
+   * head of the external RAM region, outside the zero-fill window: the
+   * kernel zeroes the bracket at boot, after the external RAM is
+   * brought up and proved (boot.rs). The arena's second window starts
+   * at the section's end (bracketed below). */
+  .rhu_hydrated ORIGIN(PSRAM) (NOLOAD) : ALIGN(8)
+  {
+    __rhu_hydrated_lo = .;
+    *(.hydrated*);
+    . = ALIGN(8);
+    __rhu_hydrated_hi = .;
+  } > PSRAM
+
   .bss (NOLOAD) : ALIGN(4)
   {
     __sbss = .;
@@ -186,13 +212,29 @@ SECTIONS
  * establishes the zero-birth invariant over it at boot. (Top level: the
  * linker rejects a bare ASSERT between output sections and reports the
  * error one command late.) */
-RHU_BOOT_STACK_RESERVE = 64K;
+RHU_BOOT_STACK_RESERVE = 16K;
 __rhu_arena_lo = ALIGN(__rhu_console_log_end, 8);
 __rhu_arena_hi = __stack_start - RHU_BOOT_STACK_RESERVE;
 ASSERT(__rhu_arena_hi >= __rhu_arena_lo,
   "static RAM + .kstacks + the console mirror overflow into the boot-stack reserve (arena window negative)");
 ASSERT(__rhu_arena_hi - __rhu_arena_lo >= RHU_ARENA_MIN,
   "arena window under this board's GC-substrate floor (RHU_ARENA_MIN)");
+
+/* The arena's second window: the external RAM region from the end of
+ * the rehydrated-data region (8-aligned) to the region's end.
+ * Kernel-owned space outside every section, like the first window; the
+ * kernel takes it only when the external RAM has been brought up and
+ * proved at boot, and arena::init() establishes the zero-birth
+ * invariant over it then. A rehydrated-data region that fills the
+ * whole external region refuses the link. */
+__rhu_arena1_lo = ALIGN(__rhu_hydrated_hi, 8);
+__rhu_arena1_hi = ORIGIN(PSRAM) + LENGTH(PSRAM);
+ASSERT(__rhu_arena1_hi > __rhu_arena1_lo,
+  "rehydrated-data region fills the external region (the arena's second window empty)");
+
+/* The rehydrated-data region lies inside the external RAM region. */
+ASSERT(__rhu_hydrated_lo >= ORIGIN(PSRAM) && __rhu_hydrated_hi <= ORIGIN(PSRAM) + LENGTH(PSRAM),
+  "rehydrated-data region outside the external region");
 
 /* The module-0 TLS template rides the boot's single .data copy: its
  * load/run offset must equal .data's, on every board. */
@@ -215,3 +257,26 @@ ASSERT(ADDR(.rp2350_boot_block) == ORIGIN(CODE) + 0x440,
   "boot block not at the fixed offset 0x440 from the image base");
 ASSERT(SIZEOF(.rp2350_boot_block) == 20,
   "boot block is not the five words the boot ROM recognises");
+
+/* The null-page guard: the protection unit denies the first 4 KB of
+ * the address space on every row, so no code may be placed below it; the
+ * vector table alone may (exception vector reads bypass the unit). */
+ASSERT(__stext >= 0x1000,
+  "code placed inside the first page, which the protection unit denies (the null-page guard)");
+
+/* The console's link-time words. A project's knobs reach this
+ * prebuilt kernel as ABSOLUTE SYMBOLS the kernel reads by address at boot;
+ * an image linked without a knob gets 0 = the row's default (the facts'
+ * channels row; the level's 0 = verbose). The SDK passes --defsym from the
+ * project's properties; build.rs passes the environment's for the kernel's
+ * own images. The pin words are the serial act's (0 = the facts' pair). */
+PROVIDE(__rhu_log_level = 0);
+PROVIDE(__rhu_log_channel = 0);
+PROVIDE(__rhu_console_channel = 0);
+PROVIDE(__rhu_uart0_tx = 0);
+PROVIDE(__rhu_uart0_rx = 0);
+PROVIDE(__rhu_uart1_tx = 0);
+PROVIDE(__rhu_uart1_rx = 0);
+/* The handler stack's watermark word: 0 = off; 1 = the boot stack reserve is
+ * filled with a pattern at reset and its deepest use printed at the end. */
+PROVIDE(__rhu_stack_watermark = 0);

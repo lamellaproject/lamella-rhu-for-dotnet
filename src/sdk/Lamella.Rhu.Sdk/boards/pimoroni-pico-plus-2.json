@@ -9,6 +9,98 @@
   "pins": 48,
   "labels": "gp",
   "functions": "rp2350b",
+  "pwm": {
+    "chip": 0,
+    "lines": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47
+    ]
+  },
+  "adc": {
+    "converters": [
+      {
+        "number": 0,
+        "bits": 12,
+        "referenceMillivolts": 3300,
+        "channels": [
+          {
+            "number": 0,
+            "pin": 40
+          },
+          {
+            "number": 1,
+            "pin": 41
+          },
+          {
+            "number": 2,
+            "pin": 42
+          },
+          {
+            "number": 3,
+            "pin": 43
+          },
+          {
+            "number": 4,
+            "pin": 44
+          },
+          {
+            "number": 6,
+            "pin": 46
+          },
+          {
+            "number": 8,
+            "pin": null
+          }
+        ]
+      }
+    ]
+  },
   "i2c": [
     {
       "block": 0,
@@ -33,5 +125,81 @@
       "min": 184,
       "max": 6000000
     }
-  ]
+  ],
+  "ram": [
+    {
+      "name": "SRAM",
+      "base": 536870912,
+      "bytes": 532480,
+      "external": false,
+      "cached": false
+    },
+    {
+      "name": "PSRAM",
+      "base": 285212672,
+      "bytes": 8388608,
+      "external": true,
+      "cached": true
+    }
+  ],
+  "uart": [
+    {
+      "block": 0,
+      "tx": 0,
+      "rx": 1
+    },
+    {
+      "block": 1
+    }
+  ],
+  "uartPairs": [
+    {
+      "block": 0,
+      "tx": [
+        0,
+        12,
+        16,
+        28,
+        32,
+        44
+      ],
+      "rx": [
+        1,
+        13,
+        17,
+        29,
+        33,
+        45
+      ]
+    },
+    {
+      "block": 1,
+      "tx": [
+        4,
+        8,
+        20,
+        24,
+        36,
+        40
+      ],
+      "rx": [
+        5,
+        9,
+        21,
+        25,
+        37,
+        41
+      ]
+    }
+  ],
+  "channels": {
+    "log": "memory",
+    "console": "memory",
+    "legal": [
+      "memory",
+      "off",
+      "uart0",
+      "uart1"
+    ]
+  }
 }

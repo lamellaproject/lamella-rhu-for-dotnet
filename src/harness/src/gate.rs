@@ -1,6 +1,14 @@
 //! Gate scaffolding: the case machinery every gate definition composes,
 //! and the selfcheck probe scaffold that keeps each gate's checkers
 //! negative-controlled on every invocation.
+//!
+//! A gate builds an image flavor, stages the artifact under its own name,
+//! records the staged file's hash (the artifact of record, not the build
+//! command's intent), runs it under QEMU with a per-case timeout, and
+//! asserts markers AND exit codes on the raw capture. Failure paths emit
+//! the failing case line, the summary, and the gate's loud FAIL verdict
+//! before exiting nonzero.
+
 
 use crate::results::{validate_results, Results};
 use crate::sha256::sha256_file;
@@ -15,6 +23,15 @@ pub struct CaseRun {
     pub path_rel: String,
     pub raw: Vec<u8>,
     pub exit: i32,
+}
+
+/// A case's staged image, the artifact of record: its path as the
+/// emulator takes it, its sha256 and its repo-relative path for the
+/// results file.
+pub struct Staged {
+    pub staged_arg: String,
+    pub sha: String,
+    pub path_rel: String,
 }
 
 /// Shared per-gate context: identity, tool facts, output home, results.
@@ -48,8 +65,35 @@ impl GateCtx {
         features: &[&str],
         profile: ExecProfile,
     ) -> CaseRun {
+        self.build_and_run_full(name, features, profile, None)
+    }
+
+    /// The whole routine under a profile, with an optional second serial
+    /// chardev: the image's second UART on QEMU's second `-serial`, pushed
+    /// after `-serial stdio` so the console stays the first (the api
+    /// images' wire echo). Without one the argv is byte-identical to the
+    /// established invocation.
+    pub fn build_and_run_full(
+        &mut self,
+        name: &str,
+        features: &[&str],
+        profile: ExecProfile,
+        serial2: Option<&str>,
+    ) -> CaseRun {
+        let staged = self.build_case(name, features);
+        self.run_staged(name, &staged, profile, serial2)
+    }
+
+    /// The build half: the kernel built with the given cargo feature
+    /// arguments, the ELF staged under the case name and hashed (the
+    /// artifact of record). A build error emits the case's fail line and
+    /// fails the gate.
+    pub fn build_case(&mut self, name: &str, features: &[&str]) -> Staged {
         println!("== case {name} ==");
         let log = self.out.join(format!("build-{name}.log"));
+        // Every emulator image built here names the entropy opt-in: the
+        // gate images accept the software stream for the cryptographic
+        // door, and their banner says so.
         let mut feats: Vec<&str> = features.to_vec();
         feats.extend_from_slice(&["--features", "entropy-accept-software"]);
         let ok = match cargo_build_kernel(&self.repo, &feats, &log) {
@@ -80,23 +124,23 @@ impl GateCtx {
             Err(e) => self.gate_fail(&format!("{name}: cannot hash staged artifact: {e}")),
         };
         let path_rel = format!("{}/rhu-kernel-{name}.elf", self.out_rel);
+        Staged { staged_arg: staged.to_string_lossy().into_owned(), sha, path_rel }
+    }
+
+    /// The run half: the staged image under QEMU with the case's timeout,
+    /// the raw capture echoed; a run killed at its timeout is recorded as
+    /// exit 124 (a hang is observed, never a pass).
+    pub fn run_staged(&mut self, name: &str, staged: &Staged, profile: ExecProfile, serial2: Option<&str>) -> CaseRun {
         let raw_path = self.out.join(format!("{name}.raw"));
         let stderr_path = self.out.join(format!("{name}.stderr"));
-        let staged_arg = staged.to_string_lossy().into_owned();
-        let mut args: Vec<&str> = vec![
-            "-M",
-            "mps2-an500",
-            "-display",
-            "none",
-            "-monitor",
-            "none",
-            "-serial",
-            "stdio",
-            "-semihosting",
-        ];
+        let mut args: Vec<&str> = vec!["-M", "mps2-an500", "-display", "none", "-monitor", "none", "-serial", "stdio"];
+        if let Some(s) = serial2 {
+            args.extend_from_slice(&["-serial", s]);
+        }
+        args.push("-semihosting");
         args.extend_from_slice(profile.qemu_args());
         args.push("-kernel");
-        args.push(&staged_arg);
+        args.push(&staged.staged_arg);
         let outcome = match run_captured(
             &self.qemu,
             &args,
@@ -113,8 +157,8 @@ impl GateCtx {
         let raw = std::fs::read(&raw_path).unwrap_or_default();
         echo_file(&raw_path, "  | ");
         CaseRun {
-            sha,
-            path_rel,
+            sha: staged.sha.clone(),
+            path_rel: staged.path_rel.clone(),
             raw,
             exit: outcome.exit,
         }
@@ -214,12 +258,20 @@ impl Selfcheck {
     }
 }
 
-/// Write a probe fixture file, exact bytes.
+/// Write a probe fixture file, exact bytes; a failure is the gate's
+/// (a fixture that reads back empty would pass a contains-based probe
+/// vacuously).
 pub fn write_fixture(path: &Path, bytes: &[u8]) {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            println!("GATE FAIL: cannot create {}: {e}", parent.display());
+            exit(1);
+        }
     }
-    let _ = std::fs::write(path, bytes);
+    if let Err(e) = std::fs::write(path, bytes) {
+        println!("GATE FAIL: cannot write the fixture {}: {e}", path.display());
+        exit(1);
+    }
 }
 
 /// The processor class a frozen object is compiled for: the two words of

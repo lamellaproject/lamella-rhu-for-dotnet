@@ -1,10 +1,27 @@
 //! Tool resolution and process machinery.
+//!
+//! Every external tool resolves environment override first, then PATH, then
+//! an untracked per-machine pointer file (never a path written into the
+//! source) -- and a tool that resolves nowhere fails LOUD naming every place
+//! it looked;
+//! the runner never silently skips a missing tool. A command-valued
+//! override splits into words on whitespace, and a double-quoted word keeps
+//! its spaces. Captures are byte-true: a case's console stream goes to its file
+//! through a direct handle, never through a text layer, so the wire's CR
+//! bytes reach the transcript checks untouched. A run that outlives its
+//! timeout is killed and recorded as exit 124, which never satisfies any
+//! expected-exit check.
+
 
 use std::env;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Repo root: the nearest ancestor of the working directory that contains
@@ -50,6 +67,7 @@ const VERSION_PROBE_TIMEOUT_S: u64 = 20;
 /// unbounded: they ride file or inherited handles (no pipe exposure),
 /// their durations legitimately vary. Only probes and the
 /// external-linker merge get deadlines.
+
 pub fn probe_stdout_bounded(
     program: &Path,
     args: &[&str],
@@ -322,6 +340,7 @@ pub fn llvm_tool(facts: &RustcFacts, name: &str) -> Result<PathBuf, String> {
 /// count-class pins are pinnable exact only there. The shift value is
 /// part of every such pin's identity: changing it re-clocks every count
 /// pin, a reviewed migration, never a tweak.
+
 #[derive(Clone, Copy)]
 pub enum ExecProfile {
     Parity,
@@ -515,6 +534,9 @@ mod host {
         let mut exit = Steps::default();
         let mut kernel = Steps::default();
         let mut user = Steps::default();
+        // SAFETY: the handle is the child's own, held open by the standard
+        // library for the child's life; the four pointers name live values
+        // of the layout the call writes.
         let answered = unsafe {
             GetProcessTimes(child.as_raw_handle(), &mut creation, &mut exit, &mut kernel, &mut user)
         };
@@ -545,6 +567,8 @@ mod host {
 
     pub fn processor_time(child: &Child) -> Option<Duration> {
         let line = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).ok()?;
+        // SAFETY: the call reads one value of the host's configuration and
+        // touches no memory of this program's.
         let tick = unsafe { sysconf(CLOCK_TICK) };
         super::stat_line_time(&line, u64::try_from(tick).ok()?)
     }
@@ -592,6 +616,9 @@ pub struct CountedRun {
     pub outlived: bool,
     /// The run ended by itself with more than half of its budget spent.
     pub past_half: bool,
+    /// The run's budget of processor time, so the record carries the
+    /// numbers beside the reading.
+    pub budget: Duration,
 }
 
 /// `run_captured` for an instruction-counted run: the same spawn and the
@@ -634,6 +661,7 @@ pub fn run_counted(
                     spent,
                     outlived: began.elapsed() > limits.deadline,
                     past_half: spent.is_some_and(|s| s > limits.budget / 2),
+                    budget: limits.budget,
                 });
             }
             Ok(None) => {
@@ -646,6 +674,7 @@ pub fn run_counted(
                         spent,
                         outlived: false,
                         past_half: false,
+                        budget: limits.budget,
                     });
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -657,26 +686,51 @@ pub fn run_counted(
 
 /// The lines an instruction-counted run is reported with: the rule that
 /// stopped it, or what its ending says of the host and of its budget. The
-/// two notes are printed only when their condition holds.
+/// two notes are printed only when their condition holds. The budget's rule: every line
+/// carries the numbers -- the processor time spent, the budget, the spent
+/// share of it and the host's unit -- so the record holds the margin.
 pub fn say_counted(run: &CountedRun) {
+    let numbers = counted_numbers(run);
     match run.stop {
         Some(Stop::Work) => println!(
-            "  (run stopped: its budget of processor time is spent; exit recorded as 124 -- a hang is observed, never a pass)"
+            "  (run stopped: its budget of processor time is spent; {numbers}; exit recorded as 124 -- a hang is observed, never a pass)"
         ),
         Some(Stop::NoWork) => println!(
-            "  (run stopped: a whole deadline passed in which the emulator did no work; exit recorded as 124 -- a hang is observed, never a pass)"
+            "  (run stopped: a whole deadline passed in which the emulator did no work; {numbers}; exit recorded as 124 -- a hang is observed, never a pass)"
         ),
         Some(Stop::Deadline) => println!(
-            "  (run killed at its timeout; exit recorded as 124 -- a hang is observed, never a pass)"
+            "  (run killed at its timeout; {numbers}; exit recorded as 124 -- a hang is observed, never a pass)"
         ),
         None => {
             if run.outlived {
                 println!("  (the run outlived its wall deadline while the emulator kept working: the host is busy)");
             }
             if run.past_half {
-                println!("  (the run spent more than half of its budget of processor time)");
+                println!("  (the run spent more than half of its budget of processor time; {numbers})");
+            } else {
+                println!("  (the run's processor time: {numbers})");
             }
         }
+    }
+}
+
+/// The numbers of a counted run as words -- the processor time spent
+/// (the host's last reading), the budget, the spent share of it, and the
+/// host's unit of emulator work the budget followed.
+fn counted_numbers(run: &CountedRun) -> String {
+    let unit = match UNIT.get() {
+        Some(Some(u)) => format!("{} ms", u.as_millis()),
+        _ => "not measured".to_string(),
+    };
+    match run.spent {
+        Some(s) => format!(
+            "spent {} ms of the budget {} ms ({:.2} of it); the host's unit {}",
+            s.as_millis(),
+            run.budget.as_millis(),
+            s.as_secs_f64() / run.budget.as_secs_f64().max(0.001),
+            unit
+        ),
+        None => format!("no reading of the processor time; the budget {} ms; the host's unit {}", run.budget.as_millis(), unit),
     }
 }
 
@@ -872,6 +926,24 @@ pub fn cargo_build_kernel_at(
     extra: &[&str],
     log_path: &Path,
 ) -> Result<bool, String> {
+    cargo_build_kernel_env(repo, target_dir, extra, &[], log_path)
+}
+
+/// `cargo_build_kernel_at` with environment words on the build: the
+/// environment route of the console's channels and the log's level
+/// (`RHU_LOG_LEVEL`, `RHU_LOG_CHANNEL`, `RHU_CONSOLE_CHANNEL`, the pin
+/// overrides `RHU_UART<n>_TX` and `RHU_UART<n>_RX`), read by the crate's
+/// build script into the image's link-time words. The build script re-runs
+/// when such a word changes, so a routed image is built in a target dir of
+/// its own, never in the shared per-target tree the gates' plain images
+/// share -- their identities would move with every route.
+pub fn cargo_build_kernel_env(
+    repo: &Path,
+    target_dir: &Path,
+    extra: &[&str],
+    env: &[(&str, &str)],
+    log_path: &Path,
+) -> Result<bool, String> {
     let crate_dir = repo.join("src").join("kernel");
     let log = File::create(log_path).map_err(|e| format!("cannot create build log: {e}"))?;
     let log2 = log
@@ -890,6 +962,7 @@ pub fn cargo_build_kernel_at(
         .args(extra)
         .current_dir(&crate_dir)
         .env("CARGO_TARGET_DIR", target_dir)
+        .envs(env.iter().map(|(k, v)| (*k, *v)))
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log2))
@@ -908,5 +981,120 @@ pub fn echo_file(path: &Path, prefix: &str) {
     let text = String::from_utf8_lossy(&bytes);
     for line in text.lines() {
         println!("{prefix}{}", line.trim_end_matches('\r'));
+    }
+}
+
+/// A free TCP port on the loopback interface: bound at 0, read, released.
+/// The emulator's chardev binds it a moment later; a gate runs one case at
+/// a time, and a port taken in between fails that run loudly (the chardev
+/// cannot bind), never silently.
+pub fn free_port() -> Result<u16, String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("cannot bind a loopback port: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("cannot read the bound port: {e}"))?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+/// QEMU's second serial chardev for an api image's second UART: a TCP
+/// server on the loopback interface the wire's echo connects to; the run
+/// does not wait for the client, and the bytes go out without the Nagle
+/// delay. The native Windows build of the emulator listens on the host's
+/// own loopback interface, so the echo reaches it directly.
+pub fn echo_chardev(port: u16) -> String {
+    // wait=on: the emulator starts the machine once the gate's echo peer is connected, so the first bytes the
+    // ladder sends reach the peer.
+    format!("tcp:127.0.0.1:{port},server=on,wait=on,nodelay=on")
+}
+
+/// The wire's echo on an api image's second UART: a thread that connects
+/// to the chardev with retries every 25 ms until it listens (or the
+/// deadline passes, or the run ends first), then writes back every byte it
+/// reads until the peer closes or the stop flag is raised -- a 250 ms read
+/// timeout re-checks the flag. `finish` raises the flag, joins and answers
+/// the bytes echoed. Spawned after the case's build and before its run, so
+/// the deadline bounds the run alone.
+pub struct Echo {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<Result<u64, String>>,
+}
+
+pub fn spawn_echo(port: u16, deadline: Duration) -> Echo {
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let thread = std::thread::spawn(move || echo_until_closed(port, deadline, &flag));
+    Echo { stop, thread }
+}
+
+fn echo_until_closed(port: u16, deadline: Duration, stop: &AtomicBool) -> Result<u64, String> {
+    let start = Instant::now();
+    let mut stream = loop {
+        if stop.load(Ordering::SeqCst) {
+            // The run ended before the chardev listened (an early death):
+            // nothing to echo, and nothing wrong with the echo.
+            return Ok(0);
+        }
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(s) => break s,
+            Err(e) => {
+                if start.elapsed() >= deadline {
+                    return Err(format!(
+                        "the wire's echo could not connect to the chardev on port {port} within {} s: {e}",
+                        deadline.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    };
+    let _ = stream.set_nodelay(true);
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .map_err(|e| format!("the wire's echo cannot set its read timeout: {e}"))?;
+    // A write back blocks only while the guest stops reading and the
+    // socket's buffer is full: bounded, so a run that ends there ends
+    // the thread too.
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("the wire's echo cannot set its write timeout: {e}"))?;
+    let mut buf = [0u8; 4096];
+    let mut echoed = 0u64;
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Err(e) = stream.write_all(&buf[..n]) {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    return Err(format!("the wire's echo could not write {n} bytes back: {e}"));
+                }
+                echoed += n as u64;
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            // The peer is gone (the emulator exited): the echo's work is done.
+            Err(_) => break,
+        }
+    }
+    Ok(echoed)
+}
+
+impl Echo {
+    /// Raise the stop flag, join the thread, answer the bytes echoed.
+    pub fn finish(self) -> Result<u64, String> {
+        self.stop.store(true, Ordering::SeqCst);
+        match self.thread.join() {
+            Ok(r) => r,
+            Err(_) => Err("the wire's echo thread panicked".to_string()),
+        }
     }
 }

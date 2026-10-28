@@ -12,6 +12,12 @@ Third-party components:
 - src/vendor/ -- GC interface headers from the dotnet/runtime repository,
   Copyright (c) .NET Foundation and Contributors, MIT license. See
   src/vendor/gcinterface/NOTICE and src/VENDORED.md.
+- src/vendor/crates/ -- the network stack smoltcp 0.14.0 and its seven
+  dependencies, vendored as crates.io released them (src/VENDORED.md has
+  the versions and hashes): smoltcp and managed, 0BSD; bitflags, cfg-if,
+  heapless, hash32 and stable_deref_trait, MIT license (offered with
+  Apache-2.0); byteorder, MIT license (offered with the Unlicense). Each
+  crate's license texts travel with it under src/vendor/crates/.
 - src/payload/minirt/minirt.cs (and the frozen objects under goldens/payload
   compiled from it) -- Lamella RHU code, except for the parts that
   the .NET NativeAOT compiler dictates: the type layouts, the type and member

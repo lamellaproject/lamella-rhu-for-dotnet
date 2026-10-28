@@ -1,11 +1,12 @@
 // minirt: the minimal system module the payload programs compile in for no-runtime NativeAOT
 
+
 namespace System
 {
     public unsafe class Object
     {
 #pragma warning disable 169
-        private IntPtr m_pMethodTable;
+        private IntPtr m_pMethodTable; // layout contract with the compiler
 #pragma warning restore 169
 
         internal Runtime.MethodTable* MT => (Runtime.MethodTable*)m_pMethodTable;
@@ -13,6 +14,7 @@ namespace System
 
     public struct Void { }
 
+    // Primitive type layout is special-cased by the compiler.
     public struct Boolean { }
     public struct Char { }
     public struct SByte { }
@@ -45,6 +47,8 @@ namespace System
     public abstract class Array
     {
 #pragma warning disable 169, 649
+        // Layout contract: array length immediately follows the MethodTable
+        // pointer. Roslyn binds `.Length` here (and lowers array foreach).
         private int _numComponents;
 #pragma warning restore 169, 649
 
@@ -63,6 +67,8 @@ namespace System
 
     namespace Collections
     {
+        // Present only so Roslyn can bind foreach (arrays use the indexed
+        // fast path and never actually dispatch through these).
         public interface IEnumerator
         {
             bool MoveNext();
@@ -75,8 +81,10 @@ namespace System
         }
     }
 
+    // RyuJIT asks for this builtin class handle during codegen.
     internal sealed class RuntimeType { }
 
+    // Thin app-facing surface over the conservative collector.
     public static class GC
     {
         public static void Collect()
@@ -89,6 +97,10 @@ namespace System
             => (int)Internal.Runtime.CompilerHelpers.MiniGC.FreeBytes();
     }
 
+    // Division/modulo helper targets: on ARM32, RyuJIT lowers integer
+    // division to calls resolved by name on System.Math (JitHelper.cs).
+    // Implemented as restoring shift-subtract so the helpers themselves
+    // contain no division and no variable-count 64-bit shifts.
     public static class Math
     {
         const int IntMin = unchecked((int)0x8000_0000);
@@ -183,6 +195,9 @@ namespace System
             return q;
         }
 
+        // Checked floating-point conversion helper targets (rooted by ILC's
+        // helper cache). No doubles exist in this profile; fail fast if ever
+        // reached -- real bodies would put f64 arithmetic back in the image.
         internal static int ConvertToInt32Checked(double v) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("a checked floating-point conversion", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltConvert); return 0; }
         internal static uint ConvertToUInt32Checked(double v) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("a checked floating-point conversion", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltConvert); return 0; }
         internal static long ConvertToInt64Checked(double v) { Internal.Runtime.CompilerHelpers.StartupCodeHelpers.Halt("a checked floating-point conversion", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltConvert); return 0; }
@@ -205,10 +220,14 @@ namespace System
             public RuntimeExportAttribute(string entry) { }
         }
 
+        // Mirror of the leading fields of the runtime MethodTable
+        // (Internal/Runtime/MethodTable.cs): flags+componentSize, baseSize,
+        // related type, vtable/interface counts. Enough for allocation and
+        // class-hierarchy casts.
         internal unsafe struct MethodTable
 #pragma warning disable 169, 649
         {
-            internal uint _uFlags;
+            internal uint _uFlags;      // upper 16 flags; lower 16 = component size when sign bit set
             internal uint _uBaseSize;
             internal MethodTable* _relatedType;
             internal ushort _usNumVtableSlots;
@@ -257,6 +276,8 @@ namespace System
                 public object Value;
             }
 
+            // Store into object[] without covariance validation (no GC, and
+            // apps on this profile use exact-typed arrays).
             public static void StelemRef(Array array, nint index, object obj)
             {
                 ref object element = ref CompilerServices.Unsafe.As<ArrayElement[]>(array)[index].Value;
@@ -274,14 +295,19 @@ namespace System
             public static unsafe int OffsetToStringData => sizeof(nint) + sizeof(int);
         }
 
+        // Roslyn checks this to enable native-sized integer arithmetic etc.
         public static class RuntimeFeature
         {
             public const string NumericIntPtr = nameof(NumericIntPtr);
             public const string ByRefFields = nameof(ByRefFields);
         }
 
+        // Used by the C# compiler for fixed-size buffers / required features.
         public sealed class IsVolatile { }
 
+        // ILC recognizes this attribute and the Unsafe type by name and
+        // replaces the method bodies with the corresponding IL intrinsics;
+        // the fail-fast bodies below must never actually run.
         internal sealed class IntrinsicAttribute : Attribute { }
 
         public static unsafe class Unsafe
@@ -315,10 +341,13 @@ namespace System
         }
     }
 
+    // JIT helper targets (ReadyToRunHelper.MemCpy/MemSet/MemZero/BulkWriteBarrier
+    // map here by name; signatures mirror System.Private.CoreLib).
     public static unsafe class Buffer
     {
         internal static void BulkMoveWithWriteBarrier(ref byte destination, ref byte source, nuint byteCount)
         {
+            // No GC, so no write barrier -- plain move.
             SpanHelpers.Memmove(ref destination, ref source, byteCount);
         }
     }
@@ -381,6 +410,11 @@ namespace Internal.Runtime.CompilerHelpers
         static void ThrowTypeLoadException() => StartupCodeHelpers.Halt("the compiler's TypeLoad helper", Internal.Runtime.CompilerHelpers.StartupCodeHelpers.HaltHelper);
     }
 
+    // ILC looks this class up by name; helpers may be absent but the class
+    // must exist. The Rhp* exports below are the managed/native transition
+    // points -- with no GC they are no-ops -- plus a bump allocator backing
+    // the full .NET 11 allocation-export family. Memory comes from a
+    // pre-zeroed C-side arena (shim.c) and is never freed.
     unsafe class StartupCodeHelpers
     {
         [RuntimeExport("RhpReversePInvoke")]
@@ -398,6 +432,7 @@ namespace Internal.Runtime.CompilerHelpers
         [RuntimeExport("RhpGcPoll")]
         static void RhpGcPoll() { }
 
+        // Write barriers: plain stores (no GC to notify).
         [RuntimeExport("RhpAssignRef")]
         static void RhpAssignRef(void** dst, void* r) => *dst = r;
 
@@ -410,6 +445,7 @@ namespace Internal.Runtime.CompilerHelpers
         [RuntimeExport("RhpFallbackFailFast")]
         static void RhpFallbackFailFast() => Halt("the fallback fail-fast", HaltFailFast);
 
+        // ---- allocation entry points (backed by MiniGC) ----
 
         static void* NewObject(System.Runtime.MethodTable* pMT, uint mod8)
         {
@@ -431,16 +467,21 @@ namespace Internal.Runtime.CompilerHelpers
             return mem;
         }
 
-        internal const int HaltThrow = 101;
-        internal const int HaltHwFault = 102;
-        internal const int HaltRethrow = 103;
-        internal const int HaltFailFast = 104;
-        internal const int HaltHelper = 105;
-        internal const int HaltCast = 106;
-        internal const int HaltDivide = 107;
-        internal const int HaltConvert = 108;
-        internal const int HaltOutOfMemory = 109;
-        internal const int HaltArrayLength = 110;
+        // ---- the halt: every failure path ends at the kernel's exit door ----
+        // No exception handling exists in this module, so a failure ends the
+        // program: one line through the seam's console write, then the exit
+        // door with the code below, so the emulator run ends with the code
+        // and a board never parks.
+        internal const int HaltThrow = 101;       // an unhandled throw
+        internal const int HaltHwFault = 102;     // a hardware exception
+        internal const int HaltRethrow = 103;     // a rethrow
+        internal const int HaltFailFast = 104;    // the fallback fail-fast
+        internal const int HaltHelper = 105;      // a helper this profile does not implement
+        internal const int HaltCast = 106;        // a failed cast
+        internal const int HaltDivide = 107;      // a zero divisor or an overflowing division
+        internal const int HaltConvert = 108;     // a checked floating-point conversion
+        internal const int HaltOutOfMemory = 109; // the arena exhausted
+        internal const int HaltArrayLength = 110; // an array length negative or past the arena's addressing
 
         [System.Runtime.InteropServices.DllImport("shim")]
         static extern void rhu_exit(int code);
@@ -454,6 +495,7 @@ namespace Internal.Runtime.CompilerHelpers
             while (true) ;
         }
 
+        // ---- throw diagnostics: unhandled throws print and halt ----
 
         [System.Runtime.InteropServices.DllImport("shim")]
         static extern void sh_write0(byte* asciiz);
@@ -509,7 +551,7 @@ namespace Internal.Runtime.CompilerHelpers
         static void* RhpNewFast(System.Runtime.MethodTable* pMT) => NewObject(pMT, 0);
 
         [RuntimeExport("RhpNewFinalizable")]
-        static void* RhpNewFinalizable(System.Runtime.MethodTable* pMT) => NewObject(pMT, 0);
+        static void* RhpNewFinalizable(System.Runtime.MethodTable* pMT) => NewObject(pMT, 0); // finalizers never run
 
         [RuntimeExport("RhpNewFastAlign8")]
         static void* RhpNewFastAlign8(System.Runtime.MethodTable* pMT) => NewObject(pMT, 0);
@@ -532,8 +574,16 @@ namespace Internal.Runtime.CompilerHelpers
         [RuntimeExport("RhpNewPtrArrayFast")]
         static void* RhpNewPtrArrayFast(System.Runtime.MethodTable* pMT, nint n) => NewArrayLike(pMT, n, 0);
 
+        // ---- module initialization (called by ILC's generated StartupCodeMain
+        // when the app enters through __managed__Main) ----
+        //
+        // GC-static base cells ship as rel32 descriptors (MethodTable | flags);
+        // each must be replaced with a real allocated block before any
+        // GC-static access. Without this, static stores write through raw
+        // descriptor values: a bus fault on one target and silent memory
+        // corruption on another.
 
-        const int SectionGCStaticRegion = 201;
+        const int SectionGCStaticRegion = 201; // ReadyToRunSectionType
 
         [RuntimeExport("InitializeModules")]
         internal static void InitializeModules(IntPtr osModule, IntPtr* pModuleHeaders, int count, IntPtr* pClasslibFunctions, int nClasslibFunctions)
@@ -542,6 +592,8 @@ namespace Internal.Runtime.CompilerHelpers
             {
                 byte* h = (byte*)pModuleHeaders[m];
                 if (h == null) continue;
+                // ReadyToRunHeader: u32 sig, u16 maj, u16 min, u32 flags,
+                //                   u16 nSections, u8 entrySize, u8 entryType
                 ushort nSections = *(ushort*)(h + 12);
                 byte entrySize = h[14];
                 byte* row = h + 16;
@@ -565,23 +617,31 @@ namespace Internal.Runtime.CompilerHelpers
             {
                 int* pBlock = (int*)ReadRelPtr32(block);
                 nint blockAddr = (nint)ReadRelPtr32(pBlock);
-                if ((blockAddr & 1) != 0)
+                if ((blockAddr & 1) != 0) // GCStaticRegionConstants.Uninitialized
                 {
                     var pMT = (System.Runtime.MethodTable*)(blockAddr & ~(nint)3);
-                    void* obj = NewObject(pMT, 0);
-                    if ((blockAddr & 2) != 0)
+                    void* obj = NewObject(pMT, 0); // zeroed, never moves
+                    if ((blockAddr & 2) != 0)      // HasPreInitializedData
                     {
                         byte* src = (byte*)ReadRelPtr32(pBlock + 1);
                         byte* dst = (byte*)obj + sizeof(nint);
                         uint sz = pMT->BaseSize - 2u * (uint)sizeof(nint);
                         for (uint i = 0; i < sz; i++) dst[i] = src[i];
                     }
-                    *(void**)pBlock = obj;
+                    *(void**)pBlock = obj; // absolute base pointer from here on
                 }
             }
         }
     }
 
+    // Conservative, non-moving mark-sweep collector for the no-runtime
+    // profile. Single-threaded. Roots: callee-saved registers, the whole
+    // stack, and static data (minus the heap itself). Objects are never
+    // moved; interior pointers are resolved through an object-start bitmap
+    // (1 bit per 8-byte granule, maintained on allocate/coalesce).
+    //
+    // Block layout: [u32 size|flags][u32 pad][payload...]; size includes the
+    // 8-byte header and is a multiple of 8, so the low 3 bits hold flags.
     static unsafe class MiniGC
     {
         const uint HDR = 8;
@@ -642,9 +702,10 @@ namespace Internal.Runtime.CompilerHelpers
             SetHdr(s_heap, s_size | F_FREE);
             BitSet(s_heap);
             s_rover = s_heap;
-            s_maxBlock = 16;
+            s_maxBlock = 16; // tracks the largest LIVE block (backscan cap)
         }
 
+        // mod8: 0 => payload at 8n; 4 => payload at 8n+4 (RhpNewFastMisalign).
         internal static void* Alloc(uint payload, uint mod8)
         {
             if (s_heap == null) Init();
@@ -679,6 +740,7 @@ namespace Internal.Runtime.CompilerHelpers
                 uint sz = Size(p);
                 if ((Flags(p) & F_FREE) != 0)
                 {
+                    // opportunistic coalesce with following free blocks
                     byte* q = p + sz;
                     while (q < s_end && (Flags(q) & F_FREE) != 0)
                     {
@@ -707,7 +769,7 @@ namespace Internal.Runtime.CompilerHelpers
             }
             else
             {
-                SetHdr(blk, sz);
+                SetHdr(blk, sz); // takes the whole block, flags cleared
             }
             if (Size(blk) > s_maxBlock) s_maxBlock = Size(blk);
             s_rover = blk + Size(blk);
@@ -723,9 +785,11 @@ namespace Internal.Runtime.CompilerHelpers
         {
             if (s_heap == null) { Init(); return; }
 
+            // 1. clear marks
             for (byte* b = s_heap; b < s_end; b += Size(b))
                 *(uint*)b &= ~(F_MARK | F_SCAN);
 
+            // 2. roots: callee-saved regs, stack, statics minus the heap
             uint* regs = stackalloc uint[8];
             gc_flush_regs(regs);
             ScanRange((byte*)regs, (byte*)(regs + 8));
@@ -735,6 +799,7 @@ namespace Internal.Runtime.CompilerHelpers
             if (sd < s_heap) ScanRange(sd, se < s_heap ? se : s_heap);
             if (se > s_end) ScanRange(sd > s_end ? sd : s_end, se);
 
+            // 3. transitive closure (heap-order passes until stable)
             bool again = true;
             while (again)
             {
@@ -751,6 +816,7 @@ namespace Internal.Runtime.CompilerHelpers
                 }
             }
 
+            // 4. sweep + coalesce
             for (byte* b = s_heap; b < s_end; )
             {
                 uint sz = Size(b);
@@ -798,6 +864,7 @@ namespace Internal.Runtime.CompilerHelpers
             while (!BitGet(g))
             {
                 if (g == 0 || steps++ > limit) return;
+                // skip a whole zero byte of the bitmap when possible
                 if ((g & 7) == 7 && s_bits[(g >> 3)] == 0)
                 {
                     if (g < 8) return;
@@ -812,7 +879,7 @@ namespace Internal.Runtime.CompilerHelpers
             byte* blk = s_heap + (g << 3);
             uint f = Flags(blk);
             if ((f & F_FREE) != 0) return;
-            if (addr >= (uint)blk + Size(blk)) return;
+            if (addr >= (uint)blk + Size(blk)) return; // in a gap
             if ((f & F_MARK) == 0)
                 *(uint*)blk |= F_MARK;
         }

@@ -1,8 +1,8 @@
 //! The module registry: the table
 //! behind the exidx/frozen/statics walks, and the anchor of N-module
-//! TLS. Born deliberately small: 4 slots, descs copied at
+//! TLS. Deliberately small: 4 slots, descs copied at
 //! registration, ranges immutable afterward, no unregister ever
-//! (modules never unload; a dynamic app-slot story is not part of
+//! (modules never unload; dynamic application slots are not part of
 //! this registry).
 
 use core::ptr::{self, addr_of};

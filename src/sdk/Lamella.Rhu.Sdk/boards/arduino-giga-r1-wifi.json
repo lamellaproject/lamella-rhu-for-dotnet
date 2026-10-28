@@ -1,0 +1,41 @@
+{
+  "name": "arduino-giga-r1-wifi",
+  "maker": "Arduino",
+  "product": "GIGA R1 WiFi",
+  "chip": "STM32H747XI",
+  "clockHz": 400000000,
+  "posture": "default",
+  "postureName": "the PLL posture",
+  "pins": 176,
+  "labels": "port",
+  "functions": "gpio",
+  "pwm": {
+    "chip": 0,
+    "lines": []
+  },
+  "adc": {
+    "converters": []
+  },
+  "i2c": [],
+  "spi": [],
+  "ram": [
+    {
+      "name": "SRAM",
+      "base": 603979776,
+      "bytes": 524288,
+      "external": false,
+      "cached": false
+    }
+  ],
+  "uart": [],
+  "uartPairs": [],
+  "channels": {
+    "log": "memory",
+    "console": "memory",
+    "legal": [
+      "memory",
+      "probe",
+      "off"
+    ]
+  }
+}

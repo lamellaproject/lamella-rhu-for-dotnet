@@ -11,8 +11,11 @@
 //! board's backend (`board::adc_backend`: the registers). A read starts one
 //! conversion and polls for its end against a budget from the block's
 //! clock -- spinning, then yielding, the bus doors' wait -- and a budget
-//! passed resets the block and answers the timeout code. No interrupt; no
-//! conversion runs under the kernel's critical section.
+//! passed resets the block and answers the timeout code. A conversion the
+//! block flags as erroneous is discarded and the next started, at most
+//! eight in one read; the eighth flagged refuses the read with the
+//! input/output code and the block released. No interrupt; no conversion
+//! runs under the kernel's critical section.
 
 #![cfg_attr(not(rhu_pwm_adc_rows), allow(dead_code))]
 
@@ -25,6 +28,20 @@ use crate::sched;
 
 /// The code this module adds to the hosting API's set (`include/rhu.h`).
 pub const ERR_BUSY: i32 = -16;
+/// The code a read answers when the block flagged every one of its attempts
+/// (`include/rhu.h` RHU_EIO, the value the other doors answer for a part
+/// that failed).
+pub const ERR_IO: i32 = sched::ERR_IO;
+/// The conversions one read runs at most. A conversion the block flags as
+/// erroneous is discarded -- the RP2350 datasheet's section 12.4.3 leaves
+/// its result undefined and says such samples are discarded -- and the
+/// next is started with the block kept, up to this many; the last one
+/// flagged refuses the read. Eight conversions are 64 microseconds of
+/// converting at that part's 96-cycle conversion on its 12 MHz clock: an
+/// error that outlasts them is not the comparator's chance miss near its
+/// threshold (the datasheet's cause) but a converter or an input that
+/// cannot be read, which the program hears as a failure.
+pub const CONVERSION_ATTEMPTS: u32 = 8;
 
 /// The row's counts, constant per image (the banner line's numbers).
 pub const CHANNELS: usize = facts::ADC_CHANNELS.len();
@@ -47,6 +64,10 @@ pub struct AdcWitness {
     pub last_sample: u32,
     pub last_refused_index: u32,
     pub last_refused_code: i32,
+    /// The conversions started again after a flagged one was discarded, and
+    /// the reads refused after their last attempt was flagged.
+    pub retries: u32,
+    pub conversion_errors: u32,
 }
 
 #[unsafe(export_name = "__rhu_adc_witness")]
@@ -63,6 +84,8 @@ pub static mut WITNESS: AdcWitness = AdcWitness {
     last_sample: 0,
     last_refused_index: 0,
     last_refused_code: 0,
+    retries: 0,
+    conversion_errors: 0,
 };
 
 /// The witness's fields are written through raw pointers, one field at a
@@ -82,6 +105,7 @@ fn refused(index: u32, code: i32) -> i32 {
         match code {
             ERR_BUSY => bump(addr_of_mut!((*w).refused_busy), 1),
             sched::ERR_TIMEDOUT => bump(addr_of_mut!((*w).timeouts), 1),
+            ERR_IO => bump(addr_of_mut!((*w).conversion_errors), 1),
             _ => bump(addr_of_mut!((*w).refused_inval), 1),
         }
         write_volatile(addr_of_mut!((*w).last_refused_index), index);
@@ -143,6 +167,14 @@ mod served {
         }
     }
 
+    /// Whether a claimed channel reads the line: the GPIO side refuses a
+    /// claim of such a line until the channel is released (the other
+    /// direction is the claim below, refused on a line a program holds as
+    /// a GPIO line).
+    pub fn line_held(line: u32) -> bool {
+        facts::ADC_CHANNELS.iter().enumerate().any(|(ix, c)| c.line != m::NO_LINE && c.line as u32 == line && CLAIMED[ix].load(Ordering::Acquire) != 0)
+    }
+
     /// A claim: the index inside the table, then the line (where the channel
     /// reads one) AND the channel bit taken under one section, all or
     /// nothing.
@@ -174,9 +206,12 @@ mod served {
         ix as i32
     }
 
-    /// One conversion: started, awaited against the block's budget, the
-    /// sample answered inside the width; the timeout code with the block
-    /// reset when the budget passes first.
+    /// A read: a conversion started and awaited against the block's budget,
+    /// the sample answered inside the width. A conversion the block flagged
+    /// is discarded and the next started with the block kept, the retry
+    /// counted, up to the attempts' bound; the last attempt flagged answers
+    /// the input/output code with the block released, never a sample. The
+    /// timeout code with the block reset when a budget passes first.
     pub fn read(h: i32) -> i32 {
         let Some(ix) = held(h) else {
             return refused(h as u32, sched::ERR_INVAL);
@@ -186,19 +221,31 @@ mod served {
         let conversion = m::conversion_ns(b.conversion_cycles, b.clock_hz);
         let budget = m::budget_ticks(conversion, crate::board::TICK_HZ);
         hw::start(ix);
-        if !crate::bus::wait_until(budget, sched::DEADLINE_NONE, 2 * conversion, || hw::ready(ix)) {
-            hw::reset(c.block as usize);
-            with_cs(|| unsafe { bump(addr_of_mut!((*witness()).resets), 1) });
-            kprintln!("[adc] block {}: the conversion passed its budget on channel {}; the block reset", b.number, c.channel);
-            return refused(ix as u32, sched::ERR_TIMEDOUT);
+        let mut attempt = 1;
+        loop {
+            if !crate::bus::wait_until(budget, sched::DEADLINE_NONE, 2 * conversion, || hw::ready(ix)) {
+                hw::reset(c.block as usize);
+                with_cs(|| unsafe { bump(addr_of_mut!((*witness()).resets), 1) });
+                kprintln!("[adc] block {}: the conversion passed its budget on channel {}; the block reset", b.number, c.channel);
+                return refused(ix as u32, sched::ERR_TIMEDOUT);
+            }
+            let again = attempt < CONVERSION_ATTEMPTS;
+            if let Some(s) = hw::sample(ix, again) {
+                let sample = s & m::full_scale(b.bits);
+                with_cs(|| unsafe {
+                    let w = witness();
+                    bump(addr_of_mut!((*w).conversions), 1);
+                    write_volatile(addr_of_mut!((*w).last_sample), sample);
+                });
+                return sample as i32;
+            }
+            if !again {
+                kprintln!("[adc] block {}: the converter flagged {} conversions in a row on channel {}; the read refused", b.number, CONVERSION_ATTEMPTS, c.channel);
+                return refused(ix as u32, ERR_IO);
+            }
+            attempt += 1;
+            with_cs(|| unsafe { bump(addr_of_mut!((*witness()).retries), 1) });
         }
-        let sample = hw::sample(ix) & m::full_scale(b.bits);
-        with_cs(|| unsafe {
-            let w = witness();
-            bump(addr_of_mut!((*w).conversions), 1);
-            write_volatile(addr_of_mut!((*w).last_sample), sample);
-        });
-        sample as i32
     }
 
     /// A block's reference voltage in millivolts, a fact of the board.
@@ -233,7 +280,7 @@ mod served {
 }
 
 #[cfg(rhu_pwm_adc_rows)]
-pub use served::{claim, read, reference, release};
+pub use served::{claim, line_held, read, reference, release};
 
 
 #[cfg(not(rhu_pwm_adc_rows))]
@@ -254,4 +301,9 @@ pub fn reference(block: u32, _millivolts: *mut u32) -> i32 {
 #[cfg(not(rhu_pwm_adc_rows))]
 pub fn release(h: i32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
+}
+
+#[cfg(not(rhu_pwm_adc_rows))]
+pub fn line_held(_line: u32) -> bool {
+    false
 }

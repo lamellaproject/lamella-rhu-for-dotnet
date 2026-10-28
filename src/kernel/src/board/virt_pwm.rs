@@ -64,7 +64,7 @@ pub fn park(index: usize) {
 /// The period the timer runs as its registers state it: (PSC + 1) x
 /// (ARR + 1) ticks of its clock, in nanoseconds (the doctored control's
 /// reading runs the prescaler one step long).
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub fn probe_period_ns(timer: usize) -> u64 {
     let p = PSC[timer].load(Ordering::Acquire) + 1 + cfg!(feature = "test-pwm-doctored") as u32;
     let a = ARR[timer].load(Ordering::Acquire) + 1;

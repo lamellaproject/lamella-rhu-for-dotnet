@@ -7,13 +7,13 @@
  * runtime's loader is never asked; the package's stock v1 driver then runs
  * as it does on Linux, and its v2 and sysfs probes are never reached.
  *
- * This file is an implementation written from scratch that presents the
+ * This file is an independent implementation that presents the
  * established libgpiod v1 API. The signatures, the flag values and the
  * enumerations are the binding's (its request flags, its direction and
  * bias readings, its event kinds, its timespec of two 32-bit words and
- * its 12-byte event record). The version string names the API generation
- * presented -- 1.6, the one with the bias flags the driver keeps at 1.5
- * and above -- not a libgpiod build.
+ * its 12-byte event record). The version string reads 1.6.0, an API
+ * version with the bias flags (the driver requires 1.5 or above); it is
+ * not the version of any libgpiod build.
  *
  * The mapping from the kernel's seven GPIO calls: a chip open takes the
  * line space (rhu_gpio_count) and allocates ITS OWN chip object with one
@@ -47,9 +47,9 @@
  * wire in one line; both edges only (the level-triggered and wakeup kinds
  * have no entry point in this binding); the open-drain output the kernel
  * serves has no entry point either; the active-low and open-source flags
- * are refused EINVAL; this generation of the kernel API counts edges and
- * keeps no record of each one's kind and time (an intent registered for
- * the kernel's event act), so an event's kind is read off the pad when the
+ * are refused EINVAL; the kernel API counts edges and
+ * keeps no record of each one's kind and time (a count and nothing
+ * more), so an event's kind is read off the pad when the
  * event is READ and its time is the time of that read; and a pulse shorter
  * than the interrupt handler's latency counts ONCE on a family whose
  * hardware latches one pending bit per line, and is then one event of the
@@ -66,7 +66,7 @@
 #include "rhu_shim.h"
 
 #include "rhu.h"
-#include "rhu_pal_errno_net11_rc1.h"
+#include "rhu_pal_errno_net11_rc2.h"
 
 extern int *__errno_location(void);
 void *malloc(size_t n);
@@ -77,15 +77,16 @@ size_t strlen(const char *s);
 int pthread_mutex_lock(void *slot);
 int pthread_mutex_unlock(void *slot);
 #if defined(RHU_SHIM_BREAK_GPIOD_ARM_ORDER) || defined(RHU_SHIM_BREAK_GPIOD_KIND_ORDER) || defined(RHU_SHIM_BREAK_GPIOD_OPEN_UNLOCKED)
-/* A race control holds its restored window OPEN, BLOCKED on the kernel's
- * futex, until the other thread's step is seen -- never for a counted
- * number of turns given away: a turn is a chance the host's timing can
- * spend, and a control that can miss is no control. The ladder runs its
- * second thread one step below this thread's level, so that thread runs
- * only while this one is blocked here and can never take its step before
- * the window is open. A window no second thread will ever step into (the
- * ladder's thread alone in a request, a read or an open) gives up at this
- * deadline of the kernel's clock, the only way the deadline is reached. */
+/* The builds under these defines hold their race window OPEN, BLOCKED on the
+ * kernel's futex, until the other thread's step is seen -- never for a
+ * counted number of turns given away: a turn is a chance the host's timing
+ * can spend, and a window that can miss proves nothing. The test program
+ * gate/rhu_shimtest.c runs its second thread one step below this thread's
+ * level, so that thread runs only while this one is blocked here and can
+ * never take its step before the window is open. A window no second thread
+ * will ever step into (the test program's thread alone in a request, a read
+ * or an open) gives up at this deadline of the kernel's clock, the only way
+ * the deadline is reached. */
 #define GPIOD_CONTROL_WINDOW_NS 500000000ull
 #endif
 #ifdef RHU_SHIM_BREAK_GPIOD_OPEN_UNLOCKED
@@ -170,8 +171,9 @@ static uint32_t g_pull_lines;
 static uint8_t g_mutex[24];
 
 #ifdef RHU_SHIM_BREAK_GPIOD_VERSION
-/* The control's answer: an API generation without the bias flags, which
- * the driver reads as "no pull modes" -- the suite's section must refuse. */
+/* Built with this define, the version string names an API version without
+ * the bias flags, which the driver reads as "no pull modes"; the GPIO
+ * section of the managed test program under src/rt/gate fails. */
 static const char g_version[] = "1.4.0";
 #else
 static const char g_version[] = "1.6.0";
@@ -320,13 +322,13 @@ struct gpiod_chip *gpiod_chip_open_by_number(int number)
     c->lines = (uint32_t)n;
     c->table = t;
 #ifdef RHU_SHIM_BREAK_GPIOD_OPEN_UNLOCKED
-    /* The control's fault: the list joined with no lock, the window
+    /* Built with this define, the list is joined with no lock, the window
      * between the read of its head and the store held open, blocked,
      * until another opener has moved the head. With two threads inside
      * the open together both read one head, the second to arrive stores
      * its chip at once, and the first then stores the stale head over it:
-     * one chip is lost from the list every time -- the ladder's two-thread
-     * open check must refuse. */
+     * one chip is lost from the list every time, and the two-thread open
+     * check in gate/rhu_shimtest.c fails. */
     if (g_pulls == NULL) {
         g_pulls = pulls;
         g_pull_lines = (uint32_t)n;
@@ -386,8 +388,8 @@ void gpiod_chip_close(struct gpiod_chip *chip)
         return;
     }
 #ifdef RHU_SHIM_BREAK_GPIOD_CLOSE_KEEPS
-    /* The control's fault: a closed chip keeps its lines -- the ladder's
-     * two-open check must refuse. */
+    /* Built with this define, a closed chip keeps its lines, and the
+     * two-open check in gate/rhu_shimtest.c fails. */
     unit_unlock();
 #else
     for (struct gpiod_chip **p = &g_chips; *p != NULL; p = &(*p)->next) {
@@ -441,8 +443,8 @@ const char *gpiod_chip_label(struct gpiod_chip *chip)
 }
 
 #ifdef RHU_SHIM_BREAK_GPIOD_ITER_SHARED
-/* The control's fault: every iterator is ONE object whose progress a new
- * iterator resets -- the ladder's two-iterator check must refuse. */
+/* Built with this define, every iterator is one object whose progress a new
+ * iterator resets, and the two-iterator check in gate/rhu_shimtest.c fails. */
 static struct gpiod_chip_iter g_shared_iter;
 #endif
 
@@ -604,10 +606,10 @@ static int request(struct gpiod_line *l, const char *consumer, uint32_t mode, ui
     int32_t rc = rhu_gpio_claim(offset, mode, pull, initial);
     if (rc >= 0 && events) {
 #ifdef RHU_SHIM_BREAK_GPIOD_ARM_ORDER
-        /* The control's fault: the arm first and the mark read after, the
-         * window between them held open, blocked on the line's word, until
-         * the kernel has counted an edge -- that edge is swallowed by the
-         * mark; the ladder's arm check must refuse. */
+        /* Built with this define, the arm comes first and the mark is read
+         * after, the window between them held open, blocked on the line's
+         * word, until the kernel has counted an edge; that edge is swallowed
+         * by the mark, and the arm check in gate/rhu_shimtest.c fails. */
         what = "edge arm";
         rc = rhu_gpio_edge(offset, RHU_GPIO_EDGE_BOTH);
         const uint32_t *w = rc < 0 ? NULL : rhu_gpio_event_word(offset);
@@ -661,9 +663,9 @@ static int request(struct gpiod_line *l, const char *consumer, uint32_t mode, ui
     l->events = events ? 1 : 0;
     l->direction = mode == RHU_GPIO_INPUT ? GPIOD_DIRECTION_INPUT : GPIOD_DIRECTION_OUTPUT;
 #ifdef RHU_SHIM_BREAK_GPIOD_BIAS_STALE
-    /* The control's fault: the reading keeps the last FLAG's bias through
-     * flagless requests and outputs -- the ladder's bias check must
-     * refuse. */
+    /* Built with this define, the reading keeps the last flagged request's
+     * bias through flagless requests and outputs, and the bias check in
+     * gate/rhu_shimtest.c fails. */
     if (bias != GPIOD_BIAS_AS_IS)
         l->bias = bias;
 #else
@@ -810,8 +812,8 @@ static int deadline_of(const struct gpiod_timespec *t, uint64_t *deadline)
     int32_t nsec = t->nsec;
     uint64_t now = rhu_now_ns();
 #ifdef RHU_SHIM_BREAK_GPIOD_TIMEOUT_FIELDS
-    /* The control's fault: a field outside its range becomes an ordinary
-     * deadline -- the ladder's timeout check must refuse. */
+    /* Built with this define, a field outside its range becomes an ordinary
+     * deadline, and the timeout check in gate/rhu_shimtest.c fails. */
     if (sec < 0 || nsec < 0) {
         *deadline = now;
         return 1;
@@ -847,10 +849,10 @@ static int event_line(struct gpiod_line *line, const uint32_t **word, uint32_t *
 }
 
 #ifdef RHU_SHIM_BREAK_GPIOD_ACTIVATION
-/* The control's fault: after the first activation delivered during a
- * wait, every later wait answers a timeout -- no later edge reaches the
- * program -- which the hosted-runtime suite's section refuses at its
- * collection-during-wait case. */
+/* Built with this define, after the first activation delivered during a
+ * wait every later wait answers a timeout, so no later edge reaches the
+ * program; the GPIO section of the managed test program under src/rt/gate
+ * fails at its collection-during-wait case. */
 static int g_break_dead;
 #endif
 
@@ -872,8 +874,8 @@ static int wait_past(const uint32_t *word, uint32_t mark, uint64_t deadline)
         if (rc == RHU_EINTR) {
             /* An activation was delivered during the wait: the kernel's
              * contract is to re-evaluate the word and re-wait, exactly as
-             * for a spurious wake, with the deadline kept. (Measured on
-             * the wire: the runtime suspends a thread blocked outside
+             * for a spurious wake, with the deadline kept. (In practice
+             * the runtime suspends a thread blocked outside
              * managed code lazily, at its return, and sends it no
              * activation, so none reaches this wait during a collection;
              * the re-wait is the contract's path, not one a collection
@@ -940,11 +942,11 @@ int gpiod_line_event_read(struct gpiod_line *line, struct gpiod_line_event *even
         for (int tries = 0; tries < GPIOD_COHERENT_TRIES; tries++) {
             cur = *(const volatile uint32_t *)word;
 #ifdef RHU_SHIM_BREAK_GPIOD_KIND_ORDER
-            /* The control's fault: the count, then the level, never checked
-             * against the count again, the window between them held open,
-             * blocked on the word, until another edge has been counted --
-             * the level is then a later edge's; the ladder's kind check
-             * must refuse. */
+            /* Built with this define, the count is read, then the level, never
+             * checked against the count again, the window between them held
+             * open, blocked on the word, until another edge has been counted;
+             * the level is then a later edge's, and the kind check in
+             * gate/rhu_shimtest.c fails. */
             uint64_t deadline = rhu_now_ns() + GPIOD_CONTROL_WINDOW_NS;
             while (*(const volatile uint32_t *)word == cur && rhu_now_ns() < deadline)
                 rhu_futex_wait(word, cur, deadline);

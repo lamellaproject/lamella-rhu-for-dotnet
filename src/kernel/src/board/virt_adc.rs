@@ -12,7 +12,13 @@
 //! 0 while it is parked, the complement under the inversed polarity). The
 //! doctored control `test-adc-doctored` makes the loop channel answer the
 //! previous conversion's sample (a stale conversion), which the api
-//! flavor's loop check must refuse at its second reading.
+//! flavor's loop check must refuse at its second reading. Under
+//! `test-adc-flagged` the model flags conversions as the boards' blocks
+//! do -- the first conversion of one pin channel, every conversion of
+//! another -- so the door's discard, retry and bounded refusal are proved
+//! on the emulator rows; its doctored control `test-adc-flagged-doctored`
+//! answers a flagged conversion's undefined result as a sample, which the
+//! api flavor's check must refuse at its first reading.
 
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
@@ -21,7 +27,20 @@ use crate::board::{facts, virt_pwm};
 use crate::sched;
 
 const DOCTORED: bool = cfg!(feature = "test-adc-doctored");
+const FLAGGED: bool = cfg!(feature = "test-adc-flagged");
+const FLAGGED_DOCTORED: bool = cfg!(feature = "test-adc-flagged-doctored");
 const NC: usize = facts::ADC_CHANNELS.len();
+/// Under `test-adc-flagged`: the pin channel whose first conversion the
+/// model flags, and the one it flags on every conversion (both on the
+/// first block; neither the loop nor the reference channel).
+#[allow(dead_code)] // read by the api flavor's conversion-error check alone
+pub const FLAGGED_ONCE: usize = 2;
+#[allow(dead_code)] // read by the api flavor's conversion-error check alone
+pub const FLAGGED_ALWAYS: usize = 3;
+const _: () = assert!(FLAGGED_ONCE < NC && FLAGGED_ALWAYS < NC && FLAGGED_ONCE != FLAGGED_ALWAYS && FLAGGED_ONCE != facts::ADC_LOOP && FLAGGED_ALWAYS != facts::ADC_LOOP && FLAGGED_ONCE != facts::ADC_REFERENCE && FLAGGED_ALWAYS != facts::ADC_REFERENCE, "the flagged channels are two pin channels of the table");
+/// The bits the doctored converter flips in a flagged conversion's result:
+/// an in-range value that is not the channel's.
+const FLAGGED_UNDEFINED: u32 = 0x2AA;
 
 /// A pending conversion's start (the clock's low word: the elapsed time is
 /// read modulo 2^32 ns, which no conversion approaches) and its flag; the
@@ -56,8 +75,13 @@ pub fn ready(index: usize) -> bool {
     (sched::now_ns() as u32).wrapping_sub(START[index].load(Ordering::Acquire)) >= need
 }
 
-/// The sample of a finished conversion, by the channel's kind.
-pub fn sample(index: usize) -> u32 {
+/// The sample of a finished conversion, by the channel's kind -- or none
+/// for a conversion the model flags (under `test-adc-flagged`: the first
+/// conversion of `FLAGGED_ONCE`, every conversion of `FLAGGED_ALWAYS`):
+/// the sample discarded, the next conversion started when the door asks
+/// for another attempt. The doctored converter answers the flagged
+/// conversion's undefined result as a sample instead.
+pub fn sample(index: usize, again: bool) -> Option<u32> {
     PENDING[index].store(0, Ordering::Release);
     let c = &facts::ADC_CHANNELS[index];
     let b = &facts::ADC_BLOCKS[c.block as usize];
@@ -81,11 +105,17 @@ pub fn sample(index: usize) -> u32 {
     };
     let previous = LAST[index].swap(fresh, Ordering::AcqRel);
     let first = CONVERTED[index].swap(1, Ordering::AcqRel) == 0;
-    if DOCTORED && index == facts::ADC_LOOP && !first {
-        previous
-    } else {
-        fresh
+    let answered = if DOCTORED && index == facts::ADC_LOOP && !first { previous } else { fresh };
+    if FLAGGED && (index == FLAGGED_ALWAYS || (index == FLAGGED_ONCE && first)) {
+        if FLAGGED_DOCTORED {
+            return Some(answered ^ FLAGGED_UNDEFINED);
+        }
+        if again {
+            start(index);
+        }
+        return None;
     }
+    Some(answered)
 }
 
 /// The block reset: every pending conversion of its channels dropped.

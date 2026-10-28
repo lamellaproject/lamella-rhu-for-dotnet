@@ -1,0 +1,8 @@
+Lamella RHU for .NET -- a board package
+Copyright (c) 2026 Lamella LLC
+
+This package is licensed under your choice of the MIT license or the Apache
+License, Version 2.0. It carries Lamella's own files alone. The third-party
+components an image links (the .NET runtime's native libraries and the C
+library) are distributed in the runtime package for the board's processor
+class, with their license texts.

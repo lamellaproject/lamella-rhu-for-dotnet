@@ -321,6 +321,10 @@ pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], hz: u32, budget_ticks: u32, deadlin
     if !disable(d) {
         return reset_out(d, hz, 0, 0, out);
     }
+    // The control word read back against the claimed mode's: a block that
+    // lost the claim's registers (it had not come to rest when they were
+    // written) gets them again now that it rests; one that still does not
+    // hold them takes the reset path.
     let word = con_word_of(d, hz);
     if hw::rd(base + IC_CON) != word {
         registers(d, hz);
@@ -334,6 +338,8 @@ pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], hz: u32, budget_ticks: u32, deadlin
     let _ = hw::rd(base + IC_CLR_TX_ABRT);
     let _ = hw::rd(base + IC_CLR_STOP_DET);
     hw::wr(base + IC_ENABLE, ENABLE_ENABLE);
+    // The commands issued, the read commands among them, the read bytes
+    // taken, and the command index the next read byte answers.
     let (mut issued, mut reads, mut taken, mut next) = (0u32, 0u32, 0u32, 0u32);
     loop {
         if hw::rd(base + IC_RAW_INTR_STAT) & RAW_TX_ABRT != 0 {
@@ -377,6 +383,9 @@ pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], hz: u32, budget_ticks: u32, deadlin
         if moved {
             continue;
         }
+        // One step of progress awaited: a byte to take, an abort, room for a
+        // command, or the block taking a command off its queue -- the loop
+        // then comes back here with a fresh budget.
         let more = issued < total;
         let level = hw::rd(base + IC_TXFLR);
         let ok = wait_until(budget_ticks, deadline_ns, SPIN_NS, || {
@@ -389,6 +398,8 @@ pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], hz: u32, budget_ticks: u32, deadlin
             return gave_up(d, hz, msgs, issued, out);
         }
     }
+    // The end: the stop the last command asked for, or an abort, awaited a
+    // step at a time -- a fresh budget each time the block takes a command.
     loop {
         let level = hw::rd(base + IC_TXFLR);
         if !wait_until(budget_ticks, deadline_ns, SPIN_NS, || hw::rd(base + IC_RAW_INTR_STAT) & (RAW_STOP_DET | RAW_TX_ABRT) != 0 || hw::rd(base + IC_TXFLR) < level) {
@@ -402,6 +413,8 @@ pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], hz: u32, budget_ticks: u32, deadlin
         return aborted(d, hz, msgs, issued, budget_ticks, deadline_ns, out);
     }
     let _ = hw::rd(base + IC_CLR_STOP_DET);
+    // Not judged: the transaction is complete on the wire, and the next
+    // opening's disable is the guard.
     disable(d);
     0
 }

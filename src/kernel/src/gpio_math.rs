@@ -7,12 +7,12 @@
 
 /// The modes and pulls of `rhu_gpio_claim`, as the header numbers them.
 pub const MODE_INPUT: u32 = 0;
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const MODE_OUTPUT: u32 = 1;
 pub const MODE_OUTPUT_OPEN_DRAIN: u32 = 2;
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const PULL_NONE: u32 = 0;
-#[allow(dead_code)]
+#[allow(dead_code)] // the virtual and RP2350 backends name it; the ST block takes the pull as a field value
 pub const PULL_UP: u32 = 1;
 pub const PULL_DOWN: u32 = 2;
 
@@ -59,14 +59,14 @@ pub const fn pull_valid(pull: u32) -> bool {
 /// Edges since a snapshot of the counter: modular, so the counter may
 /// wrap; a wait misreads only if exactly 2^32 edges land between the
 /// snapshot and the wait.
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const fn edges_since(now: u32, snapshot: u32) -> u32 {
     now.wrapping_sub(snapshot)
 }
 
 /// An ST line number is the port letter's index times sixteen plus the
 /// bit (PA0 = 0, PB0 = 16, PG14 = 110).
-#[allow(dead_code)]
+#[allow(dead_code)] // the ST arms
 pub const fn st_split(line: u32) -> (u32, u32) {
     (line / 16, line % 16)
 }
@@ -74,7 +74,7 @@ pub const fn st_split(line: u32) -> (u32, u32) {
 /// The classic EXTI positions in the vector table (the F7 and the L4+):
 /// lines 0 to 4 at 6 to 10, lines 5 to 9 together at 23, lines 10 to 15
 /// together at 40 (RM0410's and RM0432's vector tables).
-#[allow(dead_code)]
+#[allow(dead_code)] // the ST arms
 pub const fn st_f7_nvic(bit: u32) -> usize {
     match bit {
         0..=4 => 6 + bit as usize,
@@ -85,24 +85,24 @@ pub const fn st_f7_nvic(bit: u32) -> usize {
 
 /// The U5's EXTI positions: one per line, EXTI0 to EXTI15 at 11 to 26
 /// (RM0456's vector table).
-#[allow(dead_code)]
+#[allow(dead_code)] // the ST arms
 pub const fn st_u5_nvic(bit: u32) -> usize {
     11 + bit as usize
 }
 
 /// The RP2350's interrupt arrays: eight lines per 32-bit word, four bits
 /// per line -- the word index and the line's shift within it.
-#[allow(dead_code)]
+#[allow(dead_code)] // the RP2350's half
 pub const fn rp_word(line: u32) -> (usize, u32) {
     ((line / 8) as usize, (line % 8) * 4)
 }
 
 /// The four bits of a line in the RP2350's interrupt words.
-#[allow(dead_code)]
+#[allow(dead_code)] // the RP2350's half
 pub const RP_LEVEL_LOW: u32 = 0;
-#[allow(dead_code)]
+#[allow(dead_code)] // the RP2350's half
 pub const RP_LEVEL_HIGH: u32 = 1;
-#[allow(dead_code)]
+#[allow(dead_code)] // the RP2350's half
 pub const RP_EDGE_LOW: u32 = 2;
-#[allow(dead_code)]
+#[allow(dead_code)] // the RP2350's half
 pub const RP_EDGE_HIGH: u32 = 3;

@@ -1,5 +1,13 @@
 //! Structured-results emission (JSON-lines, schema 1) and the validator
 //! hookup.
+//!
+//! One results file per gate invocation: exactly one run line first, one
+//! case line per case in execution order, exactly one summary line last.
+//! The results file records outcomes; it never decides them. As its last
+//! step, a gate validates its own file with the shared results-check tool,
+//! built from source with the pinned toolchain -- a missing or unbuildable
+//! validator is a gate FAILURE, not a skip.
+
 
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};

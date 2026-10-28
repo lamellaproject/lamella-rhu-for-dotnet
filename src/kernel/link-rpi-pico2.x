@@ -37,7 +37,7 @@ MEMORY
  * (link-enforced by the window asserts at the bottom of this map). The
  * 512 K-class floor: the mini GC row fits it beside the hosted runtime's
  * declared demand (the payload map's asserts). */
-RHU_ARENA_MIN = 192K;
+RHU_ARENA_MIN = 160K;
 
 ENTRY(Reset);
 
@@ -186,7 +186,7 @@ SECTIONS
  * establishes the zero-birth invariant over it at boot. (Top level: the
  * linker rejects a bare ASSERT between output sections and reports the
  * error one command late.) */
-RHU_BOOT_STACK_RESERVE = 64K;
+RHU_BOOT_STACK_RESERVE = 16K;
 __rhu_arena_lo = ALIGN(__rhu_console_log_end, 8);
 __rhu_arena_hi = __stack_start - RHU_BOOT_STACK_RESERVE;
 ASSERT(__rhu_arena_hi >= __rhu_arena_lo,
@@ -215,3 +215,26 @@ ASSERT(ADDR(.rp2350_boot_block) == ORIGIN(CODE) + 0x440,
   "boot block not at the fixed offset 0x440 from the image base");
 ASSERT(SIZEOF(.rp2350_boot_block) == 20,
   "boot block is not the five words the boot ROM recognises");
+
+/* The null-page guard: the protection unit denies the first 4 KB of
+ * the address space on every row, so no code may be placed below it; the
+ * vector table alone may (exception vector reads bypass the unit). */
+ASSERT(__stext >= 0x1000,
+  "code placed inside the first page, which the protection unit denies (the null-page guard)");
+
+/* The console's link-time words. A project's knobs reach this
+ * prebuilt kernel as ABSOLUTE SYMBOLS the kernel reads by address at boot;
+ * an image linked without a knob gets 0 = the row's default (the facts'
+ * channels row; the level's 0 = verbose). The SDK passes --defsym from the
+ * project's properties; build.rs passes the environment's for the kernel's
+ * own images. The pin words are the serial act's (0 = the facts' pair). */
+PROVIDE(__rhu_log_level = 0);
+PROVIDE(__rhu_log_channel = 0);
+PROVIDE(__rhu_console_channel = 0);
+PROVIDE(__rhu_uart0_tx = 0);
+PROVIDE(__rhu_uart0_rx = 0);
+PROVIDE(__rhu_uart1_tx = 0);
+PROVIDE(__rhu_uart1_rx = 0);
+/* The handler stack's watermark word: 0 = off; 1 = the boot stack reserve is
+ * filled with a pattern at reset and its deepest use printed at the end. */
+PROVIDE(__rhu_stack_watermark = 0);

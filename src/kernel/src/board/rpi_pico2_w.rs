@@ -11,6 +11,8 @@
 pub use super::rp2350::*;
 
 pub const NAME: &str = "Raspberry Pi Pico 2 W";
+/// The chip, as the SDK's facts file names it (the quiet line of the log doors).
+pub const CHIP: &str = "RP2350A";
 pub const CONSOLE: &str = "UART0 (GPIO 0 TX, GPIO 1 RX)";
 
 /// The boot kheap carve out of the arena (the GC board table's

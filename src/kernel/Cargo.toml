@@ -1,3 +1,4 @@
+
 [package]
 name = "rhu-kernel"
 version = "0.2.0"
@@ -23,32 +24,87 @@ name = "rhu_kernel"
 path = "src/lib.rs"
 crate-type = ["rlib", "staticlib"]
 
-# The kernel takes no crate dependencies: it owns the vector table and
-# the UsageFault/SVC/PendSV exception seams outright, so no runtime
-# crate may own them first.
+# The rule on dependencies: the kernel takes no dependency that owns the
+# vector table or an exception seam (UsageFault, SVC, PendSV), so no
+# runtime crate may own them first; a LEAF LIBRARY of this program -- a
+# crate written on `core` alone that owns no interrupt, no vector and no
+# memory of its own (the PSRAM crate) -- is taken as an OPTIONAL PATH DEPENDENCY behind the board
+# features that need it, and nothing else enables it.
 [dependencies]
+# The QSPI PSRAM bring-up (the `lamella-psram-qspi` crate), the RP2350's QSPI memory
+# interface as its host. Enabled by the two Pimoroni board features below
+# with the host feature (those boards carry the part), and by the STM32F769 row
+# WITHOUT it (the SDRAM's proof reuses the crate's generic read-back
+# walks, which compile on `core` alone).
+lamella-psram-qspi = { path = "../psram-qspi", version = "0.1.0", optional = true }
+# The network stack (smoltcp 0.14.0, vendored fresh from the crates.io
+# release under src/VENDORED.md and read from src/vendor/crates by the
+# crate-local cargo config), a leaf library on `core` alone that owns no
+# interrupt, no vector and no memory of its own: the kernel keeps every
+# buffer and drives the stack from its own pump. Behind the `net` feature
+# below and nothing else; with the feature off every row's image is
+# byte-identical to the image without this line (measured).
+smoltcp = { version = "=0.14.0", optional = true, default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "socket-dhcpv4", "socket-dns"] }
 
 [features]
 default = ["qemu-exit", "board-mps2-an500"]
+# The network doors over the vendored stack, OFF by default on every row:
+# the stack and its arithmetic (net_math.rs), the doors, the virtual medium
+# and the api checks.
+net = ["dep:smoltcp"]
 # Exactly one board feature must be selected (src/board/mod.rs enforces).
 # The boards in the registry's order: the emulator rows first, then the
 # silicon rows by maker and model.
-board-mps2-an500 = []
-# QEMU mps2-an505 (Cortex-M33, ARMv8-M mainline): the architecture leg.
+# The emulator rows' 16 MB PSRAM bank is proved at boot by the PSRAM
+# crate's walks, pulled without its host feature.
+board-mps2-an500 = ["dep:lamella-psram-qspi"]
+# QEMU mps2-an505 (Cortex-M33, ARMv8-M mainline): the emulator row of that class.
 # Secure-flat TrustZone posture -- the M33 boots Secure and the kernel
 # stays there (no SAU programming, no NS transition). Build with
 # --target thumbv8m.main-none-eabihf.
-board-mps2-an505 = ["fpemul"]
+board-mps2-an505 = ["fpemul", "dep:lamella-psram-qspi"]
+# Adafruit Feather RP2350 with HSTX (RP2350A; the same chip module as the
+# Pico 2; 8 MB of QSPI flash; no PSRAM part on this variant): the same
+# build shape as the Pico 2's.
+board-adafruit-feather-rp2350-hstx = ["fpemul"]
+# Feather RP2350 clock posture 2: the same crystal posture on that board;
+# requires board-adafruit-feather-rp2350-hstx.
+adafruit-feather-rp2350-hstx-xtal12 = []
+# Adafruit Feather RP2350 with HSTX and PSRAM (the Feather with its 8 MB
+# PSRAM part fitted behind the flash interface's second chip select on
+# GPIO 8, brought up by the PSRAM crate at the PLL posture): the same build
+# shape as the Pico Plus 2's.
+board-adafruit-feather-rp2350-hstx-psram = ["fpemul", "dep:lamella-psram-qspi", "lamella-psram-qspi/rp2350-qmi"]
+# The PSRAM Feather's clock posture 2: the same crystal posture on that
+# board; requires board-adafruit-feather-rp2350-hstx-psram.
+adafruit-feather-rp2350-hstx-psram-xtal12 = []
+# Pimoroni Pico LiPo 2 (RP2350B; the same chip module as the Pico 2; no
+# wireless module; 16 MB of QSPI flash; 8 MB of PSRAM behind the flash
+# interface's second chip select on GPIO 47, brought up by the PSRAM crate
+# at the PLL posture): the Pico Plus 2's build shape.
+board-pimoroni-pico-lipo-2 = ["fpemul", "dep:lamella-psram-qspi", "lamella-psram-qspi/rp2350-qmi"]
+# Pico LiPo 2 clock posture 2: the same crystal posture on that board;
+# requires board-pimoroni-pico-lipo-2.
+pimoroni-pico-lipo-2-xtal12 = []
+# Pimoroni Pico LiPo 2 XL W (the Pico LiPo 2's chip, flash and PSRAM with a
+# wireless module; the same crate and features).
+board-pimoroni-pico-lipo-2-xl-w = ["fpemul", "dep:lamella-psram-qspi", "lamella-psram-qspi/rp2350-qmi"]
+# Pico LiPo 2 XL W clock posture 2: the same crystal posture on that board;
+# requires board-pimoroni-pico-lipo-2-xl-w.
+pimoroni-pico-lipo-2-xl-w-xtal12 = []
 # Pimoroni Pico Plus 2 (RP2350B; the same chip module as the Pico 2; no
-# wireless module): the same build shape as the Pico 2's.
-board-pimoroni-pico-plus-2 = ["fpemul"]
+# wireless module; 8 MB of PSRAM behind the flash interface's second chip
+# select, brought up by the PSRAM crate at the PLL posture): the same
+# build shape as the Pico 2's.
+board-pimoroni-pico-plus-2 = ["fpemul", "dep:lamella-psram-qspi", "lamella-psram-qspi/rp2350-qmi"]
 # Pico Plus 2 clock posture 2: the same crystal posture on that board;
 # requires board-pimoroni-pico-plus-2.
 pimoroni-pico-plus-2-xtal12 = []
 # Pimoroni Pico Plus 2 W (RP2350B; the same chip module as the Pico 2;
-# the wireless module's lines are the wifi driver's): the same build
-# shape as the Pico 2's.
-board-pimoroni-pico-plus-2-w = ["fpemul"]
+# the wireless module's lines are the wifi driver's; 8 MB of PSRAM behind
+# the flash interface's second chip select, brought up by the PSRAM crate
+# at the PLL posture): the same build shape as the Pico 2's.
+board-pimoroni-pico-plus-2-w = ["fpemul", "dep:lamella-psram-qspi", "lamella-psram-qspi/rp2350-qmi"]
 # Pico Plus 2 W clock posture 2: the same crystal posture on that board;
 # requires board-pimoroni-pico-plus-2-w.
 pimoroni-pico-plus-2-w-xtal12 = []
@@ -70,7 +126,7 @@ board-rpi-pico2-w = ["fpemul"]
 # requires board-rpi-pico2-w.
 rpi-pico2-w-xtal12 = []
 # NUCLEO-L4R5ZI (STM32L4R5ZI, Cortex-M4 silicon with a single-precision
-# FPU, flash-boot at 0x08000000; the STM32L4+ family's first board,
+# FPU, flash-boot at 0x08000000;
 # hosting the kernel alone): build with --no-default-features (no
 # semihosting exits on hardware) and --target thumbv7em-none-eabihf.
 board-st-nucleo-l4r5zi = ["fpemul"]
@@ -85,27 +141,92 @@ st-nucleo-l4r5zi-pll120 = []
 # --no-default-features (no semihosting exits on hardware) and
 # --target thumbv8m.main-none-eabihf.
 board-st-nucleo-u5a5zj-q = ["fpemul"]
-# U5A5 clock posture 2: PLL1 at 160 MHz (the range-1 ceiling posture). A
-# gated posture -- own image names, own goldens, banner line from
-# register read-back; requires board-st-nucleo-u5a5zj-q (src/board/mod.rs
-# refuses otherwise). Without it the board runs the boring HSI16 default.
+# U5A5 clock postures. The row's default is PLL1 at 160 MHz off the 16 MHz
+# internal oscillator (the range-1 ceiling posture; the banner line from
+# register read-back); the feature `-pll160` names that default and stays
+# accepted as a no-op, so an image that names it builds as before. The
+# 16 MHz internal-oscillator posture is the opt-out `-hsi16` (the mirror of
+# the STM32F769 row's `-hsi16`, the STM32H7 rows' `-hsi64` and the Pico
+# rows' `-xtal12`). Both require board-st-nucleo-u5a5zj-q (src/board/mod.rs
+# refuses otherwise); the two together are refused (build.rs).
 st-nucleo-u5a5zj-q-pll160 = []
+st-nucleo-u5a5zj-q-hsi16 = []
 # STM32F746G-DISCO (Cortex-M7 silicon, flash-boot at 0x08000000; the F7
 # family's second board, hosting the kernel alone): build with
 # --no-default-features (no semihosting exits on hardware).
 board-st-stm32f746g-disco = ["fpemul"]
-# F746 clock posture 2: PLL at 216 MHz (the production clock), the same
-# recipe as the F769's; requires board-st-stm32f746g-disco (src/board/mod.rs
+# STM32F746 clock posture 2: PLL at 216 MHz (the production clock), the same
+# recipe as the STM32F769's; requires board-st-stm32f746g-disco (src/board/mod.rs
 # refuses otherwise). Without it the board runs the boring HSI-16 default.
 st-stm32f746g-disco-pll216 = []
 # STM32F769I-DISCO (Cortex-M7 silicon, flash-boot at 0x08000000): build
-# with --no-default-features (no semihosting exits on hardware).
-board-st-stm32f769i-disco = []
-# F769 clock posture 2: PLL at 216 MHz (the production clock). A gated
-# posture -- own image names, own goldens, banner line from register
-# read-back; requires board-st-stm32f769i-disco (src/board/mod.rs refuses
-# otherwise). Without it the board runs the boring HSI-16 default.
+# with --no-default-features (no semihosting exits on hardware). The
+# board's 16 MB SDRAM behind the flexible memory controller is brought up
+# and proved at boot at both postures (src/board/stm32f7_sdram.rs);
+# the proof's walks are the PSRAM crate's, pulled without its host feature.
+board-st-stm32f769i-disco = ["dep:lamella-psram-qspi"]
+# STM32F769 clock postures. The row's default is the PLL at 216 MHz (the
+# production clock; the banner line from register read-back); the feature
+# `-pll216` names that default and stays accepted as a no-op, so an image
+# that names it builds as before. The 16 MHz internal-oscillator posture is
+# the opt-out `-hsi16` (the mirror of the STM32H7 rows' `-hsi64` and the
+# Pico rows' `-xtal12`). Both require board-st-stm32f769i-disco
+# (src/board/mod.rs refuses otherwise); the two together are refused
+# (build.rs).
 st-stm32f769i-disco-pll216 = []
+st-stm32f769i-disco-hsi16 = []
+# The STM32F769 row's quad-SPI flash clock: the default aims at 108 MHz
+# (the 216 MHz posture's prescaler 1, the chip's ceiling); the opt-out
+# `-qspi-54mhz` aims at 54 MHz (prescaler 3). The part rows' dummy clocks
+# and the controller's sample shift follow the clock by the datasheets'
+# tables (board/stm32f7_qspi.rs). Requires board-st-stm32f769i-disco.
+st-stm32f769i-disco-qspi-54mhz = []
+# Arduino GIGA R1 WiFi (STM32H747XI, the Cortex-M7 core alone; flash-boot
+# at 0x08000000 after the board is erased): build with
+# --no-default-features (no semihosting exits on hardware) and --target
+# thumbv7em-none-eabihf. The chip's supply configuration (the linear
+# regulator alone, as the board wires it) is written at the reset vector by
+# the family's register-only entry; the default image set runs the 400 MHz
+# PLL from the board's 16 MHz crystal, a start-up failure a loud stop.
+board-arduino-giga-r1-wifi = []
+# GIGA clock posture 2: the internal 64 MHz oscillator alone, the PLL off
+# (the bring-up posture). A gated posture -- own feature, own image names,
+# own goldens, the banner line from register read-back; requires
+# board-arduino-giga-r1-wifi (src/board/mod.rs refuses otherwise).
+arduino-giga-r1-wifi-hsi64 = []
+# Arduino Portenta H7 (STM32H747XI, the Cortex-M7 core alone; flash-boot at
+# 0x08000000 after the board is erased): build with --no-default-features
+# and --target thumbv7em-none-eabihf. The supply configuration (the
+# switching regulator at 1.8 V feeding the linear regulator, as the board
+# wires it) is written at the reset vector; the default image set runs the
+# 400 MHz PLL from the board's 25 MHz oscillator behind its enable line.
+board-arduino-portenta-h7 = []
+# Portenta H7 clock posture 2: the internal oscillator posture; requires
+# board-arduino-portenta-h7.
+arduino-portenta-h7-hsi64 = []
+# Arduino Portenta H7 Lite (the Portenta H7 without the radio module, the
+# secure element and the video bridge; the same chip, supply and clock):
+# the same build shape as the Portenta H7's.
+board-arduino-portenta-h7-lite = []
+# Portenta H7 Lite clock posture 2: the internal oscillator posture;
+# requires board-arduino-portenta-h7-lite.
+arduino-portenta-h7-lite-hsi64 = []
+# Arduino Portenta H7 Lite Connected (the Portenta H7 Lite with the radio
+# module fitted): the same build shape as the Portenta H7's.
+board-arduino-portenta-h7-lite-connected = []
+# Portenta H7 Lite Connected clock posture 2: the internal oscillator
+# posture; requires board-arduino-portenta-h7-lite-connected.
+arduino-portenta-h7-lite-connected-hsi64 = []
+# Arduino Portenta Machine Control (a Portenta H7 module on an industrial
+# carrier with 24 V terminals: the same chip, supply and clock as the
+# Portenta H7, with the radio module, the secure element and the video
+# bridge fitted): the same build shape as the Portenta H7's, the memory
+# console alone (the maker's console pins are the carrier's serial
+# transceiver's mode lines, so the probe channel is not legal on this row).
+board-arduino-portenta-machine-control = []
+# Portenta Machine Control clock posture 2: the internal oscillator posture;
+# requires board-arduino-portenta-machine-control.
+arduino-portenta-machine-control-hsi64 = []
 # Semihosting exits on the shutdown/panic/fault paths. QEMU runs only:
 # without a debugger attached, BKPT #0xAB escalates to HardFault on real
 # silicon, so non-QEMU builds disable this and every exit becomes a park.
@@ -116,16 +237,52 @@ qemu-exit = []
 # implied by no board feature, never named on a silicon image by the build
 # machinery -- a developer who names it on one gets the same honest banner.
 entropy-accept-software = []
+# The four network controls (the api gate's, on the emulator rows with
+# the net feature): the scripted peer that never answers an ARP request;
+# the network thread that bumps the global word every pass without a mask
+# change; the slow pump (half a second of busy work per pass); the budget
+# table a stream buffer of a megabyte wide, which the compile-time assertion
+# against the row's RAM window must refuse.
+test-net-doctored-arp = []
+test-net-doctored-bump = []
+test-net-doctored-slow = []
+test-net-doctored-budget = []
 # Gate flavors: deliberately exercise the panic / fault path after the
 # selftests pass.
-test-panic = []
-test-fault = []
+test-panic = ["stack-watermark"]
+test-fault = ["stack-watermark"]
 # The designed death: corrupt a free kheap header, walk, die loud.
-test-kheap-loud = []
-# The stack-overflow designed death (v8-M rows only; a v7-M target refuses
-# the flavor at compile time): a thread descends past its stack floor and
-# the limit register must raise the UsageFault with the overflow line.
-test-stackovfl = []
+test-kheap-loud = ["stack-watermark"]
+# The stack-overflow designed death: a thread descends past its stack floor
+# and the floor must be named -- by the limit register's UsageFault on the
+# v8-M rows, by the guard block's MemManage fault on the v7-M rows.
+test-stackovfl = ["stack-watermark"]
+# The null-page guard's designed death and its deliveries: a thread
+# named reader reads a word through address 4. The flavor alone expects the
+# designed death (nothing armed); its cases, each a feature beside it:
+# `test-nullpage-deliver` registers a test activation handler, arms the null
+# kind through the door and expects the read and a write delivered and
+# landed; `test-nullpage-cs` reads inside the kernel's critical section and
+# expects the forced HardFault's naming; `test-nullpage-fetch` jumps to
+# address 0 with the delivery armed and expects the terminal fetch line (an
+# instruction fetch is never delivered); `test-nullpage-header` reads the
+# image header's first word through the linker symbol (inside the page on a
+# row whose image base is 0) and expects the designed death. A case feature
+# without the flavor refuses to compile.
+test-nullpage = ["stack-watermark"]
+test-nullpage-deliver = []
+test-nullpage-cs = []
+test-nullpage-fetch = []
+test-nullpage-header = []
+# The two controls that remove a guard (the doctored-control pattern: a loud rule, and a
+# build that trips it), never in a shipped image: `null-guard-off` leaves
+# the first page as the part answers it (the PMSAv7 null-page region
+# disabled; the PMSAv8 table's hole filled), so the nullpage flavor's
+# survived shape and the api flavor's unguarded-read observation return and hosting's
+# managed null test has its control; `stack-guard-off` leaves the v7-M rows'
+# stack guard off, so the stackovfl flavor's survived shape returns there.
+null-guard-off = []
+stack-guard-off = []
 # The tick-cost measurement flavor (QEMU an500 + the
 # Deterministic icount profile only): raw dns/dms/dsw numbers, never a
 # gate case, never golden'd, never a silicon flavor.
@@ -135,7 +292,7 @@ test-tickcost = []
 sched-smoke = []
 # Gate flavor: hosting-API smoke (tick quiescence: a solo thread runs
 # tick-free while the tick clock advances).
-api-smoke = []
+api-smoke = ["stack-watermark"]
 # Payload hosting: the import surface the hosted minirt payloads bind
 # against, plus the managed entry sequence. The image only exists via
 # the external payload link (staticlib + frozen ILC object).
@@ -175,18 +332,175 @@ test-gpio-doctored-edge = []
 # image): the landing pad stores its witness before its thread id and sleeps
 # between the two, so the check must refuse at its off-thread assert.
 test-susp-doctored-order = []
+# The exit word's doctored control (the api flavor, never a shipped image): the
+# store into the console mirror's header swaps the word's halves, so the api
+# flavor's read-back disagrees with the contract's numbers and the check dies.
+test-exit-word-doctored = []
+# The handler stack's watermark: the boot stack reserve filled with a pattern
+# at reset and its deepest use printed at the program's end as one verbose
+# line of the log stream, beside the reserve's size. Named by the gate flavors
+# above and by the kernel's own test images; a shipped image leaves it off and
+# reads its link-time word `__rhu_stack_watermark` instead (0 in every map).
+stack-watermark = []
+# The watermark's doctored control (the api flavor, never a shipped image):
+# the fill at reset is skipped, so the read-back finds the reserve used whole
+# and the api flavor's check dies.
+test-stack-watermark-doctored = []
+# The designed death inside an interrupt handler: the row's spare line's
+# handler executes an undefined instruction; the fault escalates to the
+# HardFault the funnel names from handler mode, and the watermark line reads
+# the handler stack's deepest use.
+test-fault-in-handler = ["stack-watermark"]
 # The PWM and ADC doors' doctored controls (the emulator rows only), never a
 # shipped image: the virtual timer reads its own period one prescaler step
 # long; the virtual loop channel answers the previous conversion's sample.
 test-pwm-doctored = []
 test-adc-doctored = []
+# The converter's conversion-error path (the emulator rows only), never a
+# shipped image: `test-adc-flagged` makes the virtual converter flag the
+# first conversion of one pin channel and every conversion of another, so
+# the api flavor's check proves a flagged conversion discarded and retried,
+# a persistent error refused with its own code and the channel read again
+# after it; `test-adc-flagged-doctored` answers the flagged conversion's
+# undefined result as a sample, which that check must refuse.
+test-adc-flagged = []
+test-adc-flagged-doctored = []
+# The RAM-range doors' doctored control (the api flavor, never a shipped
+# image): the count door answers one range more than the board's facts
+# state and the range door fills a record for it, which the api flavor's
+# ram-range check must refuse against the facts.
+test-ram-doctored = []
+# The PSRAM proof's doctored control (the two Pimoroni rows, a board
+# flight, never a shipped image): the flash interface's second window is
+# left read-only after the bring-up, so the read-back proof's writes are
+# downgraded to reads and the boot must die loud at the first word.
+test-psram-doctored = []
+# The exclusive-access control (the api flavor on the RP2350 rows, a board
+# flight, never a shipped image; QEMU models no refusal): every Normal region is
+# programmed Shareable, so the core sends each ldrex/strex pair to the fabric's
+# global exclusive monitor instead of deciding it on its local one -- the SRAM
+# pair holds there, the PSRAM pair reports the datasheet's refusal (section
+# 2.1.6.2) with the stores gone through.
+test-excl-shareable = []
+# The STM32F769's SDRAM bank left write-protected after its wake-up
+# sequence, so the proof's writes are ignored and its first word refuses
+# (a board flight's negative control; never a shipped image).
+test-sdram-doctored = []
+# The chip's bound on the SDRAM clock put under every legal divider,
+# so the compile-time derivation must refuse the build with its words (a
+# negative build case checked on the development machine; never a shipped image).
+test-sdram-overclock = []
+# The quad-SPI flash bring-up's doctored controls (the STM32F769 row, board
+# flights, never a shipped image): `test-qspi-wrong-id` makes the part
+# table's manufacturer bytes impossible, so the identification read must
+# refuse naming the bytes it read; `test-qspi-dummy` programs the frame both
+# read paths share with one dummy clock less than the part's count, so the
+# window's words read shifted on both paths and the window header's magic
+# must refuse; `test-qspi-mmap-dummy` shortens the memory-mapped read's
+# frame alone, the indirect read's frame right, so the two-path read-back
+# must mismatch and refuse; `test-xip-header` shifts the image's
+# own matched-set words, so the window header's comparison must refuse;
+# `test-xip-store` stores one word into the window from the api flavor's
+# window case, so the protection unit must refuse it (a MemManage death the
+# funnel names).
+test-qspi-wrong-id = []
+test-qspi-dummy = []
+test-qspi-mmap-dummy = []
+test-xip-header = []
+test-xip-store = []
+# The flash clock's middle point (the STM32F769 row; a board flight's
+# measurement posture, never a shipped image): `test-qspi-72mhz` aims the
+# quad-SPI flash clock at 72 MHz (the 216 MHz posture's prescaler 2)
+# between the opt-out's 54 and the default's 108, so the window's reads
+# are timed at the prescaler's middle point; the part rows' dummy clocks
+# and the controller's sample shift follow the clock by the datasheets'
+# tables (board/stm32f7_qspi.rs). The opt-out and this posture together
+# are refused.
+test-qspi-72mhz = []
+# The instruction cache turned on without the window (the STM32F769 row; a
+# board flight's measurement posture for the internal flash under the cache;
+# never a shipped image).
+test-icache = []
+# The hosted program's run timed by the core's cycle counter (the STM32F769
+# row; a board flight's measurement posture, never a shipped image): the
+# cycles from the payload's entry to its return and, of those, the cycles the
+# console's write doors spend (their waits for the wire's room included) with
+# the doors' write count, printed once after the return line, so the program's
+# own compute under the internal map and under the window compares with the
+# console's wire out of the figure. Refused without the board.
+test-payload-cycles = []
+# The card socket's doctored control (the STM32F769 row only), never a shipped
+# image: the host capacity bit cleared in ACMD41's argument, so a high-capacity
+# card is refused at the CSD's capacity class or never leaves busy.
+test-sd-doctored = []
+# The STM32H7 rows' three compile-time refusals (negative build cases checked on
+# the development machine; never a shipped image). `test-h7-supply-doctored` forces the
+# Portentas' supply wiring onto the GIGA row, whose facts say the switching
+# regulator's pins are grounded, so the family's derivation of the supply
+# word must refuse the build with its words; `test-h7-pll-doctored` moves
+# the PLL's multiplier so the VCO leaves its range, which the PLL's bound
+# asserts must refuse; `test-h7-apb-doctored` leaves the internal
+# oscillator posture's APB prescalers at /1, which the datasheet's 50 MHz
+# APB maximum at the reset voltage scale must refuse.
+test-h7-supply-doctored = []
+test-h7-pll-doctored = []
+test-h7-apb-doctored = []
+# The power-management chip's register reading: a gate flavor of the four
+# rows carrying the Portenta H7 module, never a shipped image.
+test-h7-pmic-read = []
+# The external RAM's init mode, a build-time choice of three modes with
+# only the chosen mode's code in the image. Neither
+# feature = init at boot, the whole-window zeroing at `arena::init`.
+# `ram-init-first-use` zeroes an external window's span at the hand-out
+# instead; `ram-init-background` zeroes ahead in the idle thread behind a
+# frontier, a hand-out above it zeroing its own part. Both at once, or a
+# lazy mode on a row without an external RAM window (the Pimoroni rows at
+# the PLL posture and the STM32F769 row carry one), refuse the build in build.rs
+# with their words. The internal SRAM (window 0) stays zeroed at boot in
+# every mode.
+ram-init-first-use = []
+ram-init-background = []
+# The init mode's chain gate: window 0 follows the image's init mode (the emulator
+# rows carry no external window), the api-smoke poison kept, so the lazy
+# hand-out's zeroing is what the arena checks prove; the api flavor only,
+# never a shipped image.
+test-ram-init-window0 = []
+# The init mode's doctored control (the api flavor, never a shipped image): the lazy
+# hand-out skips its zeroing, so the zero-birth check must refuse at its
+# first scan through the poison.
+test-ram-init-doctored = []
+# The doctored control of the background mode (the api flavor, never a
+# shipped image): the idle step's zeroing put back under the critical
+# section, so the frontier check's witness -- the ticks served while a
+# piece was in flight -- reads 0 and the check must refuse.
+test-ram-init-doctored-section = []
 # The band-interrupt control's doctored control (the api flavor, never a shipped
 # image): the tick hook pends nothing while the fp-band check runs, so the check
 # must refuse at its own assert once its bound of the kernel's ticks was observed.
 test-fp-band-doctored = []
+# The rezero band's doctored control (the api flavor, never a shipped image): the rezero's
+# memset under the critical section, so the
+# arena-rezero-band check must refuse with no tick landing inside the memset at
+# its bound of the kernel's ticks.
+test-rezero-doctored = []
+# The control for the gpio-refuse check's skip path (the api flavor,
+# never a shipped image): the emulator row's facts claim NO line for the board
+# -- the Pico rows' shape (the memory console takes no pin) -- so the
+# check's board-line assertion is skipped and its witness bound must hold at a
+# floor of 0 EBUSY, the pwm-claim check's the same, the image whole to its exit
+# door.
+test-no-board-claims = []
 # The GPIO acceptance run's image on the boards with a button row (a test image, not a product image):
 # the LED row blinked for the eye, then a bounded wait for a press that lights it.
 test-gpio-button = []
+# The UART acceptance run's images on the Pico rows (test images, not product images): UART0
+# claimed through the doors at 115200 8N1 and 256 bytes written and read back byte for byte --
+# `test-uart-loopback` over the block's own loopback bit, `test-uart-jumper` over a wire from
+# GP0 to GP1; one of the two beside `api-smoke`. `test-uart-port1` moves either flight to the
+# row's port 1 on its default pair (UART1 on GP8 and GP9: the Click shield's second socket).
+test-uart-loopback = []
+test-uart-jumper = []
+test-uart-port1 = []
 # The unhosted-main flavor: an image whose kmain thread, after the selftests,
 # calls a main the program defines (`rhu_unhosted_main`) instead of hosting a
 # runtime, and exits with the code it returns. The kernel declares that main

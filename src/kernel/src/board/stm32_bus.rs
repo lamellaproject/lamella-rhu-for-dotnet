@@ -33,6 +33,7 @@ use crate::critical::with_cs;
 use crate::gpio_math as g;
 use crate::sched;
 
+// ---------------- the register seam ----------------
 
 pub fn rd(addr: usize) -> u32 {
     unsafe { read_volatile(addr as *const u32) }
@@ -59,6 +60,7 @@ pub fn rmw(addr: usize, clear: u32, set: u32) {
     });
 }
 
+// ---------------- the pad seam ----------------
 
 /// The port block's registers beside the ones the family GPIO driver
 /// programs: the output type, the output speed and the alternate-function
@@ -97,12 +99,20 @@ fn line_of(d: &I2cBus, role: PadRole) -> Option<u32> {
 /// section the output type, the speed, the alternate function and LAST the
 /// mode, so the pad leaves the plain-line state in one step.
 pub fn pad_take(p: &Pad) {
-    let line = p.line as u32;
     let (open_drain, pull, speed) = match p.role {
         PadRole::I2cClock | PadRole::I2cData => (true, g::PULL_UP, SPEED_LOW),
         PadRole::SpiClock | PadRole::SpiOut => (false, g::PULL_NONE, SPEED_HIGH),
         PadRole::SpiIn => (false, g::PULL_UP, SPEED_LOW),
     };
+    pad_take_as(p.line as u32, p.alternate, open_drain, pull, speed);
+}
+
+/// A pad handed to a block at a stated electrical setup (the bus pads'
+/// steps above; the card socket's six pads come through here too,
+/// push-pull without a pull at the very high speed setting): the output
+/// type, the speed in OSPEEDR's two bits, the alternate function and LAST
+/// the mode.
+pub fn pad_take_as(line: u32, alternate: u8, open_drain: bool, pull: u32, speed: u32) {
     pins::configure(line, g::MODE_INPUT, pull, false);
     let (_, bit) = g::st_split(line);
     with_cs(|| {
@@ -112,7 +122,7 @@ pub fn pad_take(p: &Pad) {
         wr(ospeedr, (rd(ospeedr) & !(0b11 << (2 * bit))) | (speed << (2 * bit)));
         let afr = port_reg(line, AFRL + 4 * (bit as usize / 8));
         let shift = 4 * (bit % 8);
-        wr(afr, (rd(afr) & !(0xF << shift)) | ((p.alternate as u32) << shift));
+        wr(afr, (rd(afr) & !(0xF << shift)) | ((alternate as u32) << shift));
         let moder = port_reg(line, MODER);
         wr(moder, (rd(moder) & !(0b11 << (2 * bit))) | (MODE_ALTERNATE << (2 * bit)));
     });

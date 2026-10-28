@@ -16,8 +16,8 @@
 //! loses its master bit and refuses its enable until the fault is cleared.
 //! The reference manual's own configuration steps write the configuration
 //! registers first and the internal select afterwards, and the block
-//! faults on exactly that order: the order here is deliberate and is not
-//! to be put back. A block found out of master mode after its
+//! faults on exactly that order, so the order here is deliberate. A block
+//! found out of master mode after its
 //! configuration is refused at once as a bus error, the fault cleared by
 //! its flag-clear bit, never waited on. The receiver is clocked by the
 //! clock line as its pad reads it back, so a transfer completes only with
@@ -64,8 +64,8 @@ const IFCR_END: u32 = SR_EOT | SR_TXTF;
 const IFCR_MODFC: u32 = 1 << 9;
 
 /// The negative control of the write order: the doctored image's first
-/// transfer after a claim drops the internal select at its head, as the
-/// order once stood, so the block falls out of master mode and the refusal
+/// transfer after a claim drops the internal select at its head (the wrong
+/// order), so the block falls out of master mode and the refusal
 /// in the transfer is what answers.
 #[cfg(feature = "test-bus-doctored")]
 static OLD_ORDER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -90,9 +90,10 @@ pub fn claim(d: &SpiBus) {
 /// when it fell out of master mode -- and started, the select asserted, the
 /// bytes pumped, the end of the transfer awaited and cleared, the select
 /// released, the block disabled.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // the door's arguments, passed through
 pub fn transfer(d: &SpiBus, sel: Option<u32>, cpol: bool, cpha: bool, divisor: u32, tx: Option<&[u8]>, rx: Option<&mut [u8]>, len: u32, budget_ticks: u32, out: &mut Outcome) -> i32 {
     let base = d.base;
+    // A wait spins for two byte times at the achieved rate before its first yield.
     let spin_ns = 2 * 8_000_000_000 / (d.kernel_hz >> (divisor + 1)) as u64;
     hw::wr(base + CR1, CR1_SSI);
     #[cfg(feature = "test-bus-doctored")]
@@ -110,6 +111,8 @@ pub fn transfer(d: &SpiBus, sel: Option<u32>, cpol: bool, cpha: bool, divisor: u
     hw::wr(base + CFG2, cfg2);
     hw::wr(base + CR2, len);
     hw::wr(base + CR1, CR1_SSI | CR1_SPE);
+    // A block that fell out of master mode refuses its enable while the
+    // fault stands: answered at once, the fault cleared, nothing clocked.
     if hw::rd(base + SR) & SR_MODF != 0 || hw::rd(base + CR1) & CR1_SPE == 0 {
         hw::wr(base + IFCR, IFCR_MODFC);
         hw::wr(base + CR1, CR1_SSI);
@@ -121,8 +124,16 @@ pub fn transfer(d: &SpiBus, sel: Option<u32>, cpol: bool, cpha: bool, divisor: u
         hw::select_drive(d, i, true);
     }
     hw::wr(base + CR1, CR1_SSI | CR1_SPE | CR1_CSTART);
+    // The pump: a byte sent while the transmitter has room and the bytes in
+    // flight stay under the bound; a byte taken while the receiver holds one.
+    // The bound removed under the doctored feature (the negative control:
+    // the receiver's honest overflow then loses bytes), which also defers
+    // every read until the writes are done.
     let doctored = cfg!(feature = "test-bus-doctored");
     let ahead = if doctored { len } else { d.ahead };
+    // A byte moved without a yield (the pump keeps up with the wire on any
+    // core; a yield per byte would cost more than the byte's time on a slow
+    // one); the wait with its budget and its yields only when nothing moves.
     let mut rx = rx;
     let (mut sent, mut received) = (0u32, 0u32);
     let ok = loop {

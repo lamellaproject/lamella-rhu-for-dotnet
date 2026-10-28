@@ -6,22 +6,23 @@ re-derived from source, and where the hosted .NET runtime comes from.
 
 ## Prerequisites
 
-To run the gate chain you need two things:
+To run the gate chain you need three things:
 
 - Rust, installed through rustup. The exact toolchain, its cross-compilation
   targets and its `llvm-tools` component are pinned by `rust-toolchain.toml`
   and installed by rustup on the first build.
 - QEMU, for the gates that run the kernel: the `qemu-system-arm` executable
-  of the release the gates are pinned to (the QEMU 11.0 series today). The
+  of the release the gates are pinned to (the QEMU 11.0 series). The
   chain finds it through the `QEMU` environment variable (the path of the
   executable), or else `qemu-system-arm` on your PATH, or else the first line
   of the file `tools/toolchains/qemu.local`; if none resolves, it refuses.
+- clang 22.1.8, the LLVM release from llvm.org: the api gate's first case
+  compiles the hosting header `src/kernel/include/rhu.h` with it, and the
+  chain fails without it; a clang reporting another version is refused.
 
 Re-deriving the frozen objects from source (optional; see below) needs, in
 addition:
 
-- clang 22.1.8, the LLVM release from llvm.org; a clang reporting another
-  version is refused.
 - The Arm GNU Toolchain 12.2.MPACBTI-Rel1 (arm-none-eabi), used only as the
   sysroot: the C library and headers the garbage-collector and shim legs
   compile against. The shim leg refuses another release of it.
@@ -46,7 +47,7 @@ on QEMU, and checks its behavior. To run it via Rust's cargo:
     cargo run --release -- chain
 
 Please note that gate results are pinned against a specific QEMU release
-(currently the QEMU 11.0 series; each gate's result line reports the exact
+(the QEMU 11.0 series; each gate's result line reports the exact
 QEMU and Rust versions it ran under). If your QEMU version is different, the
 chain may report correspondingly-different results.
 
@@ -91,7 +92,7 @@ collector's two never-abort behaviours: a mark stack that fills defers the
 push and rescans the marked objects inside the window the deferred objects
 span, and a handle pool that spends the row's slots grows by segments from
 the shim's mmap and answers no handle only when the mmap refuses. A program
-may hold as many finalizable objects, live or not yet finalized, as the
+may hold as many finalizable objects, live or awaiting finalization, as the
 board's finalization table has entries; the next request for one is
 answered out of memory after one collection, and none is ever handed out
 unregistered (the gate's `gc.finalize-full` case). The
@@ -103,6 +104,42 @@ byte. The payload gate's rt-link cases link the hosted runtime's frozen
 merged object under every board's payload map and need the two
 hosted-runtime tiers; without them the gate runs its other cases and names
 those cases NOT RUN, with the absent tier, on its verdict line.
+
+The two hosted-runtime tiers and the two runtime archive sets are too large
+for the source archive: they are published as two archives of the release
+that carries this copy, named with the project and the version --
+`lamella-rhu-<version>-goldens.tar` (the tiers, a directory per tier
+inside, `goldens/rt-m7` and `goldens/rt-m33`) and
+`lamella-rhu-<version>-runtime-archives.tar` (the runtime archive sets, a
+directory per set inside) -- with `SHA256SUMS` beside them. Each archive
+carries `MANIFEST.txt` at its root: what it holds, every member with its
+size and sha256, and the one command that checks the unpacked files. The
+record `goldens/MANIFEST.md` in this tree names every tier and both
+archives with their sha256s and byte counts and repeats each archive's
+list, so the bytes you fetch are checked against the revision you hold
+before any gate reads them. Fetch the three files from the release with
+the GitHub command-line tool (or each one by name with `curl -L` from the
+release's page), check them, unpack the goldens archive at the repository
+root and the runtime-archives archive into a directory of your own, check
+the unpacked files, and name each set's own directory by `RHU_RT_ARCHIVES_M7`
+and `RHU_RT_ARCHIVES_M33` or by the pointer files `rtarchives-m7.local` and
+`rtarchives-m33.local` described below:
+
+    gh release download <tag> --repo lamellaproject/lamella-rhu-for-dotnet \
+        --pattern 'lamella-rhu-*.tar' --pattern SHA256SUMS
+    sha256sum -c SHA256SUMS
+    tar -xf lamella-rhu-<version>-goldens.tar
+    sha256sum -c MANIFEST.txt
+    mkdir -p /path/to/archives
+    tar -xf lamella-rhu-<version>-runtime-archives.tar -C /path/to/archives
+    (cd /path/to/archives && sha256sum -c MANIFEST.txt)
+    export RHU_RT_ARCHIVES_M7=/path/to/archives/net11-rc2-rhu-cortex-m7-sgc-enabled
+    export RHU_RT_ARCHIVES_M33=/path/to/archives/net11-rc2-rhu-cortex-m33-sgc-enabled
+
+The goldens archive leaves its `MANIFEST.txt` at the repository root, where
+git ignores it. With the tiers in place the chain runs every gate, and the
+harness's selfcheck ties `goldens/MANIFEST.md` to the tree it runs in,
+refusing a record that does not match the files it holds.
 
 ## Re-deriving the frozen objects
 
@@ -177,8 +214,8 @@ an ARM image); then run the leg, which reads each object where the publish
 wrote it (to read them from another directory, name it by
 `RHU_PAYLOAD_OBJECTS`). A compiler that refuses the programs' system module at the pin
 fails the publish with the compiler's lines; a build whose bytes differ
-from the tier's reads MOVED, and the leg's boot of the rebuilt objects
-against the goldens is the read a re-freeze of the tier rests on.
+from the tier's reads MOVED; the leg also boots the rebuilt objects
+against the goldens and compares their output.
 
 The leg's second form drives the publish itself, through a script the
 harness runs in that Linux environment, when `RHU_PUBLISH` (the command
@@ -202,7 +239,7 @@ way.
 
 Where the toolchain's object copier can remove an object's producer stamp (the
 section naming the compiler build that produced it), the comparison is made
-without that section and the two stamps are printed for the record; where it
+without that section and both stamps are printed; where it
 cannot (the merged runtime objects), the object is compared whole -- each leg
 says which.
 
@@ -220,8 +257,9 @@ names no board:
 
 (the Cortex-M33 gate publishes the same programs for `arm-mps2-an505`),
 and the gate links the object the SDK writes under
-`obj/Release/net11.0/linux-arm/native/`. The projects name the
-`Lamella.Rhu.Sdk` package, which publishes at the launch: the gate
+`obj/Release/net11.0/linux-arm/native/`. The projects name the Lamella SDK
+(`Sdk="Lamella.Sdk"`, whose shell restores RHU's build, board, runtime and
+tools packages): the gate
 consumes the tier's frozen objects, and the SDK parity leg declares itself
 not run without the Linux environment for the publish. With it, the leg ties
 the object, the surgery object, the merged object and the image byte for
@@ -230,24 +268,26 @@ program's stack knob produces, and exercises the SDK's refusals through
 the real tool, among them a publish from a git checkout at another path,
 which must tie the frozen object.
 The SDK's link runs the tools package for the host the .NET SDK reports;
-the packages are packed for `linux-x64` and `osx-arm64`, and a macOS host
-publishes natively. The compile reads its reference assemblies from the
+the packages are packed for `win-x64`, `win-arm64`, `osx-arm64`, `linux-x64`
+and `linux-arm64` from the LLVM release's own binaries and the Lamella
+project's `lamella` tool built for each host, and a macOS host publishes
+natively. The compile reads its reference assemblies from the
 package `Microsoft.NETCore.App.Ref`, never from the copy a .NET SDK
 bundles, and the SDK names that package's version itself, whatever .NET
 SDK is installed; so the object of record is one object on every host of
-the pinned .NET SDK (measured on a Linux x64 host and natively on a macOS
-arm64 host). Another .NET SDK version compiles the same code under another
+the pinned .NET SDK.
+Another .NET SDK version compiles the same code under another
 identity: its object differs in the sixteen bytes of the assembly's module
-version id alone (measured with an older and a newer .NET SDK).
+version id alone.
 
 Lamella RHU builds the runtime archives itself from the dotnet/runtime
-source at its pinned tag (.NET 11 RC1 today), with clang 22.1.8,
+source at its pinned tag (.NET 11 RC2), with clang 22.1.8,
 through the runtime repository's own build entry in a cross environment
 whose target sysroot is Ubuntu 22.04's armhf packages:
 
     ./build.sh clr.nativeaotruntime -c Release -arch arm -cross
 
-with two build flags moved from the stock build:
+with two build flags that differ from the stock build:
 
     CLR_ARM_FPU_TYPE=fpv5-d16
     -mcpu=cortex-m7        (the C and C++ compiles)
@@ -268,7 +308,7 @@ archives. The stock runtime pack for the same version,
 `Microsoft.NETCore.App.Runtime.NativeAOT.linux-arm`, is the parity control:
 it and the RHU build have the same archive members with the same defined
 names; the RHU build's undefined names add the 64-bit atomic library
-calls and drop the integer division helpers the core has in hardware, and
+calls and omit the integer division helpers the core has in hardware, and
 the two differ otherwise only in the flags' effect. Because the emulator
 executes both kinds of instruction, each hosted-runtime gate censuses its
 frozen objects and its linked images for them at instruction boundaries,

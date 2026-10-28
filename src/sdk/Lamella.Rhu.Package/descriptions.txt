@@ -1,0 +1,12 @@
+# The description NuGet shows for each kind of package this project packs:
+# one line per kind, the text after the first "=" verbatim. The pack script
+# fills <board-id>, <cpu-class> or <host-rid> for the package it packs and
+# hands the project the text through a file (RhuPackageDescriptionFile), so
+# a comma or a semicolon in a text never meets MSBuild's property switch,
+# which would split the value; it then reads every packed package's
+# description back from its nuspec against this file.
+build=MSBuild targets and tasks used by Lamella.Sdk to publish net11.0 programs as Lamella RHU native images. Restored by Lamella.Sdk; do not reference directly.
+board=Board support payload for <board-id>, used by Lamella.Sdk when publishing a Lamella RHU image: kernels, linker maps, board facts and prebuilt objects. Restored by Lamella.Sdk; do not reference directly.
+runtime=Runtime payload for the <cpu-class> processor class, used by Lamella.Sdk when publishing a Lamella RHU image. Restored by Lamella.Sdk; do not reference directly.
+tools=LLVM linker tools for Lamella RHU on <host-rid>: ld.lld and llvm-objcopy. Lamella.Sdk restores this package when publishing a net11.0 image. Do not reference it directly.
+symbols=The Lamella RHU kernel archives for <board-id> with their debug information. This package is for debugging the RHU kernel; Lamella.Sdk does not restore it for a program build. Do not reference it directly.

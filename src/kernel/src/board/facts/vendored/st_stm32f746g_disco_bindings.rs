@@ -3,9 +3,9 @@
 //! its board-description generator's Rust emission for this board, the source
 //! `bsp/st-stm32f746g-disco/rust/st_stm32f746g_disco_bindings.rs`,
 //! the emission's sha256 2e4e12d621b5c30866ec0abb8bd15d87a988be2a22aed01519f5a0a54b5b33a7.
-//! Nothing below the sentinel is edited in this tree: a re-vendoring replaces this whole file at
-//! the generator's next public commit, and the desk check ties the bytes to that commit's blob
-//! and to this header's hash. The facts module beside this file reads the constants the kernel
+//! Nothing below the sentinel is edited by hand: a re-vendoring replaces this whole file from
+//! the generator's public commit, and the recorded hash ties the bytes to that commit's blob
+//! and to this header. The facts module beside this file reads the constants the kernel
 //! needs and states its own.
 //! SPDX-License-Identifier: MIT OR Apache-2.0 -- the public repository's own licenses (LICENSE-MIT,
 //! LICENSE-APACHE at that commit), which these bytes carry; the copyright is the Lamella project's.
@@ -152,7 +152,7 @@ pub const MEMORY_QSPI_DCR: u32 = 0x170100;
 /// A dummy phase covers the device's internal latency in TIME, so the cycles that cover it
 /// fall with the interface clock -- and a wrong count does not fail, it shifts every byte
 /// and returns plausible garbage. Walk the range and keep the first count that reads back a
-/// payload you already know; the anchors below say what this board answered, and at what --
+/// payload you already know; the anchors below say what this part answers, and at what --
 pub const MEMORY_QSPI_READ_CONFIGURATIONS: u32 = 4;
 pub const MEMORY_QSPI_DUMMY_MIN: u32 = 0;
 pub const MEMORY_QSPI_DUMMY_MAX: u32 = 31;
@@ -206,7 +206,7 @@ pub const MEMORY_SDRAM_SDTR1_HSI_16MHZ: u32 = 0x1126361;
 /// image was built for. A chip identity register cannot answer this on its own, because the
 /// parts that separate one board from its sibling are soldered outside the die and a bare
 /// board answers the same identity as a populated one. So each row names the CLAIM it
-/// reaches -- `part`, or `memory:<region>` -- alongside the rung a successful read of its
+/// reaches -- `part`, or `memory:<region>` -- alongside the level a successful read of its
 /// kind establishes: `identified` (it answered its identity register) or `exercised` (it
 /// produced measurements a driver decoded). A region's ACCESSIBLE size is reachable only at
 /// `exercised`: an identity read reports the fitted device, and a board may wire less of a

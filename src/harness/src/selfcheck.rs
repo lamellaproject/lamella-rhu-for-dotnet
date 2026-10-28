@@ -5,6 +5,7 @@
 
 use crate::chain::chain_verdict;
 use crate::gate::Selfcheck;
+use crate::release;
 use crate::results::{json_escape, validate_results, Results};
 use crate::sha256::sha256_hex;
 use crate::text::{
@@ -25,6 +26,11 @@ const DISPLAY: &str = "RHU-GATE SELFCHECK";
 const SHA_EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const SHA_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 const SHA_TWO_BLOCK: &str = "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1";
+/// The release module's archive of its two fixture members, as GNU tar
+/// 1.35 writes the same members in the ustar format with single-block
+/// records, sorted names, owner and group 0, mode 0644 and modification
+/// time 0 (3584 bytes).
+const SHA_TAR_FIXTURE: &str = "0aa5407ceceaa0782a43a1f2f2d5bf50e1e44834a7b1ba96ca4ab7bf15871c9a";
 
 /// Feed the judge of an instruction-counted run one poll a second for
 /// `seconds`, the reading of each second from `spent_at`: the rule that
@@ -365,6 +371,152 @@ pub fn run(repo: &Path) -> ! {
             ]
             && guest_image(Guest::Spin) == [0x00, 0x10, 0x00, 0x20, 0x09, 0x00, 0x00, 0x00, 0xFE, 0xE7, 0x00, 0xBF]
             && guest_image(Guest::Wait) == [0x00, 0x10, 0x00, 0x20, 0x09, 0x00, 0x00, 0x00, 0x30, 0xBF, 0xFD, 0xE7],
+    );
+
+    let tree = release::FsTree { root: repo.to_path_buf() };
+    let sets = release::resolve_sets(repo);
+    let record = std::fs::read_to_string(repo.join("goldens").join("MANIFEST.md")).unwrap_or_default();
+    let real = release::model(&tree, [sets[0].as_ref().map(|t| t as &dyn release::Tree), sets[1].as_ref().map(|t| t as &dyn release::Tree)])
+        .and_then(|m| release::check(&record, &m));
+    match &real {
+        Ok(lines) => {
+            for l in lines {
+                println!("    {l}");
+            }
+        }
+        Err(e) => println!("    {e}"),
+    }
+    sc.accept_probe(
+        "release-record-tree",
+        "goldens/MANIFEST.md ties this checkout (the tiers it holds verified, the absent ones declared)",
+        real.is_ok(),
+    );
+    let (fx, set_m7, set_m33) = release::fixture();
+    let fx_model = |t: &release::MapTree| release::model(t, [Some(&set_m7 as &dyn release::Tree), Some(&set_m33 as &dyn release::Tree)]);
+    let fixture_model = fx_model(&fx).ok();
+    let fixture_text = fixture_model.as_ref().and_then(|m| release::render(m).ok()).unwrap_or_default();
+    let fixture_ok = |text: &str, t: &release::MapTree| fx_model(t).and_then(|m| release::check(text, &m)).is_ok();
+    sc.accept_probe(
+        "release-fixture-roundtrip",
+        "a fixture tree's generated record checks clean against the same tree",
+        !fixture_text.is_empty() && fixture_ok(&fixture_text, &fx),
+    );
+    let manifest_ok = fixture_model
+        .as_ref()
+        .map(|m| {
+            !m.assets.is_empty()
+                && m.assets.iter().all(|a| {
+                    a.facts
+                        .as_ref()
+                        .map(|f| {
+                            let first = f.members.first().map(|(p, s)| p == release::ARCHIVE_MANIFEST && *s == sha256_hex(f.manifest.as_bytes())).unwrap_or(false);
+                            let others = f.members.len() > 1 && f.members.iter().skip(1).all(|(p, s)| f.manifest.lines().any(|l| l == format!("{s}  {p}")));
+                            let not_itself = !f.manifest.lines().any(|l| l.ends_with(&format!("  {}", release::ARCHIVE_MANIFEST)));
+                            let embedded = fixture_text.contains(&format!("{}  {}\n{}", sha256_hex(f.manifest.as_bytes()), release::ARCHIVE_MANIFEST, f.manifest));
+                            first && others && not_itself && embedded
+                        })
+                        .unwrap_or(false)
+                })
+        })
+        .unwrap_or(false);
+    sc.accept_probe(
+        "release-archive-manifest",
+        "each fixture archive's first member is its MANIFEST.txt, listing every other member's sha256 and not itself, and the record embeds that text under its digest",
+        manifest_ok,
+    );
+    sc.accept_probe(
+        "release-tar-pinned",
+        "the tar writer's bytes for the fixture members reproduce the pinned sha256",
+        release::tar(&release::tar_fixture_members()).map(|b| sha256_hex(&b)).ok().as_deref() == Some(SHA_TAR_FIXTURE),
+    );
+    let hex_run = |line: &str| -> Option<(usize, usize)> {
+        let b = line.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            let mut j = i;
+            while j < b.len() && b[j].is_ascii_hexdigit() && !b[j].is_ascii_uppercase() {
+                j += 1;
+            }
+            if j - i == 64 {
+                return Some((i, j));
+            }
+            i = if j > i { j } else { i + 1 };
+        }
+        None
+    };
+    let flip = |line: &str| -> String {
+        match hex_run(line) {
+            Some((s, _)) => {
+                let c = line.as_bytes()[s] as char;
+                let n = if c == 'f' { 'e' } else { char::from_digit(c.to_digit(16).unwrap_or(0) + 1, 16).unwrap_or('0') };
+                format!("{}{n}{}", &line[..s], &line[s + 1..])
+            }
+            None => line.to_string(),
+        }
+    };
+    let shorten = |line: &str| -> String {
+        match hex_run(line) {
+            Some((s, _)) => format!("{}{}", &line[..s], &line[s + 1..]),
+            None => line.to_string(),
+        }
+    };
+    let doctor = |needle: &str, how: &dyn Fn(&str) -> Option<String>| -> String {
+        let mut hit = false;
+        let mut out = String::new();
+        for l in fixture_text.lines() {
+            if !hit && l.contains(needle) {
+                hit = true;
+                if let Some(nl) = how(l) {
+                    out.push_str(&nl);
+                    out.push('\n');
+                }
+            } else {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        out
+    };
+    let names = release::fixture_asset_names();
+    let first_asset = names.first().cloned().unwrap_or_default();
+    let last_asset = names.last().cloned().unwrap_or_default();
+    let object_line = format!("{}  goldens/rt-m7/object.o", sha256_hex(b"rt-m7 object bytes\n"));
+    sc.probe(
+        "release-doctored-tier-sha",
+        "the record's sha256 of a tier manifest with one digit flipped",
+        fixture_ok(&doctor("| `goldens/gc/MANIFEST.md` | `", &|l| Some(flip(l))), &fx),
+    );
+    sc.probe(
+        "release-doctored-asset-sha",
+        "the record's sha256 of an archive with one digit flipped",
+        fixture_ok(&doctor(&format!("| `{first_asset}` |"), &|l| Some(flip(l))), &fx),
+    );
+    sc.probe(
+        "release-doctored-member-sha",
+        "the record's sha256 of an archive member with one digit flipped",
+        fixture_ok(&doctor(&object_line,&|l| Some(flip(l))), &fx),
+    );
+    sc.probe(
+        "release-doctored-member-missing",
+        "the record with an archive member's line removed",
+        fixture_ok(&doctor(&object_line,&|_| None), &fx),
+    );
+    sc.probe(
+        "release-doctored-archive-manifest",
+        "the record's copy of an archive's MANIFEST.txt with one comment line changed",
+        fixture_ok(&doctor(&format!("# {first_asset}"), &|l| Some(format!("{l} (changed)"))), &fx),
+    );
+    let mut extra = fx.0.clone();
+    extra.insert("goldens/rt-m7/extra.o".to_string(), b"a file no record names\n".to_vec());
+    sc.probe(
+        "release-doctored-extra-file",
+        "a file added to a tier directory that no record names",
+        fixture_ok(&fixture_text, &release::MapTree(extra)),
+    );
+    sc.probe(
+        "release-malformed",
+        "a record whose archive sha256 has sixty-three digits",
+        fixture_ok(&doctor(&format!("| `{last_asset}` |"), &|l| Some(shorten(l))), &fx),
     );
 
     sc.finish("genuine inputs accepted");

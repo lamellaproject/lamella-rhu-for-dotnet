@@ -2,24 +2,36 @@
 //! board's schematic and the chip's datasheet -- this board has no vendored
 //! board description. The console's lines, the line count of the RP2350B,
 //! the user LED and the user button are stated here, cited.
+//!
+//! The RP2350 datasheet: 48 user GPIOs on the RP2350B (chapter 1, Table 1;
+//! section 9.1). The board's schematic (sheet 2, the user LED and the
+//! combined boot and user switch; sheet 1, the chip's nets): the LED on
+//! GPIO 25 through a 470 ohm resistor to ground, lit when high; the boot
+//! switch doubles as the user switch on GPIO 45, which a 10 k resistor
+//! pulls up to the 3.3 V rail -- low when pressed, and since the boot
+//! select is sampled at reset alone, a press at run time is a plain input.
+//! The board's pinout diagram: UART0 on GPIO 0 and 1.
 
 use crate::claims;
 
 pub const LINE_COUNT: usize = 48;
 
 /// The console's GPIO 0 and 1.
-pub const CONSOLE_TX: u32 = 0;
-pub const CONSOLE_RX: u32 = 1;
-pub const BOARD_CLAIMS: &[u16] = &[CONSOLE_TX as u16, CONSOLE_RX as u16];
+pub const UART0_TX: u32 = 0;
+#[allow(dead_code)] // the pair is the facts' UART row's; this row reads the transmit side alone (CHECK_BOARD)
+pub const UART0_RX: u32 = 1;
+/// No line is claimed by the board by default -- the memory console takes
+/// no pin; a UART the kernel holds as its wire claims its two lines at init.
+pub const BOARD_CLAIMS: &[u16] = &[];
 pub const BOARD_CLAIM_BITS: [u32; claims::BANKS] = claims::fold_board(BOARD_CLAIMS);
-pub const BANNER: &str = "48 lines, 2 claimed by the board (the console GPIO 0/1)";
+pub const BANNER: &str = "48 lines, 0 claimed by the board";
 
 /// The board's rows: the LED on GPIO 25 through the SIO, lit when high; the
 /// user switch on GPIO 45, low when pressed, the board's own pull-up
 /// holding its level, so none is applied.
 #[allow(dead_code)]
 pub const LED_LINE: u32 = 25;
-#[allow(dead_code)]
+#[allow(dead_code)] // the silicon leg's check and the flights read the rows
 pub const LED_ACTIVE_LOW: bool = false;
 #[allow(dead_code)]
 pub const LED0_LINE: u32 = LED_LINE;
@@ -27,9 +39,9 @@ pub const LED0_LINE: u32 = LED_LINE;
 pub const LED0_ACTIVE_LOW: bool = LED_ACTIVE_LOW;
 #[allow(dead_code)]
 pub const BUTTON0_LINE: u32 = 45;
-#[allow(dead_code)]
+#[allow(dead_code)] // the flight image reads the row
 pub const BUTTON0_PULL: u32 = crate::gpio_math::PULL_NONE;
-#[allow(dead_code)]
+#[allow(dead_code)] // the flight image reads the row
 pub const BUTTON0_ACTIVE_LOW: bool = true;
 
 /// The api flavor's check lines: the LED as the output claimed at its
@@ -37,16 +49,16 @@ pub const BUTTON0_ACTIVE_LOW: bool = true;
 /// software-triggered edges are counted on and as the free line of the
 /// claim and refusal checks; the switch as the input-only line; the
 /// console's GPIO 0 as the board-claimed line.
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_FREE: u32 = 26;
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_OUT: Option<u32> = Some(LED_LINE);
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_IN: u32 = 26;
-#[allow(dead_code)]
-pub const CHECK_BOARD: u32 = CONSOLE_TX;
+#[allow(dead_code)] // the api flavor's checks
+pub const CHECK_BOARD: u32 = UART0_TX;
 /// No loopback on a board: the software trigger makes the edge beside the toggle.
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const LOOPBACK: bool = false;
 
 /// The switch's line is an input only: an output claim on it is refused.
@@ -54,12 +66,12 @@ pub const fn input_only(line: u32) -> bool {
     line == BUTTON0_LINE
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_INPUT_ONLY: Option<u32> = Some(BUTTON0_LINE);
 
 /// No pin present-list is stated for this board, so no unpopulated line can
 /// be stated: the whole space is treated as populated.
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_UNPOPULATED: Option<u32> = None;
 
 pub const fn populated(_line: u32) -> bool {
@@ -125,11 +137,10 @@ const _: () = assert!(
 /// datasheet numbers it nothing), 12 bits, 96 cycles a conversion (section
 /// 12.4.3), clocked from the crystal at 12 MHz on BOTH clock postures -- the
 /// datasheet asks 48 MHz of the converter's clock for its rated 500
-/// thousand samples a second (section 12.4.3), but the block's registers
-/// do not answer while that clock runs faster than the system clock (a
-/// fact of the part, measured, not in the text) and a crystal-posture image's
-/// system clock is 12 MHz, so the crystal drives the converter on both
-/// postures, 8 microseconds a sample -- its
+/// thousand samples a second (the RP2350 datasheet's section 12.4.3), but the block's registers
+/// do not answer while that clock runs faster than the system clock, and a
+/// crystal-posture image's system clock is 12 MHz, so the crystal drives the
+/// converter on both postures, 8 microseconds a sample -- its
 /// reference the board's ADC supply, the 3.3 V rail through a filter. The
 /// channels (Table 1119, the board's schematic sheet 1 for the nets): 0, 1
 /// and 2 on GPIO 40, 41 and 42, whose nets reach the header pins GP26, GP27
@@ -138,7 +149,7 @@ const _: () = assert!(
 /// on its net, parked with the channel when no program holds it (a program
 /// that holds the twin sets its pad, and the reading follows); 3 on GPIO 43,
 /// the board's supply sense; 4 on GPIO 44 and 6 on GPIO 46, which the board
-/// routes to no net; 8 the temperature sensor (section 12.4.6), no line.
+/// routes to no net; 8 the temperature sensor (the RP2350 datasheet's section 12.4.6), no line.
 /// NOT offered: channel 5 on GPIO 45, the board's user switch (a row of its
 /// own, input only), and channel 7 on GPIO 47, the PSRAM's chip select.
 pub const ADC_BLOCKS: &[crate::adc_math::AdcBlock] =
@@ -155,7 +166,7 @@ pub const ADC_CHANNELS: &[crate::adc_math::AdcChannel] = &[
 /// The channels' twins: a digital pad on a channel's net, parked with it.
 pub const ADC_TWINS: &[(u16, u16)] = &[(40, 26), (41, 27), (42, 28)];
 /// The channel table's position of the temperature sensor.
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const ADC_SENSOR: usize = 6;
 /// The api flavor's check rows: the pin channel it claims and reads (a
 /// header net with nothing on it; its twin parked); the PWM line it claims
@@ -163,13 +174,61 @@ pub const ADC_SENSOR: usize = 6;
 /// the line sharing that slice output (GPIO 22) and the slice's other
 /// output (GPIO 7); no resistor-capacitor loop
 /// between a PWM line and a channel is wired on this row.
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const ADC_CHECK: usize = 0;
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const PWM_CHECK_LINE: u32 = 6;
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const PWM_CHECK_TWIN: u32 = 22;
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const PWM_CHECK_SIBLING: u32 = 7;
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const ADC_LOOP: Option<(usize, usize)> = None;
+
+/// The RAM ranges of this row (the hosted runtime learns them
+/// through the `rhu_ram_count` and `rhu_ram_range` doors): the physical
+/// range as the board's facts file states it in the SDK (`boards/<row>.json`,
+/// its `ram` array; the two kept equal by the hosted-runtime gate's facts
+/// tie), range 0 the internal SRAM the kernel's map calls DATA. Range 0's
+/// `base` and `bytes` are the map's DATA region, whole: the arena window
+/// the runtime is handed lies inside it, bracketed by the map.
+/// Range 1 is the board's 8 MB PSRAM part behind the flash interface's
+/// second chip select: external, reached through the chip's XIP
+/// cache, shown at the second select's cached window. The part's chip
+/// select is on GPIO 47 (the board's schematic: the net PSRAM_CS on pad
+/// 58, GPIO47/ADC7; the designer's note allows GP0, GP8, GP19 or GP47).
+pub const RAM_RANGES: &[crate::ram::RamFacts] = &[
+    crate::ram::RamFacts { name: "SRAM", base: 0x2000_0000, bytes: 0x8_2000, external: false, cached: false, exec: true },
+    crate::ram::RamFacts { name: "PSRAM", base: 0x1100_0000, bytes: 0x80_0000, external: true, cached: true, exec: true },
+];
+/// The GPIO line the board wires the PSRAM's chip select to.
+#[allow(dead_code)] // the crystal posture builds without the window
+pub const PSRAM_SELECT_LINE: u8 = 47;
+
+/// The console's channel facts of this row (the SDK's `channels` member):
+/// the two streams' default channel codes and the row's legal set
+/// (`crate::console`: 1 off, 2 memory, 3 probe, 0x10 + n uart n).
+pub const CHANNELS: crate::console::ChannelFacts = crate::console::ChannelFacts { log: crate::console::CH_MEMORY, console: crate::console::CH_MEMORY, legal: &[crate::console::CH_MEMORY, crate::console::CH_OFF, crate::console::CH_UART0, crate::console::CH_UART1] };
+/// The pre-defined UART rows of this row (the SDK's `uart` member), by the
+/// chip's own block number with their pins (none on a row whose UARTs have
+/// no pins); a program's serial doors and the console's wire read them.
+/// UART1 has NO default pair on this row (no maker document names one) -- the block stays in the
+/// table and becomes claimable when the project's pin words name a legal pair.
+pub const UART_ROWS: &[crate::console::UartRow] = &[crate::console::UartRow { block: 0, tx: 0, rx: 1 }, crate::console::UartRow { block: 1, tx: crate::console::NO_PIN, rx: crate::console::NO_PIN }];
+/// The gpio banner's line when the kernel holds a UART of this row as its
+/// console wire, by block (empty on a row with no UART row).
+pub const BANNER_UART: &[&str] = &["48 lines, 2 claimed by the board (the console UART0 on GPIO 0/1)", "48 lines, 2 claimed by the board (the console UART1 on the project's pins)"];
+/// The UART rows' names for the boot banner's console clause, by block.
+#[allow(dead_code)] // the Pico rows' banner clause reads it
+pub const UART_NAMES: &[&str] = &["UART0 (GPIO 0 TX, GPIO 1 RX)", "UART1 (no default pins; the project's pin words name a legal pair)"];
+
+/// The chip's legal pin sets per block for a project's pin override (the SDK's `uartPairs`
+/// member): the UART function's TX and RX
+/// pins (the function table's F2 column, the RP2350B's GPIO 0 to 47; the
+/// UART AUX function, select 11, is not supported).
+pub const UART_PAIRS: &[crate::console::UartPairs] = &[
+    crate::console::UartPairs { block: 0, tx: &[0, 12, 16, 28, 32, 44], rx: &[1, 13, 17, 29, 33, 45] },
+    crate::console::UartPairs { block: 1, tx: &[4, 8, 20, 24, 36, 40], rx: &[5, 9, 21, 25, 37, 41] },
+];
+/// The gpio banner's line when the kernel holds BOTH UART rows as wires.
+pub const BANNER_UART_BOTH: &str = "48 lines, 4 claimed by the board (the console UART0 on GPIO 0/1, UART1 on the project's pins)";

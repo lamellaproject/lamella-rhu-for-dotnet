@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 # The harness takes no crate dependencies: the verification tier must build
 # on a consumer machine from the bare pinned toolchain, so everything here
-# is the standard library (the results validator set the precedent).
+# is the standard library.
 [dependencies]
 
 [profile.release]

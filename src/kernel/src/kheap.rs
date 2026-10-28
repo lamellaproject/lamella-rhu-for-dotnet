@@ -23,13 +23,13 @@ pub(crate) const HDR_BYTES: u32 = (HDR_WORDS * 4) as u32;
 /// next alignment step instead of orphaning unusable bytes.
 const MIN_SPAN: u32 = HDR_BYTES + 8;
 
-const STATE_FREE: u32 = 0x4652_4545;
-const STATE_USED: u32 = 0x5553_4544;
+const STATE_FREE: u32 = 0x4652_4545; // "FREE"
+const STATE_USED: u32 = 0x5553_4544; // "USED"
 
 /// Address-derived, so a header memcpy'd to another address fails its
 /// canary there -- corruption cannot masquerade by relocation.
 fn canary_for(h: usize) -> u32 {
-    (h as u32) ^ 0x4B48_5552
+    (h as u32) ^ 0x4B48_5552 // "RUHK"
 }
 
 struct Kheap {
@@ -108,11 +108,15 @@ pub fn alloc(bytes: u32, align: u32) -> *mut u8 {
     assert!(bytes != 0, "kheap: zero-byte alloc (caller bug)");
     with_cs(|| unsafe {
         let k = kheap();
+        // The rounded span in checked arithmetic, capped at the heap's own
+        // size: a request that wraps the rounding or that the heap could
+        // never hold is refused NULL and says so, before any sum in the
+        // walk below can wrap.
         let Some(need_payload) = rounded_request(bytes, (k.hi - k.lo) as u32) else {
             kprintln!("[kheap] refused: a request of {} bytes wraps the rounding or exceeds the heap", bytes);
             return ptr::null_mut();
         };
-        let mut prev: usize = 0;
+        let mut prev: usize = 0; // 0 = the list head itself
         let mut p = k.free_head;
         while p != 0 {
             validate(p);
@@ -120,6 +124,9 @@ pub fn alloc(bytes: u32, align: u32) -> *mut u8 {
             let size = hdr_read(p, 0);
             let block_end = p + size as usize;
 
+            // Candidate payload: aligned, with any leading gap (the
+            // span [p, h) left in front of the used header) either zero
+            // or big enough to stay a real free block.
             let mut payload = (p + HDR_BYTES as usize + (align as usize - 1)) & !(align as usize - 1);
             while payload - HDR_BYTES as usize > p
                 && ((payload - HDR_BYTES as usize - p) as u32) < MIN_SPAN
@@ -146,6 +153,7 @@ pub fn alloc(bytes: u32, align: u32) -> *mut u8 {
                     hdr_read(p, 3) as usize
                 };
                 if gap != 0 {
+                    // The shrunk leading block keeps p's list position.
                     hdr_write(p, 0, gap);
                     hdr_write(p, 3, next_after as u32);
                 } else if prev == 0 {
@@ -162,7 +170,7 @@ pub fn alloc(bytes: u32, align: u32) -> *mut u8 {
             prev = p;
             p = hdr_read(p, 3) as usize;
         }
-        ptr::null_mut()
+        ptr::null_mut() // honest exhaustion: state untouched
     })
 }
 
@@ -181,6 +189,7 @@ pub fn free(p: *mut u8) {
         assert!(hdr_read(h, 1) == STATE_USED, "kheap: free of a block not in use");
         let mut size = hdr_read(h, 0);
 
+        // Find the address-ordered neighbors on the free list.
         let mut prev: usize = 0;
         let mut next = k.free_head;
         while next != 0 && next < h {
@@ -189,15 +198,17 @@ pub fn free(p: *mut u8) {
             next = hdr_read(next, 3) as usize;
         }
         if next != 0 {
-            validate(next);
+            validate(next); // the merge candidate is touched too
         }
 
+        // Forward merge: absorb `next` if it starts where we end.
         let mut link_next = next;
         if next != 0 && h + size as usize == next {
             size += hdr_read(next, 0);
             link_next = hdr_read(next, 3) as usize;
             ptr::write_bytes(next as *mut u8, 0, HDR_BYTES as usize);
         }
+        // Backward merge: vanish into `prev` if it ends where we start.
         if prev != 0 && prev + hdr_read(prev, 0) as usize == h {
             hdr_write(prev, 0, hdr_read(prev, 0) + size);
             hdr_write(prev, 3, link_next as u32);

@@ -193,7 +193,7 @@ pub fn set(ticks: u64, source: i32) -> i32 {
     0
 }
 
-/// The record's words for the api flavor's check: the real-time clock's
+/// The words of the api flavor's check: the real-time clock's
 /// state, the oscillator's state, the pushes consumed.
 #[allow(dead_code)]
 pub fn record_states() -> (u32, u32, u32) {

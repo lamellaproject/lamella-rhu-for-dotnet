@@ -1,43 +1,55 @@
 <Project>
 
-  <!-- Lamella RHU for .NET: the SDK's properties, evaluated before the
-       project's own body. The .NET SDK is imported first, so a project's
-       Directory.Build.props is read before the defaults below; every
-       default yields to a value the project or its environment sets, and
-       the targets refuse a value the build contract forbids. -->
-  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
-
+  <!-- Lamella RHU for .NET: the build package's properties, imported by the
+       Lamella SDK at its dispatch for a net11.0 project: after Microsoft's
+       properties (two of which these read) and the project's own body, before
+       Microsoft's targets (which default the C compiler's name at their own
+       import). Everything the restore reads lives in the shell, generated from
+       RHU's release manifest: the target framework, the runtime identifier, the
+       publish posture, the runtime version and the pack pins, the package
+       references and downloads; this file sets what the restore never reads.
+       Every default below yields to a value the project or its environment sets,
+       and the targets refuse a value the build contract forbids. -->
   <PropertyGroup>
     <UsingLamellaRhuSdk>true</UsingLamellaRhuSdk>
+    <!-- This build package's version: the pack stamps the shipped line with
+         its own version, unconditioned (this line defaults it for the desk
+         alone); the targets refuse a resolved package at another version. -->
     <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">1.0.0-alpha.1</RhuSdkVersion>
-    <!-- The runtime build this SDK version was tested against: the
+    <!-- The runtime build this release is pinned to: the shell pins the
          ILCompiler pack, the runtime pack and the reference assemblies'
-         package are pinned at it, whatever .NET SDK is installed. -->
-    <RhuRuntimeVersion Condition="'$(RhuRuntimeVersion)' == ''">11.0.0-rc.1.26425.128</RhuRuntimeVersion>
-    <RhuSdkRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..'))</RhuSdkRoot>
+         package at it from the release manifest, whose runtime entry is this
+         string; the targets record the build an image was compiled against. -->
+    <RhuRuntimeVersionTested>11.0.0-rc.2.26504.105</RhuRuntimeVersionTested>
     <RhuHostRid Condition="'$(RhuHostRid)' == ''">$(NETCoreSdkPortableRuntimeIdentifier)</RhuHostRid>
-    <RhuToolsPackageId>Lamella.Rhu.Tools.$(RhuHostRid)</RhuToolsPackageId>
   </PropertyGroup>
 
-  <!-- The defaults of an RHU project: full .NET at net11.0, compiled ahead
-       of time for the ARM runtime identifier, self-contained. -->
-  <PropertyGroup>
-    <TargetFramework Condition="'$(TargetFramework)' == ''">net11.0</TargetFramework>
-    <OutputType Condition="'$(OutputType)' == ''">Exe</OutputType>
-    <PublishAot Condition="'$(PublishAot)' == ''">true</PublishAot>
-    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">linux-arm</RuntimeIdentifier>
-    <SelfContained Condition="'$(SelfContained)' == ''">true</SelfContained>
-    <RuntimeFrameworkVersion Condition="'$(RuntimeFrameworkVersion)' == ''">$(RhuRuntimeVersion)</RuntimeFrameworkVersion>
-  </PropertyGroup>
+  <!-- The emulator, for the two emulator rows, is never carried or fetched by
+       any package of this SDK: the run targets look for qemu-system-arm in the
+       folder RhuQemuDir names, else on the PATH, and report the emulator route
+       available only where one answers. The program that writes an image to a
+       board over its debug probe is the Lamella SDK's own tool, which the shell
+       runs; nothing here names it. -->
 
-  <!-- The three knobs of an RHU image and their mapping to the runtime's
+  <!-- The ten knobs of an RHU image and their mapping to the runtime's
        own build properties, so a value in a build log says what it means:
 
-         knob            values       default        underlying
-         RhuDiag         min | rich   min            StackTraceSupport, UseSystemResourceKeys
-         RhuReflection   on  | off    on             the compiler argument reflectiondata:none
-         RhuThreadStack  bytes        the row's      the absolute symbol __rhu_thread_stack_default
-                                      default        the link defines for the hosting layer
+         knob                values                         default    underlying
+         RhuDiag             min | rich                     min        StackTraceSupport, UseSystemResourceKeys
+         RhuReflection       on  | off                      on         the compiler argument reflectiondata:none
+         RhuThreadStack      bytes                          the row's  the absolute symbol __rhu_thread_stack_default
+                                                            default    the link defines for the hosting layer
+         RhuThreadPoolThreadTimeoutMs                        the row's  the absolute symbol
+                             milliseconds | -1              100 ms     __rhu_threadpool_thread_timeout_ms, defined
+                                                                       only when the project sets it
+         RhuExternalRamInit  boot | first-use | background  boot       the row's prebuilt kernel built for the mode
+         RhuManagedMemory    external | internal            external   the row's payload map, its second map for internal
+         RhuProgramMemory    internal | external            internal   the row's payload map, its external-flash map for external
+         RhuLogLevel         silent | quiet | verbose       quiet      the absolute symbol __rhu_log_level
+         RhuLogChannel       memory | probe | uart0 |       the row's  the absolute symbol __rhu_log_channel,
+                             uart1 | off                    default    defined only when the project sets it
+         RhuConsoleChannel   memory | probe | uart0 |       the row's  the absolute symbol __rhu_console_channel,
+                             uart1 | off                    default    defined only when the project sets it
 
        RhuThreadStack is the stack size of every managed thread that sets
        none of its own, the runtime's own threads among them; the board's
@@ -47,45 +59,113 @@
        in the row's pool beside the idle thread's kilobyte. The value
        reaches the image at the link, so the compiled object is the same
        with or without it; the runtime's own default-stack knob is never
-       set, because it cannot express a size inside a row's range. The
+       set, because it cannot express a size inside a row's range.
+       RhuThreadPoolThreadTimeoutMs is how long an idle thread-pool worker
+       keeps its stack before it exits and the stack returns to the row's
+       pool: 100 ms unless the project sets it (the runtime's own default
+       keeps an idle worker for 20 s), -1 for never. The runtime reads this
+       setting from the hosting layer's environment before a program's
+       runtimeconfig switch, so the property is the one way a program moves
+       it; the value reaches the image at the link as an absolute symbol
+       (the compiled object is the same with or without it), and the targets
+       refuse a value that is not a whole number of milliseconds or -1, a
+       zero (no link word is the row's default), or one above the 32-bit
+       range.
+       RhuExternalRamInit chooses when a board's external RAM is zeroed:
+       at boot (the default: all of it before the program starts), at
+       first use (each piece at the moment it is handed out) or in the
+       background (ahead of use whenever the processor is idle, the rest
+       on demand). The targets link the row's prebuilt kernel built for
+       that mode, so only the chosen mode's code is in the image; a row
+       that carries an external RAM range names its three archives in the
+       board table, and a lazy value on any other row, a value outside the
+       three, or a value the targets' refusal table names, is refused
+       before anything is compiled. The memory a program receives
+       reads zero in every mode.
+       RhuManagedMemory says where a board's external RAM puts the hosted
+       runtime's managed heap and its rehydrated type data: external (the
+       default) places both in the external RAM, internal keeps both in
+       the chip's own RAM. The targets link the image under the row's
+       payload map for external and under the row's second map for
+       internal; the map alone moves (the same kernel is linked under
+       either, and the hosting layer finds the heap's home by the map's
+       brackets), so the compiled object is the same with or without it.
+       A row that carries an external RAM range names its second map in
+       the board table, and the internal value on any other row, or a
+       value outside the two, is refused before anything is compiled.
+       RhuProgramMemory says where a board's memory-mapped external flash
+       puts the hosted program's managed code and read-only data: internal
+       (the default) keeps them in the chip's own flash, external places
+       them, with the managed code's unwind tables, in the board's external
+       flash, and the program executes in place from it. The targets rename
+       the program object's read-only data and unwind-table sections before
+       the merge with the runtime archives, so the row's external-flash map
+       places them in the flash window, and link the image under that map;
+       the compiled object is the same with or without it. A row whose board
+       carries such a flash names the map in the board table; the external
+       value on any other row, a value outside the two, and the external
+       value together with RhuManagedMemory=internal (the external-flash
+       map keeps the managed heap in the external RAM) are refused before
+       anything is compiled.
+       RhuLogLevel says how loud the kernel's own diagnostic stream is:
+       silent prints nothing but a fatal error's last words, quiet (the
+       default) one line naming the version, the board and its clock,
+       verbose the whole boot report; the program's own output is never
+       filtered. RhuLogChannel and RhuConsoleChannel route that stream
+       and the program's output to a sink the board can serve: the 16 KB
+       memory console read over the debug port, the ST-Link boards'
+       virtual COM port, a UART of the board's table held by the kernel
+       from boot, or nowhere; empty means the board's own default, which
+       the board table states beside the row's legal set (copies of the
+       facts file's channels row). Each reaches the image as an absolute
+       symbol the link defines, the level always and a channel only when
+       set, so the compiled object is the same with or without them; a
+       value outside the words, or a channel the board cannot serve, is
+       refused before anything is compiled, and the targets' board message
+       names the effective choice (a message the terminal logger hides at
+       its default verbosity). The
        fixed posture of every image follows: invariant culture, no event
        source, no metrics, no debugger support, size over speed, and no
        symbol stripping by the compiler pack: its strip belongs to the link
        this SDK replaces (Sdk.targets), and its probe for a stripping tool on
-       the PATH refuses a host that has none. The group's last three lines
-       take the compile's reference assemblies from the package
-       Microsoft.NETCore.App.Ref, never from the copy the installed .NET
-       SDK bundles: the bundled copies of the .NET SDK's host builds differ
-       in the identities of their facade assemblies, a program's symbol
-       file records those identities and the compiled object follows them,
-       so with the package one .NET SDK version compiles one object on
-       every host. The pack root names a folder this package does not
-       carry, so the .NET SDK finds no bundled pack there and restores the
-       package; the package-pruning data is still read from the .NET SDK's
-       own folder; and the reference packs of the other shared frameworks,
-       which the moved root would otherwise download as well, stay out. -->
+       the PATH refuses a host that has none. -->
   <PropertyGroup>
     <RhuDiag Condition="'$(RhuDiag)' == ''">min</RhuDiag>
     <RhuReflection Condition="'$(RhuReflection)' == ''">on</RhuReflection>
-    <StackTraceSupport Condition="'$(RhuDiag)' == 'rich'">true</StackTraceSupport>
-    <StackTraceSupport Condition="'$(RhuDiag)' == 'min'">false</StackTraceSupport>
-    <UseSystemResourceKeys Condition="'$(RhuDiag)' == 'rich'">false</UseSystemResourceKeys>
-    <UseSystemResourceKeys Condition="'$(RhuDiag)' == 'min'">true</UseSystemResourceKeys>
+    <RhuExternalRamInit Condition="'$(RhuExternalRamInit)' == ''">boot</RhuExternalRamInit>
+    <RhuManagedMemory Condition="'$(RhuManagedMemory)' == ''">external</RhuManagedMemory>
+    <RhuProgramMemory Condition="'$(RhuProgramMemory)' == ''">internal</RhuProgramMemory>
+    <RhuLogLevel Condition="'$(RhuLogLevel)' == ''">quiet</RhuLogLevel>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <InvariantTimezone>true</InvariantTimezone>
     <EventSourceSupport>false</EventSourceSupport>
     <MetricsSupport>false</MetricsSupport>
     <DebuggerSupport>false</DebuggerSupport>
     <OptimizationPreference>Size</OptimizationPreference>
     <StripSymbols>false</StripSymbols>
-    <NetCoreTargetingPackRoot>$(RhuSdkRoot)packs</NetCoreTargetingPackRoot>
-    <PrunePackageTargetingPackRoots>$(NetCoreRoot)packs</PrunePackageTargetingPackRoots>
-    <DisableTransitiveFrameworkReferenceDownloads>true</DisableTransitiveFrameworkReferenceDownloads>
+    <!-- The compiler pack's targets refuse a Windows host that targets another
+         operating system unless this is set; the guard protects the pack's own
+         native link, which these targets replace with the merge and the link
+         through the tools package, so a Windows host publishes like the others. -->
+    <DisableUnsupportedError>true</DisableUnsupportedError>
+    <!-- The compiler pack's compile step first looks on the PATH for the C
+         compiler it would link with (clang, then gcc) and refuses a host that
+         has neither; that link is replaced by the merge and the link through
+         the tools package (Sdk.targets), and the pack's linker is never run.
+         So the name it looks for is set here to a program every host has, its
+         command shell, and the step's other work stands (the framework's
+         native libraries bound directly in the compile's arguments). A host
+         with no C compiler then publishes like the others, the same object. -->
+    <CppCompilerAndLinker Condition="'$(CppCompilerAndLinker)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">cmd</CppCompilerAndLinker>
+    <CppCompilerAndLinker Condition="'$(CppCompilerAndLinker)' == ''">sh</CppCompilerAndLinker>
   </PropertyGroup>
 
   <!-- The build is deterministic and the project's directory is mapped to
        one fixed string, the same on every host, so a program's assembly,
        its compiled object and its image are byte-identical across desks
-       and directories; a project's own PathMap value wins. The checkout's
+       and directories (the targets put the intermediate directory's own
+       entry ahead of it, for the sources MSBuild generates there); a
+       project's own PathMap value wins. The checkout's
        revision and every other source-control fact stay out as well: the
        source-control queries are OFF, so no git revision is read into the
        informational version, no source-link record is written, and no
@@ -100,7 +180,8 @@
        sets the two properties in its own file, read after this one. -->
   <PropertyGroup>
     <Deterministic>true</Deterministic>
-    <PathMap Condition="'$(PathMap)' == ''">$(MSBuildProjectDirectory)=/rhu/src/$(MSBuildProjectName)</PathMap>
+    <_RhuPathMapDefault>$(MSBuildProjectDirectory)=/rhu/src/$(MSBuildProjectName)</_RhuPathMapDefault>
+    <PathMap Condition="'$(PathMap)' == ''">$(_RhuPathMapDefault)</PathMap>
     <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
     <IncludeSourceRevisionInInformationalVersion Condition="'$(IncludeSourceRevisionInInformationalVersion)' == ''">false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
@@ -109,11 +190,6 @@
     <IlcArg Include="--reflectiondata:none" />
   </ItemGroup>
 
-  <!-- The ILCompiler pack and the reference assemblies' package at the
-       tested runtime build, whatever version the installed .NET SDK names
-       for them, and the tools package for this host (the linker and the
-       object copier the link step runs); the tools package contributes
-       its build properties and nothing else. -->
   <!-- The standard GPIO package's Linux driver binds the libgpiod v1 C
        API by this library name; on RHU the shim's frozen GPIO API object
        defines those entry points over the kernel's GPIO doors, so the name
@@ -131,12 +207,18 @@
     <DirectPInvoke Include="libc!open" />
     <DirectPInvoke Include="libc!ioctl" />
     <DirectPInvoke Include="libc!close" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler" ILCompilerPackVersion="$(RhuRuntimeVersion)" />
-    <KnownFrameworkReference Update="Microsoft.NETCore.App" TargetingPackVersion="$(RhuRuntimeVersion)" />
-    <PackageReference Include="$(RhuToolsPackageId)" Version="$(RhuSdkVersion)" PrivateAssets="all" ExcludeAssets="compile;runtime;native;contentFiles;analyzers" />
+    <!-- The same package's PWM class checks a channel directory through the
+         C library's access before it opens the channel's files; the shim's
+         glue answers it for the PWM device files under /sys, so it is a
+         direct P/Invoke by entry point like the three above. -->
+    <DirectPInvoke Include="libc!access" />
+    <!-- The standard serial port package's Linux driver binds its own native
+         layer by this library name; on RHU that layer's own sources are
+         compiled unchanged into the shim's frozen serial layer object, which
+         defines those entry points over the serial device files the shim
+         presents on the kernel's UART doors, so the name is a direct
+         P/Invoke like the GPIO library's above. -->
+    <DirectPInvoke Include="libSystem.IO.Ports.Native" />
   </ItemGroup>
 
 </Project>

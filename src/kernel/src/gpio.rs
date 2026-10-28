@@ -11,6 +11,10 @@
 //! path; the program's thread waits in `rhu_futex_wait` on the value it
 //! read, so an edge between its read and its wait returns at once and
 //! nothing is lost. No blocking verb, no callback into the program.
+//!
+//! The witness `__rhu_gpio_witness` and the claims record `__rhu_claims`
+//! are read by symbol (a debugger, the api flavor's checks). The banner
+//! line at boot is constant text per image.
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
@@ -104,14 +108,38 @@ fn refused(line: u32, code: i32) -> i32 {
 /// The board's claims fixed at boot; the counters zeroed.
 pub fn init() {
     with_cs(|| unsafe {
-        claims::init(&mut *addr_of_mut!(CLAIMS), N as u32, facts::BOARD_CLAIM_BITS);
+        let c = &mut *addr_of_mut!(CLAIMS);
+        claims::init(c, N as u32, facts::BOARD_CLAIM_BITS);
+        // A UART the kernel holds as a stream's wire takes its two
+        // lines as BOARD claims (no line by default on the Pico rows: the
+        // memory console takes no pin); the pins are the held port's (the
+        // facts' pair, or the project's legal override).
+        for row in facts::UART_ROWS.iter() {
+            if crate::uart::console_holds(row.block as u32) {
+                let (tx, rx) = crate::uart::held_pins(row.block as u32);
+                for line in [tx, rx] {
+                    if line != crate::uart::NO_PIN {
+                        let _ = claims::claim_board(c, line);
+                    }
+                }
+            }
+        }
         write_volatile(addr_of_mut!((*witness()).lines), N as u32);
     });
 }
 
-/// The banner's text after "[boot] gpio: ", constant per image.
+/// The banner's text after "[boot] gpio: ", constant per image (the row's
+/// own line, or the line naming the UART block or blocks the kernel holds
+/// as the streams' wires, with the facts' pairs).
 pub fn banner() -> &'static str {
-    facts::BANNER
+    let h0 = crate::uart::console_holds(0);
+    let h1 = crate::uart::console_holds(1);
+    match (h0, h1) {
+        (true, true) if !facts::BANNER_UART_BOTH.is_empty() => facts::BANNER_UART_BOTH,
+        (true, false) if !facts::BANNER_UART.is_empty() => facts::BANNER_UART[0],
+        (false, true) if facts::BANNER_UART.len() > 1 => facts::BANNER_UART[1],
+        _ => facts::BANNER,
+    }
 }
 
 /// The line SPACE (the highest line plus one), the library's range bound;
@@ -140,12 +168,18 @@ pub fn claim(line: u32, mode: u32, pull: u32, initial: u32) -> i32 {
         return refused(line, ERR_ACCES);
     }
     let held = with_cs(|| unsafe { claims::is_program(&*addr_of!(CLAIMS), line) });
+    if held && crate::adc::line_held(line) {
+        // A line an analog channel of this program reads is not a GPIO line
+        // until the channel is released; the analog side refuses the reverse.
+        return refused(line, ERR_BUSY);
+    }
     if !held {
         let r = with_cs(|| unsafe { claims::claim(&mut *addr_of_mut!(CLAIMS), line) });
         if r != 0 {
             return refused(line, r);
         }
     } else if EDGE[line as usize].load(Ordering::Acquire) != 0 && mode != m::MODE_INPUT {
+        // A re-configuration to an output disarms the edge an input held.
         backend::disarm(line);
         EDGE[line as usize].store(0, Ordering::Release);
     }
@@ -214,6 +248,10 @@ pub fn edge(line: u32, kind: u32) -> i32 {
             if !backend::HAS_EVENTS {
                 return refused(line, ERR_NOTSUP);
             }
+            // The kind is stored before the arm opens the interrupt, so an
+            // edge in that window reaches `fire` with its kind (the arms clear
+            // stale pending before enabling, so nothing stale is counted); a
+            // refused arm clears it back.
             EDGE[line as usize].store(kind as u8, Ordering::Release);
             let r = backend::arm(line, rising, falling);
             if r != 0 {
@@ -263,7 +301,7 @@ pub fn fire(line: u32, rising: bool) {
 /// The silicon check's software-triggered edge on a claimed, armed line
 /// (the family's software-interrupt register); false where the backend
 /// offers none (the virtual backend, which fires its loop instead).
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's silicon arm
 pub fn software_edge(line: u32) -> bool {
     if line as usize >= N || EDGE[line as usize].load(Ordering::Acquire) == 0 {
         return false;

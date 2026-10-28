@@ -3,38 +3,78 @@
   <!-- The board table: one row per target name, spelled maker-product.
        A row names the processor class, the payload map, the prebuilt
        kernel, the runtime archive set, the build-attributes donor, the
-       tier objects the image links in the link's order (the five shim
-       objects, the P/Invoke-facing surface object and the GPIO API
-       object, the three collector row objects, the C-library closure),
+       tier objects the image links in the link's order (the shim's five
+       link objects, the P/Invoke-facing surface object, the GPIO API
+       object, the bus and PWM device objects, the serial device object
+       and the serial layer's object, the three collector row objects,
+       the C-library closure),
+       the row's own objects among them (BoardObjects: its shim core and
+       system-call objects and its heap and collect rows, four names from
+       the Objects list, which ride in the row's board package where the
+       rest ride in the processor class's runtime package; the link keeps
+       the Objects order and takes each from the package that carries it),
        the thread stack facts (the kernel's stack pool for the row, the
        default managed stack and its clamp, in bytes: copies of the
        kernel's and the hosting layer's constants that the verification
-       chain's parity leg ties to the tree), the emulator machine (empty
-       for a physical board) and the image base. Every path is relative
-       to the package root. -->
+       chain checks against the sources), the emulator machine (empty
+       for a physical board), the image base, and the two streams' default
+       channels with the row's legal channel set (LogChannel, ConsoleChannel,
+       Channels: copies of the facts file's channels row, which the chain
+       checks too). A row that carries an
+       external RAM range names beside its default kernel (init at boot)
+       the two archives built for the lazy init modes, which the project's
+       RhuExternalRamInit value picks; the other rows carry none. Such a
+       row also names a second payload map (MapInternal), which keeps the
+       hosted runtime's rehydrated type data and the managed heap's window
+       in the chip's own RAM, picked by the project's RhuManagedMemory
+       value in place of the row's map. A row whose board carries a
+       memory-mapped external flash names a third payload map
+       (MapExternalFlash), which places the hosted program's managed code,
+       read-only data and unwind tables in that flash, executed in place,
+       picked by the project's RhuProgramMemory value. A row says where the
+       library the standard analog classes express a voltage in fits
+       (AnalogVoltageFits): internal-flash when the chip's own flash holds
+       it, external-flash when the board's external flash alone does; a
+       row without the attribute does not hold it, and the SDK leaves the
+       analog voltage switch false there. Every
+       path is relative to the root of the package that carries it. -->
   <ItemGroup>
     <LamellaTargetBoardRow Include="arm-mps2-an500"
                  Class="cortex-m7"
                  Map="maps/payload-mps2-an500.x"
+                 MapInternal="maps/payload-mps2-an500-internal.x"
                  Kernel="kernels/arm-mps2-an500/librhu_kernel.a"
+                 KernelRamInitFirstUse="kernels/arm-mps2-an500/ram-init-first-use/librhu_kernel.a"
+                 KernelRamInitBackground="kernels/arm-mps2-an500/ram-init-background/librhu_kernel.a"
                  Archives="archives/cortex-m7"
                  Donor="tier/cortex-m7/attr-donor-v7em.bin"
-                 Objects="tier/cortex-m7/shim-core.o tier/cortex-m7/shim-sysnative.o tier/cortex-m7/shim-libc-glue.o tier/cortex-m7/shim-stdio-sym.o tier/cortex-m7/shim-host.o tier/cortex-m7/shim-pal-surface.o tier/cortex-m7/shim-gpiod.o tier/cortex-m7/shim-busdev.o tier/cortex-m7/skel-row.o tier/cortex-m7/heap-row.o tier/cortex-m7/collect-row.o tier/cortex-m7/rt-libc.o"
-                 StackPool="98304"
+                 Objects="tier/cortex-m7/shim-core.o tier/cortex-m7/shim-sysnative.o tier/cortex-m7/shim-libc-glue.o tier/cortex-m7/shim-stdio-sym.o tier/cortex-m7/shim-host.o tier/cortex-m7/shim-pal-surface.o tier/cortex-m7/shim-gpiod.o tier/cortex-m7/shim-busdev.o tier/cortex-m7/shim-pwmfs.o tier/cortex-m7/shim-iiofs.o tier/cortex-m7/shim-ttydev.o tier/cortex-m7/shim-ports-native.o tier/cortex-m7/skel-row.o tier/cortex-m7/heap-row.o tier/cortex-m7/collect-row.o tier/cortex-m7/rt-libc.o"
+                 BoardObjects="tier/cortex-m7/shim-core.o tier/cortex-m7/shim-sysnative.o tier/cortex-m7/heap-row.o tier/cortex-m7/collect-row.o"
+                 StackPool="131072"
                  StackDefault="16384"
                  StackClamp="24576"
+                 LogChannel="uart0"
+                 ConsoleChannel="uart0"
+                 Channels="uart0 uart1 memory off"
                  Machine="mps2-an500"
                  Base="0x00000000" />
     <LamellaTargetBoardRow Include="arm-mps2-an505"
                  Class="cortex-m33"
                  Map="maps/payload-mps2-an505.x"
+                 MapInternal="maps/payload-mps2-an505-internal.x"
                  Kernel="kernels/arm-mps2-an505/librhu_kernel.a"
+                 KernelRamInitFirstUse="kernels/arm-mps2-an505/ram-init-first-use/librhu_kernel.a"
+                 KernelRamInitBackground="kernels/arm-mps2-an505/ram-init-background/librhu_kernel.a"
                  Archives="archives/cortex-m33"
                  Donor="tier/cortex-m33/attr-donor-v8m.bin"
-                 Objects="tier/cortex-m33/shim-core-an505.o tier/cortex-m33/shim-sysnative-an505.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-an505.o tier/cortex-m33/collect-row-an505.o tier/cortex-m33/rt-libc.o"
-                 StackPool="98304"
+                 Objects="tier/cortex-m33/shim-core-an505.o tier/cortex-m33/shim-sysnative-an505.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/shim-pwmfs-an505.o tier/cortex-m33/shim-iiofs-an505.o tier/cortex-m33/shim-ttydev-an505.o tier/cortex-m33/shim-ports-native-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-an505.o tier/cortex-m33/collect-row-an505.o tier/cortex-m33/rt-libc.o"
+                 BoardObjects="tier/cortex-m33/shim-core-an505.o tier/cortex-m33/shim-sysnative-an505.o tier/cortex-m33/heap-row-an505.o tier/cortex-m33/collect-row-an505.o"
+                 StackPool="131072"
                  StackDefault="16384"
                  StackClamp="24576"
+                 LogChannel="uart0"
+                 ConsoleChannel="uart0"
+                 Channels="uart0 uart1 memory off"
                  Machine="mps2-an505"
                  Base="0x10000000" />
     <!-- The physical rows, by brand and then model: no emulator machine;
@@ -47,31 +87,122 @@
          objects; the U5A5's row links its own heap object (the least
          managed heap the row guarantees differs from the an505 row's)
          and shares every other object with the an505 row, the core
-         included; the F769's row links its own core, system-call, heap
+         included; the STM32F769 row links its own core, system-call, heap
          and collect objects (the board's row fields differ from the
          emulator row's). -->
+    <LamellaTargetBoardRow Include="adafruit-feather-rp2350-hstx"
+                 Class="cortex-m33"
+                 Map="maps/payload-adafruit-feather-rp2350-hstx.x"
+                 Kernel="kernels/adafruit-feather-rp2350-hstx/librhu_kernel.a"
+                 Archives="archives/cortex-m33"
+                 Donor="tier/cortex-m33/attr-donor-v8m.bin"
+                 Objects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/shim-pwmfs-an505.o tier/cortex-m33/shim-iiofs-an505.o tier/cortex-m33/shim-ttydev-an505.o tier/cortex-m33/shim-ports-native-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-rp2350.o tier/cortex-m33/collect-row-rp2350.o tier/cortex-m33/rt-libc.o"
+                 BoardObjects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/heap-row-rp2350.o tier/cortex-m33/collect-row-rp2350.o"
+                 StackPool="131072"
+                 StackDefault="16384"
+                 StackClamp="24576"
+                 LogChannel="memory"
+                 ConsoleChannel="memory"
+                 Channels="memory off uart0 uart1"
+                 Machine=""
+                 Base="0x10000000" />
+    <LamellaTargetBoardRow Include="adafruit-feather-rp2350-hstx-psram"
+                 Class="cortex-m33"
+                 Map="maps/payload-adafruit-feather-rp2350-hstx-psram.x"
+                 MapInternal="maps/payload-adafruit-feather-rp2350-hstx-psram-internal.x"
+                 Kernel="kernels/adafruit-feather-rp2350-hstx-psram/librhu_kernel.a"
+                 KernelRamInitFirstUse="kernels/adafruit-feather-rp2350-hstx-psram/ram-init-first-use/librhu_kernel.a"
+                 KernelRamInitBackground="kernels/adafruit-feather-rp2350-hstx-psram/ram-init-background/librhu_kernel.a"
+                 Archives="archives/cortex-m33"
+                 Donor="tier/cortex-m33/attr-donor-v8m.bin"
+                 Objects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/shim-pwmfs-an505.o tier/cortex-m33/shim-iiofs-an505.o tier/cortex-m33/shim-ttydev-an505.o tier/cortex-m33/shim-ports-native-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-picoplus2.o tier/cortex-m33/collect-row-rp2350.o tier/cortex-m33/rt-libc.o"
+                 BoardObjects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/heap-row-picoplus2.o tier/cortex-m33/collect-row-rp2350.o"
+                 StackPool="131072"
+                 StackDefault="16384"
+                 StackClamp="24576"
+                 LogChannel="memory"
+                 ConsoleChannel="memory"
+                 Channels="memory off uart0 uart1"
+                 Machine=""
+                 Base="0x10000000" />
+    <LamellaTargetBoardRow Include="pimoroni-pico-lipo-2"
+                 Class="cortex-m33"
+                 Map="maps/payload-pimoroni-pico-lipo-2.x"
+                 MapInternal="maps/payload-pimoroni-pico-lipo-2-internal.x"
+                 AnalogVoltageFits="internal-flash"
+                 Kernel="kernels/pimoroni-pico-lipo-2/librhu_kernel.a"
+                 KernelRamInitFirstUse="kernels/pimoroni-pico-lipo-2/ram-init-first-use/librhu_kernel.a"
+                 KernelRamInitBackground="kernels/pimoroni-pico-lipo-2/ram-init-background/librhu_kernel.a"
+                 Archives="archives/cortex-m33"
+                 Donor="tier/cortex-m33/attr-donor-v8m.bin"
+                 Objects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/shim-pwmfs-an505.o tier/cortex-m33/shim-iiofs-an505.o tier/cortex-m33/shim-ttydev-an505.o tier/cortex-m33/shim-ports-native-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-picoplus2.o tier/cortex-m33/collect-row-rp2350.o tier/cortex-m33/rt-libc.o"
+                 BoardObjects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/heap-row-picoplus2.o tier/cortex-m33/collect-row-rp2350.o"
+                 StackPool="131072"
+                 StackDefault="16384"
+                 StackClamp="24576"
+                 LogChannel="memory"
+                 ConsoleChannel="memory"
+                 Channels="memory off uart0 uart1"
+                 Machine=""
+                 Base="0x10000000" />
+    <LamellaTargetBoardRow Include="pimoroni-pico-lipo-2-xl-w"
+                 Class="cortex-m33"
+                 Map="maps/payload-pimoroni-pico-lipo-2-xl-w.x"
+                 MapInternal="maps/payload-pimoroni-pico-lipo-2-xl-w-internal.x"
+                 AnalogVoltageFits="internal-flash"
+                 Kernel="kernels/pimoroni-pico-lipo-2-xl-w/librhu_kernel.a"
+                 KernelRamInitFirstUse="kernels/pimoroni-pico-lipo-2-xl-w/ram-init-first-use/librhu_kernel.a"
+                 KernelRamInitBackground="kernels/pimoroni-pico-lipo-2-xl-w/ram-init-background/librhu_kernel.a"
+                 Archives="archives/cortex-m33"
+                 Donor="tier/cortex-m33/attr-donor-v8m.bin"
+                 Objects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/shim-pwmfs-an505.o tier/cortex-m33/shim-iiofs-an505.o tier/cortex-m33/shim-ttydev-an505.o tier/cortex-m33/shim-ports-native-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-picoplus2.o tier/cortex-m33/collect-row-rp2350.o tier/cortex-m33/rt-libc.o"
+                 BoardObjects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/heap-row-picoplus2.o tier/cortex-m33/collect-row-rp2350.o"
+                 StackPool="131072"
+                 StackDefault="16384"
+                 StackClamp="24576"
+                 LogChannel="memory"
+                 ConsoleChannel="memory"
+                 Channels="memory off uart0 uart1"
+                 Machine=""
+                 Base="0x10000000" />
     <LamellaTargetBoardRow Include="pimoroni-pico-plus-2"
                  Class="cortex-m33"
                  Map="maps/payload-pimoroni-pico-plus-2.x"
+                 MapInternal="maps/payload-pimoroni-pico-plus-2-internal.x"
+                 AnalogVoltageFits="internal-flash"
                  Kernel="kernels/pimoroni-pico-plus-2/librhu_kernel.a"
+                 KernelRamInitFirstUse="kernels/pimoroni-pico-plus-2/ram-init-first-use/librhu_kernel.a"
+                 KernelRamInitBackground="kernels/pimoroni-pico-plus-2/ram-init-background/librhu_kernel.a"
                  Archives="archives/cortex-m33"
                  Donor="tier/cortex-m33/attr-donor-v8m.bin"
-                 Objects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-rp2350.o tier/cortex-m33/collect-row-rp2350.o tier/cortex-m33/rt-libc.o"
-                 StackPool="98304"
+                 Objects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/shim-pwmfs-an505.o tier/cortex-m33/shim-iiofs-an505.o tier/cortex-m33/shim-ttydev-an505.o tier/cortex-m33/shim-ports-native-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-picoplus2.o tier/cortex-m33/collect-row-rp2350.o tier/cortex-m33/rt-libc.o"
+                 BoardObjects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/heap-row-picoplus2.o tier/cortex-m33/collect-row-rp2350.o"
+                 StackPool="131072"
                  StackDefault="16384"
                  StackClamp="24576"
+                 LogChannel="memory"
+                 ConsoleChannel="memory"
+                 Channels="memory off uart0 uart1"
                  Machine=""
                  Base="0x10000000" />
     <LamellaTargetBoardRow Include="pimoroni-pico-plus-2-w"
                  Class="cortex-m33"
                  Map="maps/payload-pimoroni-pico-plus-2-w.x"
+                 MapInternal="maps/payload-pimoroni-pico-plus-2-w-internal.x"
+                 AnalogVoltageFits="internal-flash"
                  Kernel="kernels/pimoroni-pico-plus-2-w/librhu_kernel.a"
+                 KernelRamInitFirstUse="kernels/pimoroni-pico-plus-2-w/ram-init-first-use/librhu_kernel.a"
+                 KernelRamInitBackground="kernels/pimoroni-pico-plus-2-w/ram-init-background/librhu_kernel.a"
                  Archives="archives/cortex-m33"
                  Donor="tier/cortex-m33/attr-donor-v8m.bin"
-                 Objects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-rp2350.o tier/cortex-m33/collect-row-rp2350.o tier/cortex-m33/rt-libc.o"
-                 StackPool="98304"
+                 Objects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/shim-pwmfs-an505.o tier/cortex-m33/shim-iiofs-an505.o tier/cortex-m33/shim-ttydev-an505.o tier/cortex-m33/shim-ports-native-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-picoplus2.o tier/cortex-m33/collect-row-rp2350.o tier/cortex-m33/rt-libc.o"
+                 BoardObjects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/heap-row-picoplus2.o tier/cortex-m33/collect-row-rp2350.o"
+                 StackPool="131072"
                  StackDefault="16384"
                  StackClamp="24576"
+                 LogChannel="memory"
+                 ConsoleChannel="memory"
+                 Channels="memory off uart0 uart1"
                  Machine=""
                  Base="0x10000000" />
     <LamellaTargetBoardRow Include="rpi-pico2"
@@ -80,10 +211,14 @@
                  Kernel="kernels/rpi-pico2/librhu_kernel.a"
                  Archives="archives/cortex-m33"
                  Donor="tier/cortex-m33/attr-donor-v8m.bin"
-                 Objects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-rp2350.o tier/cortex-m33/collect-row-rp2350.o tier/cortex-m33/rt-libc.o"
-                 StackPool="98304"
+                 Objects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/shim-pwmfs-an505.o tier/cortex-m33/shim-iiofs-an505.o tier/cortex-m33/shim-ttydev-an505.o tier/cortex-m33/shim-ports-native-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-rp2350.o tier/cortex-m33/collect-row-rp2350.o tier/cortex-m33/rt-libc.o"
+                 BoardObjects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/heap-row-rp2350.o tier/cortex-m33/collect-row-rp2350.o"
+                 StackPool="131072"
                  StackDefault="16384"
                  StackClamp="24576"
+                 LogChannel="memory"
+                 ConsoleChannel="memory"
+                 Channels="memory off uart0 uart1"
                  Machine=""
                  Base="0x10000000" />
     <LamellaTargetBoardRow Include="rpi-pico2-w"
@@ -92,10 +227,14 @@
                  Kernel="kernels/rpi-pico2-w/librhu_kernel.a"
                  Archives="archives/cortex-m33"
                  Donor="tier/cortex-m33/attr-donor-v8m.bin"
-                 Objects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-rp2350.o tier/cortex-m33/collect-row-rp2350.o tier/cortex-m33/rt-libc.o"
-                 StackPool="98304"
+                 Objects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/shim-pwmfs-an505.o tier/cortex-m33/shim-iiofs-an505.o tier/cortex-m33/shim-ttydev-an505.o tier/cortex-m33/shim-ports-native-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-rp2350.o tier/cortex-m33/collect-row-rp2350.o tier/cortex-m33/rt-libc.o"
+                 BoardObjects="tier/cortex-m33/shim-core-rp2350.o tier/cortex-m33/shim-sysnative-rp2350.o tier/cortex-m33/heap-row-rp2350.o tier/cortex-m33/collect-row-rp2350.o"
+                 StackPool="131072"
                  StackDefault="16384"
                  StackClamp="24576"
+                 LogChannel="memory"
+                 ConsoleChannel="memory"
+                 Channels="memory off uart0 uart1"
                  Machine=""
                  Base="0x10000000" />
     <LamellaTargetBoardRow Include="st-nucleo-u5a5zj-q"
@@ -104,22 +243,35 @@
                  Kernel="kernels/st-nucleo-u5a5zj-q/librhu_kernel.a"
                  Archives="archives/cortex-m33"
                  Donor="tier/cortex-m33/attr-donor-v8m.bin"
-                 Objects="tier/cortex-m33/shim-core-an505.o tier/cortex-m33/shim-sysnative-an505.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-u5a5.o tier/cortex-m33/collect-row-an505.o tier/cortex-m33/rt-libc.o"
+                 Objects="tier/cortex-m33/shim-core-an505.o tier/cortex-m33/shim-sysnative-an505.o tier/cortex-m33/shim-libc-glue-an505.o tier/cortex-m33/shim-stdio-sym-an505.o tier/cortex-m33/shim-host-an505.o tier/cortex-m33/shim-pal-surface-an505.o tier/cortex-m33/shim-gpiod-an505.o tier/cortex-m33/shim-busdev-an505.o tier/cortex-m33/shim-pwmfs-an505.o tier/cortex-m33/shim-iiofs-an505.o tier/cortex-m33/shim-ttydev-an505.o tier/cortex-m33/shim-ports-native-an505.o tier/cortex-m33/skel-row-an505.o tier/cortex-m33/heap-row-u5a5.o tier/cortex-m33/collect-row-an505.o tier/cortex-m33/rt-libc.o"
+                 BoardObjects="tier/cortex-m33/shim-core-an505.o tier/cortex-m33/shim-sysnative-an505.o tier/cortex-m33/heap-row-u5a5.o tier/cortex-m33/collect-row-an505.o"
                  StackPool="262144"
                  StackDefault="16384"
                  StackClamp="24576"
+                 LogChannel="probe"
+                 ConsoleChannel="probe"
+                 Channels="probe memory off"
                  Machine=""
                  Base="0x08000000" />
     <LamellaTargetBoardRow Include="st-stm32f769i-disco"
                  Class="cortex-m7"
                  Map="maps/payload-st-stm32f769i-disco.x"
+                 MapInternal="maps/payload-st-stm32f769i-disco-internal.x"
+                 MapExternalFlash="maps/payload-st-stm32f769i-disco-xip.x"
+                 AnalogVoltageFits="external-flash"
                  Kernel="kernels/st-stm32f769i-disco/librhu_kernel.a"
+                 KernelRamInitFirstUse="kernels/st-stm32f769i-disco/ram-init-first-use/librhu_kernel.a"
+                 KernelRamInitBackground="kernels/st-stm32f769i-disco/ram-init-background/librhu_kernel.a"
                  Archives="archives/cortex-m7"
                  Donor="tier/cortex-m7/attr-donor-v7em.bin"
-                 Objects="tier/cortex-m7/shim-core-f769.o tier/cortex-m7/shim-sysnative-f769.o tier/cortex-m7/shim-libc-glue.o tier/cortex-m7/shim-stdio-sym.o tier/cortex-m7/shim-host.o tier/cortex-m7/shim-pal-surface.o tier/cortex-m7/shim-gpiod.o tier/cortex-m7/shim-busdev.o tier/cortex-m7/skel-row.o tier/cortex-m7/heap-row-f769.o tier/cortex-m7/collect-row-f769.o tier/cortex-m7/rt-libc.o"
-                 StackPool="98304"
+                 Objects="tier/cortex-m7/shim-core-f769.o tier/cortex-m7/shim-sysnative-f769.o tier/cortex-m7/shim-libc-glue.o tier/cortex-m7/shim-stdio-sym.o tier/cortex-m7/shim-host.o tier/cortex-m7/shim-pal-surface.o tier/cortex-m7/shim-gpiod.o tier/cortex-m7/shim-busdev.o tier/cortex-m7/shim-pwmfs.o tier/cortex-m7/shim-iiofs.o tier/cortex-m7/shim-ttydev.o tier/cortex-m7/shim-ports-native.o tier/cortex-m7/skel-row.o tier/cortex-m7/heap-row-f769.o tier/cortex-m7/collect-row-f769.o tier/cortex-m7/rt-libc.o"
+                 BoardObjects="tier/cortex-m7/shim-core-f769.o tier/cortex-m7/shim-sysnative-f769.o tier/cortex-m7/heap-row-f769.o tier/cortex-m7/collect-row-f769.o"
+                 StackPool="131072"
                  StackDefault="16384"
                  StackClamp="24576"
+                 LogChannel="probe"
+                 ConsoleChannel="probe"
+                 Channels="probe memory off"
                  Machine=""
                  Base="0x08000000" />
   </ItemGroup>

@@ -137,11 +137,11 @@
  *    collection), so a cooperative spinner always sees the lock
  *    freed. During a collection the lock is provably free, so the
  *    GcEnumAllocContexts site never spins at all.
- *  - Negative control (-DMGC_BREAK_WINDOW_FIX): the plug+count are
- *    suppressed (contexts still cleared). The un-plugged window gap
- *    makes the very next heap walk read a NULL MethodTable -> the
- *    'heap walk CORRUPT' fail-fast is the deterministic detector --
- *    proving the walk cross-check genuinely guards the window seam.
+ *  - Built with -DMGC_BREAK_WINDOW_FIX, the plug and the count are
+ *    suppressed (contexts still cleared); the un-plugged window gap
+ *    makes the very next heap walk read a NULL MethodTable, so the
+ *    'heap walk CORRUPT' fail-fast fires, which shows the walk
+ *    cross-check guards the window seam.
  */
 
 #include "mgc_env.h"
@@ -149,6 +149,7 @@
 #include "gcenv.ee.h"     /* flat GCToEEInterface -- StompWriteBarrier lives here */
 #include "gcenv.object.h" /* MethodTable mirror for the free-object gap fill */
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -160,20 +161,51 @@ extern "C" void* mmap64(void* addr, size_t len, int prot, int flags,
                         int fd, uint64_t off);
 #define GLIBC_PROT_RW       0x3  /* PROT_READ|PROT_WRITE */
 #define GLIBC_MAP_ANON_PRIV 0x22 /* MAP_PRIVATE|MAP_ANONYMOUS */
+/* The collector's own mapping entry (the shim's rhu_shim_collector_mmap):
+ * a page-rounded, page-aligned, zero-born mapping served from the window
+ * the managed heap lives in -- the external RAM's window where the image's
+ * rehydrated type data went, the chip's own SRAM otherwise -- and (void*)-1
+ * on that window's exhaustion. The single-range region below is drawn
+ * through it; the two-range postures keep mmap64. */
+extern "C" void* rhu_shim_collector_mmap(size_t len);
 
 /* Handle-pool / frozen-segment recap, implemented by the skeleton TU
  * (only ever linked together with it in MGC_HEAP_LIVE images). */
 extern "C" void mgc_skel_census(void);
 
-#define HPLOG(fmt, ...) \
-    do { printf("[mgc-heap] " fmt "\n", ##__VA_ARGS__); fflush(stdout); } while (0)
-#define PRLOG(fmt, ...) \
-    do { printf("[mgc-probe] " fmt "\n", ##__VA_ARGS__); fflush(stdout); } while (0)
+/* The log-door stage: one line of the collector's log on the kernel's LOG
+ * stream (mgc_env.h): the image's level read once, the line formatted only
+ * when it will print, ONE write through the door. */
+static void mgc_log(uint32_t level, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void mgc_log(uint32_t level, const char *fmt, ...)
+{
+    static int32_t image_level = 0;
+    if (image_level == 0)
+        image_level = rhu_log_level();
+    if ((int32_t)level > image_level)
+        return;
+    char line[256];        /* the line's bound: one longer than 255 characters
+                            * with its newline is written cut at 255 and loses
+                            * the newline (every line below stays under it; the
+                            * longest, the finalization table's refusal, is 234
+                            * at its largest numbers) */
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    if (n <= 0)
+        return;
+    if ((size_t)n >= sizeof line)
+        n = (int)sizeof line - 1;
+    rhu_log_write(level, line, (uint32_t)n);
+}
+
+#define HPLOG(fmt, ...) mgc_log(MGC_LOG_VERBOSE, "[mgc-heap] " fmt "\n", ##__VA_ARGS__)
+#define PRLOG(fmt, ...) mgc_log(MGC_LOG_VERBOSE, "[mgc-probe] " fmt "\n", ##__VA_ARGS__)
 
 static void heap_failfast(const char* what)
 {
-    printf("[mgc-heap] FAIL-FAST: %s\n", what);
-    fflush(stdout);
+    mgc_log(MGC_LOG_SILENT, "[mgc-heap] FAIL-FAST: %s\n", what);
     abort();
 }
 
@@ -211,7 +243,20 @@ static void heap_failfast(const char* what)
 #define MGC_FINQ_CAP 2048u
 #endif
 
-#ifndef MGC_PROBE_WINDOW_BYTES  /* -DMGC_PROBE_WINDOW experiment size */
+#ifndef MGC_FINQ_RESERVE        /* finalize-registration slots held back
+                                 * for an out-of-memory exception's own
+                                 * finalizable allocation: a finalizable
+                                 * request takes a slot only below the
+                                 * cap minus this while the grace is
+                                 * closed (the refusal is the out-of-memory
+                                 * report, which opens it) and up to the
+                                 * cap while it is open */
+#define MGC_FINQ_RESERVE 16u
+#endif
+static_assert(MGC_FINQ_RESERVE < MGC_FINQ_CAP,
+              "the slots held back are a part of the finalization table, not the table");
+
+#ifndef MGC_PROBE_WINDOW_BYTES  /* the window's size under -DMGC_PROBE_WINDOW */
 #define MGC_PROBE_WINDOW_BYTES 512u
 #endif
 
@@ -356,6 +401,7 @@ static uint32_t g_finq_n, g_finq_lost;
                              * slots only) */
 static uint8_t  g_finq_state[MGC_FINQ_CAP];
 static uint32_t g_finq_live;        /* REG slots */
+static uint32_t g_finq_held;        /* HELD slots (a request between its slot and its memory) */
 static uint32_t g_freach_n, g_freach_crit_n;
 static uint32_t g_finq_reg_total;   /* monotonic (census) */
 static uint32_t g_finq_rover;       /* append scan start */
@@ -450,8 +496,11 @@ static int      g_win_state;    /* 0=not handed 1=handed 2=verdict logged */
 
 #ifdef MGC_HEAP_AT_BOOT
 /* The C library's own questions for the page size and the pages still
- * free; the shim answers both from the kernel's system memory, so
- * nothing RHU-named enters the collector. */
+ * free in the window the managed heap lives in; the shim answers both
+ * from the kernel's system memory of that window (the external RAM's
+ * where the image's rehydrated type data went, the chip's own SRAM
+ * otherwise), and the region below is drawn from the same window
+ * through the collector's mapping entry. */
 extern "C" long sysconf(int name);
 #define GLIBC_SC_PAGESIZE     30
 #define GLIBC_SC_AVPHYS_PAGES 86
@@ -528,8 +577,7 @@ extern "C" void mgc_heap_init(void)
 #ifdef MGC_HEAP_AT_BOOT
     g_heap_bytes = heap_size_at_boot();
 #endif
-    void* p = mmap64(nullptr, HEAP_BYTES, GLIBC_PROT_RW,
-                     GLIBC_MAP_ANON_PRIV, -1, 0);
+    void* p = rhu_shim_collector_mmap(HEAP_BYTES);
 #endif
     if (p == (void*)-1 || p == nullptr)
         heap_failfast("region mmap failed (see the arena audit above)");
@@ -585,12 +633,10 @@ extern "C" void mgc_heap_init(void)
 #endif
 
 #ifdef MGC_BREAK_STOMP
-    /* Negative control: the write-barrier stomp is SUPPRESSED. The
-     * gate's ordering check (stomp marker before the first Alloc-return
-     * marker) must FAIL against this transcript --
-     * marker absence is the deterministic detector; whatever the
-     * unstomped barriers then do to the image is recorded, not
-     * asserted. */
+    /* Built with this define, the write-barrier stomp is suppressed, so
+     * its marker line is absent and the collector gate's ordering check
+     * (the stomp marker before the first Alloc-return marker) fails;
+     * whatever the unstomped barriers then do is printed, not asserted. */
     HPLOG("BREAK_STOMP: write-barrier stomp SUPPRESSED (negative control)");
 #else
     /* THE STOMP: one Initialize op writes all five globals. Card
@@ -696,10 +742,10 @@ extern "C" void mgc_heap_init(void)
 }
 
 #ifdef MGC_FRAG_CENSUS
-/* Fragmentation observability. One O(runs) pass over the free list;
- * every caller holds the alloc lock or runs with the world stopped.
- * Transcript-affecting, so the whole feature sits behind the knob: an
- * image adopts it deliberately, with its own goldens. */
+/* A fragmentation census: one O(runs) pass over the free list; every
+ * caller holds the alloc lock or runs with the world stopped. It adds
+ * lines to the output, so the whole feature compiles only under
+ * MGC_FRAG_CENSUS. */
 static uint32_t frag_walk(uint32_t* largest, uint32_t hist[8])
 {
     uint32_t runs = 0;
@@ -774,11 +820,11 @@ extern "C" void mgc_heap_census(const char* why)
           (unsigned long)g_fl_zopt, (unsigned long)g_fl_loh,
           (unsigned long)g_fl_poh);
 #ifdef MGC_SWEEP_LIVE
-    HPLOG("finq: registered_total=%lu live=%lu freach=%lu(+%lu crit) lost=%lu (cap=%lu, bound=%lu)",
+    HPLOG("finq: registered_total=%lu live=%lu freach=%lu(+%lu crit) lost=%lu (cap=%lu, reserve=%lu, bound=%lu)",
           (unsigned long)g_finq_reg_total, (unsigned long)g_finq_live,
           (unsigned long)g_freach_n, (unsigned long)g_freach_crit_n,
           (unsigned long)g_finq_lost, (unsigned long)MGC_FINQ_CAP,
-          (unsigned long)g_finq_n);
+          (unsigned long)MGC_FINQ_RESERVE, (unsigned long)g_finq_n);
     HPLOG("free list: runs=%lu free=%lu KB; reuse: allocs=%lu bytes=%lu KB (exact=%lu split=%lu); walk_expected=%lu",
           (unsigned long)g_free_runs, (unsigned long)(g_free_bytes / 1024u),
           (unsigned long)g_reuse_allocs,
@@ -918,16 +964,37 @@ extern "C" uint32_t mgc_freach_count(void);
 /* A finalizable request takes its slot BEFORE its memory, so no object
  * is ever handed out unregistered. Lock-free like the append: FREE ->
  * HELD by CAS; the slot carries no object until finq_commit. */
+static uint32_t finq_occupied(void)
+{
+    return __atomic_load_n(&g_finq_live, __ATOMIC_RELAXED)
+         + __atomic_load_n(&g_freach_n, __ATOMIC_RELAXED)
+         + __atomic_load_n(&g_freach_crit_n, __ATOMIC_RELAXED)
+         + __atomic_load_n(&g_finq_held, __ATOMIC_RELAXED);
+}
+
+/* The table's bound for a request: the cap less the reserve while the
+ * grace is closed, the cap while it is open (the reserve is for the
+ * exception's own finalizable allocation, which the grace announces). */
+static bool finq_room(void)
+{
+    uint32_t bound = g_grace ? MGC_FINQ_CAP : MGC_FINQ_CAP - MGC_FINQ_RESERVE;
+    return finq_occupied() < bound;
+}
+
 static int32_t finq_hold(void)
 {
+    if (!finq_room())
+        return -1;
     uint32_t rover = __atomic_load_n(&g_finq_rover, __ATOMIC_RELAXED);
     for (uint32_t k = 0; k < MGC_FINQ_CAP; k++) {
         uint32_t i = (rover + k) % MGC_FINQ_CAP;
         uint8_t expect = FQ_FREE;
         if (__atomic_compare_exchange_n(&g_finq_state[i], &expect,
                                         (uint8_t)FQ_HELD, false,
-                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+            __atomic_add_fetch(&g_finq_held, 1u, __ATOMIC_RELAXED);
             return (int32_t)i;
+        }
     }
     return -1;
 }
@@ -937,6 +1004,7 @@ static void finq_release(int32_t slot)
 {
     __atomic_store_n(&g_finq_state[(uint32_t)slot], (uint8_t)FQ_FREE,
                      __ATOMIC_RELEASE);
+    __atomic_sub_fetch(&g_finq_held, 1u, __ATOMIC_RELAXED);
 }
 
 /* The held slot receives its object: HELD -> REG, the same books and
@@ -947,6 +1015,7 @@ static void finq_commit(int32_t slot, Object* obj, size_t size)
     g_finq[i] = obj;
     __atomic_thread_fence(__ATOMIC_RELEASE);
     __atomic_store_n(&g_finq_state[i], (uint8_t)FQ_REG, __ATOMIC_RELEASE);
+    __atomic_sub_fetch(&g_finq_held, 1u, __ATOMIC_RELAXED);
     __atomic_add_fetch(&g_finq_live, 1u, __ATOMIC_RELAXED);
     uint32_t total = __atomic_add_fetch(&g_finq_reg_total, 1u,
                                         __ATOMIC_RELAXED);
@@ -959,22 +1028,14 @@ static void finq_commit(int32_t slot, Object* obj, size_t size)
               (unsigned long)size, (unsigned long)i);
 }
 
-static bool finq_has_free(void)
-{
-    for (uint32_t i = 0; i < MGC_FINQ_CAP; i++)
-        if (__atomic_load_n(&g_finq_state[i], __ATOMIC_RELAXED) == FQ_FREE)
-            return true;
-    return false;
-}
-
 /* After the collection a full table made: a dead finalizable object's
  * slot is freed only when the finalizer thread takes the object. While
  * such objects are pending and no slot is free, give the processor away
  * the allocator's own way (preemptive, so a suspension never waits on
  * this thread; the caller holds no lock), a bounded number of times.
  * The wait rests on every hosted thread running at one priority, round
- * robin: a yield reaches the finalizer thread. A later change that maps managed
- * priorities into the band meets this wait here -- a requester that
+ * robin: a yield reaches the finalizer thread. Mapping managed priorities
+ * into the band would have to revisit this wait -- a requester that
  * outranks the finalizer thread would exhaust its yields and be
  * refused. The finalizer thread itself, asking while every slot is
  * pending, cannot be helped by the wait (it is the thread the wait is
@@ -983,7 +1044,7 @@ static void finq_wait_drain(void)
 {
     GCToEEInterface::EnablePreemptiveGC();
     for (uint32_t n = 0; n < MGC_FINQ_DRAIN_YIELDS; n++) {
-        if (mgc_freach_count() == 0 || finq_has_free())
+        if (mgc_freach_count() == 0 || finq_room())
             break;
         sched_yield();
     }
@@ -1443,10 +1504,10 @@ static void window_fix_locked(gc_alloc_context* acontext)
     if (!(ptr >= w->base && ptr <= limit))
         heap_failfast("window fix geometry (alloc_ptr outside [base,limit])");
 #ifdef MGC_BREAK_WINDOW_FIX
-    /* Negative control: no plug, no count -- the walk model and heap
-     * parseability are deliberately broken. The next heap walk reads
-     * a NULL MethodTable in the gap -> 'heap walk CORRUPT' fail-fast
-     * is the deterministic detector. */
+    /* Built with this define, there is no plug and no count: the walk
+     * model and the heap's parseability are broken, the next heap walk
+     * reads a NULL MethodTable in the gap, and the 'heap walk CORRUPT'
+     * fail-fast fires. */
     {
         static int armed;
         if (!armed++)
@@ -1643,8 +1704,9 @@ extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
     if (flags & GC_ALLOC_FINALIZE) {
         fq_slot = finq_hold();
         if (fq_slot < 0) {
-            HPLOG("finalization table full (%lu entries): one collection before the request is answered (alloc #%lu size=%lu)",
-                  (unsigned long)MGC_FINQ_CAP,
+            HPLOG("finalization table at its bound (%lu of %lu entries taken, %lu held back for an exception's own): one collection before the request is answered (alloc #%lu size=%lu)",
+                  (unsigned long)finq_occupied(), (unsigned long)MGC_FINQ_CAP,
+                  (unsigned long)MGC_FINQ_RESERVE,
                   (unsigned long)(g_allocs + 1), (unsigned long)size);
             alloc_lock_release();
             mgc_heap_collect(2, /*low_memory_p*/ 1, /*mode*/ 0);
@@ -1652,11 +1714,23 @@ extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
             alloc_lock_acquire();
             fq_slot = finq_hold();
             if (fq_slot < 0) {
-                HPLOG("finalization table FULL: all %lu entries hold finalizable objects that are live or not yet finalized; the request of %lu bytes is answered no memory (no finalizable object is handed out unregistered)",
-                      (unsigned long)MGC_FINQ_CAP, (unsigned long)size);
-                g_null_returns++;
-                alloc_lock_release();
-                return nullptr;
+                if (g_grace) {
+                    /* the slots held back were for this request -- an
+                     * exception's own finalizable allocation -- and they
+                     * are gone: loud, never a null the dispatch cannot
+                     * take (the heap's rule for its byte reserve) */
+                    HPLOG("FINALIZATION RESERVE EXHAUSTED: every one of the %lu entries taken while the out-of-memory grace is open; the request of %lu bytes cannot be registered -- raise MGC_FINQ_RESERVE",
+                          (unsigned long)MGC_FINQ_CAP, (unsigned long)size);
+                    mgc_heap_census("finalization reserve exhausted");
+                    heap_failfast("finalization reserve exhausted during OOM dispatch (raise MGC_FINQ_RESERVE)");
+                }
+                /* the managed protocol: NULL with the grace opened, so the
+                 * OutOfMemoryException's own finalizable allocation finds
+                 * a slot among those held back */
+                HPLOG("finalization table FULL: %lu of its %lu entries hold finalizable objects live or not yet finalized (%lu held back for an exception's own); the request of %lu bytes is answered no memory, none handed out unregistered",
+                      (unsigned long)finq_occupied(), (unsigned long)MGC_FINQ_CAP,
+                      (unsigned long)MGC_FINQ_RESERVE, (unsigned long)size);
+                return oom_report_locked(size, flags);
             }
         }
     }
@@ -1743,7 +1817,7 @@ extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
                     if (g_win_tab[i].ctx) out++;
                 if (out > g_win_hw) g_win_hw = out;
                 if (g_win_handed <= 4 || (g_win_handed & 255u) == 0
-#ifdef MGC_DIAG_ALLOC_LOG /* diagnostic knob */
+#ifdef MGC_DIAG_ALLOC_LOG /* a diagnostic build: log every one */
                     || 1
 #endif
                     )
@@ -1914,7 +1988,7 @@ extern "C" void* mgc_heap_alloc(gc_alloc_context* acontext, size_t size,
     }
 #endif
     if (g_allocs <= 12
-#ifdef MGC_DIAG_ALLOC_LOG /* diagnostic knob */
+#ifdef MGC_DIAG_ALLOC_LOG /* a diagnostic build: log every one */
         || 1
 #endif
         )

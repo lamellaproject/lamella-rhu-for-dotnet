@@ -45,6 +45,7 @@ fn sections(obj: &[u8]) -> Option<Vec<Section>> {
     if shentsize < 40 || shstrndx >= shnum {
         return None;
     }
+    // A header's name index, type, file offset, size, link and entry size.
     let raw = |i: usize| -> Option<(usize, u32, usize, usize, usize, usize)> {
         let at = shoff + i * shentsize;
         Some((

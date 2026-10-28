@@ -1,4 +1,5 @@
 // rtsmoke: the payload gate's boot smoke program against the minimal runtime.
+
 using System.Runtime;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;

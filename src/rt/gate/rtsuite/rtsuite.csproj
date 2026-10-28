@@ -1,4 +1,4 @@
-<Project Sdk="Lamella.Rhu.Sdk">
+<Project Sdk="Lamella.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -7,13 +7,41 @@
     <RootNamespace>Rhu.Hosted</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
+    <!-- The gate's posture: the kernel's whole boot report, what the goldens measure. -->
+    <RhuLogLevel>verbose</RhuLogLevel>
   </PropertyGroup>
 
-  <!-- The standard GPIO package at the version the suite's section thirteen
-       was frozen against; the rt tiers' manifests record the package's
+  <!-- The standard GPIO package at the version the suite's GPIO section was
+       written against; the rt tiers' manifests record the package's
        identity. -->
   <ItemGroup>
     <PackageReference Include="System.Device.Gpio" Version="4.2.0" />
+  </ItemGroup>
+
+  <!-- The standard serial port package at the runtime's own build: the
+       serial section drives its class over the host's serial device
+       files; the rt tiers' manifests record the package's identity. -->
+  <ItemGroup>
+    <PackageReference Include="System.IO.Ports" Version="11.0.0-rc.2.26504.105" />
+  </ItemGroup>
+
+  <!-- The board package: the analog section drives the standard analog
+       controller it returns, and the SDK generates the row's facts into this
+       program because it references the package. -->
+  <PropertyGroup>
+    <LamellaHardwareVersion Condition="'$(LamellaHardwareVersion)' == ''">1.0.0-alpha.1</LamellaHardwareVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Lamella.Hardware" Version="$(LamellaHardwareVersion)" />
+  </ItemGroup>
+
+  <!-- The analog section calls no voltage member, and the row's image carries
+       no code of the library the standard analog classes express a voltage
+       in: the board class's switch false and trimmed, so the three members'
+       computing branches leave the image (the emulator rows' code region has
+       no room for that library). -->
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="Lamella.Hardware.AnalogVoltage.IsSupported" Value="false" Trim="true" />
   </ItemGroup>
 
   <!-- The two bus sections read the row's bus numbers from the kernel's

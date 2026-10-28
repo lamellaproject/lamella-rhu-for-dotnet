@@ -12,9 +12,9 @@
  * So this file defines the missing data symbol and points it at the real
  * stream object, and states the shape of that object itself rather than
  * including a header that would rewrite the names. Every layout fact and
- * flag value it relies on comes from the generated header, which is read
- * off the C library's own headers by a compile-only probe under the pinned
- * kit; the mirror records below are asserted against those values at
+ * flag value it relies on comes from the generated header rhu_newlib_arm32.h,
+ * which tools/extract-pal/extract_newlib_arm32.py reads off the C library's
+ * own headers; the mirror records below are asserted against those values at
  * compile time, so a library whose layout moved refuses to build this file
  * instead of writing the wrong word.
  *
@@ -51,9 +51,9 @@ _Static_assert(sizeof(((struct rhu_libc_stream *)0)->flags) == RHU_NEWLIB_STREAM
 _Static_assert(offsetof(struct rhu_libc_stream, file) == RHU_NEWLIB_STREAM_FILE_OFFSET, "the stream descriptor's offset");
 
 /* The buffering bits of that flag word, as the library defines them. Line
- * buffering is what a gate diffing transcripts needs: without it two
- * threads writing at once fuse their output mid-line and the diff reports
- * damage that is really just interleaving. */
+ * buffering keeps lines whole when two threads write at once: without it
+ * their output fuses mid-line, and a byte-for-byte comparison of the console
+ * output reports damage that is only interleaving. */
 #define RHU_LIBC_STREAM_LINEBUF RHU_NEWLIB_STREAM_LINEBUF
 #define RHU_LIBC_STREAM_NOBUF RHU_NEWLIB_STREAM_NOBUF
 
@@ -85,8 +85,7 @@ static struct rhu_libc_task_head *task_head(void)
 }
 
 /* Bind the data symbol to the library's own error stream. With no C
- * library linked, there is no stream object and the symbol stays null --
- * which is the truth, and better than a pointer to something invented. */
+ * library linked there is no stream object, and the symbol stays null. */
 void rhu_stdio_bind_stderr(void)
 {
     struct rhu_libc_task_head *h = task_head();

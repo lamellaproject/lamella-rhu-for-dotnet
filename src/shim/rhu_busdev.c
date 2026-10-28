@@ -8,7 +8,7 @@
  * directly, so they land on those functions at link time and the
  * runtime's loader is never asked.
  *
- * This file is an implementation written from scratch that presents the
+ * This file is an independent implementation that presents the
  * established device-file surface. The request numbers, the flag values
  * and the record layouts are the package's binding, read off its source
  * at the pinned version (its i2c_msg of twelve bytes with the pointer at
@@ -84,9 +84,9 @@
  * call states a bus's select count); a node's settings are its own
  * descriptor's and start unset (no rate until the program sets one or a
  * transfer carries one); a closed node does NOT release its bus or its
- * select, because this generation of the kernel API has no release call
- * -- the release at the last close is registered as an intent for the
- * kernel's release act. No SMBus emulation, no file-transfer form (read
+ * select, because the kernel API has no release call
+ * (a closed node's bus and select stay claimed until the program ends).
+ * No SMBus emulation, no file-transfer form (read
  * and write on a node, the address-selection requests), no ten-bit
  * addressing, no post-transfer delay, one transfer record per request
  * (an empty message answers 0), no duplicated descriptors, the 32-bit
@@ -102,7 +102,7 @@
 #include "rhu_shim.h"
 
 #include "rhu.h"
-#include "rhu_pal_errno_net11_rc1.h"
+#include "rhu_pal_errno_net11_rc2.h"
 
 extern int *__errno_location(void);
 void *memcpy(void *dst, const void *src, size_t n);
@@ -182,7 +182,7 @@ static_assert(sizeof(unsigned long) == 4, "the functionality request's output is
  * shape, outside Linux's numbers 0x0701 to 0x0720): one 32-bit word in
  * hertz, in and out -- the bus claimed at that rate for the program's run,
  * the word read back with the rate the bus runs at. The board class issues
- * it; the harness ties the two numbers. */
+ * it under the same number. */
 #define BUSDEV_I2C_RATE 0x0740u
 #define BUSDEV_I2C_BUSES 8u
 #define BUSDEV_DEADLINE_NS NS_PER_S
@@ -278,9 +278,8 @@ static struct busdev_node *node_enter(int fd, struct busdev_node *copy)
 }
 
 /* A request's exit: counted out; an entry closed meanwhile is given back
- * when its last request leaves. (A lock refused here would leave the entry
- * counted in for the boot: the same damaged-slot path as at an open's
- * end, stated rather than worked around.) */
+ * when its last request leaves. (A lock refused here leaves the entry
+ * counted in for the rest of the run, as at an open's end.) */
 static void node_leave(struct busdev_node *n)
 {
     if (!table_lock())
@@ -464,9 +463,9 @@ int rhu_busdev_close(int fd)
         table_unlock();
         return refuse(RHU_GERR_EBADF);
     }
-    /* The bus and its selects stay the board's: no release call in this
-     * generation of the kernel API (the release at the last close an
-     * intent). The entry goes back now, or when the last request running
+    /* The bus and its selects stay the board's: the kernel API has no
+     * release call (they stay claimed until the program
+     * ends). The entry goes back now, or when the last request running
      * on it ends. */
 #ifdef RHU_SHIM_BREAK_BUSDEV_UNOWNED
     memset(n, 0, sizeof *n);
@@ -588,7 +587,8 @@ static int i2c_rate(const struct busdev_node *c, void *arg)
         return refuse(RHU_GERR_EINVAL);
     }
 #ifdef RHU_SHIM_BREAK_BUSDEV_RATE_UNJUDGED
-    /* The careless shape: the request answers 0 and claims nothing. */
+    /* Built with this define, the request answers 0 and claims nothing, so
+     * the rate check in gate/rhu_shimtest.c fails. */
     return 0;
 #else
     uint32_t running;
@@ -634,9 +634,9 @@ static int i2c_transaction(const struct busdev_node *c, void *arg)
     }
     /* The bus claimed at the default rate at the first transfer, unless the
      * rate request claimed it earlier: a program that names no rate meets
-     * the bus at 100 kHz, as the open gave it before (its refusal for a pin
-     * a program holds as a GPIO line lands here, where the binding's lazy
-     * open already put it from the program's side). */
+     * the bus at 100 kHz (the refusal of a pin a program holds as a GPIO
+     * line lands here, where the binding's lazy open already put it from
+     * the program's side). */
     uint32_t running;
     if (i2c_rate_claim(c->bus, BUSDEV_I2C_RATE_HZ, &running, 0) != 0)
         return -1;

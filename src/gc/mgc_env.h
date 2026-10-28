@@ -3,11 +3,11 @@
  * pinned commit recorded in src/VENDORED.md).
  *
  * Upstream compiles those headers after its own gcenv.base.h has
- * defined a large ambient surface. mgc deliberately does NOT vendor
- * gcenv.base.h; this file supplies exactly the names the three
+ * defined a large ambient surface. gcenv.base.h is not vendored here;
+ * this file supplies exactly the names the three
  * vendored headers reference, nothing more -- every definition below
  * exists because a vendored header line uses it. Files under
- * src/vendor/ are never edited (the VENDORED.md rule): local needs
+ * src/vendor/ are never edited (see src/VENDORED.md): local needs
  * are met HERE, in RHU's own file.
  *
  * ABI notes (arm32, AAPCS hard-float, Itanium-family C++ ABI):
@@ -15,9 +15,9 @@
  *  - DPTR(T) is T* in non-DAC builds (DACCESS_COMPILE undefined here).
  *  - __stdcall / CALLBACK are x86-isms; empty on ARM (as upstream's
  *    gcenv does).
- *  - FEATURE_NATIVEAOT is deliberately NOT defined: PURE_VIRTUAL
+ *  - FEATURE_NATIVEAOT is left undefined: PURE_VIRTUAL
  *    stays `= 0;`, so the interfaces are abstract and the compiler
- *    ENFORCES that the skeleton overrides every method (a missed one
+ *    requires the skeleton to override every method (a missed one
  *    is a compile error, not a silent vtable hole).
  */
 #ifndef MGC_ENV_H
@@ -67,5 +67,16 @@ struct Interlocked {
  * global constructors (the payload link runs no C++ .init_array;
  * a global instance would boot with a NULL vtable pointer). */
 inline void* operator new(size_t, void* p) noexcept { return p; }
+
+/* The log-door stage: the collector's own lines go out on the kernel's LOG
+ * stream through rhu_log_write at a level -- verbose for the ordinary lines,
+ * silent for a fail-fast's last words -- and each file reads the image's
+ * level once through rhu_log_level (the level is fixed for the image's life)
+ * to skip formatting a line it would drop. The two doors as rhu.h declares
+ * them, the words as it defines them (the skeleton asserts the tie). */
+extern "C" int32_t rhu_log_level(void);
+extern "C" int32_t rhu_log_write(uint32_t level, const void *buf, uint32_t n);
+#define MGC_LOG_SILENT 1u
+#define MGC_LOG_VERBOSE 3u
 
 #endif /* MGC_ENV_H */

@@ -94,12 +94,11 @@
  *    PublishObject -- no GarbageCollect). OOM remains the bounded
  *    managed-OutOfMemoryException protocol.
  *
- * Negative control (-DMGC_BREAK_ROOTS): ALL root scanning is
- * suppressed (callback bracket, bitmap, census all still run). The
- * deterministic detector is the census itself: "roots=0 ... marked=0".
- * Mark-only means nothing dies either way -- fate recorded, not
- * asserted; the gate proves its roots>0 check bites against this
- * transcript.
+ * Built with -DMGC_BREAK_ROOTS, all root scanning is suppressed (callback
+ * bracket, bitmap, census all still run), so the census prints
+ * "roots=0 ... marked=0" and the collector gate's roots>0 check fails on
+ * that build; under a mark-only collection nothing dies either way, and
+ * the outcome is printed, not asserted.
  *
  * -DMGC_SWEEP_LIVE -- the death pipeline, in the runtime's own
  * mark_phase position and order:
@@ -150,10 +149,10 @@
  * so SuspendEE serializes the drain against this pipeline and the pop
  * needs no extra guard beyond the alloc lock (vs concurrent appends).
  *
- * Negative control (-DMGC_BREAK_WEAK): weak NULLING alone is
- * suppressed (both phases + dependent clearing); partition, promote,
- * sweep all run. Deterministic detector: a weak reference to a dead
- * object reads alive where the positive run reads it dead.
+ * Built with -DMGC_BREAK_WEAK, weak nulling alone is suppressed (both
+ * phases and the dependent clearing); partition, promote and sweep all
+ * run, and a weak reference to a dead object reads alive where the
+ * unbroken build reads it dead.
  */
 
 #include "mgc_env.h"
@@ -162,6 +161,7 @@
 #include "gcenv.object.h"
 #include "gcdesc.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -171,6 +171,11 @@ extern "C" void* mmap64(void* addr, size_t len, int prot, int flags,
                         int fd, uint64_t off);
 #define GLIBC_PROT_RW       0x3
 #define GLIBC_MAP_ANON_PRIV 0x22
+/* The collector's own mapping entry (the shim's rhu_shim_collector_mmap):
+ * the mark bitmap and the mark stack are served from the window the
+ * managed heap lives in, as the heap's region is; the two-range posture's
+ * second bitmap keeps mmap64. */
+extern "C" void* rhu_shim_collector_mmap(size_t len);
 
 /* the allocator (mgc_heap.cpp) */
 extern "C" void     mgc_heap_range(uint8_t** lo, uint8_t** hi);
@@ -218,13 +223,34 @@ extern "C" void mgc_skel_handles_foreach(
 extern "C" int mgc_skel_frozen_get(unsigned i, uint8_t** base,
                                    size_t* first, size_t* allocated);
 
-#define CLLOG(fmt, ...) \
-    do { printf("[mgc-coll] " fmt "\n", ##__VA_ARGS__); fflush(stdout); } while (0)
+/* The log-door stage: one line of the collector's log on the kernel's LOG
+ * stream (mgc_env.h): the image's level read once, the line formatted only
+ * when it will print, ONE write through the door. */
+static void mgc_log(uint32_t level, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void mgc_log(uint32_t level, const char *fmt, ...)
+{
+    static int32_t image_level = 0;
+    if (image_level == 0)
+        image_level = rhu_log_level();
+    if ((int32_t)level > image_level)
+        return;
+    char line[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    if (n <= 0)
+        return;
+    if ((size_t)n >= sizeof line)
+        n = (int)sizeof line - 1;
+    rhu_log_write(level, line, (uint32_t)n);
+}
+
+#define CLLOG(fmt, ...) mgc_log(MGC_LOG_VERBOSE, "[mgc-coll] " fmt "\n", ##__VA_ARGS__)
 
 static void coll_failfast(const char* what)
 {
-    printf("[mgc-coll] FAIL-FAST: %s\n", what);
-    fflush(stdout);
+    mgc_log(MGC_LOG_SILENT, "[mgc-coll] FAIL-FAST: %s\n", what);
     mgc_heap_census("collector fail-fast");
     abort();
 }
@@ -289,10 +315,10 @@ static uint8_t* g_r1bm;         /* range 1 mark bitmap */
 static uint32_t g_r1bm_bytes;
 static uint32_t g_walk_r[2];    /* per-range walk counts (census) */
 
-/* Walk end for range i = its bump, fetched live. The negative control
- * MGC_BREAK_RANGE_TABLE under-reports range 1's end by 4096 B -- a
- * deliberately LYING table entry; the walk cross-check (count vs the
- * allocator model, or a mid-object stop) is the designated detector. */
+/* Walk end for range i = its bump, fetched live. Built with
+ * MGC_BREAK_RANGE_TABLE, the table under-reports range 1's end by 4096 B,
+ * and the walk cross-check (the count against the allocator model, or a
+ * mid-object stop) fails. */
 static uint8_t* range_walk_end(uint32_t i)
 {
     uint8_t *b, *e, *p;
@@ -1590,9 +1616,9 @@ static void fix_slot(Object** slot)
     if (!t || !in_heap(t)) return;
     uint8_t* n = cp_forward(t);
 #ifdef MGC_BREAK_COMPACT_FWD
-    /* Negative control: the 7th rewritten heap slot gets a
-     * MISALIGNED forward (+2). The stale-scan's alignment test must
-     * catch it LOUDLY at this same collection. */
+    /* Built with this define, the 7th rewritten heap slot gets a
+     * misaligned forward (+2), and the stale-scan's alignment test fails
+     * at this same collection. */
     if (n != (uint8_t*)t && g_cp_fix_heap == 6u) {
         CLLOG("BREAK_COMPACT_FWD: slot %p forwarded to %p+2 (negative control)",
               (void*)slot, (void*)n);
@@ -1602,8 +1628,8 @@ static void fix_slot(Object** slot)
     if (n != (uint8_t*)t) { *slot = (Object*)n; g_cp_fix_heap++; }
 }
 
-/* scan_refs clone with slot rewrite (kept separate so the hot mark
- * path stays byte-identical when the knob is off) */
+/* scan_refs clone with slot rewrite (a separate copy, so the hot mark
+ * path is the same code when the compaction define is off) */
 static void fixup_refs(Object* o)
 {
     MethodTable* mt = o->RawGetMethodTable();
@@ -1684,8 +1710,8 @@ static void handle_fix_visit(unsigned idx, Object** pslot,
         if (n != (uint8_t*)*pslot) { *pslot = (Object*)n; g_cp_fix_handle++; }
     }
 #ifdef MGC_BREAK_COMPACT_DEPSEC
-    /* Negative control: dependent-handle SECONDARY rewrites are
-     * SKIPPED. The stale-scan's handle pass must catch a moved
+    /* Built with this define, the dependent handles' secondary rewrites
+     * are skipped, and the stale-scan's handle pass fails on a moved
      * secondary. */
     if (type == 6) {
         static uint32_t warned;
@@ -2192,10 +2218,10 @@ static void compact_heap(unsigned long index)
         }
     }
 #ifdef MGC_BREAK_COMPACT_ROOTS
-    /* Negative control: the EE root re-scan is SKIPPED -- every
-     * moved object referenced only from a stack/register slot keeps
-     * its stale address. A payload's own checks (and usually the
-     * stale refs' downstream reads) catch this; fate RECORDED. */
+    /* Built with this define, the EE root re-scan is skipped: every moved
+     * object referenced only from a stack or register slot keeps its
+     * stale address, which the program's own checks (and usually the
+     * stale references' later reads) catch; the outcome is printed. */
     if (index == 1)
         CLLOG("BREAK_COMPACT_ROOTS: EE root relocation SKIPPED (negative control)");
 #else
@@ -2285,8 +2311,7 @@ extern "C" void mgc_collect_init(void)
         coll_failfast("mgc_collect_init before mgc_heap_init");
 
     g_bm_bytes = (uint32_t)(g_hi - g_lo) / 32u;
-    void* bm = mmap64(nullptr, g_bm_bytes, GLIBC_PROT_RW,
-                      GLIBC_MAP_ANON_PRIV, -1, 0);
+    void* bm = rhu_shim_collector_mmap(g_bm_bytes);
     if (bm == (void*)-1 || bm == nullptr)
         coll_failfast("mark bitmap mmap failed");
     g_bm = (uint8_t*)bm;
@@ -2304,8 +2329,7 @@ extern "C" void mgc_collect_init(void)
 #endif
 
     g_stk_cap = MGC_MARK_STACK_ENTRIES;
-    void* stk = mmap64(nullptr, g_stk_cap * sizeof(Object*), GLIBC_PROT_RW,
-                       GLIBC_MAP_ANON_PRIV, -1, 0);
+    void* stk = rhu_shim_collector_mmap(g_stk_cap * sizeof(Object*));
     if (stk == (void*)-1 || stk == nullptr)
         coll_failfast("mark stack mmap failed");
     g_stk = (Object**)stk;
@@ -2456,11 +2480,10 @@ extern "C" int mgc_heap_collect(int generation, int low_memory_p, int mode)
     sc.concurrent         = false;
 
 #ifdef MGC_BREAK_ROOTS
-    /* Negative control: no root is ever reported. The census below
-     * then deterministically prints roots=0 marked=0 --
-     * the gate's positive roots>0 assert must FAIL against this
-     * transcript. Downstream fate is recorded, not asserted (mark-only
-     * kills nothing either way). */
+    /* Built with this define, no root is ever reported; the census below
+     * then prints roots=0 marked=0, and the collector gate's roots>0 check
+     * fails on this build. What follows is printed, not asserted (a
+     * mark-only collection kills nothing either way). */
     CLLOG("BREAK_ROOTS: ALL root scanning SUPPRESSED (negative control)");
     (void)sc;
     (void)&mgc_promote; (void)&handle_visit; (void)&dep_visit;
@@ -2518,10 +2541,9 @@ extern "C" int mgc_heap_collect(int generation, int low_memory_p, int mode)
     /* ------------ the death pipeline (the runtime's order) ------------ */
     memset(&g_dc, 0, sizeof(g_dc));
 #ifdef MGC_BREAK_WEAK
-    /* Negative control: weak NULLING suppressed (both phases + the
-     * dependent clearing); partition/promote/sweep unchanged. The
-     * deterministic detector is a weak reference to a dead object
-     * reading alive. */
+    /* Built with this define, weak nulling is suppressed (both phases and
+     * the dependent clearing); partition, promote and sweep are unchanged,
+     * and a weak reference to a dead object reads alive. */
     if (index == 1)
         CLLOG("BREAK_WEAK: weak nulling SUPPRESSED (negative control)");
 #else
@@ -2571,9 +2593,9 @@ extern "C" int mgc_heap_collect(int generation, int low_memory_p, int mode)
 
     uint32_t used = mgc_heap_used_bytes();
 #ifdef MGC_SWEEP_LIVE
-    /* alloc-triggered collections make ~20-40 per run: census lines
-     * print for the first 6 + every 8th (#1-#4 stay full via full_log
-     * -- gate anchors) */
+    /* alloc-triggered collections make about 20 to 40 per run: census lines
+     * print for the first 6 + every 8th (#1-#4 stay full via full_log:
+     * the verification gate reads those lines) */
     int census_log = (index <= 6) || ((index & 7u) == 0);
 #else
     int census_log = 1;

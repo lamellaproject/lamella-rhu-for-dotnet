@@ -12,6 +12,8 @@
 pub use super::stm32f7::*;
 
 pub const NAME: &str = "STM32F746G-DISCO";
+/// The chip, as the SDK's facts file names it (the quiet line of the log doors).
+pub const CHIP: &str = "STM32F746NG";
 pub const CONSOLE: &str = "USART1 (ST-LINK VCP)";
 
 /// FPU shape, per part: the STM32F746NG's FPU is single-precision (DS10916:
@@ -27,7 +29,7 @@ pub const CONSOLE_PINS: [(usize, u32); 2] = [(0, 9), (1, 7)];
 
 /// The board's high-speed crystal (X1, 25 MHz per UM1907): decode-only,
 /// the postures never enable it.
-#[allow(dead_code)]
+#[allow(dead_code)] // read by the family's clock read-back on the PLL posture alone
 pub const HSE_HZ: u32 = 25_000_000;
 
 /// Thread stack pool (lives in .kstacks): 64 KiB on this row's 320 K of
@@ -48,7 +50,7 @@ pub const NIRQ: usize = 98;
 /// The vector line a test image may claim: RM0385's position 97 (SPDIFRX),
 /// implemented on this part, its peripheral never clocked by the kernel,
 /// the line claimed by no kernel handler.
-#[allow(dead_code)]
+#[allow(dead_code)] // board-facts surface; the api flavor's band-interrupt control is its consumer
 pub const SPARE_IRQ: usize = 97;
 
 /// RAM windows a hardware-pushed exception frame may plausibly live in:

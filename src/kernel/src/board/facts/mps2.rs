@@ -14,29 +14,42 @@ use crate::claims;
 
 /// The line space: the highest line plus one.
 pub const LINE_COUNT: usize = 6;
+#[cfg(not(feature = "test-no-board-claims"))]
 pub const BOARD_CLAIMS: &[u16] = &[4];
-pub const BOARD_CLAIM_BITS: [u32; claims::BANKS] = claims::fold_board(BOARD_CLAIMS);
+#[cfg(not(feature = "test-no-board-claims"))]
 pub const BANNER: &str = "6 virtual lines (5 populated), 1 claimed by the board (the virtual console)";
+/// The api flavor's control `test-no-board-claims` (never a shipped image):
+/// the Pico rows' shape on this row -- no line claimed by the board (as
+/// the memory console takes no pin) -- so the gpio-refuse check's skip path
+/// and its witness bound run on the emulator.
+#[cfg(feature = "test-no-board-claims")]
+pub const BOARD_CLAIMS: &[u16] = &[];
+#[cfg(feature = "test-no-board-claims")]
+pub const BANNER: &str = "6 virtual lines (5 populated), 0 claimed by the board (the control's shape: test-no-board-claims)";
+pub const BOARD_CLAIM_BITS: [u32; claims::BANKS] = claims::fold_board(BOARD_CLAIMS);
+
+#[cfg(all(feature = "test-no-board-claims", not(feature = "api-smoke")))]
+compile_error!("test-no-board-claims is the api flavor's control feature: select api-smoke beside it");
 
 pub const LOOP_OUT: u32 = 2;
 pub const LOOP_IN: u32 = 3;
 
 /// The api flavor's check lines: a free latch, the loop pair, the board's
 /// line, the unpopulated line.
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_FREE: u32 = 0;
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_INPUT_ONLY: Option<u32> = Some(1);
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_OUT: Option<u32> = Some(LOOP_OUT);
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_IN: u32 = LOOP_IN;
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_BOARD: u32 = 4;
 /// The output loops back to the input on this row: a toggle IS the edge.
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const LOOPBACK: bool = true;
-#[allow(dead_code)]
+#[allow(dead_code)] // the api flavor's checks
 pub const CHECK_UNPOPULATED: Option<u32> = Some(5);
 
 pub const fn input_only(line: u32) -> bool {
@@ -172,3 +185,48 @@ pub const ADC_LOOP: usize = 5;
 /// The PWM line table's position the loop channel reads.
 pub const ADC_LOOP_SOURCE: usize = 0;
 pub const ADC_REFERENCE_MV: u32 = 1212;
+
+/// The RAM ranges of this row (the hosted runtime learns them
+/// through the `rhu_ram_count` and `rhu_ram_range` doors): the physical
+/// range as the board's facts file states it in the SDK (`boards/<row>.json`,
+/// its `ram` array; the two kept equal by the hosted-runtime gate's facts
+/// tie), range 0 the internal SRAM the kernel's map calls DATA. Range 0's
+/// `base` and `bytes` are the map's DATA region, whole: the arena window
+/// the runtime is handed lies inside it, bracketed by the map.
+/// The emulator rows' 4 MB of ZBT SSRAM (the application notes' SSRAM2
+/// and SSRAM3 as one window; the AN500 at 0x20000000, the AN505 through
+/// its secure alias at 0x38000000), and the machines' 16 MB PSRAM bank
+/// (the AN500's at 0x60000000, the AN505's at 0x80000000; QEMU models
+/// both as plain RAM): the second range, external, uncached, execute-never
+/// by the protection unit's region over it.
+#[cfg(feature = "board-mps2-an500")]
+pub const RAM_RANGES: &[crate::ram::RamFacts] = &[
+    crate::ram::RamFacts { name: "SSRAM", base: 0x2000_0000, bytes: 0x40_0000, external: false, cached: false, exec: true },
+    crate::ram::RamFacts { name: "PSRAM", base: 0x6000_0000, bytes: 0x100_0000, external: true, cached: false, exec: false },
+];
+#[cfg(feature = "board-mps2-an505")]
+pub const RAM_RANGES: &[crate::ram::RamFacts] = &[
+    crate::ram::RamFacts { name: "SSRAM", base: 0x3800_0000, bytes: 0x40_0000, external: false, cached: false, exec: true },
+    crate::ram::RamFacts { name: "PSRAM", base: 0x8000_0000, bytes: 0x100_0000, external: true, cached: false, exec: false },
+];
+
+/// The console's channel facts of this row (the SDK's `channels` member):
+/// the two streams' default channel codes and the row's legal set
+/// (`crate::console`: 1 off, 2 memory, 3 probe, 0x10 + n uart n).
+pub const CHANNELS: crate::console::ChannelFacts = crate::console::ChannelFacts { log: crate::console::CH_UART0, console: crate::console::CH_UART0, legal: &[crate::console::CH_UART0, crate::console::CH_UART1, crate::console::CH_MEMORY, crate::console::CH_OFF] };
+/// The pre-defined UART rows of this row (the SDK's `uart` member), by the
+/// chip's own block number with their pins (none on a row whose UARTs have
+/// no pins); a program's serial doors and the console's wire read them.
+pub const UART_ROWS: &[crate::console::UartRow] = &[crate::console::UartRow { block: 0, tx: crate::console::NO_PIN, rx: crate::console::NO_PIN }, crate::console::UartRow { block: 1, tx: crate::console::NO_PIN, rx: crate::console::NO_PIN }];
+/// The gpio banner's line when the kernel holds a UART of this row as its
+/// console wire, by block (empty on a row with no UART row).
+pub const BANNER_UART: &[&str] = &[];
+/// The UART rows' names for the boot banner's console clause, by block.
+#[allow(dead_code)] // the Pico rows' banner clause reads it
+pub const UART_NAMES: &[&str] = &[];
+/// No pin override on this row (the UART rows have no pins, or there are
+/// none): the SDK's `uartPairs` member is empty.
+#[allow(dead_code)] // no row of this board reads it: the UART doors answer ENODEV here
+pub const UART_PAIRS: &[crate::console::UartPairs] = &[];
+/// No both-held banner line on this row.
+pub const BANNER_UART_BOTH: &str = "";

@@ -1,16 +1,24 @@
 /* The shim gate's tenant: a C program hosted exactly like a managed
  * payload (the payload board map, the kernel's managed entry sequence,
  * the machine's exit code), exercising the shim's C-runtime surface and
- * the PAL from the caller's side. Eight ladders, one per build:
+ * the PAL from the caller's side. Eleven ladders, one per build:
  *
  *   RHU_SHIMTEST_LADDER_CORE        the glibc personality and the PAL's
  *                                   threading, memory, time and random verbs
  *   RHU_SHIMTEST_LADDER_FDMAP       the descriptor bands and the file surface
  *   RHU_SHIMTEST_LADDER_ACTIVATION  the activation costume (the signal
- *                                   surface over the kernel's delivery) and
- *                                   the PAL's signal rows
+ *                                   surface over the kernel's delivery), the
+ *                                   kernel's null fault delivered as SIGSEGV
+ *                                   and the PAL's signal rows
  *   RHU_SHIMTEST_LADDER_TLS         the image's thread-local template: the
  *                                   kernel's per-thread copy of module 0
+ *   RHU_SHIMTEST_LADDER_PWMFS       the PWM device files (/sys/class/pwm/pwmchip0)
+ *                                   from a native caller's side, over the kernel's PWM doors
+ *   RHU_SHIMTEST_LADDER_IIOFS       the analog input device files (/sys/bus/iio/devices)
+ *                                   from a native caller's side, over the kernel's ADC doors
+ *   RHU_SHIMTEST_LADDER_TTYDEV      the serial device files (/dev/ttyS<n>) from a
+ *                                   native caller's side, over the kernel's UART doors,
+ *                                   with the stock serial layer through its own entry points
  *   RHU_SHIMTEST_LADDER_BUSDEV      the bus device nodes (/dev/i2c-<bus>,
  *                                   /dev/spidev<bus>.<select>) from a native
  *                                   caller's side, on the row's bus models
@@ -29,13 +37,13 @@
  * carries a timing value or an address, and the checks run in a fixed
  * order, so the payload stream is the same bytes on every run.
  *
- * Two build knobs here break one check each, so the gate can prove it
- * detects a failing tenant:
+ * Two build defines here break one check each, so the test runner can be
+ * shown to report a failing program:
  *   RHU_SHIMTEST_BREAK_ERRNO   a worker writes through the main thread's
  *                              errno pointer (the isolation check fails)
  *   RHU_SHIMTEST_BREAK_CANARY  a block's header is corrupted before it is
  *                              freed (the allocator dies loud, exit 134)
- * and the shim objects' own knobs place the file band at the console's
+ * and the shim objects' own defines place the file band at the console's
  * base (the descriptor ladder refuses it), name a foreign process in the
  * activation's signal information, fill the context's program counter
  * from the link register (the activation ladder refuses both), drop the
@@ -50,19 +58,19 @@
 
 #include "rhu.h"
 #include "rhu_glibc_arm32.h"
-#include "rhu_pal_errno_net11_rc1.h"
-#include "rhu_pal_io_net11_rc1.h"
-#include "rhu_pal_memory_net11_rc1.h"
-#include "rhu_pal_random_net11_rc1.h"
-#include "rhu_pal_signal_net11_rc1.h"
-#include "rhu_pal_threading_net11_rc1.h"
-#include "rhu_pal_time_net11_rc1.h"
+#include "rhu_pal_errno_net11_rc2.h"
+#include "rhu_pal_io_net11_rc2.h"
+#include "rhu_pal_memory_net11_rc2.h"
+#include "rhu_pal_random_net11_rc2.h"
+#include "rhu_pal_signal_net11_rc2.h"
+#include "rhu_pal_threading_net11_rc2.h"
+#include "rhu_pal_time_net11_rc2.h"
 
 #if !defined(RHU_SHIMTEST_LADDER_CORE) && !defined(RHU_SHIMTEST_LADDER_FDMAP) \
     && !defined(RHU_SHIMTEST_LADDER_ACTIVATION) && !defined(RHU_SHIMTEST_LADDER_TLS) \
     && !defined(RHU_SHIMTEST_LADDER_HOST) && !defined(RHU_SHIMTEST_LADDER_BUSDEV) \
-    && !defined(RHU_SHIMTEST_LADDER_GPIOD) && !defined(RHU_SHIMTEST_LADDER_FROZEN)
-#error "a tenant build names its ladder (RHU_SHIMTEST_LADDER_CORE, RHU_SHIMTEST_LADDER_FDMAP, RHU_SHIMTEST_LADDER_ACTIVATION, RHU_SHIMTEST_LADDER_TLS, RHU_SHIMTEST_LADDER_HOST, RHU_SHIMTEST_LADDER_BUSDEV, RHU_SHIMTEST_LADDER_GPIOD or RHU_SHIMTEST_LADDER_FROZEN)"
+    && !defined(RHU_SHIMTEST_LADDER_GPIOD) && !defined(RHU_SHIMTEST_LADDER_FROZEN) && !defined(RHU_SHIMTEST_LADDER_PWMFS) && !defined(RHU_SHIMTEST_LADDER_TTYDEV) && !defined(RHU_SHIMTEST_LADDER_IIOFS)
+#error "a tenant build names its ladder (RHU_SHIMTEST_LADDER_CORE, RHU_SHIMTEST_LADDER_FDMAP, RHU_SHIMTEST_LADDER_ACTIVATION, RHU_SHIMTEST_LADDER_TLS, RHU_SHIMTEST_LADDER_HOST, RHU_SHIMTEST_LADDER_BUSDEV, RHU_SHIMTEST_LADDER_GPIOD, RHU_SHIMTEST_LADDER_PWMFS, RHU_SHIMTEST_LADDER_IIOFS, RHU_SHIMTEST_LADDER_TTYDEV or RHU_SHIMTEST_LADDER_FROZEN)"
 #endif
 
 /* --- the C-runtime surface, declared as the caller sees it --- */
@@ -217,7 +225,65 @@ static int fail(const char *name, const char *detail)
 #define SCHECK(cond, name, detail) CHECK(cond, name, detail)
 #endif
 
+#if defined(RHU_SHIMTEST_LADDER_CORE)
+/* The thread pool's idle-worker timeout link word, read as the hosting
+ * layer reads it (a weak absolute symbol: no word in this image reads
+ * NULL), so the expectation for the row is computed from the same word
+ * the row is built from, and the gate links this ladder both ways. */
+extern const char __rhu_threadpool_thread_timeout_ms[] __attribute__((weak));
+
+/* A value in decimal into the buffer given (at least eleven bytes);
+ * returns the buffer. */
+static const char *dec_u32(char *buf, uint32_t v)
+{
+    char tmp[12];
+    uint32_t n = 0;
+    do {
+        tmp[n++] = (char)('0' + v % 10u);
+        v /= 10u;
+    } while (v != 0);
+    uint32_t i = 0;
+    while (n != 0)
+        buf[i++] = tmp[--n];
+    buf[i] = 0;
+    return buf;
+}
+#endif
+
 #if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_FROZEN)
+/* The link map's rehydrated-data brackets, read as the hosting layer
+ * reads them (weak references: an image whose map defines none reads
+ * NULL). */
+extern char __rhu_hydrated_lo[] __attribute__((weak));
+extern char __rhu_hydrated_hi[] __attribute__((weak));
+
+/* The managed heap's window as the hosting layer chooses it: window 1
+ * when the image serves two ranges and the brackets lie inside range 1's
+ * physical range, window 0 otherwise. The chosen window's record is
+ * filled at the call (zeroed should the range door refuse). Returns 1
+ * for window 1, 0 for window 0. */
+static int heap_window_read(rhu_ram_desc *w)
+{
+    rhu_ram_desc r;
+    if (rhu_ram_count() >= 2 && rhu_ram_range(1u, &r) == 0 && __rhu_hydrated_lo != NULL && __rhu_hydrated_hi != NULL) {
+        uint32_t lo = (uint32_t)(uintptr_t)__rhu_hydrated_lo;
+        uint32_t hi = (uint32_t)(uintptr_t)__rhu_hydrated_hi;
+        if (lo <= hi && lo >= r.base && hi - r.base <= r.bytes) {
+            *w = r;
+            return 1;
+        }
+    }
+    if (rhu_ram_range(0u, w) != 0) {
+        w->base = 0u;
+        w->bytes = 0u;
+        w->lo = 0u;
+        w->hi = 0u;
+        w->free = 0u;
+        w->flags = 0u;
+    }
+    return 0;
+}
+
 /* The runtime's hard-limit row as a number: "0x" and hexadecimal digits,
  * nothing else. A row that is absent or malformed reads as all ones, a
  * value no board's memory reaches. */
@@ -241,7 +307,7 @@ static uint32_t hard_limit_row(void)
 #endif
 
 /* Named positively: only the ladders that measure elapsed time carry
- * this, and a ladder added later must say so rather than inherit it. */
+ * this; a ladder that does not name itself here does not get it. */
 #if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_FDMAP)
 static uint64_t now_ns(void)
 {
@@ -252,7 +318,8 @@ static uint64_t now_ns(void)
 #endif
 
 #if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_ACTIVATION) || defined(RHU_SHIMTEST_LADDER_FDMAP) \
-    || defined(RHU_SHIMTEST_LADDER_TLS) || defined(RHU_SHIMTEST_LADDER_BUSDEV) || defined(RHU_SHIMTEST_LADDER_GPIOD)
+    || defined(RHU_SHIMTEST_LADDER_TLS) || defined(RHU_SHIMTEST_LADDER_BUSDEV) || defined(RHU_SHIMTEST_LADDER_GPIOD) \
+    || defined(RHU_SHIMTEST_LADDER_TTYDEV)
 
 static void msleep(int ms)
 {
@@ -279,7 +346,7 @@ static void wait_done(volatile int *done, int want)
 #define WORKER_STACK 2048u
 
 /* The ladders whose workers run level with the ladder's thread (the
- * bus and GPIO ladders' second threads run below it: spawn_below). */
+ * bus, GPIO and serial ladders' second threads run below it: spawn_below). */
 #if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_ACTIVATION) || defined(RHU_SHIMTEST_LADDER_FDMAP) || defined(RHU_SHIMTEST_LADDER_TLS)
 static int spawn(uint32_t *tid, void *(*fn)(void *), void *arg, uint32_t stack)
 {
@@ -291,7 +358,7 @@ static int spawn(uint32_t *tid, void *(*fn)(void *), void *arg, uint32_t stack)
 }
 #endif
 
-#if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_BUSDEV) || defined(RHU_SHIMTEST_LADDER_GPIOD)
+#if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_BUSDEV) || defined(RHU_SHIMTEST_LADDER_GPIOD) || defined(RHU_SHIMTEST_LADDER_TTYDEV)
 /* A second thread BELOW the ladder's: spawned through the kernel's door one
  * step less urgent than the flat hosted level every shim thread runs at,
  * so it runs only while the ladder's thread is blocked and never takes a
@@ -557,18 +624,28 @@ static void *mon_worker(void *a)
 
 static int g_phdr_load;
 static int g_phdr_exidx;
+static int g_phdr_modules;
+static int g_phdr_qspi;
 
+/* One call per module of the table: the module counted; a load segment
+ * holding this code and an exception-index segment noted; a load segment
+ * inside the quad-SPI region (0x90000000 to 0x9FFFFFFF, where the
+ * STM32F769's execute-in-place window lives; no emulator map brackets
+ * one) noted too. */
 static int phdr_cb(dl_phdr_info *info, size_t size, void *data)
 {
     (void)size;
     (void)data;
     uintptr_t me = (uintptr_t)phdr_cb & ~1u;
+    g_phdr_modules++;
     for (int i = 0; i < info->dlpi_phnum; i++) {
         const elf32_phdr *p = &info->dlpi_phdr[i];
         if (p->p_type == 0x70000001u)
             g_phdr_exidx = 1;
         if (p->p_type == 1u && me >= p->p_vaddr && me < p->p_vaddr + p->p_memsz)
             g_phdr_load = 1;
+        if (p->p_type == 1u && p->p_vaddr >= 0x90000000u && p->p_vaddr < 0xA0000000u)
+            g_phdr_qspi = 1;
     }
     return 0;
 }
@@ -600,6 +677,11 @@ static int core_ladder(void)
     /* The system memory free before the shim initializes: the environment
      * check reads the runtime's hard-limit row against it. */
     uint32_t free_at_start = rhu_arena_headroom();
+    /* The managed heap's window and its record before the shim
+     * initializes, by the hosting layer's rule (heap_window_read): the
+     * hard-limit row and the page counts are checked against it. */
+    rhu_ram_desc heap_w;
+    int heap_ext = heap_window_read(&heap_w);
 
     out("shimtest: the glibc personality and the PAL on the kernel's hosting API");
 
@@ -1001,10 +1083,13 @@ static int core_ladder(void)
         pass("shim-futex-pal", " (a wait blocks until its wake; a timed wait false only on timeout)");
     }
 
-    /* the program-header walk */
+    /* the program-header walk: the image's own module alone under this map
+     * (the window entry the shim appends under the STM32F769's execute-in-place
+     * map is absent here, its brackets undefined) and nothing in the quad-SPI region */
     dl_iterate_phdr(phdr_cb, NULL);
     CHECK(g_phdr_load == 1 && g_phdr_exidx == 1, "shim-dlphdr", "(this code is not inside a load segment, or no exception index)");
-    pass("shim-dlphdr", " (a load segment spans this code; the exception index segment present)");
+    CHECK(g_phdr_modules == 1 && g_phdr_qspi == 0, "shim-dlphdr", "(the table does not hold exactly one module under this map, or a load segment lies in the quad-SPI region)");
+    pass("shim-dlphdr", " (a load segment spans this code; the exception index segment present; one module in the table under this map, none in the quad-SPI region)");
 
     /* the environment table */
     {
@@ -1012,14 +1097,66 @@ static int core_ladder(void)
         CHECK(v != NULL && strcmp(v, "0") == 0, "shim-env", "(gcServer)");
         v = getenv("DOTNET_gcConcurrent");
         CHECK(v != NULL && strcmp(v, "0") == 0, "shim-env", "(gcConcurrent)");
+        /* The thread pool's idle-worker timeout row: the row's default of
+         * 100 ms when the image carries no link word, the word's value in
+         * decimal when it does (a negative word reads -1). */
+        char want[12];
+        const char *how;
+        if (__rhu_threadpool_thread_timeout_ms == NULL) {
+            dec_u32(want, 100u);
+            how = " ms, the row's default";
+        } else if ((int32_t)(uintptr_t)__rhu_threadpool_thread_timeout_ms < 0) {
+            want[0] = '-';
+            want[1] = '1';
+            want[2] = 0;
+            how = " ms, the link word";
+        } else {
+            dec_u32(want, (uint32_t)(uintptr_t)__rhu_threadpool_thread_timeout_ms);
+            how = " ms, the link word";
+        }
+        v = getenv("DOTNET_ThreadPool_ThreadTimeoutMs");
+        CHECK(v != NULL && strcmp(v, want) == 0, "shim-env", "(ThreadPool_ThreadTimeoutMs)");
         v = getenv("HOME");
         CHECK(v != NULL && strcmp(v, "/tmp") == 0, "shim-env", "(HOME)");
-        /* The hard limit is the system memory free at initialization less
-         * what the row keeps for later draws, in whole pages: on this row
-         * the frozen object heap's 64 KB and 64 KB left unallocated. */
-        CHECK(hard_limit_row() == ((free_at_start - 131072u) & ~4095u), "shim-env", "(the hard limit is not the system memory free at the start less what the row keeps)");
+        /* The hard limit is the managed heap window's free memory at
+         * initialization, in whole pages, less what the row keeps for
+         * later draws when that window is the internal one (on this row
+         * the frozen object heap's 64 KB and 64 KB left unallocated);
+         * window 1 serves the heap alone. */
+        CHECK(hard_limit_row() == (heap_ext ? heap_w.free & ~4095u : (free_at_start - 131072u) & ~4095u), "shim-env", "(the hard limit is not the managed heap window's free memory at the start, less what the row keeps from the internal window)");
         CHECK(getenv("NO_SUCH_ROW") == NULL, "shim-env", "(a missing row was answered)");
-        pass("shim-env", " (the four rows; the hard limit is the system memory free at the start less what the row keeps; a miss NULL)");
+        {
+            char note[LINE_MAX];
+            uint32_t n = put(note, 0u, " (the five rows; the thread pool's idle timeout ");
+            n = put(note, n, want);
+            n = put(note, n, how);
+            n = put(note, n, "; the hard limit is the managed heap window's free memory at the start, less what the row keeps when that window is the internal one; a miss NULL)");
+            note[n] = 0;
+            pass("shim-env", note);
+        }
+    }
+
+    /* the collector's mapping entry and the managed heap's window */
+    {
+        rhu_ram_desc w;
+        uint32_t which = heap_ext ? 1u : 0u;
+        CHECK(rhu_ram_range(which, &w) == 0 && w.lo == heap_w.lo && w.hi == heap_w.hi, "shim-collector-mmap", "(the managed heap window's record)");
+        CHECK(sysconf(85) == (long)((w.hi - w.lo) / 4096u) && sysconf(86) == (long)(w.free / 4096u), "shim-collector-mmap", "(the page counts are not the managed heap window's)");
+        uint8_t *p = (uint8_t *)rhu_shim_collector_mmap(5000u);
+        CHECK(p != (uint8_t *)-1 && p != NULL && ((uintptr_t)p & 4095u) == 0u, "shim-collector-mmap", "(the entry did not answer a page-aligned mapping)");
+        CHECK((uint32_t)(uintptr_t)p >= w.lo && (uint32_t)(uintptr_t)p + 8192u <= w.hi, "shim-collector-mmap", "(the mapping lies outside the managed heap's window)");
+        uint32_t nonzero = 0u;
+        for (uint32_t i = 0u; i < 8192u; i++)
+            nonzero |= p[i];
+        CHECK(nonzero == 0u, "shim-collector-mmap", "(the mapping is not zero-born)");
+        p[0] = 1u;
+        p[8191] = 1u;
+        rhu_ram_desc after;
+        CHECK(rhu_ram_range(which, &after) == 0 && after.free + 8192u <= w.free, "shim-collector-mmap", "(the window's free memory did not fall by the mapping)");
+        CHECK(sysconf(86) == (long)(after.free / 4096u), "shim-collector-mmap", "(the available page count did not follow the window)");
+        *__errno_location() = 0;
+        CHECK(rhu_shim_collector_mmap(0u) == (void *)-1 && *__errno_location() == RHU_GERR_EINVAL, "shim-collector-mmap", "(a zero-length ask was not refused with EINVAL)");
+        pass("shim-collector-mmap", " (a page-aligned zero-born mapping inside the managed heap's window; the window's free memory and the page counts follow it; a zero-length ask EINVAL)");
     }
 
     /* the small identities */
@@ -1055,8 +1192,8 @@ static int core_ladder(void)
         CHECK(spawn_below(&adopt_tid, adopt_second, NULL) == 0, "shim-mutex-adopt", "(the second thread did not spawn)");
         __atomic_store_n(&g_adopt_go, 1, __ATOMIC_RELEASE);
         /* Both checks carry ONE message: which of the two first users a
-         * broken adoption refuses is the control's construction, and the
-         * line on the wire must not say. */
+         * broken adoption refuses is not fixed, and the line on the wire
+         * must be the same bytes on every run. */
         CHECK(pthread_mutex_lock(&g_adopt_slot) == 0, "shim-mutex-adopt", "(one of two first users of a zero-filled mutex was refused)");
         pthread_mutex_unlock(&g_adopt_slot);
         wait_done(&g_adopt_done, 1);
@@ -1478,6 +1615,33 @@ static int fdmap_ladder(void)
         pass("shim-fdmap-bounds", " (offsets, counts and lengths checked in 64 bits against the stated maximum: EFBIG past it, EINVAL below zero, the bytes and the size untouched)");
     }
 
+    /* A refused open of the process identity file gives back the object slot it took */
+    {
+        char ib[16];
+        intptr_t held[RHU_SHIM_FD_FILE_COUNT];
+        held[0] = SystemNative_Open("/tmp/ident.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        SCHECK(held[0] >= 0, "shim-fdmap-identity-leak", "(the file to hold)");
+        int n = 1;
+        for (; n < RHU_SHIM_FD_FILE_COUNT; n++) {
+            held[n] = SystemNative_Open("/tmp/ident.txt", RHU_PAL_O_RDONLY, 0);
+            if (held[n] < 0)
+                break;
+        }
+        SCHECK(n == RHU_SHIM_FD_FILE_COUNT, "shim-fdmap-identity-leak", "(the descriptor band did not fill)");
+        /* more refused identity opens than the store has object slots: each must give back the slot it took */
+        for (int i = 0; i < 16; i++)
+            SCHECK(SystemNative_Open("/proc/self/stat", RHU_PAL_O_RDONLY, 0) == -1, "shim-fdmap-identity-leak", "(an identity open past the band succeeded)");
+        SCHECK(SystemNative_Close(held[n - 1]) == 0, "shim-fdmap-identity-leak", "(close)");
+        intptr_t id = SystemNative_Open("/proc/self/stat", RHU_PAL_O_RDONLY, 0);
+        SCHECK(id >= 0, "shim-fdmap-identity-leak", "(the identity file did not open once a descriptor was free: a refused open kept the slot it took)");
+        SCHECK(SystemNative_Read(id, ib, 11) == 11 && memcmp(ib, "1 (program)", 11) == 0, "shim-fdmap-identity-leak", "(the identity line)");
+        SCHECK(SystemNative_Close(id) == 0, "shim-fdmap-identity-leak", "(close)");
+        for (int i = 0; i < n - 1; i++)
+            SystemNative_Close(held[i]);
+        SCHECK(SystemNative_Unlink("/tmp/ident.txt") == 0, "shim-fdmap-identity-leak", "(unlink)");
+        pass("shim-fdmap-identity-leak", " (sixteen refused opens of the identity file past the band, each giving back the slot it took; the file opens and reads once a descriptor is free)");
+    }
+
     out("SHIMTEST-FDMAP: ALL GOOD (explicit descriptor bands; the console never answers for a file)");
     return 0;
 }
@@ -1707,6 +1871,114 @@ static int in_window(uint32_t v, uint32_t lo, uint32_t len)
     return v >= lo && v < lo + len;
 }
 
+/* --- The kernel's null fault delivered as SIGSEGV --- */
+
+/* r4 to r11 hold FAULT_BASE + 4 .. FAULT_BASE + 11 at the faulting load, so
+ * the handler can tell the context's registers are the worker's own. */
+#define FAULT_BASE 0x40000000u
+static volatile uint32_t g_f_count;
+static volatile int g_f_signo;
+static volatile int g_f_code;
+static volatile uint32_t g_f_addr;
+static volatile uint32_t g_f_pc;
+static volatile uint32_t g_f_sp;
+static volatile int g_f_regs_ok;
+static volatile uint32_t g_f_tid;
+static volatile uint32_t g_f_sp_edit;   /* the case: 0 = a plain redirect; 8 = the stack pointer moved up by 8 */
+static volatile uint32_t g_fl_sp;       /* the stack pointer the landing saw at its entry */
+static volatile uint32_t g_fl_expected; /* the handler's prediction: the fault's stack pointer plus the edit */
+static volatile uint32_t g_fl_tid;
+static volatile int g_fl_ran;
+static volatile uint32_t g_f_word;
+
+/* The faulting load: a label in the worker's assembly, so the handler can
+ * assert the context's pc is the instruction itself. */
+extern const uint8_t rhu_shimtest_fault_site[];
+
+/* The landing's C half (external linkage: the stub below names it). The
+ * thread ends here, as a redirected activation's landing does. */
+void rhu_shimtest_fault_land(uint32_t sp_at_entry, uint32_t expected);
+void rhu_shimtest_fault_land(uint32_t sp_at_entry, uint32_t expected)
+{
+    g_fl_sp = sp_at_entry;
+    g_fl_expected = expected;
+    g_fl_tid = (uint32_t)syscall(224);
+    g_fl_ran = 1;
+    rhu_thread_exit();
+}
+
+/* The landing a redirected fault resumes into: the stack pointer AT ENTRY
+ * in r0 (read before any frame is pushed), the handler's prediction in r1
+ * (planted through the context; the costume's trampoline keeps r0 and r1). */
+__attribute__((naked, noinline)) static void fault_landing(void)
+{
+    __asm__ volatile("mov r0, sp\n\tb rhu_shimtest_fault_land");
+}
+
+/* The SA_SIGINFO handler for SIGSEGV: records the Linux-shaped record and the
+ * context, then redirects the thread to the landing; in the second case it
+ * also moves the stack pointer up by 8, which the shim's trampoline must
+ * honour because the kernel never writes a thread's stack pointer back. */
+static void fault_handler(int signo, rhu_glibc_siginfo *si, void *ctx)
+{
+    rhu_glibc_ucontext *uc = (rhu_glibc_ucontext *)ctx;
+    g_f_count = g_f_count + 1;
+    g_f_signo = signo;
+    g_f_code = si->si_code;
+    g_f_addr = si->si_addr;
+    g_f_pc = uc->uc_mcontext.arm_pc;
+    g_f_sp = uc->uc_mcontext.arm_sp;
+    g_f_tid = (uint32_t)syscall(224);
+    g_f_regs_ok = uc->uc_mcontext.arm_r4 == FAULT_BASE + 4 && uc->uc_mcontext.arm_r5 == FAULT_BASE + 5 &&
+                  uc->uc_mcontext.arm_r6 == FAULT_BASE + 6 && uc->uc_mcontext.arm_r7 == FAULT_BASE + 7 &&
+                  uc->uc_mcontext.arm_r8 == FAULT_BASE + 8 && uc->uc_mcontext.arm_r9 == FAULT_BASE + 9 &&
+                  uc->uc_mcontext.arm_r10 == FAULT_BASE + 10 && uc->uc_mcontext.arm_fp == FAULT_BASE + 11;
+    uc->uc_mcontext.arm_r1 = uc->uc_mcontext.arm_sp + g_f_sp_edit;
+    uc->uc_mcontext.arm_pc = (uint32_t)(uintptr_t)fault_landing;
+    uc->uc_mcontext.arm_sp += g_f_sp_edit;
+}
+
+/* The faulting worker: publishes its identity and its stack carve, loads
+ * r4 to r11 with the known words and reads one word through null at offset
+ * 8 at the global label. The read faults (the first page is no-access on
+ * every row), the kernel delivers it through the shim's costume, and the
+ * handler redirects the thread to the landing, so the code after the load
+ * never runs. The null pointer comes through a volatile word so the
+ * compiler cannot see it and fold the load away. */
+static void *act_fault_worker(void *a)
+{
+    (void)a;
+    volatile uint32_t zero = 0;
+    uint32_t nul = zero;
+    uint32_t word;
+    attr_slot at;
+    void *lo = NULL;
+    size_t len = 0;
+    pthread_getattr_np(pthread_self(), &at);
+    pthread_attr_getstack(&at, &lo, &len);
+    g_w_lo = (uint32_t)(uintptr_t)lo;
+    g_w_len = (uint32_t)len;
+    g_w_tid = pthread_self();
+    __asm__ volatile(
+        "movw r4, #4\n\tmovt r4, #0x4000\n\t"
+        "movw r5, #5\n\tmovt r5, #0x4000\n\t"
+        "movw r6, #6\n\tmovt r6, #0x4000\n\t"
+        "movw r7, #7\n\tmovt r7, #0x4000\n\t"
+        "movw r8, #8\n\tmovt r8, #0x4000\n\t"
+        "movw r9, #9\n\tmovt r9, #0x4000\n\t"
+        "movw r10, #10\n\tmovt r10, #0x4000\n\t"
+        "movw r11, #11\n\tmovt r11, #0x4000\n\t"
+        "mov r1, %[nul]\n\t"
+        ".globl rhu_shimtest_fault_site\n"
+        "rhu_shimtest_fault_site:\n\t"
+        "ldr %[w], [r1, #8]\n\t"
+        : [w] "=r"(word)
+        : [nul] "r"(nul)
+        : "r1", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "memory", "cc");
+    g_f_word = word;
+    return NULL;
+}
+
 static int activation_ladder(void)
 {
     uint32_t t1;
@@ -1774,6 +2046,36 @@ static int activation_ladder(void)
     act.sa_flags = RHU_GLIBC_SA_SIGINFO | RHU_GLIBC_SA_RESTART;
     CHECK(sigaction(RHU_GSIG_SIGSEGV, &act, NULL) == 0, "shim-act-register", "(a fault signal's handler was not recorded)");
     pass("shim-act-register", " (the query form reads the default; the install keeps the old disposition; the read-back matches; a one-argument disposition answers its predecessor)");
+
+    /* The kernel's null fault delivered as SIGSEGV. The
+     * SIGSEGV recording above armed the kernel's delivery (the shim's line
+     * says so); this handler replaces it as the disposition. Two cases: a
+     * plain redirect, then a redirect with the stack pointer moved up by 8,
+     * which the landing sees as exactly 8 (the shim's trampoline). */
+    memset(&act, 0, sizeof act);
+    act.sa_handler = (void *)fault_handler;
+    act.sa_flags = RHU_GLIBC_SA_SIGINFO;
+    CHECK(sigaction(RHU_GSIG_SIGSEGV, &act, &old) == 0 && old.sa_handler == (void *)act_handler, "shim-act-fault", "(the fault handler's recording refused or the old disposition moved)");
+    for (int leg = 0; leg < 2; leg++) {
+        g_f_sp_edit = leg == 0 ? 0u : 8u;
+        g_f_count = 0;
+        g_fl_ran = 0;
+        g_fl_sp = 0;
+        g_fl_expected = 1;
+        CHECK(spawn(&t1, act_fault_worker, NULL, ACT_WORKER_STACK) == 0, "shim-act-fault", "(spawn refused)");
+        CHECK(poll_flag(&g_fl_ran, 200), "shim-act-fault", leg == 0 ? "(the landing never ran after the plain redirect)" : "(the landing never ran after the stack-pointer edit)");
+        CHECK(g_f_count == 1, "shim-act-fault", "(the handler did not run exactly once)");
+        CHECK(g_f_signo == RHU_GSIG_SIGSEGV, "shim-act-fault", "(the signal number is not SIGSEGV)");
+        CHECK(g_f_code == 1, "shim-act-fault", "(the origin code is not SEGV_MAPERR)");
+        CHECK(g_f_addr == 8u, "shim-act-fault", "(the faulting address is not 8)");
+        CHECK(g_f_pc == (uint32_t)(uintptr_t)rhu_shimtest_fault_site, "shim-act-fault", "(the context's pc is not the faulting load)");
+        CHECK(g_f_regs_ok, "shim-act-fault", "(r4 to r11 in the context are not the worker's)");
+        CHECK(g_f_tid == g_w_tid && g_w_tid == t1 && g_fl_tid == t1, "shim-act-fault", "(the handler or the landing ran on another thread)");
+        CHECK(in_window(g_f_sp, g_w_lo, g_w_len), "shim-act-fault", "(the faulting stack pointer is outside the worker's stack)");
+        CHECK(g_fl_sp == g_fl_expected && g_fl_sp == g_f_sp + g_f_sp_edit, "shim-act-fault", leg == 0 ? "(the landing's stack pointer is not the fault's)" : "(the landing's stack pointer did not advance by exactly 8)");
+        msleep(20);
+    }
+    pass("shim-act-fault", " (the kernel's null fault delivered as SIGSEGV with the address, the registers and the pc; a redirect landed; an upward stack-pointer edit honoured by the trampoline)");
 
     /* delivery: the handler on the target's own stack, the records exact */
     g_act_mode = ACT_DELIVER;
@@ -2063,14 +2365,15 @@ static int tls_ladder(void)
  * stand-ins carry the prototypes the generated header declares and read
  * the table by the slot names and export names it declares: a stand-in
  * that disagreed with the pin would prove the wrong contract. */
-#include "rhu_rt_entry_net11_rc1.h"
+#include "rhu_rt_entry_net11_rc2.h"
 
 _Static_assert(RHU_RT_CLASSLIB_SLOTS > RHU_RT_CLASSLIB_SLOT_ResolveDispatch, "the table holds the dispatch slot");
 _Static_assert(RHU_RT_CLASSLIB_EXPORTS == 8, "eight slots carry an export at this pin");
 
-/* The in-image header the kernel states: the module handle the host passes
- * is the load address it carries. */
-extern const uint32_t __rhu_image_header[16];
+/* The module handle the host passes is the image's load address: the
+ * vector table's address (the header's load-address word repeats it; the
+ * host reads the symbol, not the word). */
+extern const uint32_t __vector_table[];
 
 static int g_step;
 static int g_rt_init_at;
@@ -2180,7 +2483,7 @@ static int32_t host_checks(int argc)
         CHECK(g_classlib[i] == NULL, "shim-host-classlib", "(a slot past the exports is not null)");
     pass("shim-host-classlib", " (twelve slots; eight exports by the bootstrapper's names, four null)");
 
-    CHECK(g_registered_module == (void *)(uintptr_t)__rhu_image_header[3], "shim-host-module", "(the module handle is not the image's stated load address)");
+    CHECK(g_registered_module == (void *)(uintptr_t)__vector_table, "shim-host-module", "(the module handle is not the image's load address, the vector table's)");
     CHECK(g_modules_module == g_registered_module, "shim-host-module", "(the module list was initialized under another handle)");
     CHECK(g_managed_bytes == 0u && g_unbox_bytes == 0u, "shim-host-module", "(this tenant carries no managed code, yet a range was registered)");
     CHECK(g_modules_count == 0, "shim-host-module", "(this tenant carries no module table, yet modules were counted)");
@@ -2314,9 +2617,10 @@ static int busdev_ladder(void)
     }
     /* The one RHU request on the I2C node: the bus's rate for the program's
      * run (the rate request). This row's emulated block serves 100 kHz alone (the
-     * generic timing arm's one pair), so the served rate is the default and
-     * the second-rate refusal -- EBUSY with the running rate read back -- is
-     * the bench's to prove, by the kernel's contract. The request on a fresh
+     * generic timing arm's one pair), so the served rate is the default, and
+     * the refusal of a second served rate (EBUSY with the running rate read
+     * back) can be tested only on a board whose block serves two rates. The
+     * request on a fresh
      * node of the same bus: the claim is the bus's, not the node's, and the
      * transaction then runs through the first node. */
     {
@@ -2474,6 +2778,429 @@ static int busdev_ladder(void)
 
 #endif /* RHU_SHIMTEST_LADDER_BUSDEV */
 
+#ifdef RHU_SHIMTEST_LADDER_PWMFS
+
+/* --- the PWM device files, from a native caller's side: the small tree
+ * under /sys the standard package's PWM class reads and writes, driven
+ * through the runtime's portability verbs the class reaches (the store
+ * hands a /sys path and every sysfs-band descriptor to the unit) and the
+ * C library's access (the package's own check of a channel directory), on
+ * the emulator row's two virtual timers: the lines 0 and 2 on timer 0, the
+ * line 3 on timer 1, the line 1 a hole no timer drives. The kernel's PWM
+ * witness is read by symbol after the verbs, in the kernel's layout. --- */
+struct pf_witness {
+    uint32_t lines, timers, claims_taken, releases, sets, enables, refused_busy, refused_inval;
+    uint32_t last_refused_line;
+    int32_t last_refused_code;
+    uint32_t last_holder_line, reserved;
+    uint64_t last_period_ns;
+};
+extern struct pf_witness __rhu_pwm_witness;
+int access(const char *path, int mode);
+
+#define PF_CHIP "/sys/class/pwm/pwmchip0"
+#define PF_ERRNO_IS(e) (SystemNative_GetErrNo() == (e))
+
+/* One value written to a node through the store, as the class writes one:
+ * the count, or -1 with the write's errno kept past the close. */
+static int32_t pf_write(const char *path, const char *text)
+{
+    intptr_t fd = SystemNative_Open(path, RHU_PAL_O_WRONLY, 0);
+    if (fd < 0)
+        return -1;
+    int32_t n = SystemNative_Write(fd, text, (int32_t)strlen(text));
+    int32_t e = *__errno_location();
+    SystemNative_Close(fd);
+    if (n < 0)
+        *__errno_location() = e;
+    return n;
+}
+
+/* A node's text read through the store: the count with the text
+ * terminated, or -1 with the errno kept past the close. */
+static int32_t pf_read(const char *path, char *buf, int32_t cap)
+{
+    intptr_t fd = SystemNative_Open(path, RHU_PAL_O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+    int32_t n = SystemNative_Read(fd, buf, cap - 1);
+    int32_t e = *__errno_location();
+    SystemNative_Close(fd);
+    if (n >= 0)
+        buf[n] = 0;
+    else
+        *__errno_location() = e;
+    return n;
+}
+
+static int pf_is(const char *path, int32_t type)
+{
+    rhu_pal_filestatus st;
+    return SystemNative_Stat(path, &st) == 0 && (st.Mode & 0xF000) == type;
+}
+
+static int pf_reads(const char *path, const char *want)
+{
+    char t[32];
+    int32_t n = pf_read(path, t, (int32_t)sizeof t);
+    return n == (int32_t)strlen(want) && strcmp(t, want) == 0;
+}
+
+static int pwmfs_ladder(void)
+{
+    char t[32];
+    rhu_pal_filestatus st;
+    const volatile struct pf_witness *w = &__rhu_pwm_witness;
+    out("shimtest-pwmfs: the PWM device files from a native caller's side, on the row's virtual timers");
+    CHECK(rhu_shim_init() == 0, "shim-pwmfs-init", "(initialization refused)");
+    CHECK(rhu_pwm_count() == 3 && w->lines == 3 && w->timers == 2, "shim-pwmfs-init", "(the row does not state three PWM lines over two timers)");
+    pass("shim-pwmfs-init", " (three PWM lines over two virtual timers, by the kernel's enumeration and its witness)");
+
+    /* The tree. */
+    CHECK(pf_is("/sys", RHU_PAL_S_IFDIR) && pf_is("/sys/class", RHU_PAL_S_IFDIR) && pf_is("/sys/class/pwm", RHU_PAL_S_IFDIR) && pf_is(PF_CHIP, RHU_PAL_S_IFDIR) && pf_is(PF_CHIP "/", RHU_PAL_S_IFDIR),
+          "shim-pwmfs-tree", "(a directory of the tree is missing)");
+    CHECK(pf_is(PF_CHIP "/npwm", RHU_PAL_S_IFREG) && pf_is(PF_CHIP "/export", RHU_PAL_S_IFREG) && pf_is(PF_CHIP "/unexport", RHU_PAL_S_IFREG), "shim-pwmfs-tree", "(npwm, export or unexport is not a regular file)");
+    CHECK(SystemNative_Stat("/sys/class/pwm/pwmchip1", &st) == -1 && PF_ERRNO_IS(RHU_GERR_ENOENT), "shim-pwmfs-tree", "(a second chip answered)");
+    CHECK(SystemNative_Stat(PF_CHIP "/pwm0", &st) == -1 && PF_ERRNO_IS(RHU_GERR_ENOENT), "shim-pwmfs-tree", "(an unexported channel's directory answered)");
+    CHECK(SystemNative_Open(PF_CHIP, RHU_PAL_O_RDONLY, 0) == -1 && PF_ERRNO_IS(RHU_GERR_EISDIR), "shim-pwmfs-tree", "(a directory opened as a file)");
+    pass("shim-pwmfs-tree", " (/sys, /sys/class, /sys/class/pwm and pwmchip0 directories, with or without a trailing slash; the three chip files regular; pwmchip1 and an unexported channel ENOENT; a directory EISDIR)");
+
+    /* npwm. */
+    CHECK(pf_reads(PF_CHIP "/npwm", "4\n"), "shim-pwmfs-npwm", "(npwm did not read 4)");
+    CHECK(pf_write(PF_CHIP "/npwm", "4") == -1 && PF_ERRNO_IS(RHU_GERR_EACCES), "shim-pwmfs-npwm", "(a write to npwm was not refused EACCES)");
+    pass("shim-pwmfs-npwm", " (the highest PWM-capable line plus one, read-only)");
+
+    /* export. */
+    CHECK(pf_write(PF_CHIP "/export", "0\n") == 2 && w->claims_taken == 1, "shim-pwmfs-export", "(the export of line 0 did not claim it)");
+    CHECK(pf_write(PF_CHIP "/export", "0") == -1 && PF_ERRNO_IS(RHU_GERR_EBUSY), "shim-pwmfs-export", "(a second export of line 0 was not refused EBUSY)");
+    CHECK(pf_write(PF_CHIP "/export", "1") == -1 && PF_ERRNO_IS(RHU_GERR_ENODEV), "shim-pwmfs-export", "(the hole's export was not refused ENODEV)");
+    CHECK(pf_write(PF_CHIP "/export", "2") == 1 && pf_write(PF_CHIP "/export", "3") == 1 && w->claims_taken == 3, "shim-pwmfs-export", "(lines 2 and 3 did not export)");
+    CHECK(pf_write(PF_CHIP "/export", "4") == -1 && PF_ERRNO_IS(RHU_GERR_ENODEV), "shim-pwmfs-export", "(a line past npwm was not refused ENODEV)");
+    CHECK(pf_write(PF_CHIP "/export", "x") == -1 && PF_ERRNO_IS(RHU_GERR_EINVAL), "shim-pwmfs-export", "(a non-number was not refused EINVAL)");
+    CHECK(pf_is(PF_CHIP "/pwm0", RHU_PAL_S_IFDIR) && pf_is(PF_CHIP "/pwm0/period", RHU_PAL_S_IFREG) && pf_is(PF_CHIP "/pwm3/enable", RHU_PAL_S_IFREG), "shim-pwmfs-export", "(an exported channel's directory or a file of it is missing)");
+    CHECK(pf_read(PF_CHIP "/export", t, (int32_t)sizeof t) == -1 && PF_ERRNO_IS(RHU_GERR_EACCES), "shim-pwmfs-export", "(a read of export was not refused EACCES)");
+    pass("shim-pwmfs-export", " (the channel number is the line number: lines 0, 2 and 3 claimed, the second export EBUSY, the hole and a line past npwm ENODEV, a non-number EINVAL; export write-only)");
+
+    /* period: the period the timer runs read back, the shared period. */
+    CHECK(pf_reads(PF_CHIP "/pwm0/period", "0\n"), "shim-pwmfs-period", "(the period before any set did not read 0)");
+    CHECK(pf_write(PF_CHIP "/pwm0/period", "0") == -1 && PF_ERRNO_IS(RHU_GERR_EINVAL), "shim-pwmfs-period", "(a period of 0 was not refused EINVAL)");
+    CHECK(pf_write(PF_CHIP "/pwm0/duty_cycle", "1") == -1 && PF_ERRNO_IS(RHU_GERR_EINVAL), "shim-pwmfs-period", "(a duty before any period was not refused EINVAL)");
+    CHECK(pf_write(PF_CHIP "/pwm3/enable", "1") == -1 && PF_ERRNO_IS(RHU_GERR_EINVAL), "shim-pwmfs-period", "(an enable before any period was not refused EINVAL)");
+    CHECK(pf_write(PF_CHIP "/pwm0/period", "1000000") == 7 && w->sets == 1 && w->last_period_ns == 1000000ull, "shim-pwmfs-period", "(the period of 1 ms did not reach the timer)");
+    CHECK(pf_reads(PF_CHIP "/pwm0/period", "1000000\n"), "shim-pwmfs-period", "(the period did not read back the timer's 1000000)");
+    CHECK(pf_write(PF_CHIP "/pwm3/period", "333333333") == 9 && w->last_period_ns == 333336000ull, "shim-pwmfs-period", "(the 3 Hz period did not quantize to 333336000 ns on the timer)");
+    CHECK(pf_reads(PF_CHIP "/pwm3/period", "333336000\n"), "shim-pwmfs-period", "(the period file did not read the period the timer runs: the quantized truth)");
+    CHECK(pf_write(PF_CHIP "/pwm2/period", "500000") == -1 && PF_ERRNO_IS(RHU_GERR_EBUSY) && w->last_holder_line == 0, "shim-pwmfs-period", "(another period on the shared timer was not refused EBUSY with the holder named)");
+    CHECK(pf_write(PF_CHIP "/pwm2/period", "1000000") == 7, "shim-pwmfs-period", "(the same period on the shared timer refused)");
+    CHECK(pf_write(PF_CHIP "/pwm0/period", "x") == -1 && PF_ERRNO_IS(RHU_GERR_EINVAL), "shim-pwmfs-period", "(a non-number period was not refused EINVAL)");
+    pass("shim-pwmfs-period", " (0 before any set; 0, a non-number, a duty or an enable before the period EINVAL; 1 ms exact; 3 Hz asked reads the timer's 333336000: the quantized truth; another period on the shared timer EBUSY with the holder named, the same period accepted)");
+
+    /* duty_cycle. */
+    CHECK(pf_write(PF_CHIP "/pwm0/duty_cycle", "250000") == 6 && pf_reads(PF_CHIP "/pwm0/duty_cycle", "250000\n"), "shim-pwmfs-duty", "(the duty of 250000 ns did not set and read back)");
+    CHECK(pf_write(PF_CHIP "/pwm0/duty_cycle", "2000000") == -1 && PF_ERRNO_IS(RHU_GERR_EINVAL), "shim-pwmfs-duty", "(a duty past the period was not refused EINVAL)");
+    CHECK(pf_write(PF_CHIP "/pwm0/duty_cycle", "x") == -1 && PF_ERRNO_IS(RHU_GERR_EINVAL) && pf_reads(PF_CHIP "/pwm0/duty_cycle", "250000\n"), "shim-pwmfs-duty", "(a non-number duty was not refused EINVAL with the duty kept)");
+    pass("shim-pwmfs-duty", " (the duty asked read back; past the period or a non-number EINVAL with the duty kept)");
+
+    /* polarity. */
+    CHECK(pf_reads(PF_CHIP "/pwm0/polarity", "normal\n"), "shim-pwmfs-polarity", "(the polarity did not read normal)");
+    CHECK(pf_write(PF_CHIP "/pwm0/polarity", "inversed\n") == 9 && pf_reads(PF_CHIP "/pwm0/polarity", "inversed\n"), "shim-pwmfs-polarity", "(inversed did not set and read back)");
+    CHECK(pf_write(PF_CHIP "/pwm0/polarity", "x") == -1 && PF_ERRNO_IS(RHU_GERR_EINVAL) && pf_reads(PF_CHIP "/pwm0/polarity", "inversed\n"), "shim-pwmfs-polarity", "(a third word was not refused EINVAL with the polarity kept)");
+    CHECK(pf_write(PF_CHIP "/pwm0/polarity", "normal") == 6 && pf_reads(PF_CHIP "/pwm0/polarity", "normal\n"), "shim-pwmfs-polarity", "(normal did not set again)");
+    pass("shim-pwmfs-polarity", " (normal, inversed, normal again, each read back; a third word EINVAL)");
+
+    /* enable. */
+    CHECK(pf_write(PF_CHIP "/pwm0/enable", "1") == 1 && w->enables == 1 && pf_reads(PF_CHIP "/pwm0/enable", "1\n"), "shim-pwmfs-enable", "(enable 1 did not drive the output and read back)");
+    CHECK(pf_write(PF_CHIP "/pwm0/enable", "2") == -1 && PF_ERRNO_IS(RHU_GERR_EINVAL), "shim-pwmfs-enable", "(a value past 1 was not refused EINVAL)");
+    CHECK(pf_write(PF_CHIP "/pwm0/enable", "0\n") == 2 && pf_reads(PF_CHIP "/pwm0/enable", "0\n"), "shim-pwmfs-enable", "(enable 0 did not park the output and read back)");
+    pass("shim-pwmfs-enable", " (1 drives, 0 parks, each read back; 2 EINVAL)");
+
+    /* The descriptor verbs on a node. */
+    {
+        intptr_t fd = SystemNative_Open(PF_CHIP "/pwm0/period", RHU_PAL_O_RDWR, 0);
+        CHECK(fd >= RHU_SHIM_FD_SYSFS_LO && fd < RHU_SHIM_FD_SYSFS_LO + RHU_SHIM_FD_SYSFS_COUNT, "shim-pwmfs-descriptors", "(the node did not open in the sysfs band)");
+        CHECK(SystemNative_FStat(fd, &st) == 0 && (st.Mode & 0xF000) == RHU_PAL_S_IFREG && st.Size == 4096, "shim-pwmfs-descriptors", "(fstat is not a regular file of 4096 bytes)");
+        CHECK(SystemNative_FTruncate(fd, 0) == 0 && SystemNative_FLock(fd, 1) == 0 && SystemNative_FSync(fd) == 0, "shim-pwmfs-descriptors", "(truncate, lock or sync refused)");
+        CHECK(SystemNative_LSeek(fd, 2, RHU_PAL_SEEK_SET) == 2 && SystemNative_Read(fd, t, 31) == 6 && memcmp(t, "00000\n", 6) == 0, "shim-pwmfs-descriptors", "(a read after a seek did not continue the text)");
+        CHECK(SystemNative_Read(fd, t, 31) == 0, "shim-pwmfs-descriptors", "(a read at the text's end did not answer end of file)");
+        CHECK(SystemNative_PRead(fd, t, 31, 5) == 3 && memcmp(t, "00\n", 3) == 0, "shim-pwmfs-descriptors", "(a positional read at 5 wrong)");
+        uint32_t sets_before = w->sets;
+        CHECK(SystemNative_PWrite(fd, "1000000", 7, 100) == 7 && w->sets == sets_before + 1, "shim-pwmfs-descriptors", "(a positional write was not taken as one value whatever its offset)");
+        CHECK(SystemNative_Dup(fd) == -1 && PF_ERRNO_IS(RHU_GERR_ENOTSUP), "shim-pwmfs-descriptors", "(dup was not refused ENOTSUP)");
+        CHECK(SystemNative_Close(fd) == 0 && SystemNative_FStat(fd, &st) == -1 && PF_ERRNO_IS(RHU_GERR_EBADF) && SystemNative_Close(fd) == -1 && PF_ERRNO_IS(RHU_GERR_EBADF), "shim-pwmfs-descriptors", "(a closed descriptor still answered)");
+        pass("shim-pwmfs-descriptors", " (the sysfs band; a regular file of 4096 bytes; truncate, lock and sync 0; seek, read to the end and a positional read on the text; a positional write one value; dup ENOTSUP; a closed descriptor EBADF)");
+    }
+
+    /* The band's exhaustion and recovery. */
+    {
+        intptr_t fds[RHU_SHIM_FD_SYSFS_COUNT];
+        int ok = 1;
+        for (int i = 0; i < RHU_SHIM_FD_SYSFS_COUNT; i++) {
+            fds[i] = SystemNative_Open(PF_CHIP "/npwm", RHU_PAL_O_RDONLY, 0);
+            if (fds[i] < 0)
+                ok = 0;
+        }
+        CHECK(ok, "shim-pwmfs-band", "(the band did not open 32 descriptors)");
+        CHECK(SystemNative_Open(PF_CHIP "/npwm", RHU_PAL_O_RDONLY, 0) == -1 && PF_ERRNO_IS(RHU_GERR_EMFILE), "shim-pwmfs-band", "(the 33rd open was not refused EMFILE)");
+        for (int i = 0; i < RHU_SHIM_FD_SYSFS_COUNT; i++) {
+            if (SystemNative_Close(fds[i]) != 0)
+                ok = 0;
+        }
+        CHECK(ok && pf_reads(PF_CHIP "/npwm", "4\n"), "shim-pwmfs-band", "(the band did not recover after the closes)");
+        pass("shim-pwmfs-band", " (32 descriptors, the 33rd EMFILE, every one given back)");
+    }
+
+    /* The C library's access. */
+    CHECK(access(PF_CHIP "/pwm0", RHU_PAL_R_OK | RHU_PAL_W_OK) == 0 && access(PF_CHIP "/pwm0/period", RHU_PAL_R_OK | RHU_PAL_W_OK) == 0, "shim-pwmfs-access", "(the channel directory or its period file did not pass R_OK|W_OK)");
+    CHECK(access(PF_CHIP "/export", RHU_PAL_R_OK) == -1 && *__errno_location() == RHU_GERR_EACCES, "shim-pwmfs-access", "(R_OK on the write-only export was not refused EACCES)");
+    CHECK(access(PF_CHIP "/pwm1", 0) == -1 && *__errno_location() == RHU_GERR_ENOENT, "shim-pwmfs-access", "(an unexported channel directory did not answer ENOENT)");
+    CHECK(access("/tmp", 0) == -1 && *__errno_location() == RHU_GERR_ENOENT, "shim-pwmfs-access", "(a path outside /sys did not answer ENOENT)");
+    pass("shim-pwmfs-access", " (the package's own check: a channel directory and its file R_OK|W_OK, the write-only export EACCES for R_OK, an unexported channel and a path outside /sys ENOENT)");
+
+    /* unexport. */
+    CHECK(pf_write(PF_CHIP "/unexport", "1") == -1 && PF_ERRNO_IS(RHU_GERR_ENODEV), "shim-pwmfs-unexport", "(an unexported line's unexport was not refused ENODEV)");
+    CHECK(pf_write(PF_CHIP "/unexport", "0") == 1 && w->releases == 1 && SystemNative_Stat(PF_CHIP "/pwm0", &st) == -1 && PF_ERRNO_IS(RHU_GERR_ENOENT), "shim-pwmfs-unexport", "(the unexport of line 0 did not release it)");
+    CHECK(pf_write(PF_CHIP "/export", "0") == 1 && w->claims_taken == 4 && pf_reads(PF_CHIP "/pwm0/period", "0\n"), "shim-pwmfs-unexport", "(a re-export after the unexport was refused, or the channel kept its period)");
+    CHECK(pf_write(PF_CHIP "/unexport", "0") == 1 && pf_write(PF_CHIP "/unexport", "2") == 1 && pf_write(PF_CHIP "/unexport", "3") == 1 && w->releases == 4, "shim-pwmfs-unexport", "(the unexports of 0, 2 and 3 did not release them)");
+    CHECK(pf_write(PF_CHIP "/unexport", "0") == -1 && PF_ERRNO_IS(RHU_GERR_ENODEV), "shim-pwmfs-unexport", "(a second unexport was not refused ENODEV)");
+    pass("shim-pwmfs-unexport", " (an unexported line ENODEV; the release gives the line back and a re-export starts from 0; every channel released)");
+
+    out("SHIMTEST-PWMFS: ALL GOOD (the PWM device files from a native caller's side)");
+    return 0;
+}
+
+#endif /* RHU_SHIMTEST_LADDER_PWMFS */
+
+#ifdef RHU_SHIMTEST_LADDER_IIOFS
+
+/* --- the analog input device files, from a native caller's side: the
+ * tree under /sys/bus/iio/devices the board package's analog input class
+ * reads, driven through the runtime's portability verbs the class
+ * reaches (the store hands a /sys/bus path and every analog-band
+ * descriptor to the unit) and the C library's access, on the emulator
+ * row's two virtual converter blocks: block 1 (twelve bits, 3300 mV) with
+ * channels 0 to 3 on lines 0 to 3, block 2 (fourteen bits, 3000 mV) with
+ * channel 0 the internal reference and channel 1 the loop channel that
+ * reads the first PWM line's duty cycle. The kernel's ADC witness is read
+ * by symbol after the verbs, in the kernel's layout. --- */
+struct ai_witness {
+    uint32_t channels, blocks, claims_taken, releases, conversions, timeouts, resets, refused_busy, refused_inval;
+    uint32_t last_sample, last_refused_index;
+    int32_t last_refused_code;
+};
+extern struct ai_witness __rhu_adc_witness;
+int access(const char *path, int mode);
+int32_t SystemNative_FcntlSetFD(intptr_t fd, int32_t flags);
+
+#define AI_ROOT "/sys/bus/iio/devices"
+#define AI_DEV0 AI_ROOT "/iio:device0"
+#define AI_DEV1 AI_ROOT "/iio:device1"
+#define AI_PWM "/sys/class/pwm/pwmchip0"
+#define AI_ERRNO_IS(e) (SystemNative_GetErrNo() == (e))
+
+/* One value written to a PWM node through the store, as the PWM class
+ * writes one (the loop step drives the first PWM line through the PWM
+ * device files): the count, or -1 with the write's errno kept past the
+ * close. */
+static int32_t ai_pwm_write(const char *path, const char *text)
+{
+    intptr_t fd = SystemNative_Open(path, RHU_PAL_O_WRONLY, 0);
+    if (fd < 0)
+        return -1;
+    int32_t n = SystemNative_Write(fd, text, (int32_t)strlen(text));
+    int32_t e = *__errno_location();
+    SystemNative_Close(fd);
+    if (n < 0)
+        *__errno_location() = e;
+    return n;
+}
+
+/* A file's text read through the store by an open, a read and a close (the
+ * one-shot read a stock File.ReadAllText makes): the count with the text
+ * terminated, or -1 with the errno kept past the close. */
+static int32_t ai_read(const char *path, char *buf, int32_t cap)
+{
+    intptr_t fd = SystemNative_Open(path, RHU_PAL_O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+    int32_t n = SystemNative_Read(fd, buf, cap - 1);
+    int32_t e = *__errno_location();
+    SystemNative_Close(fd);
+    if (n >= 0)
+        buf[n] = 0;
+    else
+        *__errno_location() = e;
+    return n;
+}
+
+static int ai_reads(const char *path, const char *want)
+{
+    char t[32];
+    int32_t n = ai_read(path, t, (int32_t)sizeof t);
+    return n == (int32_t)strlen(want) && strcmp(t, want) == 0;
+}
+
+/* A held descriptor's text by a positional read at 0 (the class's read of
+ * a held channel). */
+static int ai_reads_fd(intptr_t fd, const char *want)
+{
+    char t[32];
+    int32_t n = SystemNative_PRead(fd, t, (int32_t)sizeof t - 1, 0);
+    if (n < 0)
+        return 0;
+    t[n] = 0;
+    return n == (int32_t)strlen(want) && strcmp(t, want) == 0;
+}
+
+static int ai_is(const char *path, int32_t type)
+{
+    rhu_pal_filestatus st;
+    return SystemNative_Stat(path, &st) == 0 && (st.Mode & 0xF000) == type;
+}
+
+static int ai_in_band(intptr_t fd)
+{
+    return fd >= RHU_SHIM_FD_IIO_LO && fd < RHU_SHIM_FD_IIO_LO + RHU_SHIM_FD_IIO_COUNT;
+}
+
+static int iiofs_ladder(void)
+{
+    char t[32];
+    rhu_pal_filestatus st;
+    const volatile struct ai_witness *w = &__rhu_adc_witness;
+    out("shimtest-iiofs: the analog input device files from a native caller's side, on the row's virtual converters");
+    CHECK(rhu_shim_init() == 0, "shim-iiofs-init", "(initialization refused)");
+    CHECK(rhu_adc_count() == 6 && w->channels == 6 && w->blocks == 2, "shim-iiofs-init", "(the row does not state six channels over two converter blocks)");
+    pass("shim-iiofs-init", " (six channels over two virtual converter blocks, by the kernel's enumeration and its witness)");
+
+    /* The tree. */
+    CHECK(ai_is("/sys/bus", RHU_PAL_S_IFDIR) && ai_is("/sys/bus/iio", RHU_PAL_S_IFDIR) && ai_is(AI_ROOT, RHU_PAL_S_IFDIR) && ai_is(AI_ROOT "/", RHU_PAL_S_IFDIR), "shim-iiofs-tree", "(a directory of the tree is missing)");
+    CHECK(ai_is(AI_DEV0, RHU_PAL_S_IFDIR) && ai_is(AI_DEV0 "/", RHU_PAL_S_IFDIR) && ai_is(AI_DEV1, RHU_PAL_S_IFDIR), "shim-iiofs-tree", "(a device directory is missing)");
+    CHECK(SystemNative_Stat(AI_ROOT "/iio:device2", &st) == -1 && AI_ERRNO_IS(RHU_GERR_ENOENT), "shim-iiofs-tree", "(a third device answered)");
+    CHECK(ai_is(AI_DEV0 "/name", RHU_PAL_S_IFREG) && ai_is(AI_DEV0 "/in_voltage_scale", RHU_PAL_S_IFREG) && ai_is(AI_DEV0 "/in_voltage0_raw", RHU_PAL_S_IFREG) && ai_is(AI_DEV0 "/in_voltage3_raw", RHU_PAL_S_IFREG) && ai_is(AI_DEV1 "/in_voltage1_raw", RHU_PAL_S_IFREG),
+          "shim-iiofs-tree", "(name, in_voltage_scale or a channel's raw file is not a regular file)");
+    CHECK(SystemNative_Stat(AI_DEV0 "/in_voltage4_raw", &st) == -1 && AI_ERRNO_IS(RHU_GERR_ENOENT) && SystemNative_Stat(AI_DEV1 "/in_voltage2_raw", &st) == -1 && AI_ERRNO_IS(RHU_GERR_ENOENT), "shim-iiofs-tree", "(a channel the block has not answered)");
+    CHECK(SystemNative_Stat(AI_DEV0 "/in_voltage0_offset", &st) == -1 && AI_ERRNO_IS(RHU_GERR_ENOENT) && SystemNative_Stat("/sys/bus/i2c", &st) == -1 && AI_ERRNO_IS(RHU_GERR_ENOENT), "shim-iiofs-tree", "(a file the tree has not answered)");
+    CHECK(SystemNative_Open(AI_DEV0, RHU_PAL_O_RDONLY, 0) == -1 && AI_ERRNO_IS(RHU_GERR_EISDIR), "shim-iiofs-tree", "(a directory opened as a file)");
+    CHECK(ai_is("/sys/class/pwm", RHU_PAL_S_IFDIR) && ai_is("/sys", RHU_PAL_S_IFDIR), "shim-iiofs-tree", "(the PWM tree's directories no longer answer beside the analog tree)");
+    pass("shim-iiofs-tree", " (/sys/bus, /sys/bus/iio, the devices directory and the two device directories, with or without a trailing slash; a third device, a channel a block has not and a file the tree has not ENOENT; a directory EISDIR; the PWM tree beside it)");
+
+    /* The name files. */
+    CHECK(ai_reads(AI_DEV0 "/name", "adc1\n") && ai_reads(AI_DEV1 "/name", "adc2\n"), "shim-iiofs-name", "(the name files did not read adc1 and adc2)");
+    CHECK(SystemNative_Open(AI_DEV0 "/name", RHU_PAL_O_WRONLY, 0) == -1 && AI_ERRNO_IS(RHU_GERR_EACCES), "shim-iiofs-name", "(an open of name for writing was not refused EACCES)");
+    pass("shim-iiofs-name", " (the kernel's block numbers as adc1 and adc2; read-only)");
+
+    /* The scale files. */
+    CHECK(ai_reads(AI_DEV0 "/in_voltage_scale", "0.805664062\n"), "shim-iiofs-scale", "(device 0's scale did not read 0.805664062)");
+    CHECK(ai_reads(AI_DEV1 "/in_voltage_scale", "0.183105468\n"), "shim-iiofs-scale", "(device 1's scale did not read 0.183105468)");
+    CHECK(SystemNative_Open(AI_DEV1 "/in_voltage_scale", RHU_PAL_O_RDWR, 0) == -1 && AI_ERRNO_IS(RHU_GERR_EACCES), "shim-iiofs-scale", "(an open of the scale for writing was not refused EACCES)");
+    pass("shim-iiofs-scale", " (3300 mV over twelve bits as 0.805664062, 3000 mV over fourteen bits as 0.183105468: millivolts per count with nine digits; read-only)");
+
+    /* A channel: the open claims, the read converts, the close releases. */
+    {
+        uint32_t claims = w->claims_taken, conv = w->conversions, busy = w->refused_busy;
+        intptr_t fd = SystemNative_Open(AI_DEV0 "/in_voltage0_raw", RHU_PAL_O_RDONLY, 0);
+        CHECK(ai_in_band(fd) && w->claims_taken == claims + 1, "shim-iiofs-read", "(the channel's file did not open in the analog band with the channel claimed)");
+        CHECK(SystemNative_Open(AI_DEV0 "/in_voltage0_raw", RHU_PAL_O_RDONLY, 0) == -1 && AI_ERRNO_IS(RHU_GERR_EBUSY) && w->refused_busy == busy + 1, "shim-iiofs-read", "(a second open of the held channel was not refused EBUSY)");
+        CHECK(SystemNative_Read(fd, t, 31) == 4 && memcmp(t, "819\n", 4) == 0 && w->conversions == conv + 1, "shim-iiofs-read", "(the first read did not convert once and answer 819)");
+        CHECK(SystemNative_Read(fd, t, 31) == 0 && w->conversions == conv + 1, "shim-iiofs-read", "(a read at the text's end did not answer end of file without a conversion)");
+        CHECK(ai_reads_fd(fd, "819\n") && w->conversions == conv + 2, "shim-iiofs-read", "(a positional read at 0 did not convert again and answer 819)");
+        CHECK(SystemNative_LSeek(fd, 0, RHU_PAL_SEEK_SET) == 0 && SystemNative_Read(fd, t, 31) == 4 && memcmp(t, "819\n", 4) == 0 && w->conversions == conv + 3, "shim-iiofs-read", "(a read after a seek to 0 did not convert again)");
+        CHECK(SystemNative_Open(AI_DEV0 "/in_voltage9_raw", RHU_PAL_O_RDONLY, 0) == -1 && AI_ERRNO_IS(RHU_GERR_ENOENT), "shim-iiofs-read", "(a channel the block has not was not refused ENOENT)");
+        CHECK(SystemNative_Open(AI_DEV0 "/in_voltage2_raw", RHU_PAL_O_WRONLY, 0) == -1 && AI_ERRNO_IS(RHU_GERR_EACCES) && SystemNative_Open(AI_DEV0 "/in_voltage2_raw", RHU_PAL_O_RDWR, 0) == -1 && AI_ERRNO_IS(RHU_GERR_EACCES) && w->claims_taken == claims + 1,
+              "shim-iiofs-read", "(an open of a channel for writing was not refused EACCES with nothing claimed)");
+        uint32_t releases = w->releases;
+        CHECK(SystemNative_Close(fd) == 0 && w->releases == releases + 1, "shim-iiofs-read", "(the close did not release the channel)");
+        fd = SystemNative_Open(AI_DEV0 "/in_voltage0_raw", RHU_PAL_O_RDONLY, 0);
+        CHECK(ai_in_band(fd), "shim-iiofs-read", "(the re-open after the close was refused: the channel is still held)");
+        CHECK(ai_reads_fd(fd, "819\n") && SystemNative_Close(fd) == 0 && w->releases == releases + 2, "shim-iiofs-read", "(the re-opened channel did not read 819 and release at its close)");
+        CHECK(ai_reads(AI_DEV0 "/in_voltage2_raw", "2457\n") && ai_reads(AI_DEV0 "/in_voltage3_raw", "3276\n") && w->claims_taken == claims + 4 && w->releases == releases + 4, "shim-iiofs-read", "(the one-shot reads of channels 2 and 3 did not claim, convert and release)");
+        pass("shim-iiofs-read", " (the open claims the channel and a second open is EBUSY; a read at 0 converts once and answers 819, a read at the end answers end of file, a positional read at 0 and a read after a seek convert again; a channel the block has not ENOENT; an open for writing EACCES with nothing claimed; the close releases and a re-open succeeds; one-shot reads of channels 2 and 3 answer 2457 and 3276)");
+    }
+
+    /* A line a program holds as a GPIO line refuses the channel until the line is released, and a held channel refuses the line until the channel is closed. */
+    {
+        uint32_t busy = w->refused_busy;
+        CHECK(rhu_gpio_claim(1, RHU_GPIO_INPUT, RHU_GPIO_PULL_NONE, 0) == 0, "shim-iiofs-pad-law", "(the kernel's claim of line 1 as a GPIO line refused)");
+        CHECK(SystemNative_Open(AI_DEV0 "/in_voltage1_raw", RHU_PAL_O_RDONLY, 0) == -1 && AI_ERRNO_IS(RHU_GERR_EBUSY), "shim-iiofs-pad-law", "(the held line's open was not refused EBUSY)");
+        CHECK(w->refused_busy == busy + 1 && rhu_gpio_release(1) == 0, "shim-iiofs-pad-law", "(the refusal was not the kernel's, or the line's release refused)");
+        intptr_t fd = SystemNative_Open(AI_DEV0 "/in_voltage1_raw", RHU_PAL_O_RDONLY, 0);
+        CHECK(ai_in_band(fd) && ai_reads_fd(fd, "1638\n"), "shim-iiofs-pad-law", "(the channel did not open and read 1638 after the line's release)");
+        CHECK(rhu_gpio_claim(1, RHU_GPIO_INPUT, RHU_GPIO_PULL_NONE, 0) == RHU_EBUSY, "shim-iiofs-pad-law", "(the kernel's claim of the held channel's line as a GPIO line was not refused EBUSY)");
+        CHECK(SystemNative_Close(fd) == 0 && rhu_gpio_claim(1, RHU_GPIO_INPUT, RHU_GPIO_PULL_NONE, 0) == 0 && rhu_gpio_release(1) == 0, "shim-iiofs-pad-law", "(the line did not come back to the GPIO side after the channel's close)");
+        pass("shim-iiofs-pad-law", " (line 1 held as a GPIO line: the channel's open EBUSY by the kernel's refusal; released: the channel opens and reads 1638 and the line's GPIO claim is EBUSY; closed: the line is a GPIO line again)");
+    }
+
+    /* The internal reference. */
+    CHECK(ai_reads(AI_DEV1 "/in_voltage0_raw", "6619\n"), "shim-iiofs-reference", "(the internal reference did not read 6619)");
+    pass("shim-iiofs-reference", " (block 2's channel 0, the 1212 mV reference over 3000 mV at fourteen bits: 6619)");
+
+    /* The loop channel: the first PWM line's duty cycle, driven through the PWM device files beside this tree. */
+    {
+        intptr_t fd = SystemNative_Open(AI_DEV1 "/in_voltage1_raw", RHU_PAL_O_RDONLY, 0);
+        CHECK(ai_in_band(fd) && ai_reads_fd(fd, "0\n"), "shim-iiofs-loop", "(the loop channel did not read 0 with the PWM output parked)");
+        CHECK(ai_pwm_write(AI_PWM "/export", "0") == 1 && ai_pwm_write(AI_PWM "/pwm0/period", "1000000") == 7 && ai_pwm_write(AI_PWM "/pwm0/duty_cycle", "250000") == 6 && ai_pwm_write(AI_PWM "/pwm0/enable", "1") == 1,
+              "shim-iiofs-loop", "(the PWM line 0 did not export and start at 25 percent through the PWM device files)");
+        CHECK(ai_reads_fd(fd, "4096\n"), "shim-iiofs-loop", "(the loop channel did not read 4096 at 25 percent)");
+        CHECK(ai_pwm_write(AI_PWM "/pwm0/duty_cycle", "750000") == 6 && ai_reads_fd(fd, "12287\n"), "shim-iiofs-loop", "(the loop channel did not read 12287 at 75 percent)");
+        CHECK(ai_pwm_write(AI_PWM "/pwm0/duty_cycle", "250000") == 6 && ai_pwm_write(AI_PWM "/pwm0/polarity", "inversed") == 8 && ai_reads_fd(fd, "12287\n"), "shim-iiofs-loop", "(the loop channel did not read 12287 at 25 percent inversed)");
+        CHECK(ai_pwm_write(AI_PWM "/pwm0/enable", "0") == 1 && ai_reads_fd(fd, "0\n"), "shim-iiofs-loop", "(the loop channel did not read 0 after the output stopped)");
+        CHECK(ai_pwm_write(AI_PWM "/unexport", "0") == 1 && SystemNative_Close(fd) == 0, "shim-iiofs-loop", "(the PWM line's unexport or the loop channel's close refused)");
+        pass("shim-iiofs-loop", " (0 parked; 4096 at 25 percent, 12287 at 75 percent and at 25 percent inversed, 0 after the stop: every reading a fresh conversion of the first PWM line's duty cycle through the two trees in one image)");
+    }
+
+    /* The descriptor verbs on a channel file. */
+    {
+        intptr_t fd = SystemNative_Open(AI_DEV0 "/in_voltage0_raw", RHU_PAL_O_RDONLY, 0);
+        CHECK(ai_in_band(fd), "shim-iiofs-descriptors", "(the channel file did not open in the analog band)");
+        CHECK(SystemNative_FStat(fd, &st) == 0 && (st.Mode & 0xF000) == RHU_PAL_S_IFREG && st.Size == 4096, "shim-iiofs-descriptors", "(fstat is not a regular file of 4096 bytes)");
+        CHECK(SystemNative_FTruncate(fd, 0) == 0 && SystemNative_FLock(fd, 1) == 0 && SystemNative_FSync(fd) == 0 && SystemNative_FcntlSetFD(fd, 1) == 0, "shim-iiofs-descriptors", "(truncate, lock, sync or the descriptor flag refused)");
+        uint32_t conv = w->conversions;
+        CHECK(SystemNative_PRead(fd, t, 31, 0) == 4 && SystemNative_LSeek(fd, 2, RHU_PAL_SEEK_SET) == 2 && SystemNative_Read(fd, t, 31) == 2 && memcmp(t, "9\n", 2) == 0 && w->conversions == conv + 1, "shim-iiofs-descriptors", "(a read after a seek did not continue the last text without a conversion)");
+        CHECK(SystemNative_Read(fd, t, 31) == 0 && SystemNative_PRead(fd, t, 31, 5) == 0 && w->conversions == conv + 1, "shim-iiofs-descriptors", "(a read at or past the text's end did not answer end of file)");
+        CHECK(SystemNative_PWrite(fd, "1", 1, 0) == -1 && AI_ERRNO_IS(RHU_GERR_EBADF) && SystemNative_Write(fd, "1", 1) == -1 && AI_ERRNO_IS(RHU_GERR_EBADF), "shim-iiofs-descriptors", "(a write on the read-only descriptor was not refused EBADF)");
+        CHECK(SystemNative_Dup(fd) == -1 && AI_ERRNO_IS(RHU_GERR_ENOTSUP), "shim-iiofs-descriptors", "(dup was not refused ENOTSUP)");
+        CHECK(SystemNative_Close(fd) == 0 && SystemNative_FStat(fd, &st) == -1 && AI_ERRNO_IS(RHU_GERR_EBADF) && SystemNative_Close(fd) == -1 && AI_ERRNO_IS(RHU_GERR_EBADF), "shim-iiofs-descriptors", "(a closed descriptor still answered)");
+        pass("shim-iiofs-descriptors", " (the analog band; a regular file of 4096 bytes; truncate, lock, sync and the descriptor flag 0; a read after a seek continues the last text, a read at the end answers end of file; a write EBADF; dup ENOTSUP; a closed descriptor EBADF)");
+    }
+
+    /* The band's exhaustion and recovery, on the name file (no claim). */
+    {
+        intptr_t fds[RHU_SHIM_FD_IIO_COUNT];
+        int ok = 1;
+        for (int i = 0; i < RHU_SHIM_FD_IIO_COUNT; i++) {
+            fds[i] = SystemNative_Open(AI_DEV0 "/name", RHU_PAL_O_RDONLY, 0);
+            if (!ai_in_band(fds[i]))
+                ok = 0;
+        }
+        CHECK(ok, "shim-iiofs-band", "(the band did not open 16 descriptors)");
+        CHECK(SystemNative_Open(AI_DEV0 "/name", RHU_PAL_O_RDONLY, 0) == -1 && AI_ERRNO_IS(RHU_GERR_EMFILE), "shim-iiofs-band", "(the 17th open was not refused EMFILE)");
+        CHECK(SystemNative_Open(AI_DEV0 "/in_voltage0_raw", RHU_PAL_O_RDONLY, 0) == -1 && AI_ERRNO_IS(RHU_GERR_EMFILE) && w->claims_taken == w->releases, "shim-iiofs-band", "(a channel's open with the band full was not refused EMFILE before any claim)");
+        for (int i = 0; i < RHU_SHIM_FD_IIO_COUNT; i++) {
+            if (SystemNative_Close(fds[i]) != 0)
+                ok = 0;
+        }
+        CHECK(ok && ai_reads(AI_DEV0 "/name", "adc1\n"), "shim-iiofs-band", "(the band did not recover after the closes)");
+        pass("shim-iiofs-band", " (16 descriptors, the 17th EMFILE, a channel's open with the band full EMFILE before any claim, every one given back)");
+    }
+
+    /* The C library's access. */
+    CHECK(access(AI_DEV0 "/in_voltage0_raw", RHU_PAL_R_OK) == 0 && access(AI_DEV0, RHU_PAL_R_OK | RHU_PAL_X_OK) == 0, "shim-iiofs-access", "(a channel file or its device directory did not pass R_OK)");
+    CHECK(access(AI_DEV0 "/in_voltage0_raw", RHU_PAL_W_OK) == -1 && *__errno_location() == RHU_GERR_EACCES, "shim-iiofs-access", "(W_OK on a read-only channel file was not refused EACCES)");
+    CHECK(access(AI_ROOT "/iio:device2", 0) == -1 && *__errno_location() == RHU_GERR_ENOENT, "shim-iiofs-access", "(a device the row has not did not answer ENOENT)");
+    CHECK(access("/sys/class/pwm", 0) == 0 && access("/tmp", 0) == -1 && *__errno_location() == RHU_GERR_ENOENT, "shim-iiofs-access", "(the PWM tree's root or a path outside /sys did not answer as before)");
+    pass("shim-iiofs-access", " (a channel file and its device directory R_OK, W_OK on a channel file EACCES, a device the row has not and a path outside /sys ENOENT, the PWM tree's root beside it)");
+
+    /* Every channel given back. */
+    CHECK(w->claims_taken == w->releases && w->claims_taken >= 8, "shim-iiofs-closed", "(a claim was not released)");
+    CHECK(w->timeouts == 0 && w->resets == 0, "shim-iiofs-closed", "(a conversion passed its budget)");
+    pass("shim-iiofs-closed", " (every claim released: the witness's claims equal its releases; no conversion passed its budget)");
+
+    out("SHIMTEST-IIOFS: ALL GOOD (the analog input device files from a native caller's side)");
+    return 0;
+}
+
+#endif /* RHU_SHIMTEST_LADDER_IIOFS */
+
 #ifdef RHU_SHIMTEST_LADDER_GPIOD
 
 /* --- the GPIO unit's library surface, from a native caller's side, on the
@@ -2606,8 +3333,8 @@ static int gpiod_ladder(void)
     }
     {
         /* One pair of opens, one on each thread. Whether the two overlap is
-         * the scheduler's business here; the control built with the list
-         * unlocked holds its window open until they do. */
+         * the scheduler's business here; the build with the list unlocked
+         * holds its window open until they do. */
         gd_start(GD_ACT_OPEN);
         struct gpiod_chip *mine = gpiod_chip_open_by_number(0);
         gd_join();
@@ -2744,6 +3471,453 @@ static int gpiod_ladder(void)
 
 #endif /* RHU_SHIMTEST_LADDER_GPIOD */
 
+#ifdef RHU_SHIMTEST_LADDER_TTYDEV
+
+/* --- the serial device files, from a native caller's side: the file
+ * system's view of /dev through the runtime's portability verbs, then one
+ * port through the C library's open, ioctl, close, read, write, poll,
+ * fcntl and the termios family, on the emulator row's second UART, whose
+ * far end echoes every byte (the test runner's echo peer on the emulator's
+ * second serial port); then the stock serial layer driven through its own
+ * entry points on the same port, so its object is linked and tested here as
+ * well as through the managed test program. The first UART is the kernel's
+ * console,
+ * so its device file is held (EBUSY) and the second is the ladder's. Every
+ * wait is bounded, so a run without the echo ends in a FAIL line. One
+ * step runs a second thread below this one, blocked in a read while
+ * the descriptor is closed under it. --- */
+#include <fcntl.h>
+#include "ports/termios.h"
+#include "ports/sys/ioctl.h"
+#include "ports/poll.h"
+
+long read(int fd, void *buf, size_t n);
+long write(int fd, const void *buf, size_t n);
+int fcntl(int fd, int cmd, ...);
+int shutdown(int fd, int how);
+
+/* The stock layer's entry points, as its headers declare them. */
+typedef struct td_poll_event {
+    int32_t FileDescriptor;
+    int16_t Events;
+    int16_t TriggeredEvents;
+} td_poll_event;
+intptr_t SystemIoPortsNative_SerialPortOpen(const char *name);
+int SystemIoPortsNative_SerialPortClose(intptr_t fd);
+int32_t SystemIoPortsNative_Read(intptr_t fd, void *buffer, int32_t bufferSize);
+int32_t SystemIoPortsNative_Write(intptr_t fd, const void *buffer, int32_t bufferSize);
+int32_t SystemIoPortsNative_Poll(td_poll_event *pollEvents, uint32_t eventCount, int32_t milliseconds, uint32_t *triggered);
+int32_t SystemIoPortsNative_Shutdown(intptr_t socket, int32_t socketShutdown);
+int32_t SystemIoPortsNative_TermiosReset(intptr_t fd, int32_t speed, int32_t dataBits, int32_t stopBits, int32_t parity, int32_t handshake);
+int32_t SystemIoPortsNative_TermiosGetSpeed(intptr_t fd);
+int32_t SystemIoPortsNative_TermiosAvailableBytes(intptr_t fd, int32_t readBuffer);
+int32_t SystemIoPortsNative_TermiosGetAllSignals(intptr_t fd);
+int32_t SystemIoPortsNative_TermiosSendBreak(intptr_t fd, int32_t duration);
+
+#define TD_ERRNO_IS(e) (*__errno_location() == (e))
+#define TD_FLAGS (O_RDWR | O_NOCTTY | O_CLOEXEC | O_NONBLOCK)
+#define TD_PORT "/dev/ttyS1"
+#define TD_ALIAS "/dev/ttyAMA1"
+#define TD_ECHO_BYTES 1500
+#define TD_IN_BAND(fd) ((fd) >= RHU_SHIM_FD_TTY_LO && (fd) < RHU_SHIM_FD_TTY_LO + RHU_SHIM_FD_TTY_COUNT)
+#define TD_SIG_DSR (1 << 1)
+#define TD_SIG_CTS (1 << 3)
+#define TD_SIG_DCD (1 << 4)
+
+static uint8_t g_td_out[TD_ECHO_BYTES];
+static uint8_t g_td_in[TD_ECHO_BYTES];
+/* The exchange's count sent and the errno of a refused write or read,
+ * for the bytes step's line. */
+static int g_td_sent, g_td_werr, g_td_rerr;
+
+/* A count in decimal. */
+static const char *td_dec(long v, char *buf)
+{
+    char tmp[24];
+    int n = 0, i = 0;
+    unsigned long u = v < 0 ? 0ul - (unsigned long)v : (unsigned long)v;
+    do {
+        tmp[n++] = (char)('0' + u % 10ul);
+        u /= 10ul;
+    } while (u != 0ul);
+    if (v < 0)
+        buf[i++] = '-';
+    while (n > 0)
+        buf[i++] = tmp[--n];
+    buf[i] = 0;
+    return buf;
+}
+
+/* The bytes step's counts on one line: what the ladder sent and got,
+ * the port's two queues after the exchange, a refused write or read. */
+static void td_bytes_line(int got, int pending, int received)
+{
+    char line[LINE_MAX], d[24];
+    uint32_t n = put(line, 0u, "shimtest-ttydev: bytes: sent ");
+    n = put(line, n, td_dec(g_td_sent, d));
+    n = put(line, n, ", got ");
+    n = put(line, n, td_dec(got, d));
+    n = put(line, n, ", pending ");
+    n = put(line, n, td_dec(pending, d));
+    n = put(line, n, ", received ");
+    n = put(line, n, td_dec(received, d));
+    if (g_td_werr != 0) {
+        n = put(line, n, ", a write refused with errno ");
+        n = put(line, n, td_dec(g_td_werr, d));
+    }
+    if (g_td_rerr != 0) {
+        n = put(line, n, ", a read refused with errno ");
+        n = put(line, n, td_dec(g_td_rerr, d));
+    }
+    line[n] = 0;
+    out(line);
+}
+
+static int64_t td_now_ms(void)
+{
+    struct ts64 t;
+    __clock_gettime64(1, &t);
+    return t.sec * 1000 + t.nsec / 1000000;
+}
+
+/* Wait until the port has `want` bytes pending, or the bound passes; the
+ * count pending at the end. */
+static int td_wait_pending(int fd, int want, int bound_ms)
+{
+    int64_t start = td_now_ms();
+    for (;;) {
+        int n = 0;
+        if (ioctl(fd, FIONREAD, &n) != 0)
+            return -1;
+        if (n >= want || td_now_ms() - start > bound_ms)
+            return n;
+        struct pollfd p = {fd, POLLIN, 0};
+        (void)poll(&p, 1, 20);
+    }
+}
+
+/* Write `n` bytes whole through partial writes on a non-blocking
+ * descriptor, reading the echo back as it arrives so no ring fills; the
+ * bytes read land in `in`. Answers the count read within the bound. */
+static int td_exchange(int fd, const uint8_t *out, uint8_t *in, int n, int bound_ms)
+{
+    int sent = 0, got = 0;
+    int64_t start = td_now_ms();
+    g_td_sent = 0;
+    g_td_werr = 0;
+    g_td_rerr = 0;
+    while ((sent < n || got < n) && td_now_ms() - start <= bound_ms) {
+        if (sent < n) {
+            int chunk = n - sent > 64 ? 64 : n - sent;
+            long w = write(fd, out + sent, (size_t)chunk);
+            if (w > 0) {
+                sent += (int)w;
+                g_td_sent = sent;
+            } else if (w < 0 && !TD_ERRNO_IS(RHU_GERR_EAGAIN)) {
+                g_td_werr = *__errno_location();
+                return -1;
+            }
+        }
+        struct pollfd p = {fd, POLLIN, 0};
+        (void)poll(&p, 1, sent < n ? 0 : 20);
+        long r = read(fd, in + got, (size_t)(n - got));
+        if (r > 0) {
+            got += (int)r;
+        } else if (r < 0 && !TD_ERRNO_IS(RHU_GERR_EAGAIN)) {
+            g_td_rerr = *__errno_location();
+            return -1;
+        }
+    }
+    return got;
+}
+
+static int td_same_attrs(const struct termios *a, const struct termios *b)
+{
+    return a->c_iflag == b->c_iflag && a->c_oflag == b->c_oflag && a->c_cflag == b->c_cflag && a->c_lflag == b->c_lflag
+        && memcmp(a->c_cc, b->c_cc, sizeof a->c_cc) == 0 && a->c_ispeed == b->c_ispeed && a->c_ospeed == b->c_ospeed;
+}
+
+/* The worker of the close-under-read case: one blocking read on the
+ * descriptor the case names, its answer and errno kept for the verdict. */
+static int g_td_fd;
+static volatile int g_td_entered, g_td_finished;
+static long g_td_rc;
+static int g_td_errno;
+
+static void *td_blocked_read(void *arg)
+{
+    (void)arg;
+    uint8_t b[4];
+    __atomic_store_n(&g_td_entered, 1, __ATOMIC_RELEASE);
+    g_td_rc = read(g_td_fd, b, sizeof b);
+    g_td_errno = *__errno_location();
+    __atomic_store_n(&g_td_finished, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+static int ttydev_ladder(void)
+{
+    out("shimtest-ttydev: the serial device files from a native caller's side, on the row's UART blocks");
+    CHECK(rhu_shim_init() == 0, "shim-ttydev-init", "(initialization refused)");
+    pass("shim-ttydev-init", " (the shim initialized)");
+    /* the enumeration: no /sys/class/tty, so the standard class lists /dev and keeps the tty names */
+    {
+        rhu_pal_filestatus st;
+        CHECK(SystemNative_Stat("/sys/class/tty", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-ttydev-enumeration", "(/sys/class/tty is not absent)");
+        void *dir = SystemNative_OpenDir("/dev");
+        CHECK(dir != NULL, "shim-ttydev-enumeration", "(/dev did not open as a directory)");
+        rhu_pal_directoryentry e;
+        int seen = 0, chr = 0, order_ok = 1;
+        while (SystemNative_ReadDir(dir, &e) == 0) {
+            if (strlen(e.Name) < 4 || memcmp(e.Name, "tty", 3) != 0)
+                continue;
+            if (e.InodeType == RHU_PAL_DT_CHR)
+                chr++;
+            if ((seen == 0 && strcmp(e.Name, "ttyS0") != 0) || (seen == 1 && strcmp(e.Name, "ttyS1") != 0))
+                order_ok = 0;
+            seen++;
+        }
+        CHECK(SystemNative_CloseDir(dir) == 0, "shim-ttydev-enumeration", "(closedir)");
+        CHECK(seen == 2 && chr == 2 && order_ok, "shim-ttydev-enumeration", "(the listing of /dev did not show ttyS0 then ttyS1 as character devices and no other tty name)");
+        CHECK(SystemNative_Stat(TD_PORT, &st) == 0 && (st.Mode & 0xF000) == RHU_PAL_S_IFCHR, "shim-ttydev-enumeration", "(ttyS1's status is not a character device)");
+        CHECK(SystemNative_LStat(TD_PORT, &st) == 0 && (st.Mode & 0xF000) == RHU_PAL_S_IFCHR, "shim-ttydev-enumeration", "(ttyS1's link status is not a character device)");
+        CHECK(SystemNative_Stat("/dev/ttyS9", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-ttydev-enumeration", "(ttyS9 is not absent)");
+        CHECK(SystemNative_Access(TD_PORT, RHU_PAL_R_OK | RHU_PAL_W_OK) == 0, "shim-ttydev-enumeration", "(ttyS1 is not readable and writable)");
+        CHECK(SystemNative_Access("/dev/ttyS9", RHU_PAL_F_OK) == -1, "shim-ttydev-enumeration", "(ttyS9 is present to access)");
+        pass("shim-ttydev-enumeration", " (/sys/class/tty absent; /dev lists ttyS0 and ttyS1 as character devices in the rows' order; ttyS1's status a character device, readable and writable; ttyS9 absent)");
+    }
+
+    /* the open: the stock layer's flags, the descriptor in the tty band */
+    int fd = open(TD_PORT, TD_FLAGS);
+    CHECK(TD_IN_BAND(fd), "shim-ttydev-open", "(the open did not answer a descriptor of the tty band)");
+    pass("shim-ttydev-open", " (/dev/ttyS1 opened read-write, no controlling terminal, close-on-exec, non-blocking; the descriptor in the tty band)");
+
+    /* the refusals: the console's port, a second opener, the alias of a held port, a missing port, a malformed name */
+    CHECK(open("/dev/ttyS0", TD_FLAGS) == -1 && TD_ERRNO_IS(RHU_GERR_EBUSY), "shim-ttydev-refusals", "(the console's port did not refuse EBUSY)");
+    CHECK(open(TD_PORT, TD_FLAGS) == -1 && TD_ERRNO_IS(RHU_GERR_EBUSY), "shim-ttydev-refusals", "(a second opener was not refused EBUSY)");
+    CHECK(open(TD_ALIAS, TD_FLAGS) == -1 && TD_ERRNO_IS(RHU_GERR_EBUSY), "shim-ttydev-refusals", "(the alias of a held port was not refused EBUSY)");
+    CHECK(open("/dev/ttyS9", TD_FLAGS) == -1 && TD_ERRNO_IS(RHU_GERR_ENOENT), "shim-ttydev-refusals", "(a port the board has not was not refused ENOENT)");
+    CHECK(open("/dev/ttyS01", TD_FLAGS) == -1 && TD_ERRNO_IS(RHU_GERR_ENOENT), "shim-ttydev-refusals", "(a malformed name was not refused ENOENT)");
+    pass("shim-ttydev-refusals", " (ttyS0 EBUSY, the kernel's console holding it; a second opener EBUSY; the alias of the held port EBUSY; ttyS9 ENOENT; a name with a leading zero ENOENT)");
+
+    /* the termios round trip: the claim's state read; the raw image with a two-byte minimum and a timer set and read back equal */
+    struct termios t, u;
+    {
+        CHECK(tcgetattr(fd, &t) == 0, "shim-ttydev-termios", "(tcgetattr refused)");
+        CHECK(cfgetospeed(&t) == B115200 && cfgetispeed(&t) == B115200 && (t.c_cflag & CSIZE) == CS8 && t.c_cc[VMIN] == 1 && t.c_cc[VTIME] == 0, "shim-ttydev-termios", "(the claim's state is not 115200 8N1 with one byte to satisfy a read and no timer)");
+        cfmakeraw(&t);
+        CHECK(cfsetspeed(&t, B115200) == 0, "shim-ttydev-termios", "(cfsetspeed refused)");
+        t.c_cc[VMIN] = 2;
+        t.c_cc[VTIME] = 1;
+        CHECK(tcsetattr(fd, TCSANOW, &t) == 0, "shim-ttydev-termios", "(tcsetattr refused the raw image)");
+        memset(&u, 0, sizeof u);
+        CHECK(tcgetattr(fd, &u) == 0, "shim-ttydev-termios", "(tcgetattr refused after the set)");
+        CHECK(td_same_attrs(&t, &u), "shim-ttydev-termios", "(the attributes read back are not the set attributes)");
+        t.c_cc[VMIN] = 1;
+        t.c_cc[VTIME] = 0;
+        CHECK(tcsetattr(fd, TCSANOW, &t) == 0, "shim-ttydev-termios", "(tcsetattr refused the one-byte minimum)");
+        pass("shim-ttydev-termios", " (the claim's state 115200 8N1, one byte, no timer; the raw image with a two-byte minimum and a one-tenth timer set and read back equal; then one byte, no timer)");
+    }
+
+    /* the frame refusal: seven data bits refused by the port, the image unchanged */
+    {
+        struct termios f = t;
+        f.c_cflag = (f.c_cflag & ~(tcflag_t)CSIZE) | CS7;
+        CHECK(tcsetattr(fd, TCSANOW, &f) == -1 && TD_ERRNO_IS(RHU_GERR_EINVAL), "shim-ttydev-frame", "(seven data bits were not refused EINVAL)");
+        CHECK(tcgetattr(fd, &u) == 0 && (u.c_cflag & CSIZE) == CS8, "shim-ttydev-frame", "(the image moved under a refused set)");
+        pass("shim-ttydev-frame", " (CS7 refused EINVAL: the port takes 8N1 alone; the image unchanged)");
+    }
+
+    /* the rate: past the divider's floor refused, 921600 accepted with its achieved rate, 115200 again */
+    {
+        struct termios r = t;
+        CHECK(cfsetspeed(&r, B2000000) == 0, "shim-ttydev-rate", "(cfsetspeed B2000000 refused)");
+        CHECK(tcsetattr(fd, TCSANOW, &r) == -1 && TD_ERRNO_IS(RHU_GERR_EINVAL), "shim-ttydev-rate", "(2000000 was not refused EINVAL)");
+        CHECK(tcgetattr(fd, &u) == 0 && cfgetospeed(&u) == B115200, "shim-ttydev-rate", "(the rate moved under a refused set)");
+        CHECK(cfsetspeed(&r, B921600) == 0 && tcsetattr(fd, TCSANOW, &r) == 0, "shim-ttydev-rate", "(921600 was refused)");
+        CHECK(tcgetattr(fd, &u) == 0 && cfgetospeed(&u) == B921600 && cfgetispeed(&u) == B921600, "shim-ttydev-rate", "(921600 did not read back)");
+        CHECK(tcsetattr(fd, TCSANOW, &t) == 0, "shim-ttydev-rate", "(the return to 115200 was refused)");
+        pass("shim-ttydev-rate", " (2000000 refused EINVAL, past the divider's floor; 921600 accepted with the achieved rate in the port's line and read back; 115200 again)");
+    }
+
+    /* the bytes: 1,500 through partial writes and non-blocking reads with poll, byte-equal */
+    {
+        for (int i = 0; i < TD_ECHO_BYTES; i++)
+            g_td_out[i] = (uint8_t)(i * 7 + 3);
+        int got = td_exchange(fd, g_td_out, g_td_in, TD_ECHO_BYTES, 10000);
+        int pending = -1, received = -1;
+        (void)ioctl(fd, TIOCOUTQ, &pending);
+        (void)ioctl(fd, FIONREAD, &received);
+        td_bytes_line(got, pending, received);
+        CHECK(got == TD_ECHO_BYTES, "shim-ttydev-bytes", "(the echo did not return every byte within the bound)");
+        CHECK(memcmp(g_td_out, g_td_in, TD_ECHO_BYTES) == 0, "shim-ttydev-bytes", "(the bytes read back differ from the bytes written)");
+        pass("shim-ttydev-bytes", " (1500 bytes written in partial writes and read back non-blocking with poll, byte-equal)");
+    }
+
+    /* the empty non-blocking read: EAGAIN, never 0 */
+    {
+        uint8_t b;
+        long r = read(fd, &b, 1);
+        CHECK(r == -1 && TD_ERRNO_IS(RHU_GERR_EAGAIN), "shim-ttydev-nonblock", "(an empty non-blocking read did not answer EAGAIN)");
+        pass("shim-ttydev-nonblock", " (an empty non-blocking read answers EAGAIN)");
+    }
+
+    /* poll on the idle port: writable, not readable, no error; a poll for input times out */
+    {
+        struct pollfd p = {fd, POLLIN | POLLOUT, 0};
+        int n = poll(&p, 1, 0);
+        CHECK(n == 1 && (p.revents & POLLOUT) != 0 && (p.revents & POLLIN) == 0 && (p.revents & (POLLERR | POLLHUP | POLLNVAL)) == 0, "shim-ttydev-poll", "(poll reported an error on a live port)");
+        struct pollfd q = {fd, POLLIN, 0};
+        int64_t t0 = td_now_ms();
+        CHECK(poll(&q, 1, 100) == 0 && td_now_ms() - t0 >= 80, "shim-ttydev-poll", "(a poll for input on the idle port did not time out)");
+        pass("shim-ttydev-poll", " (the idle port polls writable, not readable, with no error; a 100 ms poll for input times out)");
+    }
+
+    /* the counts: TIOCOUTQ 0 after tcdrain; FIONREAD exactly 8 after an eight-byte write and its echo */
+    {
+        uint8_t eight[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        CHECK(write(fd, eight, 8) == 8, "shim-ttydev-counts", "(the eight-byte write was partial)");
+        CHECK(tcdrain(fd) == 0, "shim-ttydev-counts", "(tcdrain refused)");
+        int outq = -1;
+        CHECK(ioctl(fd, TIOCOUTQ, &outq) == 0 && outq == 0, "shim-ttydev-counts", "(TIOCOUTQ is not 0 after tcdrain)");
+        CHECK(td_wait_pending(fd, 8, 2000) == 8, "shim-ttydev-counts", "(FIONREAD did not reach exactly 8 after the echo)");
+        uint8_t back[8];
+        CHECK(read(fd, back, 8) == 8 && memcmp(eight, back, 8) == 0, "shim-ttydev-counts", "(the eight bytes did not read back)");
+        pass("shim-ttydev-counts", " (TIOCOUTQ 0 after tcdrain; FIONREAD exactly 8 after an eight-byte write and its echo)");
+    }
+
+    /* the modem lines: CTS, DSR and DCD always; DTR and RTS latched, moved by MBIC and MBIS */
+    {
+        int bits = 0;
+        CHECK(ioctl(fd, TIOCMGET, &bits) == 0 && (bits & (TIOCM_CTS | TIOCM_DSR | TIOCM_CAR)) == (TIOCM_CTS | TIOCM_DSR | TIOCM_CAR) && (bits & (TIOCM_DTR | TIOCM_RTS)) == (TIOCM_DTR | TIOCM_RTS), "shim-ttydev-modem", "(TIOCMGET does not read CTS, DSR and DCD with DTR and RTS latched)");
+        int dtr = TIOCM_DTR;
+        CHECK(ioctl(fd, TIOCMBIC, &dtr) == 0 && ioctl(fd, TIOCMGET, &bits) == 0 && (bits & TIOCM_DTR) == 0 && (bits & TIOCM_RTS) != 0, "shim-ttydev-modem", "(TIOCMBIC did not clear DTR alone)");
+        CHECK(ioctl(fd, TIOCMBIS, &dtr) == 0 && ioctl(fd, TIOCMGET, &bits) == 0 && (bits & TIOCM_DTR) != 0, "shim-ttydev-modem", "(TIOCMBIS did not set DTR back)");
+        pass("shim-ttydev-modem", " (CTS, DSR and DCD read asserted; DTR and RTS latched at the open; MBIC clears DTR alone and MBIS sets it back, the port's line once)");
+    }
+
+    /* tcflush discards the pending input; tcsendbreak is a no-op on this port */
+    {
+        uint8_t four[4] = {9, 8, 7, 6};
+        CHECK(write(fd, four, 4) == 4 && td_wait_pending(fd, 4, 2000) == 4, "shim-ttydev-flush", "(the four bytes did not arrive)");
+        int n = -1;
+        CHECK(tcflush(fd, TCIOFLUSH) == 0 && ioctl(fd, FIONREAD, &n) == 0 && n == 0, "shim-ttydev-flush", "(tcflush did not discard the pending input)");
+        CHECK(tcsendbreak(fd, 0) == 0, "shim-ttydev-flush", "(tcsendbreak refused)");
+        pass("shim-ttydev-flush", " (tcflush discards four pending bytes; tcsendbreak answers 0 with the port's no-break line)");
+    }
+
+    /* fcntl and the four blocking cases of VMIN and VTIME */
+    {
+        int fl = fcntl(fd, F_GETFL);
+        CHECK((fl & O_NONBLOCK) != 0 && (fl & O_ACCMODE) == O_RDWR, "shim-ttydev-blocking", "(F_GETFL does not read O_NONBLOCK and O_RDWR)");
+        CHECK(fcntl(fd, F_SETFL, fl & ~O_NONBLOCK) == 0 && (fcntl(fd, F_GETFL) & O_NONBLOCK) == 0, "shim-ttydev-blocking", "(F_SETFL did not clear O_NONBLOCK)");
+        struct termios v = t;
+        uint8_t b[4];
+        v.c_cc[VMIN] = 0;
+        v.c_cc[VTIME] = 0;
+        CHECK(tcsetattr(fd, TCSANOW, &v) == 0 && read(fd, b, 4) == 0, "shim-ttydev-blocking", "(VMIN 0 VTIME 0 did not answer 0 at once)");
+        v.c_cc[VMIN] = 1;
+        v.c_cc[VTIME] = 0;
+        CHECK(tcsetattr(fd, TCSANOW, &v) == 0 && write(fd, "A", 1) == 1 && read(fd, b, 4) == 1 && b[0] == 'A', "shim-ttydev-blocking", "(VMIN 1 VTIME 0 did not answer the one echoed byte)");
+        v.c_cc[VMIN] = 0;
+        v.c_cc[VTIME] = 2;
+        int64_t t0 = td_now_ms();
+        CHECK(tcsetattr(fd, TCSANOW, &v) == 0 && read(fd, b, 4) == 0 && td_now_ms() - t0 >= 150, "shim-ttydev-blocking", "(VMIN 0 VTIME 2 did not answer 0 after the timer on a silent line)");
+        v.c_cc[VMIN] = 2;
+        v.c_cc[VTIME] = 1;
+        CHECK(tcsetattr(fd, TCSANOW, &v) == 0 && write(fd, "BC", 2) == 2 && read(fd, b, 4) == 2 && b[0] == 'B' && b[1] == 'C', "shim-ttydev-blocking", "(VMIN 2 VTIME 1 did not answer the two echoed bytes)");
+        CHECK(tcsetattr(fd, TCSANOW, &t) == 0 && fcntl(fd, F_SETFL, fl) == 0 && (fcntl(fd, F_GETFL) & O_NONBLOCK) != 0, "shim-ttydev-blocking", "(the one-byte minimum and O_NONBLOCK were not restored)");
+        pass("shim-ttydev-blocking", " (F_GETFL and F_SETFL move O_NONBLOCK; blocking reads: 0/0 answers 0 at once, 1/0 waits for the one echoed byte, 0/2 answers 0 after the timer on a silent line, 2/1 waits for two then the inter-byte time)");
+    }
+
+    /* the close, then the alias opens the same block */
+    CHECK(close(fd) == 0, "shim-ttydev-reopen", "(the close refused)");
+    {
+        int fa = open(TD_ALIAS, TD_FLAGS);
+        CHECK(TD_IN_BAND(fa), "shim-ttydev-reopen", "(the alias did not open after the close: the port is still held)");
+        CHECK(close(fa) == 0, "shim-ttydev-reopen", "(the alias's close refused)");
+        pass("shim-ttydev-reopen", " (closed, then /dev/ttyAMA1 opens the same block and closes)");
+    }
+
+    /* a close under a blocked read on a second thread: the read answers EBADF at the close; the block goes to
+     * no new opener while the read still runs on the closed descriptor; the same descriptor comes back after */
+    {
+        int fb = open(TD_PORT, TD_FLAGS);
+        CHECK(TD_IN_BAND(fb), "shim-ttydev-close-under-read", "(the port did not open for the case)");
+        int fl = fcntl(fb, F_GETFL);
+        CHECK(fcntl(fb, F_SETFL, fl & ~O_NONBLOCK) == 0, "shim-ttydev-close-under-read", "(F_SETFL did not clear O_NONBLOCK)");
+        uint32_t tid = 0;
+        g_td_fd = fb;
+        CHECK(spawn_below(&tid, td_blocked_read, NULL) == 0, "shim-ttydev-close-under-read", "(the worker did not spawn)");
+        /* The worker runs below this thread: it enters its read while
+         * this thread sleeps and blocks there with nothing on the line;
+         * it runs again only while this thread waits for its end, so the
+         * open right after the close always finds the read still on the
+         * closed descriptor. */
+        while (__atomic_load_n(&g_td_entered, __ATOMIC_ACQUIRE) == 0)
+            msleep(1);
+        msleep(20);
+        CHECK(__atomic_load_n(&g_td_finished, __ATOMIC_ACQUIRE) == 0, "shim-ttydev-close-under-read", "(the read ended before the close: the case proved nothing)");
+        CHECK(close(fb) == 0, "shim-ttydev-close-under-read", "(the close under a blocked read did not answer 0)");
+        CHECK(open(TD_PORT, TD_FLAGS) == -1 && TD_ERRNO_IS(RHU_GERR_EBUSY), "shim-ttydev-close-under-read", "(the block was reopened while a request still ran on its closed descriptor)");
+        wait_done(&g_td_finished, 1);
+        CHECK(g_td_rc == -1 && g_td_errno == RHU_GERR_EBADF, "shim-ttydev-close-under-read", "(the blocked read did not answer EBADF at the close)");
+        int fc = open(TD_PORT, TD_FLAGS);
+        CHECK(fc == fb, "shim-ttydev-close-under-read", "(the descriptor was not given back when its last request left)");
+        CHECK(close(fc) == 0, "shim-ttydev-close-under-read", "(the close refused)");
+        pass("shim-ttydev-close-under-read", " (the close under a blocked read answers 0 at once and the read answers EBADF; a new opener is refused EBUSY while the read still runs on the closed descriptor; the same descriptor comes back after)");
+    }
+
+    /* the stock layer through its own entry points on the same port */
+    {
+        intptr_t s = SystemIoPortsNative_SerialPortOpen(TD_PORT);
+        CHECK(TD_IN_BAND(s), "shim-ttydev-stock", "(the layer's open did not answer a descriptor of the tty band)");
+        CHECK(SystemIoPortsNative_TermiosReset(s, 115200, 8, 1, 0, 0) == 0, "shim-ttydev-stock", "(the layer's reset to 115200 8N1 without flow control refused)");
+        CHECK(SystemIoPortsNative_TermiosGetSpeed(s) == 115200, "shim-ttydev-stock", "(the layer did not read 115200)");
+        CHECK(SystemIoPortsNative_TermiosReset(s, 115200, 8, 1, 0, 2) != 0, "shim-ttydev-stock", "(the layer's reset with hardware flow control was not refused)");
+        CHECK(SystemIoPortsNative_TermiosGetSpeed(s) == 115200, "shim-ttydev-stock", "(the refused reset moved the rate)");
+        static const uint8_t hello[5] = {'h', 'e', 'l', 'l', 'o'};
+        int sent = 0;
+        int64_t t0 = td_now_ms();
+        while (sent < 5 && td_now_ms() - t0 < 2000) {
+            int32_t w = SystemIoPortsNative_Write(s, hello + sent, 5 - sent);
+            if (w > 0)
+                sent += w;
+        }
+        CHECK(sent == 5, "shim-ttydev-stock", "(the layer's write did not send five bytes)");
+        td_poll_event ev;
+        ev.FileDescriptor = (int32_t)s;
+        ev.Events = 0x0001;
+        ev.TriggeredEvents = 0;
+        uint32_t triggered = 0;
+        uint8_t back[5];
+        int got = 0;
+        t0 = td_now_ms();
+        while (got < 5 && td_now_ms() - t0 < 2000) {
+            ev.TriggeredEvents = 0;
+            if (SystemIoPortsNative_Poll(&ev, 1, 200, &triggered) != 0)
+                break;
+            if (triggered == 0)
+                continue;
+            int32_t r = SystemIoPortsNative_Read(s, back + got, 5 - got);
+            if (r > 0)
+                got += r;
+        }
+        CHECK(got == 5 && memcmp(hello, back, 5) == 0, "shim-ttydev-stock", "(the layer's poll and read did not return the five echoed bytes)");
+        CHECK(SystemIoPortsNative_TermiosAvailableBytes(s, 1) == 0, "shim-ttydev-stock", "(the layer counts pending input on the drained port)");
+        int32_t sig = SystemIoPortsNative_TermiosGetAllSignals(s);
+        CHECK(sig >= 0 && (sig & (TD_SIG_CTS | TD_SIG_DSR | TD_SIG_DCD)) == (TD_SIG_CTS | TD_SIG_DSR | TD_SIG_DCD), "shim-ttydev-stock", "(the layer does not read CTS, DSR and DCD)");
+        CHECK(SystemIoPortsNative_TermiosSendBreak(s, 0) == 0, "shim-ttydev-stock", "(the layer's break refused)");
+        CHECK(SystemIoPortsNative_Shutdown(s, 2) != 0, "shim-ttydev-stock", "(the layer's shutdown of a port answered success)");
+        CHECK(SystemIoPortsNative_SerialPortClose(s) == 0, "shim-ttydev-stock", "(the layer's close refused)");
+        pass("shim-ttydev-stock", " (the stock serial layer through its own entry points: open, the reset to 115200 8N1, the speed read, hardware flow control refused, five bytes written and read back through its poll, no pending input, the signals, the break, shutdown refused on a port, close)");
+    }
+
+    out("SHIMTEST-TTYDEV: ALL GOOD (the serial device files from a native caller's side)");
+    return 0;
+}
+
+#endif /* RHU_SHIMTEST_LADDER_TTYDEV */
+
 #ifdef RHU_SHIMTEST_LADDER_FROZEN
 /* The frozen object heap on a small board's row, linked with that row's
  * shim objects: a pool of 16 KB under the runtime's reservation of 4 MB
@@ -2776,6 +3950,10 @@ static int frozen_backing(uint8_t *base)
 static int frozen_ladder(void)
 {
     uint32_t free_at_start = rhu_arena_headroom();
+    /* The managed heap's window before the shim initializes, by the
+     * hosting layer's rule: the hard-limit row is checked against it. */
+    rhu_ram_desc heap_w;
+    int heap_ext = heap_window_read(&heap_w);
 
     out("shimtest-frozen: the frozen object heap on a small board's pool");
 
@@ -2783,8 +3961,8 @@ static int frozen_ladder(void)
     CHECK(rhu_arena_headroom() == free_at_start, "shim-frozen-init", "(the initialization drew system memory)");
     pass("shim-frozen-init", " (per-thread block registered; no system memory drawn)");
 
-    CHECK(hard_limit_row() == ((free_at_start - FROZEN_KEEP) & ~4095u), "shim-frozen-env", "(the hard limit is not the system memory free at the start less what the row keeps)");
-    pass("shim-frozen-env", " (the hard limit is the system memory free at the start less the 24 KB the row keeps)");
+    CHECK(hard_limit_row() == (heap_ext ? heap_w.free & ~4095u : (free_at_start - FROZEN_KEEP) & ~4095u), "shim-frozen-env", "(the hard limit is not the managed heap window's free memory at the start, less what the row keeps from the internal window)");
+    pass("shim-frozen-env", " (the hard limit is the managed heap window's free memory at the start, less the 24 KB the row keeps when that window is the internal one)");
 
     /* An ordinary mapping first: its page is memory, and it leaves the
      * arena's next draw on a page boundary, so the reservation's cost
@@ -2857,6 +4035,15 @@ int __managed__Main(int argc, char *argv[])
 #elif defined(RHU_SHIMTEST_LADDER_GPIOD)
     (void)argc;
     return gpiod_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_PWMFS)
+    (void)argc;
+    return pwmfs_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_IIOFS)
+    (void)argc;
+    return iiofs_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_TTYDEV)
+    (void)argc;
+    return ttydev_ladder();
 #elif defined(RHU_SHIMTEST_LADDER_FROZEN)
     (void)argc;
     return frozen_ladder();
