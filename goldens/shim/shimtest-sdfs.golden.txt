@@ -1,0 +1,13 @@
+shimtest-sdfs: the card's files from a native caller's side over a scripted kernel
+PASS shim-sdfs-absent (no card: the point ENOENT, /media a directory, the store's root the one mount point)
+PASS shim-sdfs-mounted (the point a directory on its own device, listed under /media; the space from the kernel's clusters; the type vfat)
+PASS shim-sdfs-roundtrip (the storage band's first descriptor; ten bytes out and back; seeks and a positional read that leaves the position; the status record mapped; access by path)
+PASS shim-sdfs-pwrite (a positional write leaves the position; truncation grows zero-filled and cuts; preallocation grows)
+PASS shim-sdfs-dup (two descriptors on one kernel handle share the position; the handle closes with the last)
+PASS shim-sdfs-dirs (mkdir and its refusals; a listing with the two dots and the types; rename within the volume, EXDEV across; rmdir refuses non-empty; unlink)
+PASS shim-sdfs-copy (the library's copy verb moves bytes from the store to the card and within the card)
+PASS shim-sdfs-errors (ENOSPC on a full volume by the sign map; EROFS and the mode of a read-only file; EISDIR and ENOENT; the attributes the layer lacks refused ENOTSUP; the locks granted without effect)
+PASS shim-sdfs-band (sixteen descriptors on the band, the seventeenth EMFILE, every slot free again after the closes)
+PASS shim-sdfs-hotswap (a card pulled under an open handle: EIO at every verb, the close 0, the point ENOENT; the card back with its file)
+PASS shim-sdfs-beside (the store's paths and band untouched; a name that only begins like the point stays in the store)
+SHIMTEST-SDFS: ALL GOOD (the card's files from a native caller's side over a scripted kernel)

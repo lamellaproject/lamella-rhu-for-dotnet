@@ -1,16 +1,19 @@
-//! The block-device doors: the device table a
+//! The block-device functions: the device table a
 //! program enumerates, the index-th device's record read at the call, the
 //! whole-block reads and writes by number, the sync. The one device
-//! is the STM32F769 Discovery board's microSD socket (`mmcblk0`, Linux's
-//! name for the first MMC/SD block device) on the chip's SDMMC2 controller
-//! through the host of board/stm32f7_sdmmc.rs and the card layer of
-//! sdcard.rs; every other row serves no device -- the count answers 0 and
-//! every other door RHU_ENODEV -- so the doors exist on every row with one
+//! is a board's microSD socket (`mmcblk0`, Linux's name for the first
+//! MMC/SD block device): the STM32F769 Discovery board's on the chip's
+//! SDMMC2 controller through the host of board/stm32f7_sdmmc.rs, the
+//! Adafruit Metro RP2350 boards' on the chip's first SPI block through the
+//! SPI-mode host of sdspi.rs and board/rp2350_sdspi.rs -- the board's `sd`
+//! module names the host -- and the card layer of sdcard.rs over either;
+//! every other row serves no device -- the count answers 0 and
+//! every other function RHU_ENODEV -- so the functions exist on every row with one
 //! shape. The boot banner's sd line is this module's too.
 
 use crate::sched;
 
-/// The most blocks one door call moves (64 KB).
+/// The most blocks one kernel call moves (64 KB).
 #[cfg_attr(not(rhu_sd_socket), allow(dead_code))]
 pub const BLK_MAX: u32 = 128;
 #[cfg_attr(not(rhu_sd_socket), allow(dead_code))]
@@ -46,23 +49,27 @@ pub struct BlkDesc {
 #[cfg(rhu_sd_socket)]
 mod socket {
     use core::ptr::{addr_of_mut, write_volatile};
-    use core::sync::atomic::AtomicU32;
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use super::*;
-    use crate::board::stm32f7_sdmmc::{self, Sdmmc2Host};
+    use crate::board::sd;
     use crate::sdcard::{self, Card, Step, Stuck, Why};
     use crate::sdhost::{Refusal, SdHost, Width};
 
     /// The one device's tenancy word.
     static TENANCY: AtomicU32 = AtomicU32::new(0);
+    /// Set while the boot banner runs (before the scheduler, nothing else
+    /// running): the device is reached without its tenancy, so the mount at
+    /// boot reads through the path a program's call takes.
+    static BOOT_DIRECT: AtomicBool = AtomicBool::new(false);
 
     struct Device {
-        host: Sdmmc2Host,
+        host: sd::Host,
         card: Option<Card>,
         /// The identification's refusal, remembered until the card leaves.
         refused: Option<Stuck>,
     }
-    static mut DEVICE: Device = Device { host: Sdmmc2Host::new(), card: None, refused: None };
+    static mut DEVICE: Device = Device { host: sd::new(), card: None, refused: None };
 
     /// The witness record, read by symbol: the identifications and refusals
     /// with the last refusal's step and reason as the enums' ordinals, the
@@ -78,10 +85,12 @@ mod socket {
         pub writes: u32,
         pub blocks_read: u32,
         pub blocks_written: u32,
-        /// The last identification's cycles.
+        /// The last identification's time in the host's ticks (the core's
+        /// cycles on the STM32F769 row).
         pub ident_cycles: u32,
-        /// The host's status word and its stream's flag word at the last refusal
-        /// (stm32f7_sdmmc::last_flags: a fault names its flag here).
+        /// The host's two words at the last refusal (the board's sd::last_words:
+        /// the SDMMC2 host's status word and its stream's flag word, the SPI-mode
+        /// host's last R1 byte and last token): a fault names its flag here.
         pub last_sta: u32,
         pub last_lisr: u32,
     }
@@ -98,7 +107,7 @@ mod socket {
             bump(addr_of_mut!((*w).refusals), 1);
             write_volatile(addr_of_mut!((*w).last_step), s.step as u32);
             write_volatile(addr_of_mut!((*w).last_why), why_ordinal(&s.why));
-            let (sta, lisr) = stm32f7_sdmmc::last_flags();
+            let (sta, lisr) = sd::last_words();
             write_volatile(addr_of_mut!((*w).last_sta), sta);
             write_volatile(addr_of_mut!((*w).last_lisr), lisr);
         }
@@ -180,7 +189,7 @@ mod socket {
     /// read now; a card gone drops the identification and forgets a
     /// refusal; a card present and unidentified is identified here (the
     /// host attached anew), a refusal remembered until the card leaves.
-    fn ensure<'a>(host: &mut Sdmmc2Host, card: &'a mut Option<Card>, refused: &mut Option<Stuck>) -> Result<&'a Card, i32> {
+    fn ensure<'a>(host: &mut sd::Host, card: &'a mut Option<Card>, refused: &mut Option<Stuck>) -> Result<&'a Card, i32> {
         if host.card_present() == Some(false) {
             *card = None;
             *refused = None;
@@ -190,9 +199,9 @@ mod socket {
             if let Some(s) = refused {
                 return Err(code_of(s));
             }
-            let t0 = stm32f7_sdmmc::cycles();
+            let t0 = sd::ticks();
             let r = sdcard::identify(host);
-            unsafe { write_volatile(addr_of_mut!((*addr_of_mut!(__rhu_sd_witness)).ident_cycles), stm32f7_sdmmc::cycles().wrapping_sub(t0)) };
+            unsafe { write_volatile(addr_of_mut!((*addr_of_mut!(__rhu_sd_witness)).ident_cycles), sd::ticks().wrapping_sub(t0)) };
             match r {
                 Ok(c) => {
                     *card = Some(c);
@@ -208,9 +217,12 @@ mod socket {
         Ok(card.as_ref().unwrap())
     }
 
-    /// The device under its tenancy for one door call; the tenancy's own
+    /// The device under its tenancy for one kernel call; the tenancy's own
     /// code when the wait fails (it does not, at no deadline).
     fn with_device<R>(f: impl FnOnce(&mut Device) -> R) -> Result<R, i32> {
+        if BOOT_DIRECT.load(Ordering::Relaxed) {
+            return Ok(f(unsafe { &mut *addr_of_mut!(DEVICE) }));
+        }
         crate::bus::tenancy_take(&TENANCY, sched::DEADLINE_NONE)?;
         let r = f(unsafe { &mut *addr_of_mut!(DEVICE) });
         crate::bus::tenancy_give(&TENANCY);
@@ -237,31 +249,77 @@ mod socket {
     /// The boot banner: the card
     /// identified before the scheduler and the tick (the
     /// host spinning, no tenancy taken: nothing else runs), the line one of
-    /// three -- the card with its class, size, lines and clock; no card; the
-    /// refusal's step. A refused card is not a boot death. The host yields
-    /// from here on.
+    /// three -- the card with its class, size, bus, lines and clock, then the
+    /// volume the file family mounted on it (or the refusal's words); no card
+    /// (with the detect line's level); the refusal's step. A refused card is
+    /// not a boot death. The host yields from here on.
     pub fn boot() {
-        let Device { host, card, refused } = unsafe { &mut *addr_of_mut!(DEVICE) };
-        host.yielding = false;
-        match ensure(host, card, refused) {
-            Ok(c) => {
+        BOOT_DIRECT.store(true, Ordering::Relaxed);
+        let ident = {
+            let Device { host, card, refused } = unsafe { &mut *addr_of_mut!(DEVICE) };
+            sd::set_yielding(host, false);
+            match ensure(host, card, refused) {
+                Ok(c) => Ok((c.high_capacity, c.capacity_blocks, c.width == Width::Four)),
+                Err(_) => Err(refused.as_ref().map(|s| step_name(s.step))),
+            }
+        };
+        match ident {
+            Ok((high_capacity, blocks, four_lines)) => {
                 // Tenths of a gibibyte: blocks x 512 x 10 / 2^30 = blocks x 5 / 2^20.
-                let tenths = (c.capacity_blocks as u64 * 5) >> 20;
+                let tenths = (blocks as u64 * 5) >> 20;
+                #[cfg(not(feature = "test-sd-doctored"))]
+                let (clause, words, close) = match crate::fsmount::boot_mount() {
+                    Ok(width) => ("; FAT", width, " mounted at /media/sd0"),
+                    Err(why) => ("; no volume mounted (", why, ")"),
+                };
+                #[cfg(feature = "test-sd-doctored")]
+                let (clause, words, close) = ("", "", "");
                 kprintln!(
-                    "[boot] sd: {} {}.{} GB on SDMMC2 ({} at {} MHz)",
-                    if c.high_capacity { "SDHC" } else { "SDSC" },
+                    "[boot] sd: {} {}.{} GB on {} ({} at {} MHz){}{}{}",
+                    if high_capacity { "SDHC" } else { "SDSC" },
                     tenths / 10,
                     tenths % 10,
-                    if c.width == Width::Four { "4 lines" } else { "1 line" },
-                    stm32f7_sdmmc::CARD_HZ_TRANSFER / 1_000_000
+                    sd::BUS_NAME,
+                    if four_lines { "4 lines" } else { "1 line" },
+                    sd::DATA_HZ / 1_000_000,
+                    clause,
+                    words,
+                    close
                 );
             }
-            Err(_) => match refused {
-                Some(s) => kprintln!("[boot] sd: card refused at {}", step_name(s.step)),
-                None => kprintln!("[boot] sd: no card in the socket"),
-            },
+            Err(Some(step)) => kprintln!("[boot] sd: card refused at {}", step),
+            Err(None) => kprintln!("[boot] sd: no card in the socket (the detect line reads {})", if sd::detect_level() { "high" } else { "low" }),
         }
-        host.yielding = true;
+        sd::set_yielding(unsafe { &mut (*addr_of_mut!(DEVICE)).host }, true);
+        BOOT_DIRECT.store(false, Ordering::Relaxed);
+    }
+
+    /// The socket's detect line as the host reads it, under the device's
+    /// tenancy (the mount thread's poll): true with a card seated. A socket
+    /// read empty drops the card's identification and a remembered refusal
+    /// here, as a block call finding it empty does, so a card put back is
+    /// identified anew at the next call (a card swapped between two calls
+    /// would otherwise be addressed as the card that left).
+    #[cfg(not(feature = "test-sd-doctored"))]
+    pub fn card_seated() -> bool {
+        with_device(|d| {
+            let present = d.host.card_present() != Some(false);
+            if !present {
+                d.card = None;
+                d.refused = None;
+            }
+            present
+        })
+        .unwrap_or(false)
+    }
+    /// The remembered refusal and the identification dropped by the mount
+    /// thread before it tries a seated card again: the next call identifies
+    /// the card anew.
+    pub fn forget_refusal() {
+        let _ = with_device(|d| {
+            d.card = None;
+            d.refused = None;
+        });
     }
 
     pub fn count() -> i32 {
@@ -287,7 +345,7 @@ mod socket {
         }
     }
 
-    /// A transfer's outcome into the door's answer: the blocks moved, or
+    /// A transfer's outcome into the function's answer: the blocks moved, or
     /// the code; a refusal for no card drops the identification.
     fn finish(r: Result<(), Stuck>, card: &mut Option<Card>, blocks: u32, moved: *mut u32, calls: *mut u32) -> i32 {
         match r {
@@ -381,9 +439,9 @@ mod socket {
         }
     }
 
-    /// The identified card's facts for the kernel's own checks (the api
-    /// flavor): None with no card or a refused one.
-    #[cfg(all(feature = "api-smoke", not(feature = "test-sd-doctored")))]
+    /// The identified card's facts for the filesystem layer's seam and the
+    /// kernel's own checks: None with no card or a refused one.
+    #[cfg(not(feature = "test-sd-doctored"))]
     pub fn with_card<R>(f: impl FnOnce(&Card) -> R) -> Option<R> {
         with_device(|d| {
             let Device { host, card, refused } = d;
@@ -393,7 +451,7 @@ mod socket {
         .flatten()
     }
 
-    /// The last identification's cycles and the host's yield count (the api
+    /// The last identification's ticks and the host's yield count (the api
     /// flavor's measurement lines).
     #[cfg(all(feature = "api-smoke", not(feature = "test-sd-doctored")))]
     pub fn ident_cycles() -> u32 {
@@ -401,16 +459,17 @@ mod socket {
     }
     #[cfg(all(feature = "api-smoke", not(feature = "test-sd-doctored")))]
     pub fn yields() -> u32 {
-        stm32f7_sdmmc::YIELDS.load(core::sync::atomic::Ordering::Relaxed)
+        sd::yields()
     }
 
     /// The filesystem layer's seam over the identified card: a unit struct over
-    /// the doors' own paths under the device's tenancy, the header's codes mapped
-    /// to the layer's errors; the api checks are its caller.
-    #[cfg(all(feature = "api-smoke", not(feature = "test-sd-doctored")))]
+    /// the block functions' own paths under the device's tenancy, the header's
+    /// codes mapped to the layer's errors; the file family's table and the api
+    /// checks are its callers.
+    #[cfg(not(feature = "test-sd-doctored"))]
     pub struct SocketDevice;
 
-    #[cfg(all(feature = "api-smoke", not(feature = "test-sd-doctored")))]
+    #[cfg(not(feature = "test-sd-doctored"))]
     impl crate::fat::BlockDevice for SocketDevice {
         fn blocks(&mut self) -> u32 {
             with_card(|c| c.capacity_blocks).unwrap_or(0)
@@ -429,8 +488,8 @@ mod socket {
         }
     }
 
-    /// A door's answer as the layer's result: the blocks moved (or 0) Ok, a code its error.
-    #[cfg(all(feature = "api-smoke", not(feature = "test-sd-doctored")))]
+    /// A block function's answer as the layer's result: the blocks moved (or 0) Ok, a code its error.
+    #[cfg(not(feature = "test-sd-doctored"))]
     fn fat_code(r: i32) -> Result<(), crate::fat::Error> {
         use crate::fat::Error;
         if r >= 0 {
@@ -471,7 +530,7 @@ mod socket {
 #[cfg(rhu_sd_socket)]
 pub use socket::*;
 
-/// Every other row: no device, the doors with one shape.
+/// Every other row: no device, the functions with one shape.
 #[cfg(not(rhu_sd_socket))]
 mod none {
     use super::*;

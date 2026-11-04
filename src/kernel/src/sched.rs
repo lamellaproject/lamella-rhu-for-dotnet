@@ -110,7 +110,7 @@ enum State {
 /// The thread stack floor, bytes: the frames the birth writes (32 + 36),
 /// an extended floating-point frame's extra 104 and an activation
 /// delivery's 140 sum to 312, rounded up to the next power of two.
-/// Mirrored by `include/rhu.h` (RHU_THREAD_STACK_MIN) for the C door,
+/// Mirrored by `include/rhu.h` (RHU_THREAD_STACK_MIN) for the kernel function `rhu_thread_spawn`,
 /// which refuses below it; a kernel-internal spawn below it is a bug.
 pub const THREAD_STACK_MIN: usize = 512;
 
@@ -212,6 +212,16 @@ struct Tcb {
     /// words a delivered fault context carries after the 72.
     fault_addr: u32,
     fault_status: u32,
+    // ---- the interrupted wait's append (after `fault_status`, per the
+    // Tcb append rule) ----
+    /// The three-way exit tell of a wait a delivery broke (`wait_addr`,
+    /// `wait_deadline`, `act_interrupted`), saved by the delivery
+    /// transform and put back by the final SVC #1 restore: the handler's
+    /// own sleeps and waits run on the live fields and leave the
+    /// interrupted wait's result as the break arm recorded it.
+    act_saved_wait_addr: usize,
+    act_saved_wait_deadline: bool,
+    act_saved_interrupted: bool,
 }
 
 const TCB_INIT: Tcb = Tcb {
@@ -243,6 +253,9 @@ const TCB_INIT: Tcb = Tcb {
     fault_access: 0,
     fault_addr: 0,
     fault_status: 0,
+    act_saved_wait_addr: 0,
+    act_saved_wait_deadline: false,
+    act_saved_interrupted: false,
 };
 
 static NEXT_TID: AtomicU32 = AtomicU32::new(1);
@@ -468,7 +481,7 @@ pub const DEBUG_LAYOUT_VERSION: u32 = 2;
 /// version-2 fields: at most 15 bytes, NUL after), so a name never
 /// outlives its thread's block.
 ///
-/// Version 2 appends the thread-local-base door: `tcb_off_tls` is the
+/// Version 2 appends the thread-local-base function: `tcb_off_tls` is the
 /// offset of a thread's per-module block pointer array, `tls_slots` its
 /// length and `tls_slot_bytes` one entry, so module `m`'s block for the
 /// thread whose control block starts at `tcb` is the pointer-sized word
@@ -493,7 +506,7 @@ pub struct DebugLayout {
     pub tcb_off_name: u32,
     pub tcb_off_stack_base: u32,
     pub tcb_off_stack_top: u32,
-    // ---- version 2 appends (the thread-local-base door) ----
+    // ---- version 2 appends (the thread-local-base function) ----
     pub tcb_off_tls: u32,
     pub tls_slots: u32,
     pub tls_slot_bytes: u32,
@@ -603,7 +616,7 @@ pub fn current_stack_top() -> u32 {
 }
 
 /// Why a spawn was refused. Kernel callers turn each into its loud
-/// panic; the C door maps all four onto one honest RHU_EAGAIN.
+/// panic; the kernel function `rhu_thread_spawn` maps all four onto one honest RHU_EAGAIN.
 pub enum SpawnErr {
     NoSlot,
     PoolExhausted,
@@ -639,7 +652,7 @@ pub fn try_spawn(
     stack_bytes: usize,
 ) -> Result<(usize, i32), SpawnErr> {
     // A kernel-internal spawn below the floor, or of a size whose
-    // round-up would wrap, is a kernel bug (the C door refuses both
+    // round-up would wrap, is a kernel bug (the kernel function `rhu_thread_spawn` refuses both
     // before it calls here).
     assert!(
         (THREAD_STACK_MIN..=usize::MAX - 7).contains(&stack_bytes),
@@ -775,6 +788,9 @@ pub fn try_spawn(
             fault_access: 0,
             fault_addr: 0,
             fault_status: 0,
+            act_saved_wait_addr: 0,
+            act_saved_wait_deadline: false,
+            act_saved_interrupted: false,
         };
         sync_bits(s, slot);
         Ok((slot, tid, s.started && prio < s.tcbs[s.current].prio))
@@ -793,7 +809,7 @@ pub fn try_spawn(
 }
 
 /// Kernel-thread spawn: birth errors are kernel bugs and stay loud
-/// panics (hosted callers go through the C door, which refuses
+/// panics (hosted callers go through the kernel function `rhu_thread_spawn`, which refuses
 /// honestly instead). Returns the slot index.
 pub fn spawn(
     name: &str,
@@ -935,7 +951,7 @@ pub const ERR_INVAL: i32 = -22;
 pub const ERR_SRCH: i32 = -3;
 /// Futex wait broken by activation delivery (rhu.h RHU_EINTR).
 pub const ERR_INTR: i32 = -4;
-/// No hardware entropy source serves (rhu.h RHU_ENODEV; the cryptographic door).
+/// No hardware entropy source serves (rhu.h RHU_ENODEV; the random-bytes function).
 pub const ERR_NODEV: i32 = -19;
 /// The hardware entropy source failed its health check (rhu.h RHU_EIO).
 pub const ERR_IO: i32 = -5;
@@ -1093,7 +1109,10 @@ pub fn futex_wait(addr: *const u32, expected: u32, deadline_ns: u64) -> i32 {
     // so no recheck loop rides here); the activation break left it
     // set AND latched `act_interrupted`. Woken wins over a raced
     // latch (the wait WAS satisfied and the handler already ran); the
-    // latch is read-and-cleared here, its only reader.
+    // latch is read-and-cleared here, its only reader. A handler that
+    // ran between the break and this read used the live fields for its
+    // own sleeps and waits: the delivery saved the three and the final
+    // restore put them back, so what is read here is the break's tell.
     with_cs(|| unsafe {
         let s = sched();
         let cur = s.current;
@@ -1285,7 +1304,7 @@ pub fn stack_bounds_by_tid(tid: i32) -> Option<(u32, u32)> {
 
 /// The C-ABI `rhu_ctx` (include/rhu.h) -- layout mirrored exactly.
 /// sp is the post-pop stack pointer, a SNAPSHOT: refused on write by
-/// set_context, ignored by the activation-return door.
+/// set_context, ignored by the activation-return function.
 #[repr(C)]
 pub struct RhuCtx {
     pub r: [u32; 13],
@@ -1370,7 +1389,7 @@ fn find_live(s: &Sched, tid: i32) -> Option<usize> {
     })
 }
 
-/// Suspend by tid and fill *out (non-null, checked at the C door).
+/// Suspend by tid and fill *out (non-null, checked at the kernel function `rhu_thread_suspend`).
 /// Refusals per rhu.h: ESRCH unknown/dead, EINVAL self or idle,
 /// EAGAIN already suspended. No pend: the target is switched out
 /// already (single core), removing it from pickability changes
@@ -1680,6 +1699,7 @@ unsafe fn deliver_activation(s: &mut Sched, i: usize) { unsafe {
     s.tcbs[i].act_saved_sp = old_sp;
     s.tcbs[i].act_in_handler = true;
     s.tcbs[i].act_pending = false;
+    save_wait_tell(s, i);
     s.tcbs[i].sp = built;
 }}
 
@@ -1690,7 +1710,7 @@ unsafe fn deliver_activation(s: &mut Sched, i: usize) { unsafe {
 /// the same frame pair entering the trampoline below it. Cost: 80 + 68 =
 /// 148 bytes, asserted against the floor as the activation's is (the
 /// funnel checked the room before it queued the fault; the thread has not
-/// run since). The resume door is the activation's: `apply_ctx` writes
+/// run since). The resume function is the activation's: `apply_ctx` writes
 /// the edited r0-r12, lr and pc back into the original frames -- the
 /// shape the runtime's redirect to its throw helper needs (pc, r0 and r1
 /// edited; sp the fault site's).
@@ -1714,13 +1734,14 @@ unsafe fn deliver_fault(s: &mut Sched, i: usize) { unsafe {
     s.tcbs[i].act_in_handler = true;
     s.tcbs[i].act_fault = true;
     s.tcbs[i].fault_pending = false;
+    save_wait_tell(s, i);
     s.tcbs[i].sp = built;
 }}
 
 /// SVC #1 (the reserved activation-resume immediate):
 /// re-deliver if a send landed during the handler (same ctx storage,
 /// the cost never nests), else apply the possibly-edited ctx to the
-/// original frames (activation door: ctx.sp ignored) and restore.
+/// original frames (activation function: ctx.sp ignored) and restore.
 /// Returns the psp to pop from; the asm arm pops the PendSV shape. The
 /// arm completes its own frame's pending lazy floating-point state
 /// BEFORE calling here (the frame-type note above the seam).
@@ -1764,11 +1785,54 @@ extern "C" fn __rhu_act_resume(_psp: u32) -> u32 {
             apply_ctx(saved, ctx);
             s.tcbs[i].act_in_handler = false;
             s.tcbs[i].act_fault = false;
+            restore_wait_tell(s, i);
             s.tcbs[i].sp = saved;
             saved
         }
     })
 }
+
+/// The delivery's save of the interrupted wait's tell: the three fields
+/// copied into the saved record and the live ones cleared, so the
+/// handler's own sleeps and waits start with no wait of this thread's in
+/// them. The thread is Ready here (the break arm readied it, or it was
+/// running when the fault was classified), so the masks `sync_bits`
+/// keeps read nothing from these fields.
+#[cfg(not(feature = "test-act-doctored-restore"))]
+fn save_wait_tell(s: &mut Sched, i: usize) {
+    let t = &mut s.tcbs[i];
+    t.act_saved_wait_addr = t.wait_addr;
+    t.act_saved_wait_deadline = t.wait_deadline;
+    t.act_saved_interrupted = t.act_interrupted;
+    t.wait_addr = 0;
+    t.wait_deadline = false;
+    t.act_interrupted = false;
+}
+
+/// The final restore's half: the saved tell put back for the interrupted
+/// wait's exit path, which reads it right after the resume, and the saved
+/// record cleared. A re-delivery (a send that landed during the handler)
+/// keeps the record for the restore that ends the handler's last run.
+#[cfg(not(feature = "test-act-doctored-restore"))]
+fn restore_wait_tell(s: &mut Sched, i: usize) {
+    let t = &mut s.tcbs[i];
+    t.wait_addr = t.act_saved_wait_addr;
+    t.wait_deadline = t.act_saved_wait_deadline;
+    t.act_interrupted = t.act_saved_interrupted;
+    t.act_saved_wait_addr = 0;
+    t.act_saved_wait_deadline = false;
+    t.act_saved_interrupted = false;
+}
+
+/// The doctored tell (the api gate's negative control, built into no
+/// board image): nothing saved at the delivery and nothing restored at
+/// the resume, so the handler's own sleeps and waits run on the
+/// interrupted wait's fields and its exit path reads what they left.
+#[cfg(feature = "test-act-doctored-restore")]
+fn save_wait_tell(_s: &mut Sched, _i: usize) {}
+
+#[cfg(feature = "test-act-doctored-restore")]
+fn restore_wait_tell(_s: &mut Sched, _i: usize) {}
 
 /// A control block's name as a string slice (the kept bytes are a
 /// character-boundary cut of the spawn name).
@@ -2269,8 +2333,8 @@ PendSvHandler:
 /// consumer is the hosting seam: the thread that runs a payload's entry
 /// joins the hosted band for the entry's life and takes its own urgency
 /// back when the entry returns (payload.rs); the api smoke exercises the
-/// same door. No other kernel thread changes priority, and no hosted
-/// thread reaches this -- there is no C door to it.
+/// same function. No other kernel thread changes priority, and no hosted
+/// thread reaches this -- there is no C function to it.
 #[cfg(any(feature = "payload", feature = "api-smoke"))]
 pub fn set_current_prio(prio: u8) -> u8 {
     let prev = with_cs(|| unsafe {

@@ -14,7 +14,7 @@
 //! properties; the kernel's own images take `RHU_LOG_CHANNEL` and
 //! `RHU_CONSOLE_CHANNEL` from the environment through build.rs):
 //!   0        the row's default (the facts' `channels` row)
-//!   1  off   the stream discarded whole (the write door still answers the count)
+//!   1  off   the stream discarded whole (the write function still answers the count)
 //!   2  memory  no wire: the 16 KB memory console alone (the Pico default)
 //!   3  probe   the ST-Link boards' virtual COM port (the board's USART path)
 //!   0x10 + n  uart n: a UART of the row's facts table, held by the kernel
@@ -380,7 +380,7 @@ pub fn wire_named(code: u8) -> bool {
     unsafe { read_volatile(addr_of!(SINKS)).iter().any(|s| matches!(s, Sink::Wire(c) if *c == code)) }
 }
 
-/// The UART blocks the streams name held through the UART doors' module
+/// The UART blocks the streams name held through the kernel's UART API's module
 /// (once; the emulator rows' UART0 stays the board module's polled wire,
 /// so it is held without its hardware). An illegal pin override is
 /// recorded for `say_refusals`.
@@ -518,7 +518,7 @@ fn put(s: Sink, b: u8) {
 /// The wire's byte. On the probe rows the board's `console_putb` is the
 /// ring's own `putb` (the mirror, then the wire ring); on the emulator rows
 /// UART0 is the polled board path with the mirror fed first; every other
-/// UART wire is a held port of the UART doors' module.
+/// UART wire is a held port of the kernel's UART API's module.
 #[cfg(rhu_console_probe)]
 fn wire_put(_c: u8, b: u8) {
     board::console_putb(b)
@@ -534,7 +534,7 @@ fn wire_put(c: u8, b: u8) {
     crate::uart::held_putb((c - CH_UART0) as u32, b)
 }
 
-/// The wire's room for a stream (the door's back-pressure): a sink without
+/// The wire's room for a stream (the function's back-pressure): a sink without
 /// a wire never waits.
 fn room(stream: Stream) -> usize {
     match sink(stream) {
@@ -620,8 +620,8 @@ pub fn locked<R>(stream: Stream, f: impl FnOnce(&mut Out) -> R) -> R {
 }
 
 /// The measurement posture test-payload-cycles (the STM32F769 row; a board
-/// flight's, never a shipped image): the cycles the console's write doors
-/// spend -- their waits for the wire's room included -- and the doors' write
+/// flight's, never a shipped image): the cycles the console's write functions
+/// spend -- their waits for the wire's room included -- and the functions' write
 /// count, read once at the hosted program's return by the payload module;
 /// the core's cycle counter, armed by the payload module at the entry.
 #[cfg(all(feature = "test-payload-cycles", rhu_qspi_window))]
@@ -645,10 +645,10 @@ pub fn door_cycles() -> (u32, u32) {
     (DOOR_CYCLES.load(Relaxed), DOOR_WRITES.load(Relaxed))
 }
 
-/// The write doors' plumbing: a write under one console lock, so a hosted
+/// The write functions' plumbing: a write under one console lock, so a hosted
 /// writer never tears against a kernel line (the same line-atomicity every
 /// kernel line already buys; callers size their lines accordingly). Wire
-/// grammar applies. Back-pressure runs OUTSIDE the lock: the door waits,
+/// grammar applies. Back-pressure runs OUTSIDE the lock: the function waits,
 /// with interrupts open, until the stream's wire has room for the write's
 /// wire length (the bytes plus one per newline), takes the lock, re-checks
 /// the room under it and writes -- a writer that outruns the wire waits on
@@ -698,7 +698,7 @@ pub fn door_write(stream: Stream, bytes: &[u8]) {
     door_cycles_add(t0);
 }
 
-/// The read door's plumbing: drain pending receiver bytes of the console
+/// The read function's plumbing: drain pending receiver bytes of the console
 /// stream's wire -- up to the buffer's length, RAW (no echo, no
 /// translation) -- and return the count. Polls only; a stream without a
 /// wire, or a wire with nothing pending, answers 0 immediately.

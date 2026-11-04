@@ -1,4 +1,4 @@
-//! The UART doors' bodies: a program's serial port on a UART block
+//! The kernel's UART API's bodies: a program's serial port on a UART block
 //! of the board's facts table -- the twelve verbs `api.rs` exports and
 //! `include/rhu.h` states (`rhu_uart_count`, `rhu_uart_port`,
 //! `rhu_uart_claim`, `rhu_uart_configure`, `rhu_uart_write`,
@@ -11,7 +11,7 @@
 //! open: a block the kernel's console holds as a stream's wire is IN the
 //! table and REFUSED at the claim with the busy code.
 //!
-//! Beneath the doors: the rings (a receive ring and a transmit ring per
+//! Beneath the functions: the rings (a receive ring and a transmit ring per
 //! port, single producer single consumer with free-running indices read
 //! whole), the board's backend (`board::uart_backend`: the registers, the
 //! pins, the interrupt lines), the claims table (a claim takes the port's
@@ -29,7 +29,7 @@
 //! (4 KB); the receive ring holds
 //! 89 ms of a 115200 Bd wire (1 KB).
 
-#![cfg_attr(not(rhu_uart_rows), allow(dead_code))] // a row without a UART row compiles the doors' helpers unused
+#![cfg_attr(not(rhu_uart_rows), allow(dead_code))] // a row without a UART row compiles the functions' helpers unused
 
 use core::ptr::{addr_of_mut, read_volatile, write_volatile};
 
@@ -66,7 +66,7 @@ pub const FLUSH_BOTH: u32 = 3;
 /// (`RHU_UART_NO_PIN`: the emulator rows).
 pub const NO_PIN: u32 = crate::uart_math::NO_PIN;
 
-/// The holder of a port: nobody, a program (through the claim door), or
+/// The holder of a port: nobody, a program (through the claim function), or
 /// the kernel's console (a stream's wire).
 const FREE: u8 = 0;
 const PROGRAM: u8 = 1;
@@ -124,7 +124,7 @@ pub static mut WITNESS: UartWitness = UartWitness {
 };
 
 /// The witness's fields are written through raw pointers, one field at a
-/// time, under the critical section by the doors and by the handler the
+/// time, under the critical section by the functions and by the handler the
 /// section masks; no reference to the static is ever formed.
 fn witness() -> *mut UartWitness {
     addr_of_mut!(WITNESS)
@@ -162,7 +162,7 @@ fn index_of(block: u32) -> Option<usize> {
     facts::UART_ROWS.iter().position(|r| r.block as u32 == block)
 }
 
-/// A facts pin as the doors answer it.
+/// A facts pin as the functions answer it.
 fn pin_word(p: u8) -> u32 {
     if p == crate::console::NO_PIN { NO_PIN } else { p as u32 }
 }
@@ -189,7 +189,7 @@ pub fn port(index: u32, block: *mut u32, tx: *mut u32, rx: *mut u32, clock_hz: *
     0
 }
 
-// ---------------- the rows with a table: the doors over the backend ----------------
+// ---------------- the rows with a table: the functions over the backend ----------------
 
 #[cfg(rhu_uart_rows)]
 mod served {
@@ -201,7 +201,7 @@ mod served {
     pub const CLOCK_HZ: u32 = hw::CLOCK_HZ;
 
     /// The rings' storage, written through raw pointers under the section
-    /// (the doors) or in the band the section masks (the handler).
+    /// (the functions) or in the band the section masks (the handler).
     #[repr(C)]
     pub struct Rings {
         rx: [u8; RX_BYTES],
@@ -209,8 +209,8 @@ mod served {
     }
     static mut RINGS: [Rings; PORTS] = [const { Rings { rx: [0; RX_BYTES], tx: [0; TX_BYTES] } }; PORTS];
     /// The free-running indices: the receive ring's head (the handler
-    /// produces) and tail (the doors consume), the transmit ring's head
-    /// (the doors produce) and tail (the handler and the primes consume).
+    /// produces) and tail (the functions consume), the transmit ring's head
+    /// (the functions produce) and tail (the handler and the primes consume).
     static RX_HEAD: [AtomicU32; PORTS] = [const { AtomicU32::new(0) }; PORTS];
     static RX_TAIL: [AtomicU32; PORTS] = [const { AtomicU32::new(0) }; PORTS];
     static TX_HEAD: [AtomicU32; PORTS] = [const { AtomicU32::new(0) }; PORTS];
@@ -445,7 +445,7 @@ mod served {
 
     /// The line discipline, live: the five values judged first (the rate
     /// law by the backend's divisor, the frame set of the part), the
-    /// pending transmit allowed to leave (the door discards nothing; a
+    /// pending transmit allowed to leave (the function discards nothing; a
     /// hosting layer drains first), then the block reprogrammed under the
     /// section with the achieved rate answered.
     pub fn configure(h: i32, baud: u32, data_bits: u32, parity: u32, stop_bits: u32, achieved_baud: *mut u32) -> i32 {
@@ -624,7 +624,7 @@ mod served {
         0
     }
 
-    /// The held port's facts (the PWM info door's shape).
+    /// The held port's facts (the PWM info function's shape).
     pub fn info(h: i32, block: *mut u32, tx: *mut u32, rx: *mut u32, clock_hz: *mut u32) -> i32 {
         let Some(ix) = held(h) else {
             return refused(h as u32, sched::ERR_INVAL);
@@ -784,7 +784,7 @@ mod served {
         }
     }
 
-    /// The room a held block's transmit ring has (the write door's
+    /// The room a held block's transmit ring has (the write function's
     /// back-pressure).
     pub fn held_room(block: u32) -> usize {
         match index_of(block) {
@@ -794,7 +794,7 @@ mod served {
     }
 
     /// One pending received byte of a held block, or None (the console
-    /// stream's read door; the caller holds the section).
+    /// stream's read function; the caller holds the section).
     pub fn held_getb(block: u32) -> Option<u8> {
         let ix = index_of(block)?;
         if rx_avail(ix) == 0 {
@@ -841,7 +841,7 @@ mod served {
 #[allow(unused_imports)] // the rows use different halves of the set
 pub use served::{block_serves_wire, brk, claim, configure, console_hold, console_holds, console_holds_any, drain_held, event_word, flush, held_getb, held_pins, held_putb, held_room, info, irq, loopback, pins_for, read, release, set_polled, status, write};
 
-// ---------------- the rows without a table: every door but the count and the enumeration refuses ----------------
+// ---------------- the rows without a table: every function but the count and the enumeration refuses ----------------
 
 #[cfg(not(rhu_uart_rows))]
 mod served {

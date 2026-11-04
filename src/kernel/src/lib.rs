@@ -49,19 +49,30 @@ mod uart;
 /// legal sets and the project's two words, pure, so the host tier proves what every claim runs.
 #[cfg_attr(not(rhu_uart_rows), allow(dead_code))]
 mod uart_math;
-/// The block-device doors: the device table and the five verbs on
+/// The block-device functions: the device table and the five verbs on
 /// every row; the one device the STM32F769 row's card socket.
 mod blk;
-/// The SD host trait and the card layer over it, compiled
-/// where a row has a socket: the STM32F769's SDMMC2 host implements the trait.
+/// The SD host trait and the card layer over it, compiled where a row has a
+/// socket: the STM32F769's SDMMC2 host implements the trait, and the SPI-mode
+/// host below implements it for the RP2350 boards' sockets.
 #[cfg(rhu_sd_socket)]
 mod sdhost;
 #[cfg(rhu_sd_socket)]
 mod sdcard;
-/// The FAT filesystem layer over the card, compiled for its one caller, the
-/// api checks of the socket row.
-#[cfg(all(rhu_sd_socket, feature = "api-smoke", not(feature = "test-sd-doctored")))]
+/// The SPI-mode host for the card layer, on the rows whose socket sits on an
+/// SPI block (the two Adafruit Metro RP2350 boards, the SparkFun IoT
+/// RedBoard RP2350).
+#[cfg(all(rhu_sd_socket, any(feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-sparkfun-iot-redboard-rp2350")))]
+mod sdspi;
+/// The FAT filesystem layer over the card, compiled for every image of a
+/// socket row (the file family's table and the api checks are its callers).
+#[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
 mod fat;
+/// The kernel's file API: its records and codes on every row, its table over
+/// the FAT layer where the layer is; the socket half with the mount thread
+/// and the function bodies api.rs serves, in one shape on every row.
+mod fs;
+mod fsmount;
 
 /// The api flavor's band-interrupt control line and its handler, folded into
 /// the vector table beside the board's own lines; empty in every other image.
@@ -145,7 +156,7 @@ pub extern "C" fn kmain() -> ! {
         klog!(
             console::LEVEL_QUIET,
             "Lamella RHU v{}, {} ({}, {} MHz)",
-            env!("CARGO_PKG_VERSION"),
+            env!("RHU_VERSION"),
             board::NAME,
             board::CHIP,
             board::SYSCLK_HZ / 1_000_000
@@ -154,7 +165,7 @@ pub extern "C" fn kmain() -> ! {
     console::say_refusals();
     kprintln!(
         "rhu {} -- Lamella RHU: runtime-hosting unikernel for .NET on Cortex-M",
-        env!("CARGO_PKG_VERSION")
+        env!("RHU_VERSION")
     );
     kprintln!("[boot] {} | {} | flavor: {}", board::NAME, console::clause(), FLAVOR);
     kprintln!(
@@ -264,9 +275,11 @@ pub extern "C" fn kmain() -> ! {
     // external RAM proved and before the arena takes its window past it.
     #[cfg(rhu_extram_window)]
     boot::zero_hydrated();
-    // On the STM32F769 row, the microSD socket: the card identified where
-    // one is seated and the banner's sd line either way; a refused card is
-    // not a boot death (the doors answer their codes).
+    // On the rows with a microSD socket (the STM32F769, the two Adafruit
+    // Metro RP2350 boards, the SparkFun IoT RedBoard RP2350): the card
+    // identified where one is seated and the
+    // banner's sd line either way; a refused card is not a boot death (the
+    // kernel functions answer their codes).
     #[cfg(rhu_sd_socket)]
     blk::boot();
 
@@ -292,7 +305,7 @@ pub extern "C" fn kmain() -> ! {
     // The network posture, constant per image, on a row with a medium:
     // the stack built over the medium, the pool's figure stated; no
     // address on the banner (the transcript-surface rule: the hardware
-    // address goes to the witness and the info door).
+    // address goes to the witness and the info function).
     #[cfg(rhu_net_rows)]
     {
         net::init();
@@ -308,6 +321,11 @@ pub extern "C" fn kmain() -> ! {
     // level, 8 KB of the pool; it runs only once the scheduler starts.
     #[cfg(rhu_net_rows)]
     net::start();
+    // The mount thread on a socket row: the card's detect line followed, the
+    // volume mounted and unmounted as the card comes and goes; it runs only
+    // once the scheduler starts.
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fsmount::start();
     kprintln!(
         "[sched] online: {} slots | SysTick {} Hz | BASEPRI ceiling {:#04x} | zero-latency band below {:#04x} never masked",
         sched::MAX_THREADS,
@@ -424,14 +442,14 @@ extern "C" fn kthread_main(_: usize) {
 
     kprintln!("[base] ALL GOOD (boot + console + panic/fault funnel armed)");
     kprintln!("[sched] ALL GOOD (threads + timers + preemption online)");
-    // The api world's machine exit takes the hosting door -- the
+    // The api world's machine exit takes the exit function -- the
     // genuine-path exercise of rhu_exit: the gate's exit-status assert
-    // proves the door terminated the machine with the handed code.
+    // proves the function terminated the machine with the handed code.
     #[cfg(feature = "api-smoke")]
     {
         // The doctored control's terminal half: a form from a range no module
         // registers, so the emulation's funnel must refuse it and this image
-        // must never reach the exit door.
+        // must never reach the exit function.
         #[cfg(feature = "test-fpemul-doctored")]
         {
             kprintln!("[api] module-code-control: a form from an unregistered range follows; the funnel must refuse it and this image must not reach the exit door");
@@ -459,7 +477,7 @@ extern "C" fn kthread_main(_: usize) {
     // of its boot-memory image).
     if console::channel(console::Stream::Log) == console::CH_MEMORY
         && console::channel(console::Stream::Console) == console::CH_MEMORY
-        && !console::mirror_holds(concat!("rhu ", env!("CARGO_PKG_VERSION"), " -- Lamella RHU").as_bytes())
+        && !console::mirror_holds(concat!("rhu ", env!("RHU_VERSION"), " -- Lamella RHU").as_bytes())
     {
         semihost::exit(1)
     }
@@ -687,9 +705,9 @@ __rhu_fp_clobber:
 // ---------------- hosting-API smoke (feature api-smoke) ----------------
 
 #[cfg(feature = "api-smoke")]
-#[cfg_attr(any(feature = "test-gpio-button", feature = "test-uart-loopback", feature = "test-uart-jumper"), allow(dead_code))]
+#[cfg_attr(any(feature = "test-gpio-button", feature = "test-uart-loopback", feature = "test-uart-jumper", feature = "test-sd-flight"), allow(dead_code))]
 mod api_smoke {
-    use core::ffi::c_void;
+    use core::ffi::{c_char, c_void};
     use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
     use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
@@ -698,9 +716,10 @@ mod api_smoke {
     #[cfg(rhu_sd_socket)]
     use crate::blk;
     #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
-    use crate::{fat, sdcard, sdhost};
+    use crate::{fat, fsmount, sdcard, sdhost};
+    use crate::fs;
 
-    /// The network doors' eight checks, on the rows with a medium.
+    /// The kernel's network API's eight checks, on the rows with a medium.
     #[cfg(rhu_net_rows)]
     mod net_checks;
 
@@ -743,12 +762,36 @@ mod api_smoke {
         }
     }
 
+    /// The flight flavor of a socket row's api image: the SD and FAT family
+    /// alone after the boot -- the card identified, block 0 read, the write-back
+    /// at the card's middle, the volume mounted and walked, the roundtrip -- so
+    /// the transcript fits the console mirror a bench rig reads over the debug
+    /// probe (a 16 KB ring and its first half); the exit by the same exit
+    /// function as the whole run's.
+    #[cfg(all(rhu_sd_socket, feature = "test-sd-flight", not(feature = "test-sd-doctored")))]
+    pub fn run() {
+        check_sd_identify();
+        check_sd_boot_sector();
+        #[cfg(rhu_sdram_window)]
+        check_sd_sdram_buffer();
+        check_sd_write_back();
+        check_fs_mount();
+        check_fs_walk();
+        check_fs_roundtrip();
+        check_fs_doors_mount();
+        check_fs_doors_roundtrip();
+        check_fs_doors_listing();
+        check_fs_doors_refusals();
+        check_fs_doors_hotswap();
+    }
+
     /// The API contract checks, in gate order, one boot,
     /// sequential; every marker is constant text the gate pins. Waiters
     /// and workers run LESS urgent than this thread (prio 4 vs 3), so the
     /// conditional-tick policy (a wake pends a switch only when one is
     /// owed) makes "readied but not run" a deterministic observable, not
     /// a race.
+    #[cfg(not(all(rhu_sd_socket, feature = "test-sd-flight", not(feature = "test-sd-doctored"))))]
     pub fn run() {
         check_monotonic();
         check_sleep();
@@ -782,12 +825,19 @@ mod api_smoke {
         #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
         {
             check_sd_boot_sector();
+            #[cfg(rhu_sdram_window)]
             check_sd_sdram_buffer();
             check_sd_write_back();
             check_fs_mount();
             check_fs_walk();
             check_fs_roundtrip();
+            check_fs_doors_mount();
+            check_fs_doors_roundtrip();
+            check_fs_doors_listing();
+            check_fs_doors_refusals();
         }
+        #[cfg(not(all(rhu_sd_socket, not(feature = "test-sd-doctored"))))]
+        check_fs_none();
         check_arena_headroom();
         check_kheap_basic();
         check_kheap_coalesce();
@@ -808,6 +858,7 @@ mod api_smoke {
         check_act_coalesce();
         check_act_redeliver();
         check_act_eintr();
+        check_act_wait_across();
         check_act_sleep_rearm();
         check_act_lazy_fp();
         check_module_find();
@@ -848,6 +899,8 @@ mod api_smoke {
         check_adc_claim();
         #[cfg(rhu_pwm_adc_rows)]
         check_pwm_adc_loop();
+        #[cfg(rhu_pwm_adc_models)]
+        check_gpio_hold();
         #[cfg(all(rhu_pwm_adc_models, feature = "test-adc-flagged"))]
         check_adc_flagged();
         #[cfg(not(rhu_pwm_adc_rows))]
@@ -1653,11 +1706,30 @@ mod api_smoke {
     }
 
 
-    /// The core's cycle counter (armed from boot on this row) and its reading in microseconds.
-    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    /// The checks' clock in the core's cycles: the core's cycle counter on
+    /// the STM32F769 row (armed from boot there); the kernel's nanosecond
+    /// clock converted at the system clock on the other socket rows.
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored"), feature = "board-st-stm32f769i-disco"))]
     fn cyc() -> u32 {
         unsafe { read_volatile(0xE000_1004 as *const u32) }
     }
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored"), not(feature = "board-st-stm32f769i-disco")))]
+    fn cyc() -> u32 {
+        (sched::now_ns() / 1_000 * (board::SYSCLK_HZ / 1_000_000) as u64) as u32
+    }
+    /// The arena range the checks' buffers come from -- the external range
+    /// where the row has one (the STM32F769's SDRAM, the PSRAM Metro's and the
+    /// SparkFun's PSRAM),
+    /// the internal SRAM otherwise -- and the roundtrip's length: 1 MB from an
+    /// external range, 64 KB from the SRAM.
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored"), rhu_extram_window))]
+    const SD_BUF_RANGE: u32 = 1;
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored"), not(rhu_extram_window)))]
+    const SD_BUF_RANGE: u32 = 0;
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored"), rhu_extram_window))]
+    const FS_ROUNDTRIP_LEN: usize = 1 << 20;
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored"), not(rhu_extram_window)))]
+    const FS_ROUNDTRIP_LEN: usize = 64 * 1024;
     #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
     fn us(cycles: u32) -> u32 {
         (cycles as u64 * 1_000_000 / board::SYSCLK_HZ as u64) as u32
@@ -1700,7 +1772,11 @@ mod api_smoke {
                 if four { 4 } else { 1 }
             );
             assert!(d.blocks == cap, "sd-identify: the record's {} blocks against the card's {}", d.blocks, cap);
-            kprintln!("[api] sd-identify: the identification took {} cycles = {} us at boot (the host spinning before the scheduler); {} yields inside the host's waits so far at {} Hz", blk::ident_cycles(), us(blk::ident_cycles()), blk::yields(), board::SYSCLK_HZ);
+            if board::sd::TICKS_AT_BOOT {
+                kprintln!("[api] sd-identify: the identification took {} cycles = {} us at boot (the host spinning before the scheduler); {} yields inside the host's waits so far at {} Hz", blk::ident_cycles(), us(blk::ident_cycles()), blk::yields(), board::SYSCLK_HZ);
+            } else {
+                kprintln!("[api] sd-identify: the identification ran at boot before the kernel's clock (no measure on this row); {} yields inside the host's waits so far; the detect line reads {} with the card in", blk::yields(), if board::sd::detect_level() { "high" } else { "low" });
+            }
             assert!((d.flags & blk::FLAG_HIGH_CAPACITY != 0) == hc && (d.flags & blk::FLAG_WRITE_PROTECTED != 0) == wp, "sd-identify: the record's flags {:#x} against the card's class", d.flags);
         }
         #[cfg(feature = "test-sd-doctored")]
@@ -1760,7 +1836,7 @@ mod api_smoke {
         kprintln!("[api] PASS sd-boot-sector (block 0 read twice and equal with the signature 55 AA, the 8-block read's first block equal to the single read, the sync door 0 and ENODEV for device 1; the counts 0 and 129, the ranges at and past the end, a NULL and a misaligned buffer EINVAL, device 1 ENODEV for a read and a write, a write of 0 blocks EINVAL)");
     }
 
-    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored"), rhu_sdram_window))]
     fn check_sd_sdram_buffer() {
         kprintln!("[api] sd-sdram-buffer: block 1 and an 8-block run read by the controller's DMA stream straight into a page of the SDRAM range (the bus matrix's path to the flexible memory controller), equal to the same blocks read into the internal SRAM");
         let site = check_sd_sdram_buffer as *const () as usize as u32;
@@ -1783,12 +1859,12 @@ mod api_smoke {
 
     #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
     fn check_sd_write_back() {
-        kprintln!("[api] sd-write-back: 128 blocks (64 KB) at the card's middle read into an SDRAM buffer, WRITTEN BACK byte for byte to the same blocks, read again into a second buffer and compared; one block the same way; the wall times by the cycle counter and the yields the host's waits took (5.12's predictions (b) and (c)); a write-protected card refuses EROFS instead");
+        kprintln!("[api] sd-write-back: 128 blocks (64 KB) at the card's middle read into a buffer from the arena's range {}, WRITTEN BACK byte for byte to the same blocks, read again into a second buffer and compared; one block the same way; the wall times by the checks' clock and the yields the host's waits took (5.12's predictions (b) and (c)); a write-protected card refuses EROFS instead", SD_BUF_RANGE);
         let site = check_sd_write_back as *const () as usize as u32;
         let (cap, protected) = blk::with_card(|c| (c.capacity_blocks, c.write_protected)).unwrap_or((0, true));
-        let p1 = api::rhu_arena_alloc_from(1, 65536, 16, site);
-        let p2 = api::rhu_arena_alloc_from(1, 65536, 16, site);
-        assert!(!p1.is_null() && !p2.is_null(), "sd-write-back: the SDRAM buffers refused NULL");
+        let p1 = api::rhu_arena_alloc_from(SD_BUF_RANGE, 65536, 16, site);
+        let p2 = api::rhu_arena_alloc_from(SD_BUF_RANGE, 65536, 16, site);
+        assert!(!p1.is_null() && !p2.is_null(), "sd-write-back: the buffers refused NULL");
         if protected {
             assert!(api::rhu_blk_write(0, 0, 1, p1 as *const c_void) == -30, "sd-write-back: a write on the protected card not refused EROFS");
             kprintln!("[api] PASS sd-write-back (the card is write-protected: a write refused EROFS; the measurement skipped)");
@@ -1831,43 +1907,22 @@ mod api_smoke {
         kprintln!("[api] PASS sd-write-back (64 KB and one block at the card's middle written back byte for byte and read equal; the times above)");
     }
 
-    /// The filesystem layer's volume over the socket for the three fs checks: a
-    /// static under the cfg, about 4.5 KB of .bss on the STM32F769 api image alone.
-    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
-    static mut FS_VOLUME: Option<fat::Volume<blk::SocketDevice>> = None;
-
-    /// The layer's clock seam: the calendar's reading when a source set it,
-    /// else None (the layer's FAT floor, 1 January 1980).
-    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
-    fn fs_now() -> Option<calendar_math::Civil> {
-        let (ticks, source) = calendar::get();
-        if source == calendar::SOURCE_UNSET {
-            None
-        } else {
-            Some(calendar_math::ticks_to_civil(ticks))
-        }
-    }
-
+    /// The filesystem layer's volume the file family mounted at boot, for the
+    /// three checks that call the layer directly under the family's tenancy
+    /// (held and released around each check).
     #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
     fn fs_volume() -> &'static mut fat::Volume<blk::SocketDevice> {
-        unsafe { (*addr_of_mut!(FS_VOLUME)).as_mut() }.expect("fs: the volume fs-mount mounted")
+        fsmount::volume().expect("fs: the volume the file family mounted at boot")
     }
 
     #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
     fn check_fs_mount() {
-        kprintln!("[api] fs-mount: the card's volume mounted through the filesystem layer with a 64 KB SDRAM scratch page from the arena's range 1 -- the type by the cluster count alone, the label, the cluster size, the counts and the free count, with the mount's cycles and whether the FSInfo's count served or one pass over the FAT ran");
-        let site = check_fs_mount as *const () as usize as u32;
-        let p = api::rhu_arena_alloc_from(1, 65536, 16, site);
-        assert!(!p.is_null(), "fs-mount: the SDRAM scratch page refused NULL");
-        let scratch = unsafe { core::slice::from_raw_parts_mut(p, 65536) };
-        let t0 = cyc();
-        let r = fat::Volume::mount_in(unsafe { &mut *addr_of_mut!(FS_VOLUME) }, blk::SocketDevice, scratch);
-        let dt = cyc().wrapping_sub(t0);
-        if let Err(r) = r {
-            panic!("fs-mount: the mount refused -- {}", r.words());
-        }
-        let v = fs_volume();
-        v.set_clock(fs_now);
+        kprintln!("[api] fs-mount: the card's volume mounted at boot through the filesystem layer with the file family's 4 KB scratch -- the type by the cluster count alone, the label, the cluster size, the counts and the free count, with the mount's ticks where the host counts at boot and whether the FSInfo's count served or one pass over the FAT ran");
+        fsmount::hold();
+        let Some(v) = fsmount::volume() else {
+            fsmount::release();
+            panic!("fs-mount: no volume mounted at boot -- the mount record reads {} ({})", fs_state_words(fsmount::state()), fsmount::why());
+        };
         let g = *v.geometry();
         let kind = match g.kind {
             fat::Kind::Fat12 => "FAT12",
@@ -1875,8 +1930,9 @@ mod api_smoke {
             fat::Kind::Fat32 => "FAT32",
         };
         let free = v.free_clusters();
+        let dt = fsmount::mount_ticks();
         kprintln!(
-            "[api] fs-mount: {} -- label {}, {} bytes per cluster ({} sectors), {} clusters, {} free, {} reserved sectors, {} FATs of {} sectors, the root {}, the volume at sector {} ({}) -- {} cycles = {} us; {}",
+            "[api] fs-mount: {} -- label {}, {} bytes per cluster ({} sectors), {} clusters, {} free, {} reserved sectors, {} FATs of {} sectors, the root {}, the volume at sector {} ({}) -- mounted at boot; {}",
             kind,
             core::str::from_utf8(v.label()).unwrap_or("?"),
             g.cluster_bytes,
@@ -1889,20 +1945,25 @@ mod api_smoke {
             if g.kind == fat::Kind::Fat32 { "a cluster chain" } else { "a fixed region" },
             g.base,
             if g.base == 0 { "the boot sector at block 0, no partition table" } else { "behind the partition table's first FAT entry" },
-            dt,
-            us(dt),
             if v.hint_served() { "the FSInfo's count served (no pass)" } else { "one pass over the FAT ran" }
         );
+        if board::sd::TICKS_AT_BOOT {
+            kprintln!("[api] fs-mount: the mount took {} cycles = {} us at boot (the host spinning before the scheduler)", dt, us(dt));
+        } else {
+            kprintln!("[api] fs-mount: the mount ran at boot before the kernel's clock (no measure on this row)");
+        }
         if !v.hint_served() {
-            kprintln!("[api] fs-mount: the pass read the FAT in {} calls through the scratch page", v.pass_calls());
+            kprintln!("[api] fs-mount: the pass read the FAT in {} calls through the scratch", v.pass_calls());
         }
         assert!(g.count_of_clusters >= 1 && free <= g.count_of_clusters, "fs-mount: the counts are not consistent");
-        kprintln!("[api] PASS fs-mount ({} with {} clusters of {} bytes, {} free, at sector {}, mounted in {} us)", kind, g.count_of_clusters, g.cluster_bytes, free, g.base, us(dt));
+        fsmount::release();
+        kprintln!("[api] PASS fs-mount ({} with {} clusters of {} bytes, {} free, at sector {}, mounted at boot)", kind, g.count_of_clusters, g.cluster_bytes, free, g.base);
     }
 
     #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
     fn check_fs_walk() {
         kprintln!("[api] fs-walk: the root listed through the layer, up to 32 entries with their long names, kinds and sizes, to compare with a PC's listing");
+        fsmount::hold();
         let v = fs_volume();
         let t0 = cyc();
         let mut d = v.opendir(b"/").unwrap_or_else(|e| panic!("fs-walk: opendir refused {}", e.code()));
@@ -1924,15 +1985,17 @@ mod api_smoke {
         }
         v.closedir(&mut d).unwrap_or_else(|e| panic!("fs-walk: closedir refused {}", e.code()));
         let dt = cyc().wrapping_sub(t0);
+        fsmount::release();
         kprintln!("[api] PASS fs-walk ({} entries listed -- {} directories, {} files -- in {} cycles = {} us)", n, dirs, files, dt, us(dt));
     }
 
     #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
     fn check_fs_roundtrip() {
-        kprintln!("[api] fs-roundtrip: THE ONE WRITE OF THE FLIGHT -- a file rhu-fs-roundtrip.tmp and a directory rhu-fs-roundtrip.dir the check creates and removes at the card's root, REFUSED before any write if either name exists; 1 MB of a cycle pattern written from an SDRAM buffer, synced, closed, re-read into a second SDRAM buffer and compared, truncated to 4096 bytes and re-read, unlinked; the directory made, listed empty and removed; the free count equal before and after; the times by the cycle counter");
+        kprintln!("[api] fs-roundtrip: THE ONE WRITE OF THE FLIGHT -- a file rhu-fs-roundtrip.tmp and a directory rhu-fs-roundtrip.dir the check creates and removes at the card's root, REFUSED before any write if either name exists; {} KB of a cycle pattern written from a buffer of the arena's range {}, synced, closed, re-read into a second buffer and compared, truncated to 4096 bytes and re-read, unlinked; the directory made, listed empty and removed; the free count equal before and after; the times by the checks' clock", FS_ROUNDTRIP_LEN / 1024, SD_BUF_RANGE);
         const FILE: &[u8] = b"/rhu-fs-roundtrip.tmp";
         const DIR: &[u8] = b"/rhu-fs-roundtrip.dir";
-        const LEN: usize = 1 << 20;
+        const LEN: usize = FS_ROUNDTRIP_LEN;
+        fsmount::hold();
         let v = fs_volume();
         for name in [FILE, DIR] {
             match v.stat(name) {
@@ -1943,13 +2006,14 @@ mod api_smoke {
         }
         let protected = blk::with_card(|c| c.write_protected).unwrap_or(true);
         if protected {
+            fsmount::release();
             kprintln!("[api] PASS fs-roundtrip (the card is write-protected: nothing written, the roundtrip skipped)");
             return;
         }
         let site = check_fs_roundtrip as *const () as usize as u32;
-        let p1 = api::rhu_arena_alloc_from(1, LEN as u32, 16, site);
-        let p2 = api::rhu_arena_alloc_from(1, LEN as u32, 16, site);
-        assert!(!p1.is_null() && !p2.is_null(), "fs-roundtrip: the SDRAM buffers refused NULL");
+        let p1 = api::rhu_arena_alloc_from(SD_BUF_RANGE, LEN as u32, 16, site);
+        let p2 = api::rhu_arena_alloc_from(SD_BUF_RANGE, LEN as u32, 16, site);
+        assert!(!p1.is_null() && !p2.is_null(), "fs-roundtrip: the buffers refused NULL");
         let (a, b) = unsafe { (core::slice::from_raw_parts_mut(p1, LEN), core::slice::from_raw_parts_mut(p2, LEN)) };
         for (i, x) in a.iter_mut().enumerate() {
             *x = (i as u8).wrapping_mul(7).wrapping_add((i >> 8) as u8) ^ ((i >> 16) as u8).wrapping_mul(31);
@@ -1974,7 +2038,7 @@ mod api_smoke {
         let t_sync = cyc().wrapping_sub(t0);
         v.close(&mut h).unwrap_or_else(|e| panic!("fs-roundtrip: the close refused {}", e.code()));
         let mut h = v.open(FILE, fat::O_READ).unwrap_or_else(|e| panic!("fs-roundtrip: the re-open refused {}", e.code()));
-        assert!(v.fstat(&h).map(|s| s.size) == Ok(LEN as u32), "fs-roundtrip: the size after the close is not 1 MB");
+        assert!(v.fstat(&h).map(|s| s.size) == Ok(LEN as u32), "fs-roundtrip: the size after the close is not the length written");
         let t0 = cyc();
         let mut done = 0;
         while done < LEN {
@@ -2020,20 +2084,397 @@ mod api_smoke {
         let free1 = v.free_clusters();
         assert!(free1 == free0, "fs-roundtrip: the free count moved from {} to {}", free0, free1);
         kprintln!(
-            "[api] fs-roundtrip: the create {} cycles = {} us, the 1 MB write {} = {} us, the sync {} = {} us, the 1 MB read {} = {} us, the unlink {} = {} us; {} clusters free before and after",
+            "[api] fs-roundtrip: the create {} cycles = {} us, the {} KB write {} = {} us, the sync {} = {} us, the {} KB read {} = {} us, the unlink {} = {} us; {} clusters free before and after",
             t_create,
             us(t_create),
+            LEN / 1024,
             t_write,
             us(t_write),
             t_sync,
             us(t_sync),
+            LEN / 1024,
             t_read,
             us(t_read),
             t_unlink,
             us(t_unlink),
             free0
         );
-        kprintln!("[api] PASS fs-roundtrip (1 MB written from the SDRAM, read back equal into the SDRAM, truncated to 4096 and re-read equal, unlinked; the directory made, empty, removed; the two names absent and the free count unchanged)");
+        fsmount::release();
+        kprintln!("[api] PASS fs-roundtrip ({} KB written from the arena's range {}, read back equal, truncated to 4096 and re-read equal, unlinked; the directory made, empty, removed; the two names absent and the free count unchanged)", LEN / 1024, SD_BUF_RANGE);
+    }
+
+    /// The mount record's state words for the lines.
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn fs_state_words(state: u32) -> &'static str {
+        match state {
+            fs::STATE_MOUNTED => "MOUNTED",
+            fs::STATE_NO_CARD => "NO_CARD",
+            fs::STATE_UNREADABLE => "UNREADABLE",
+            _ => "?",
+        }
+    }
+
+    /// A C path for the kernel's file API from a NUL-terminated byte string.
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn cpath(p: &[u8]) -> *const c_char {
+        assert!(p.last() == Some(&0), "a C path without its terminator");
+        p.as_ptr() as *const c_char
+    }
+
+    /// The mount table through the kernel's file API: the count, the record of
+    /// /media/sd0 against the layer's own geometry, the refusals of the record.
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn check_fs_doors_mount() {
+        kprintln!("[api] fs-doors-mount: the mount table through the kernel's file API -- the count, the record of /media/sd0 read at the call (its state, its FAT width and its counts against the layer's geometry), the index past the count and a NULL record refused");
+        let n = api::rhu_fs_mount_count();
+        assert!(n == 1, "fs-doors-mount: the count reads {} against the 1 socket this row has", n);
+        let mut d = fs::MountDesc::EMPTY;
+        let r = api::rhu_fs_mount(0, &mut d);
+        assert!(r == 0, "fs-doors-mount: the record refused {}", r);
+        assert!(d.state == fs::STATE_MOUNTED, "fs-doors-mount: the state reads {} ({}), not MOUNTED", fs_state_words(d.state), core::str::from_utf8(fs::MountDesc::text(&d.why)).unwrap_or("?"));
+        assert!(fs::MountDesc::text(&d.point) == b"/media/sd0" && d.device == 0, "fs-doors-mount: the point or the device index is not the socket's");
+        fsmount::hold();
+        let (width, cluster_bytes, clusters, free, label_ok) = {
+            let v = fs_volume();
+            let g = *v.geometry();
+            let w = match g.kind {
+                fat::Kind::Fat12 => 12,
+                fat::Kind::Fat16 => 16,
+                fat::Kind::Fat32 => 32,
+            };
+            (w, g.cluster_bytes, g.count_of_clusters, v.free_clusters(), fs::MountDesc::text(&d.label) == v.label())
+        };
+        fsmount::release();
+        assert!(d.fat_width == width && d.cluster_bytes == cluster_bytes && d.clusters == clusters && d.free_clusters == free && label_ok, "fs-doors-mount: the record's figures (FAT{}, {} bytes per cluster, {} clusters, {} free) are not the layer's (FAT{}, {}, {}, {})", d.fat_width, d.cluster_bytes, d.clusters, d.free_clusters, width, cluster_bytes, clusters, free);
+        assert!(api::rhu_fs_mount(1, &mut d) == fs::ERR_INVAL, "fs-doors-mount: the index past the count not refused EINVAL");
+        assert!(api::rhu_fs_mount(0, core::ptr::null_mut()) == fs::ERR_INVAL, "fs-doors-mount: a NULL record not refused EINVAL");
+        kprintln!("[api] fs-doors-mount: /media/sd0 MOUNTED -- FAT{}, label {}, {} bytes per cluster, {} clusters, {} free", width, core::str::from_utf8(fs::MountDesc::text(&d.label)).unwrap_or("?"), cluster_bytes, clusters, free);
+        kprintln!("[api] PASS fs-doors-mount (1 row, /media/sd0 mounted, FAT{} with {} clusters of {} bytes and {} free as the layer reads them; the index 1 and a NULL record EINVAL)", width, clusters, cluster_bytes, free);
+    }
+
+    /// THE FLIGHT's WRITE THROUGH THE KERNEL's FILE API: a file created, written
+    /// in pieces (one by position), synced, closed, re-opened, read back
+    /// byte-exact (one piece by position, one into a misaligned buffer), its
+    /// status by handle and by path, unlinked; the free count before and after.
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn check_fs_doors_roundtrip() {
+        kprintln!("[api] fs-doors-roundtrip: THE FLIGHT's WRITE THROUGH THE KERNEL's FILE API -- a file rhu-fs-doors.tmp under /media/sd0 created with O_CREATE and O_EXCL after the guard that refuses when it exists, 64 KB written in pieces (the last by position, the handle's position unmoved), synced, closed, re-opened, read back byte-exact (one piece by position, one into a misaligned buffer), its status by handle and by path, then unlinked; the free count through statfs before and after");
+        const PATH: &[u8] = b"/media/sd0/rhu-fs-doors.tmp\0";
+        const ROOT: &[u8] = b"/media/sd0\0";
+        const LEN: usize = 64 * 1024;
+        const PIECE: usize = 16 * 1024;
+        let mut st = fs::StatDesc::EMPTY;
+        match api::rhu_fs_stat(cpath(PATH), &mut st) {
+            fs::ERR_NOENT => {}
+            0 => panic!("fs-doors-roundtrip: REFUSED before any write -- rhu-fs-doors.tmp already exists on the card (no existing file is opened for writing)"),
+            c => panic!("fs-doors-roundtrip: the guard's stat refused {}", c),
+        }
+        let protected = blk::with_card(|c| c.write_protected).unwrap_or(true);
+        if protected {
+            kprintln!("[api] PASS fs-doors-roundtrip (the card is write-protected: nothing written, the roundtrip skipped)");
+            return;
+        }
+        let site = check_fs_doors_roundtrip as *const () as usize as u32;
+        let p1 = api::rhu_arena_alloc_from(SD_BUF_RANGE, (LEN + 16) as u32, 16, site);
+        let p2 = api::rhu_arena_alloc_from(SD_BUF_RANGE, (LEN + 16) as u32, 16, site);
+        assert!(!p1.is_null() && !p2.is_null(), "fs-doors-roundtrip: the buffers refused NULL");
+        let (a, b) = unsafe { (core::slice::from_raw_parts_mut(p1, LEN + 16), core::slice::from_raw_parts_mut(p2, LEN + 16)) };
+        for (i, x) in a.iter_mut().enumerate() {
+            *x = (i as u8).wrapping_mul(13).wrapping_add((i >> 8) as u8) ^ ((i >> 16) as u8).wrapping_mul(29);
+        }
+        b.fill(0);
+        let mut sf = fs::StatfsDesc::EMPTY;
+        assert!(api::rhu_fs_statfs(cpath(ROOT), &mut sf) == 0, "fs-doors-roundtrip: statfs refused before the write");
+        let free0 = sf.free;
+        let h = api::rhu_fs_open(cpath(PATH), fs::O_READ | fs::O_WRITE | fs::O_CREATE | fs::O_EXCL);
+        assert!(h >= 0, "fs-doors-roundtrip: the create refused {}", h);
+        let mut done = 0;
+        while done < LEN - PIECE {
+            let n = api::rhu_fs_write(h, a[done..].as_ptr() as *const c_void, (LEN - PIECE - done).min(PIECE) as u32);
+            assert!(n > 0, "fs-doors-roundtrip: the write refused {} after {} bytes", n, done);
+            done += n as usize;
+        }
+        let n = api::rhu_fs_pwrite(h, a[LEN - PIECE..].as_ptr() as *const c_void, PIECE as u32, (LEN - PIECE) as i64);
+        assert!(n == PIECE as i32, "fs-doors-roundtrip: the positional write moved {} of {} bytes", n, PIECE);
+        let mut pos = -1i64;
+        assert!(api::rhu_fs_seek(h, 0, fs::SEEK_CUR, &mut pos) == 0 && pos == (LEN - PIECE) as i64, "fs-doors-roundtrip: the position after the positional write reads {}, not {}", pos, LEN - PIECE);
+        let r = api::rhu_fs_sync(h);
+        assert!(r == 0, "fs-doors-roundtrip: the sync refused {}", r);
+        let mut by_handle = fs::StatDesc::EMPTY;
+        assert!(api::rhu_fs_fstat(h, &mut by_handle) == 0 && by_handle.size == LEN as u32 && by_handle.kind == fs::KIND_FILE, "fs-doors-roundtrip: the status by handle reads {} bytes of kind {}", by_handle.size, by_handle.kind);
+        let r = api::rhu_fs_close(h);
+        assert!(r == 0, "fs-doors-roundtrip: the close refused {}", r);
+        let h = api::rhu_fs_open(cpath(PATH), fs::O_READ);
+        assert!(h >= 0, "fs-doors-roundtrip: the re-open refused {}", h);
+        let mut done = 0;
+        while done < LEN - 2 * PIECE {
+            let n = api::rhu_fs_read(h, b[done..].as_mut_ptr() as *mut c_void, (LEN - 2 * PIECE - done) as u32);
+            assert!(n > 0, "fs-doors-roundtrip: the read refused {} after {} bytes", n, done);
+            done += n as usize;
+        }
+        let n = api::rhu_fs_pread(h, b[LEN - 2 * PIECE..].as_mut_ptr() as *mut c_void, PIECE as u32, (LEN - 2 * PIECE) as i64);
+        assert!(n == PIECE as i32, "fs-doors-roundtrip: the positional read moved {} of {} bytes", n, PIECE);
+        assert!(api::rhu_fs_seek(h, 0, fs::SEEK_CUR, &mut pos) == 0 && pos == (LEN - 2 * PIECE) as i64, "fs-doors-roundtrip: the position after the positional read reads {}, not {}", pos, LEN - 2 * PIECE);
+        assert!(api::rhu_fs_seek(h, (LEN - PIECE) as i64, fs::SEEK_SET, &mut pos) == 0 && pos == (LEN - PIECE) as i64, "fs-doors-roundtrip: the seek to the last piece refused");
+        let mut done = 0;
+        while done < PIECE {
+            let n = api::rhu_fs_read(h, b[LEN - PIECE + 1 + done..].as_mut_ptr() as *mut c_void, (PIECE - done) as u32);
+            assert!(n > 0, "fs-doors-roundtrip: the misaligned read refused {} after {} bytes", n, done);
+            done += n as usize;
+        }
+        assert!(api::rhu_fs_pread(h, b[LEN..].as_mut_ptr() as *mut c_void, 16, LEN as i64) == 0, "fs-doors-roundtrip: a positional read past the end did not answer 0");
+        assert!(a[..LEN - PIECE] == b[..LEN - PIECE], "fs-doors-roundtrip: the first 48 KB read back differ from what was written");
+        assert!(a[LEN - PIECE..LEN] == b[LEN - PIECE + 1..LEN + 1], "fs-doors-roundtrip: the last 16 KB read into the misaligned buffer differ from what was written");
+        let mut by_path = fs::StatDesc::EMPTY;
+        assert!(api::rhu_fs_stat(cpath(PATH), &mut by_path) == 0 && api::rhu_fs_fstat(h, &mut by_handle) == 0, "fs-doors-roundtrip: a status refused after the re-open");
+        assert!(by_path == by_handle && by_path.size == LEN as u32 && by_path.kind == fs::KIND_FILE && by_path.read_only == 0, "fs-doors-roundtrip: the status by path and by handle differ, or read {} bytes of kind {}", by_path.size, by_path.kind);
+        let r = api::rhu_fs_close(h);
+        assert!(r == 0, "fs-doors-roundtrip: the close after the read refused {}", r);
+        let r = api::rhu_fs_unlink(cpath(PATH));
+        assert!(r == 0, "fs-doors-roundtrip: the unlink refused {}", r);
+        assert!(api::rhu_fs_stat(cpath(PATH), &mut st) == fs::ERR_NOENT, "fs-doors-roundtrip: the file still present after the unlink");
+        assert!(api::rhu_fs_statfs(cpath(ROOT), &mut sf) == 0 && sf.free == free0, "fs-doors-roundtrip: the free count moved from {} to {}", free0, sf.free);
+        kprintln!("[api] fs-doors-roundtrip: {} KB written in {} KB pieces (the last by position), read back in one 32 KB read, one 16 KB positional read and one 16 KB misaligned read; the write time {} (Unix seconds), the first cluster {}; {} clusters free before and after", LEN / 1024, PIECE / 1024, by_path.mtime, by_path.first_cluster, free0);
+        kprintln!("[api] PASS fs-doors-roundtrip ({} KB written through the kernel's file API from the arena's range {} and read back equal, one piece each way by position with the handle's position unmoved, one read into a misaligned buffer; the status by handle and by path equal; unlinked; the free count unmoved)", LEN / 1024, SD_BUF_RANGE);
+    }
+
+    /// The listing through the kernel's file API: the root's entries, a
+    /// directory made, listed empty and removed, the free count.
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn check_fs_doors_listing() {
+        kprintln!("[api] fs-doors-listing: the root listed through the kernel's file API, up to 32 entries with their kinds and sizes; a directory rhu-fs-doors.dir made, listed empty (the two dots), removed; the free count through statfs");
+        const ROOT: &[u8] = b"/media/sd0\0";
+        const DIR: &[u8] = b"/media/sd0/rhu-fs-doors.dir\0";
+        let d = api::rhu_fs_opendir(cpath(ROOT));
+        assert!(d >= 0, "fs-doors-listing: opendir refused {}", d);
+        let mut e = fs::Dirent::EMPTY;
+        let (mut n, mut dirs, mut files) = (0u32, 0u32, 0u32);
+        while n < 32 {
+            match api::rhu_fs_readdir(d, &mut e) {
+                1 => {}
+                0 => break,
+                c => panic!("fs-doors-listing: readdir refused {} after {} entries", c, n),
+            }
+            n += 1;
+            if e.kind == fs::KIND_DIR {
+                dirs += 1;
+            } else {
+                files += 1;
+            }
+            kprintln!("[api] fs-doors-listing:   {} {:>10} {}", if e.kind == fs::KIND_DIR { "d" } else { "-" }, e.size, core::str::from_utf8(e.name()).unwrap_or("?"));
+        }
+        let r = api::rhu_fs_closedir(d);
+        assert!(r == 0, "fs-doors-listing: closedir refused {}", r);
+        let protected = blk::with_card(|c| c.write_protected).unwrap_or(true);
+        let mut made = "the card write-protected: no directory made";
+        if !protected {
+            let mut st = fs::StatDesc::EMPTY;
+            assert!(api::rhu_fs_stat(cpath(DIR), &mut st) == fs::ERR_NOENT, "fs-doors-listing: REFUSED before any write -- rhu-fs-doors.dir already exists on the card");
+            let r = api::rhu_fs_mkdir(cpath(DIR));
+            assert!(r == 0, "fs-doors-listing: the mkdir refused {}", r);
+            assert!(api::rhu_fs_mkdir(cpath(DIR)) == fs::ERR_EXIST, "fs-doors-listing: a second mkdir of the name not refused EEXIST");
+            assert!(api::rhu_fs_stat(cpath(DIR), &mut st) == 0 && st.kind == fs::KIND_DIR && st.size == 0, "fs-doors-listing: the new directory's status is not a directory's");
+            let d = api::rhu_fs_opendir(cpath(DIR));
+            assert!(d >= 0, "fs-doors-listing: the new directory's opendir refused {}", d);
+            let mut dots = 0;
+            loop {
+                match api::rhu_fs_readdir(d, &mut e) {
+                    1 => {
+                        assert!(e.name() == b"." || e.name() == b"..", "fs-doors-listing: the new directory lists an entry of its own");
+                        dots += 1;
+                    }
+                    0 => break,
+                    c => panic!("fs-doors-listing: readdir of the new directory refused {}", c),
+                }
+            }
+            assert!(api::rhu_fs_closedir(d) == 0 && dots == 2, "fs-doors-listing: the new directory lists {} entries, not the two dots", dots);
+            let r = api::rhu_fs_rmdir(cpath(DIR));
+            assert!(r == 0, "fs-doors-listing: the rmdir refused {}", r);
+            assert!(api::rhu_fs_stat(cpath(DIR), &mut st) == fs::ERR_NOENT, "fs-doors-listing: the directory still present after the rmdir");
+            made = "a directory made, listed with its two dots alone, removed";
+        }
+        let mut sf = fs::StatfsDesc::EMPTY;
+        let r = api::rhu_fs_statfs(cpath(ROOT), &mut sf);
+        assert!(r == 0, "fs-doors-listing: statfs refused {}", r);
+        assert!(sf.name_max == 255 && sf.free <= sf.blocks && sf.block_size >= 512, "fs-doors-listing: the counts are not consistent ({} of {} clusters of {} bytes, name_max {})", sf.free, sf.blocks, sf.block_size, sf.name_max);
+        kprintln!("[api] fs-doors-listing: {} MB free of {} MB ({} of {} clusters of {} bytes), name_max {}", (sf.free as u64 * sf.block_size as u64) >> 20, (sf.blocks as u64 * sf.block_size as u64) >> 20, sf.free, sf.blocks, sf.block_size, sf.name_max);
+        kprintln!("[api] PASS fs-doors-listing ({} entries listed -- {} directories, {} files; {}; the free count read)", n, dirs, files, made);
+    }
+
+    /// Every refusal by its cause through the kernel's file API.
+    #[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+    fn check_fs_doors_refusals() {
+        kprintln!("[api] fs-doors-refusals: every refusal by its cause through the kernel's file API -- a path outside the mount and a missing name ENOENT; a relative path, a NULL path, a NULL record, a flag word outside the six, no access bit and a bad whence EINVAL; a closed handle and a handle past the table EBADF; the fifth opendir EMFILE; the seventeenth open EMFILE, an existing name under O_EXCL EEXIST, a directory opened as a file EISDIR, a file opened as a directory ENOTDIR and a filled directory's rmdir ENOTEMPTY where the card takes a write");
+        const ROOT: &[u8] = b"/media/sd0\0";
+        const MISSING: &[u8] = b"/media/sd0/no-such-name-rhu\0";
+        const FILE: &[u8] = b"/media/sd0/rhu-fs-refusals.tmp\0";
+        const DIR: &[u8] = b"/media/sd0/rhu-fs-refusals.dir\0";
+        const INNER: &[u8] = b"/media/sd0/rhu-fs-refusals.dir/inner.tmp\0";
+        let mut st = fs::StatDesc::EMPTY;
+        let mut buf = [0u8; 16];
+        assert!(api::rhu_fs_open(cpath(b"/tmp/rhu-outside\0"), fs::O_READ) == fs::ERR_NOENT, "fs-doors-refusals: a path outside the mount not refused ENOENT");
+        assert!(api::rhu_fs_stat(cpath(b"/media/sd0x\0"), &mut st) == fs::ERR_NOENT, "fs-doors-refusals: a path that merely begins with the point's letters not refused ENOENT");
+        assert!(api::rhu_fs_open(cpath(MISSING), fs::O_READ) == fs::ERR_NOENT, "fs-doors-refusals: a missing name not refused ENOENT");
+        assert!(api::rhu_fs_open(cpath(b"media/sd0/x\0"), fs::O_READ) == fs::ERR_INVAL, "fs-doors-refusals: a relative path not refused EINVAL");
+        assert!(api::rhu_fs_open(core::ptr::null(), fs::O_READ) == fs::ERR_INVAL, "fs-doors-refusals: a NULL path not refused EINVAL");
+        assert!(api::rhu_fs_stat(cpath(ROOT), core::ptr::null_mut()) == fs::ERR_INVAL, "fs-doors-refusals: a NULL record not refused EINVAL");
+        assert!(api::rhu_fs_open(cpath(ROOT), 64) == fs::ERR_INVAL && api::rhu_fs_open(cpath(ROOT), fs::O_CREATE) == fs::ERR_INVAL, "fs-doors-refusals: a flag word outside the six or without an access bit not refused EINVAL");
+        assert!(api::rhu_fs_open(cpath(ROOT), fs::O_READ) == fs::ERR_ISDIR, "fs-doors-refusals: the root opened as a file not refused EISDIR");
+        assert!(api::rhu_fs_read(16, buf.as_mut_ptr() as *mut c_void, 16) == fs::ERR_BADF && api::rhu_fs_read(-1, buf.as_mut_ptr() as *mut c_void, 16) == fs::ERR_BADF, "fs-doors-refusals: a handle past the table not refused EBADF");
+        let mut dirs = [0i32; 4];
+        for (i, d) in dirs.iter_mut().enumerate() {
+            *d = api::rhu_fs_opendir(cpath(ROOT));
+            assert!(*d == i as i32, "fs-doors-refusals: the opendir {} answered {}", i + 1, *d);
+        }
+        assert!(api::rhu_fs_opendir(cpath(ROOT)) == fs::ERR_MFILE, "fs-doors-refusals: the fifth opendir not refused EMFILE");
+        for d in dirs {
+            assert!(api::rhu_fs_closedir(d) == 0, "fs-doors-refusals: a closedir refused");
+        }
+        assert!(api::rhu_fs_closedir(0) == fs::ERR_BADF, "fs-doors-refusals: a closed directory handle not refused EBADF");
+        let protected = blk::with_card(|c| c.write_protected).unwrap_or(true);
+        let mut written = "the card write-protected: the refusals that need a write not flown";
+        if !protected {
+            for p in [FILE, DIR] {
+                assert!(api::rhu_fs_stat(cpath(p), &mut st) == fs::ERR_NOENT, "fs-doors-refusals: REFUSED before any write -- a name of this check already exists on the card");
+            }
+            let h = api::rhu_fs_open(cpath(FILE), fs::O_READ | fs::O_WRITE | fs::O_CREATE | fs::O_EXCL);
+            assert!(h >= 0, "fs-doors-refusals: the create refused {}", h);
+            assert!(api::rhu_fs_write(h, buf.as_ptr() as *const c_void, 16) == 16 && api::rhu_fs_close(h) == 0, "fs-doors-refusals: the write or the close of the check's file refused");
+            assert!(api::rhu_fs_open(cpath(FILE), fs::O_WRITE | fs::O_CREATE | fs::O_EXCL) == fs::ERR_EXIST, "fs-doors-refusals: an existing name under O_EXCL not refused EEXIST");
+            assert!(api::rhu_fs_opendir(cpath(FILE)) == fs::ERR_NOTDIR, "fs-doors-refusals: a file opened as a directory not refused ENOTDIR");
+            let mut pos = 0i64;
+            let mut handles = [0i32; 16];
+            for (i, h) in handles.iter_mut().enumerate() {
+                *h = api::rhu_fs_open(cpath(FILE), fs::O_READ);
+                assert!(*h == i as i32, "fs-doors-refusals: the open {} answered {}", i + 1, *h);
+            }
+            assert!(api::rhu_fs_open(cpath(FILE), fs::O_READ) == fs::ERR_MFILE, "fs-doors-refusals: the seventeenth open not refused EMFILE");
+            assert!(api::rhu_fs_seek(handles[0], 0, 7, &mut pos) == fs::ERR_INVAL, "fs-doors-refusals: a bad whence not refused EINVAL");
+            assert!(api::rhu_fs_pwrite(handles[0], buf.as_ptr() as *const c_void, 16, -1) == fs::ERR_INVAL, "fs-doors-refusals: a negative offset not refused EINVAL");
+            for h in handles {
+                assert!(api::rhu_fs_close(h) == 0, "fs-doors-refusals: a close refused");
+            }
+            assert!(api::rhu_fs_read(0, buf.as_mut_ptr() as *mut c_void, 16) == fs::ERR_BADF, "fs-doors-refusals: a closed handle not refused EBADF");
+            let a = api::rhu_fs_open(cpath(FILE), fs::O_WRITE | fs::O_APPEND);
+            assert!(a >= 0 && api::rhu_fs_pwrite(a, buf.as_ptr() as *const c_void, 16, 0) == fs::ERR_INVAL && api::rhu_fs_close(a) == 0, "fs-doors-refusals: a positional write on an append handle not refused EINVAL");
+            assert!(api::rhu_fs_mkdir(cpath(DIR)) == 0, "fs-doors-refusals: the mkdir refused");
+            let h = api::rhu_fs_open(cpath(INNER), fs::O_WRITE | fs::O_CREATE | fs::O_EXCL);
+            assert!(h >= 0 && api::rhu_fs_close(h) == 0, "fs-doors-refusals: the inner file's create refused");
+            assert!(api::rhu_fs_rmdir(cpath(DIR)) == fs::ERR_NOTEMPTY, "fs-doors-refusals: a filled directory's rmdir not refused ENOTEMPTY");
+            assert!(api::rhu_fs_rmdir(cpath(FILE)) == fs::ERR_NOTDIR, "fs-doors-refusals: a file's rmdir not refused ENOTDIR");
+            assert!(api::rhu_fs_unlink(cpath(DIR)) == fs::ERR_ISDIR, "fs-doors-refusals: a directory's unlink not refused EISDIR");
+            assert!(api::rhu_fs_unlink(cpath(INNER)) == 0 && api::rhu_fs_rmdir(cpath(DIR)) == 0 && api::rhu_fs_unlink(cpath(FILE)) == 0, "fs-doors-refusals: the check's names not removed");
+            for p in [FILE, DIR] {
+                assert!(api::rhu_fs_stat(cpath(p), &mut st) == fs::ERR_NOENT, "fs-doors-refusals: a name of this check still present after");
+            }
+            written = "the seventeenth open EMFILE, O_EXCL EEXIST, a file as a directory ENOTDIR, a filled directory ENOTEMPTY, a directory's unlink EISDIR, a bad whence, a negative offset and an append handle's positional write EINVAL, a closed handle EBADF; the check's names removed";
+        }
+        kprintln!("[api] PASS fs-doors-refusals (outside the mount and a missing name ENOENT; a relative path, a NULL path, a NULL record, a flag word outside the six and one without an access bit EINVAL; the root as a file EISDIR; a handle past the table EBADF; the fifth opendir EMFILE and a closed directory handle EBADF; {})", written);
+    }
+
+    /// The mount record polled every 100 ms until it reads the wanted state
+    /// or the bound passes: the milliseconds waited, or None.
+    #[cfg(all(rhu_sd_socket, feature = "test-sd-flight", not(feature = "test-sd-doctored")))]
+    fn fs_wait_state(want: u32, bound_ms: u32) -> Option<u32> {
+        let t0 = sched::now_ms();
+        loop {
+            let mut d = fs::MountDesc::EMPTY;
+            if api::rhu_fs_mount(0, &mut d) == 0 && d.state == want {
+                return Some(sched::now_ms().wrapping_sub(t0));
+            }
+            if sched::now_ms().wrapping_sub(t0) >= bound_ms {
+                return None;
+            }
+            sched::sleep_ms(100);
+        }
+    }
+
+    /// THE CARD PULLED AND PUT BACK BY HAND (the flight flavor alone): a file
+    /// written and synced with its handle kept, the removal asked and awaited
+    /// through the mount record, the kept handle and the fresh calls checked,
+    /// the return asked and awaited, the file read back through a fresh
+    /// handle; a hand not given within the bound is "not flown".
+    #[cfg(all(rhu_sd_socket, feature = "test-sd-flight", not(feature = "test-sd-doctored")))]
+    fn check_fs_doors_hotswap() {
+        kprintln!("[api] fs-doors-hotswap: THE CARD PULLED AND PUT BACK BY HAND -- a file rhu-fs-hotswap.tmp written and synced with its handle kept open; the image asks for the card's removal and waits up to 300 s for the mount record to read NO_CARD, then checks the kept handle (EIO on a read, 0 on its close), a fresh open under /media/sd0 (ENOENT), statfs (ENOENT) and the record; then asks for the card's return and waits up to 300 s for MOUNTED, re-opens the file, reads it back byte-exact, unlinks it and reads the free count; a hand not given within the bound is not flown, not a refusal");
+        const PATH: &[u8] = b"/media/sd0/rhu-fs-hotswap.tmp\0";
+        const ROOT: &[u8] = b"/media/sd0\0";
+        const BOUND_MS: u32 = 300_000;
+        let protected = blk::with_card(|c| c.write_protected).unwrap_or(true);
+        if protected {
+            kprintln!("[api] fs-doors-hotswap: not flown (the card is write-protected)");
+            return;
+        }
+        let mut st = fs::StatDesc::EMPTY;
+        if api::rhu_fs_stat(cpath(PATH), &mut st) == 0 {
+            let r = api::rhu_fs_unlink(cpath(PATH));
+            assert!(r == 0, "fs-doors-hotswap: an earlier flight's file could not be removed ({})", r);
+            kprintln!("[api] fs-doors-hotswap: an earlier flight's rhu-fs-hotswap.tmp removed before the create");
+        }
+        let mut a = [0u8; 512];
+        for (i, x) in a.iter_mut().enumerate() {
+            *x = (i as u8).wrapping_mul(7) ^ (i >> 8) as u8;
+        }
+        let h = api::rhu_fs_open(cpath(PATH), fs::O_READ | fs::O_WRITE | fs::O_CREATE | fs::O_EXCL);
+        assert!(h >= 0, "fs-doors-hotswap: the create refused {}", h);
+        assert!(api::rhu_fs_write(h, a.as_ptr() as *const c_void, 512) == 512 && api::rhu_fs_sync(h) == 0, "fs-doors-hotswap: the write or the sync refused");
+        let mut pos = 0i64;
+        assert!(api::rhu_fs_seek(h, 0, fs::SEEK_SET, &mut pos) == 0, "fs-doors-hotswap: the seek to the start refused");
+        kprintln!("[api] fs-doors-hotswap: PLEASE PULL THE CARD OUT NOW -- the image waits up to 300 s for the socket's switch to read no card");
+        let Some(gone_ms) = fs_wait_state(fs::STATE_NO_CARD, BOUND_MS) else {
+            let (c, u) = (api::rhu_fs_close(h), api::rhu_fs_unlink(cpath(PATH)));
+            kprintln!("[api] fs-doors-hotswap: not flown (the mount record never read NO_CARD within 300 s); the kept handle's close answered {} and the unlink of rhu-fs-hotswap.tmp {} (0 is removed; a code means the card is not as it was: the file may remain)", c, u);
+            return;
+        };
+        kprintln!("[api] fs-doors-hotswap: the mount record reads NO_CARD {} ms after the ask", gone_ms);
+        let mut b = [0u8; 512];
+        let r = api::rhu_fs_read(h, b.as_mut_ptr() as *mut c_void, 512);
+        assert!(r == fs::ERR_IO, "fs-doors-hotswap: the kept handle's read answered {}, not EIO", r);
+        let r = api::rhu_fs_close(h);
+        assert!(r == 0, "fs-doors-hotswap: the kept handle's close answered {}, not 0", r);
+        let r = api::rhu_fs_open(cpath(PATH), fs::O_READ);
+        assert!(r == fs::ERR_NOENT, "fs-doors-hotswap: a fresh open with the card out answered {}, not ENOENT", r);
+        let mut sf = fs::StatfsDesc::EMPTY;
+        assert!(api::rhu_fs_statfs(cpath(ROOT), &mut sf) == fs::ERR_NOENT, "fs-doors-hotswap: statfs with the card out not refused ENOENT");
+        let mut d = fs::MountDesc::EMPTY;
+        assert!(api::rhu_fs_mount(0, &mut d) == 0 && d.state == fs::STATE_NO_CARD && d.fat_width == 0 && d.clusters == 0, "fs-doors-hotswap: the record with the card out is not NO_CARD with its figures cleared");
+        kprintln!("[api] PASS fs-doors-hotswap-removal (the volume dropped {} ms after the ask; the kept handle EIO on a read and 0 on its close; a fresh open and statfs ENOENT; the record NO_CARD)", gone_ms);
+        kprintln!("[api] fs-doors-hotswap: PLEASE PUT THE CARD BACK NOW -- the image waits up to 300 s for the volume to mount again");
+        let Some(back_ms) = fs_wait_state(fs::STATE_MOUNTED, BOUND_MS) else {
+            kprintln!("[api] fs-doors-hotswap: not flown (no volume mounted within 300 s of the ask); the file rhu-fs-hotswap.tmp stays on the card");
+            return;
+        };
+        assert!(api::rhu_fs_mount(0, &mut d) == 0, "fs-doors-hotswap: the record refused after the return");
+        kprintln!("[api] fs-doors-hotswap: the mount record reads MOUNTED {} ms after the ask -- FAT{}, {} clusters free", back_ms, d.fat_width, d.free_clusters);
+        let h = api::rhu_fs_open(cpath(PATH), fs::O_READ);
+        assert!(h >= 0, "fs-doors-hotswap: the re-open after the return refused {}", h);
+        let mut done = 0;
+        while done < 512 {
+            let n = api::rhu_fs_read(h, b[done..].as_mut_ptr() as *mut c_void, (512 - done) as u32);
+            assert!(n > 0, "fs-doors-hotswap: the read after the return refused {} after {} bytes", n, done);
+            done += n as usize;
+        }
+        assert!(a == b, "fs-doors-hotswap: the bytes written before the pull differ after the return");
+        assert!(api::rhu_fs_close(h) == 0 && api::rhu_fs_unlink(cpath(PATH)) == 0, "fs-doors-hotswap: the close or the unlink after the return refused");
+        assert!(api::rhu_fs_statfs(cpath(ROOT), &mut sf) == 0, "fs-doors-hotswap: statfs refused after the return");
+        kprintln!("[api] PASS fs-doors-hotswap-return (the volume mounted anew {} ms after the ask; the file written before the pull read back byte-exact through a fresh handle and unlinked; {} clusters free)", back_ms, sf.free);
+    }
+
+    /// The file family's shape on a row without a card socket (and on the
+    /// STM32F769 row's doctored control): no mount, no handle, every path absent.
+    #[cfg(not(all(rhu_sd_socket, not(feature = "test-sd-doctored"))))]
+    fn check_fs_none() {
+        kprintln!("[api] fs-none: the file family's shape with no socket -- the mount table's count, the index past it, a path, a handle, a NULL path and a NULL record");
+        let n = api::rhu_fs_mount_count();
+        assert!(n == 0, "fs-none: the count reads {} on a row with no socket", n);
+        let mut d = fs::MountDesc::EMPTY;
+        assert!(api::rhu_fs_mount(0, &mut d) == fs::ERR_INVAL, "fs-none: the index 0 not refused EINVAL");
+        assert!(api::rhu_fs_open(b"/media/sd0/x\0".as_ptr() as *const c_char, fs::O_READ) == fs::ERR_NOENT, "fs-none: a path not refused ENOENT");
+        let mut b = [0u8; 4];
+        assert!(api::rhu_fs_read(0, b.as_mut_ptr() as *mut c_void, 4) == fs::ERR_BADF, "fs-none: the handle 0 not refused EBADF");
+        assert!(api::rhu_fs_open(core::ptr::null(), fs::O_READ) == fs::ERR_INVAL, "fs-none: a NULL path not refused EINVAL");
+        assert!(api::rhu_fs_stat(b"/x\0".as_ptr() as *const c_char, core::ptr::null_mut()) == fs::ERR_INVAL, "fs-none: a NULL record not refused EINVAL");
+        kprintln!("[api] PASS fs-none (no mount: the count 0, the index 0 EINVAL, /media/sd0/x ENOENT, the handle 0 EBADF, a NULL path EINVAL, a NULL record EINVAL)");
     }
 
     // Check 13, LAST in the family: headroom is honest to the byte. An
@@ -2328,11 +2769,11 @@ mod api_smoke {
         kprintln!("[api] PASS tls-blocks (per-thread blocks distinct, init image + zero fill honored, no cross-thread bleed)");
     }
 
-    // Check 16b: the thread-local-base door. The debug-visible layout
+    // Check 16b: the thread-local-base function. The debug-visible layout
     // record is read FROM MEMORY at its exported symbols exactly as a
     // debugger reads it -- raw words at `__rhu_debug_layout`, then
     // `__rhu_sched` walked with the recorded offsets, no kernel verb in
-    // the walk -- and judged against the doors: every live thread's
+    // the walk -- and judged against the functions: every live thread's
     // module-0 pointer is null while the template brackets are empty
     // (this family carries no thread-local template); the two
     // registered modules' blocks read through the record equal what
@@ -2388,7 +2829,7 @@ mod api_smoke {
         assert!(t0 >= 1 && t1 >= 1 && t0 != t1, "tls-base-door: spawn failed");
         wait_until(|| DOOR_READY.load(Ordering::Acquire) == 2, "door workers ready");
 
-        // The doors' answers, taken once; the walk below never calls one.
+        // The functions' answers, taken once; the walk below never calls one.
         let me = api::rhu_thread_self();
         let g1 = api::rhu_tls_get(h1) as u32;
         let g2 = api::rhu_tls_get(h2) as u32;
@@ -2520,7 +2961,7 @@ mod api_smoke {
         api::rhu_thread_exit(); // the explicit exit path
     }
 
-    /// Spawn one parked probe through the C door.
+    /// Spawn one parked probe through the kernel function `rhu_thread_spawn`.
     fn spawn_probe(entry: extern "C" fn(*mut c_void), stack: u32) -> i32 {
         api::rhu_thread_spawn(Some(entry), core::ptr::null_mut(), stack, 0x40, c"probe".as_ptr())
     }
@@ -2562,8 +3003,8 @@ mod api_smoke {
         ABI_PARK.store(0, Ordering::Release);
 
         // (c) the name is the kernel's copy: spawned with names in local
-        // buffers that are clobbered once the door returns, each thread's
-        // record still reads the bytes the door saw -- cut to the buffer,
+        // buffers that are clobbered once the function returns, each thread's
+        // record still reads the bytes the function saw -- cut to the buffer,
         // at a character boundary -- and points into its own block. The
         // stacks are a size unique in the image's spawn history.
         let mut local = *b"clobbered-name-longer-than-15\0";
@@ -2653,7 +3094,7 @@ mod api_smoke {
         kprintln!("[api] PASS thread-abi (round trip clean, tids unique, exact-fit stack reused, the name a kernel copy cut at the buffer, slot exhaustion refused honest)");
     }
 
-    // Check 18b: the spawn door's stack floor. Sizes the frames cannot
+    // Check 18b: the spawn function's stack floor. Sizes the frames cannot
     // fit (0, 1, 8, 64, one below the floor) and sizes whose 8-byte
     // round-up wraps are refused RHU_EINVAL with nothing committed -- the
     // slot census, the retired list and the pool's bump unchanged; the
@@ -2705,7 +3146,7 @@ mod api_smoke {
         HB_LATE_RAN.store(1, Ordering::Release);
     }
 
-    /// Spawn one band thread through the C door at `prio`, 4K stack.
+    /// Spawn one band thread through the kernel function `rhu_thread_spawn` at `prio`, 4K stack.
     fn spawn_band(entry: extern "C" fn(*mut c_void), prio: u32, name: &'static core::ffi::CStr) -> i32 {
         let t = api::rhu_thread_spawn(Some(entry), core::ptr::null_mut(), 4096, prio, name.as_ptr());
         assert!(t >= 1, "host-band: spawn returned {}", t);
@@ -2775,7 +3216,7 @@ mod api_smoke {
         kprintln!("[api] PASS host-band (the host joined the band and its door-spawned child at the flat priority started through yield alone at one level, joining re-ran the pick, leaving restored kernel urgency and held a band thread until the host blocked)");
     }
 
-    // Check 37b: the calendar doors, late in the flavor (a board's
+    // Check 37b: the calendar functions, late in the flavor (a board's
     // low-speed crystal is ready by now, so on a row with a real-time
     // clock the write-back is a measured fact). The base at boot is the
     // epoch or a carried one (a warm board with a set clock, a pushed
@@ -2936,7 +3377,7 @@ mod api_smoke {
     /// and both edges armed, and a ten-second wait on its event word lights
     /// the LED on the first event; the outcome is printed either way -- an
     /// interactive step that says "no press" honestly.
-    #[cfg(all(feature = "test-gpio-button", any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-plus-2", feature = "board-rpi-pico2", feature = "board-st-nucleo-l4r5zi", feature = "board-st-nucleo-u5a5zj-q", feature = "board-st-stm32f746g-disco", feature = "board-st-stm32f769i-disco")))]
+    #[cfg(all(feature = "test-gpio-button", any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-plus-2", feature = "board-raspberrypi-pico-2", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-st-nucleo-l4r5zi", feature = "board-st-nucleo-u5a5zj-q", feature = "board-st-stm32f746g-disco", feature = "board-st-stm32f769i-disco")))]
     pub fn button_flight() {
         let led = board::facts::LED0_LINE;
         let off = board::facts::LED0_ACTIVE_LOW as u32;
@@ -2968,7 +3409,7 @@ mod api_smoke {
 
     /// THE UART FLAVORS (the features test-uart-loopback and test-uart-jumper,
     /// never a shipped image; the Pico rows): the row's port 0 -- or its port
-    /// 1 under test-uart-port1 -- is claimed through the doors and set to
+    /// 1 under test-uart-port1 -- is claimed through the kernel's UART API and set to
     /// 115200 8N1; the loopback image turns the block's loopback bit on, so
     /// the transmitter feeds the receiver inside the chip, and the jumper
     /// image expects the port's pair wired together by hand (GP0 to GP1 on
@@ -3167,7 +3608,7 @@ mod api_smoke {
         unsafe { core::ptr::read_volatile(addr_of!(bus::WITNESS)) }
     }
 
-    /// The I2C doors against the emulator row's model of the ST block and
+    /// The kernel's I2C API against the emulator row's model of the ST block and
     /// the sensor behind it.
     #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
     fn check_bus_i2c() {
@@ -3229,7 +3670,7 @@ mod api_smoke {
         kprintln!("[api] PASS bus-i2c (one bus, claimed once and again, the identity 0x60 and the eight-byte burst read, the reset acknowledged, an unanswered address ENXIO, nine bad arguments EINVAL, a bus the board has none of ENODEV, the rate ENOTSUP, the witness's counts as expected)");
     }
 
-    /// The SPI doors against the emulator row's model of the ST block and
+    /// The kernel's SPI API against the emulator row's model of the ST block and
     /// the memory behind it: the settings ride each transfer, the select is
     /// the device's.
     #[cfg(all(rhu_bus_models, not(feature = "test-bus-doctored")))]
@@ -3416,9 +3857,9 @@ mod api_smoke {
     }
 
     /// The doctored image's run in place of the three checks. On both
-    /// models: the sensor refuses the second data byte of a write (the door
+    /// models: the sensor refuses the second data byte of a write (the function
     /// answers EIO and names the byte); the block never completes a non-last
-    /// message (the door answers ETIMEDOUT no sooner than its budget less a
+    /// message (the function answers ETIMEDOUT no sooner than its budget less a
     /// tick and resets the block); the same with a device left holding the
     /// data line -- freed by the clocks, freed by the clock held low 35 ms,
     /// not freed -- each told in its line and counted or not; a device that
@@ -3588,8 +4029,13 @@ mod api_smoke {
         unsafe { core::ptr::read_volatile(addr_of!(crate::adc::WITNESS)) }
     }
 
-    /// The PWM doors against the emulator row's virtual timers: the
-    /// quantization measured, the door's period tied to the timer's own
+    #[cfg(rhu_pwm_adc_models)]
+    fn gpio_witness() -> gpio::GpioWitness {
+        unsafe { core::ptr::read_volatile(addr_of!(gpio::WITNESS)) }
+    }
+
+    /// The kernel's PWM API against the emulator row's virtual timers: the
+    /// quantization measured, the function's period tied to the timer's own
     /// reading of its registers (the doctored timer breaks the tie), the
     /// shared-period rule and the refusals.
     #[cfg(rhu_pwm_adc_models)]
@@ -3647,9 +4093,9 @@ mod api_smoke {
         kprintln!("[api] PASS pwm-claim (3 lines on 2 timers stated and enumerated, a claim taken, a period of 1000000 ns exact and a period of 100000000123 ns quantized to 100000306000 ns with the timer's own period equal to the door's both times, the timer's other channel EBUSY on a different period with the holder named and served on the same, a second claim EBUSY, a line without a timer function, a bad polarity, a duty past the period, a zero period, a period past the range and bad handles EINVAL, the output driven and parked, released and claimed again, the witness's counts as expected)");
     }
 
-    /// The ADC doors against the emulator row's virtual converters: the
+    /// The kernel's ADC API against the emulator row's virtual converters: the
     /// facts enumerated, the samples as the model states them, the
-    /// references, the claims table shared with the GPIO doors, the refusals.
+    /// references, the claims table shared with the kernel's GPIO API, the refusals.
     #[cfg(rhu_pwm_adc_models)]
     fn check_adc_claim() {
         kprintln!("[api] adc-claim: the count and the channels' facts stated; a channel claimed and read as the model states, the internal reference channel read against its block's reference, the two blocks' references answered; a second claim, a line a program holds, an index past the count, a NULL pointer, bad handles, a released handle and a block the board has none of each refused with its code");
@@ -3729,6 +4175,54 @@ mod api_smoke {
         kprintln!("[api] PASS pwm-adc-loop (10, 50 and 90 percent read back as {}, {} and {} of {} within a band of {}, the parked output 0, the inversed 10 percent {})", got[0], got[1], got[2], full, band, inv);
     }
 
+    /// The GPIO and PWM APIs' hold over one line, in both orders: a line a PWM
+    /// channel of this program holds is refused to the kernel's GPIO API with the
+    /// holder named in the witness and the channel still served, the
+    /// reverse order refused to the kernel's PWM API, each served after the
+    /// other's release and the kernel's GPIO API's own second claim a
+    /// re-configuration; an analog channel's line and the board's line
+    /// refused with their holders named.
+    #[cfg(rhu_pwm_adc_models)]
+    fn check_gpio_hold() {
+        kprintln!("[api] gpio-hold: a line a PWM channel of this program holds claimed through the GPIO door and the reverse order, an analog channel's line, the board's line -- each refused EBUSY with the holder named in the witness, the line served after the holder's release");
+        let l0 = board::facts::PWM_LINES[0].line as u32;
+        let w0 = gpio_witness();
+        let h = api::rhu_pwm_claim(l0);
+        assert!(h == 0, "gpio-hold: the PWM claim answered {}", h);
+        let r = api::rhu_gpio_claim(l0, gpio_math::MODE_OUTPUT, gpio_math::PULL_NONE, 0);
+        assert!(r == gpio::ERR_BUSY, "gpio-hold: the GPIO claim on the line the program's PWM channel holds answered {} (want RHU_EBUSY)", r);
+        let w1 = gpio_witness();
+        assert!(w1.last_busy_holder == gpio::HOLDER_PWM && w1.last_refused_line == l0 && w1.last_refused_code == gpio::ERR_BUSY, "gpio-hold: the witness names holder {} on line {} with the code {} (want the PWM channel {} on line {} with RHU_EBUSY)", w1.last_busy_holder, w1.last_refused_line, w1.last_refused_code, gpio::HOLDER_PWM, l0);
+        assert!(w1.reconfigured == w0.reconfigured && w1.refused_busy == w0.refused_busy + 1, "gpio-hold: the witness counts {} re-configurations and {} busy refusals (want {} and {})", w1.reconfigured, w1.refused_busy, w0.reconfigured, w0.refused_busy + 1);
+        assert!(api::rhu_gpio_read(l0) == sched::ERR_INVAL, "gpio-hold: the line reads through the GPIO door while the PWM channel holds it");
+        assert!(api::rhu_pwm_set(h, 1_000_000, 500_000, crate::pwm_math::POLARITY_NORMAL) == 0, "gpio-hold: the PWM channel's set refused after the GPIO door's refusal");
+        assert!(api::rhu_pwm_release(h) == 0, "gpio-hold: the PWM release refused");
+        assert!(api::rhu_gpio_claim(l0, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == 0, "gpio-hold: the GPIO claim after the PWM release refused");
+        let r = api::rhu_pwm_claim(l0);
+        assert!(r == crate::pwm::ERR_BUSY, "gpio-hold: the PWM claim on the line the GPIO door holds answered {} (want RHU_EBUSY)", r);
+        let pw = pwm_witness();
+        assert!(pw.last_refused_line == l0 && pw.last_refused_code == crate::pwm::ERR_BUSY, "gpio-hold: the PWM witness names line {} with the code {}", pw.last_refused_line, pw.last_refused_code);
+        assert!(api::rhu_gpio_claim(l0, gpio_math::MODE_INPUT, gpio_math::PULL_UP, 0) == 0, "gpio-hold: the GPIO door's own second claim refused");
+        assert!(gpio_witness().reconfigured == w0.reconfigured + 1, "gpio-hold: the GPIO door's own second claim was not counted as a re-configuration");
+        assert!(api::rhu_gpio_release(l0) == 0, "gpio-hold: the GPIO release refused");
+        let h = api::rhu_pwm_claim(l0);
+        assert!(h == 0 && api::rhu_pwm_release(h) == 0, "gpio-hold: the PWM claim after the GPIO release answered {}", h);
+        let line1 = board::facts::ADC_CHANNELS[1].line as u32;
+        let ha = api::rhu_adc_claim(1);
+        assert!(ha == 1, "gpio-hold: the analog claim answered {}", ha);
+        let r = api::rhu_gpio_claim(line1, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0);
+        let holder = gpio_witness().last_busy_holder;
+        assert!(r == gpio::ERR_BUSY && holder == gpio::HOLDER_ADC, "gpio-hold: the GPIO claim on the analog channel's line answered {} with holder {} (want RHU_EBUSY and the analog channel {})", r, holder, gpio::HOLDER_ADC);
+        assert!(api::rhu_adc_release(ha) == 0, "gpio-hold: the analog release refused");
+        assert!(api::rhu_gpio_claim(line1, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0) == 0 && api::rhu_gpio_release(line1) == 0, "gpio-hold: the line after the analog release refused");
+        if !board::facts::BOARD_CLAIMS.is_empty() {
+            let r = api::rhu_gpio_claim(board::facts::CHECK_BOARD, gpio_math::MODE_INPUT, gpio_math::PULL_NONE, 0);
+            let holder = gpio_witness().last_busy_holder;
+            assert!(r == gpio::ERR_BUSY && holder == gpio::HOLDER_BOARD, "gpio-hold: the board's line answered {} with holder {} (want RHU_EBUSY and the board {})", r, holder, gpio::HOLDER_BOARD);
+        }
+        kprintln!("[api] PASS gpio-hold (the GPIO claim on a line the program's PWM channel holds EBUSY with the PWM channel named, the line unreadable through the GPIO door and the channel still served, the PWM claim on a GPIO-held line EBUSY, each door served after the other's release and the GPIO door's own second claim a re-configuration, an analog channel's line and the board's line EBUSY with their holders named)");
+    }
+
     /// The converter's conversion-error path on the virtual model under
     /// `test-adc-flagged`: the channel whose first conversion the model flags
     /// reads as the model states after one discard and retry; the channel the
@@ -3769,7 +4263,7 @@ mod api_smoke {
     }
 
     /// The rows whose facts carry no PWM line and no ADC channel: the
-    /// honest posture of every door.
+    /// honest posture of every function.
     #[cfg(not(rhu_pwm_adc_rows))]
     fn check_pwm_adc_none() {
         kprintln!("[api] pwm-adc-none: no PWM line and no ADC channel on this row -- the counts 0, the enumeration doors EINVAL, every other door ENODEV");
@@ -4220,9 +4714,9 @@ mod api_smoke {
         kprintln!("[api] PASS susp-ctx (planted registers exact in ctx, sp inside the target stack, pc inside kernel text)");
     }
 
-    // Check 23: set-context -- registers and pc through the door,
+    // Check 23: set-context -- registers and pc through the function,
     // geometry refused. The pad runs by exception return with
-    // the planted r0 and exits by the C door (ctx.lr is not edited,
+    // the planted r0 and exits by the kernel function `rhu_thread_exit` (ctx.lr is not edited,
     // so returning is not an option for it).
     static SC_WITNESS: AtomicU32 = AtomicU32::new(0);
     static SC_TID: AtomicI32 = AtomicI32::new(0);
@@ -4312,7 +4806,7 @@ mod api_smoke {
     // Checks 25-30 share ONE process-global handler (registered once
     // in act-refuse, the first act check) dispatching on a MODE
     // static; MODE changes only between checks, workers joined.
-    static ACT_MODE: AtomicU32 = AtomicU32::new(0); // 0 count, 1 redeliver, 2 rearm, 3 fp-costume
+    static ACT_MODE: AtomicU32 = AtomicU32::new(0); // 0 count, 1 redeliver, 2 rearm, 3 fp-costume, 4 wait-across
     static ACT_COUNT: AtomicU32 = AtomicU32::new(0);
     static ACT_TID: AtomicI32 = AtomicI32::new(0);
     static ACT_SP: AtomicUsize = AtomicUsize::new(0);
@@ -4339,6 +4833,16 @@ mod api_smoke {
             }
             2 => {
                 H_MS.store(sched::now_ms(), Ordering::Release);
+            }
+            4 => {
+                // act-wait-across: the handler sleeps, then makes a timed
+                // wait of its own on a word nobody wakes, and records what
+                // that wait answered (the deadline passing).
+                api::rhu_sleep_ns(2_000_000);
+                let deadline = api::rhu_now_ns() + 3_000_000;
+                let r = api::rhu_futex_wait(WA_HWORD.as_ptr(), 0, deadline);
+                WA_HR.store(r, Ordering::Release);
+                WA_HRUN.store(1, Ordering::Release);
             }
             3 => {
                 // act-lazy-fp: ONE floating-point instruction inside the
@@ -4404,8 +4908,8 @@ mod api_smoke {
             "act-refuse: null ctx not EINVAL"
         );
         // A context is a word array: a pointer that is not 4-aligned is
-        // refused as the futex doors refuse a misaligned word, before any
-        // access through it (the target stays unsuspended: the door's
+        // refused as the futex functions refuse a misaligned word, before any
+        // access through it (the target stays unsuspended: the function's
         // refusal comes first).
         let mis = (addr_of_mut!(c) as usize + 2) as *mut sched::RhuCtx;
         assert!(
@@ -4595,6 +5099,47 @@ mod api_smoke {
         kprintln!("[api] PASS act-eintr (the wait returned RHU_EINTR after the handler ran, the re-wait then woke clean)");
     }
 
+    static WA_WORD: AtomicU32 = AtomicU32::new(0);
+    static WA_HWORD: AtomicU32 = AtomicU32::new(0);
+    static WA_PROG: AtomicU32 = AtomicU32::new(0);
+    static WA_R: AtomicI32 = AtomicI32::new(99);
+    static WA_HR: AtomicI32 = AtomicI32::new(99);
+    static WA_HRUN: AtomicU32 = AtomicU32::new(0);
+    static WA_C1: AtomicU32 = AtomicU32::new(99);
+
+    extern "C" fn wait_across_worker(_: usize) {
+        let r = api::rhu_futex_wait(WA_WORD.as_ptr(), 0, sched::DEADLINE_NONE);
+        WA_R.store(r, Ordering::Release);
+        WA_C1.store(ACT_COUNT.load(Ordering::Acquire), Ordering::Release);
+        WA_PROG.store(1, Ordering::Release);
+        api::rhu_futex_wake(WA_PROG.as_ptr(), u32::MAX);
+    }
+
+    fn check_act_wait_across() {
+        kprintln!("[api] act-wait-across: infinite-wait break by an activation whose handler sleeps and makes a timed wait armed");
+        ACT_MODE.store(4, Ordering::Release);
+        let c0 = ACT_COUNT.load(Ordering::Acquire);
+        let (_slot, tid) =
+            sched::try_spawn("dacross", wait_across_worker, 0, 4, 4096).ok().expect("act-wait-across: spawn");
+        wait_until(|| sched::probe_futex_waiting(WA_WORD.as_ptr()) == 1, "worker to park");
+        assert!(api::rhu_activation_send(tid) == 0, "act-wait-across: send refused");
+        wait_until(|| WA_PROG.load(Ordering::Acquire) == 1, "broken wait to return");
+        assert!(
+            WA_HRUN.load(Ordering::Acquire) == 1 && WA_C1.load(Ordering::Acquire) == c0 + 1,
+            "act-wait-across: the wait returned before the handler ran"
+        );
+        let (r, hr) = (WA_R.load(Ordering::Acquire), WA_HR.load(Ordering::Acquire));
+        assert!(
+            r == sched::ERR_INTR && hr == sched::ERR_TIMEDOUT,
+            "act-wait-across: the broken wait returned {} (want RHU_EINTR) and the handler's timed wait returned {} (want RHU_ETIMEDOUT)",
+            r,
+            hr
+        );
+        ACT_MODE.store(0, Ordering::Release);
+        join_tid(tid);
+        kprintln!("[api] PASS act-wait-across (the handler slept and its timed wait timed out, the broken wait returned RHU_EINTR after it)");
+    }
+
     // Check 30: a plain sleeper takes the delivery EARLY (ns-clock
     // witness) and the sleep still returns not-early -- the re-arm
     // (the sleep's recheck loop) is what reconciles the
@@ -4704,7 +5249,7 @@ mod api_smoke {
     }
 
     /// The whole desc as bytes for the miss-writes-nothing and
-    /// one-storage-two-doors compares (repr(C), all-u32/pointer
+    /// one-storage-two-functions compares (repr(C), all-u32/pointer
     /// fields on a 32-bit target: no padding, so a byte compare is a
     /// field compare).
     fn desc_bytes(d: &registry::ModuleDesc) -> &[u8] {
@@ -4850,7 +5395,7 @@ mod api_smoke {
         assert!(out.tls_bytes == 0, "mod-roots: tls not empty in a base-family image");
         assert!(out.tls_init.is_null(), "mod-roots: empty tls carries a non-null init image");
         assert!(!out.name.is_null(), "mod-roots: module 0 name wrong");
-        // One storage, two doors: find's desc for a text address must
+        // One storage, two functions: find's desc for a text address must
         // byte-match roots(0)'s.
         let mut via_find = sentinel_desc();
         assert!(
@@ -4876,17 +5421,17 @@ mod api_smoke {
         kprintln!("[api] PASS mod-roots (module 0 ranges tie the link brackets, frozen, exidx, and tls empty in this family, walk ends ESRCH at the table count)");
     }
 
-    // ---------- the hosting doors (the console pair + entropy; the
-    // exit door runs LAST as the machine's own exit -- kthread_main
+    // ---------- the hosting functions (the console pair + entropy; the
+    // exit function runs LAST as the machine's own exit -- kthread_main
     // hands the final code through it, and the gate's exit-status
     // assert is the proof it terminated the machine). ----------
 
-    // The console doors. The write door pushes a whole known line
+    // The console functions. The write function pushes a whole known line
     // through the kernel wire (the gate pins that exact line arriving
-    // with CRLF discipline -- the door IS the path under test),
+    // with CRLF discipline -- the function IS the path under test),
     // returns the count exact, and refuses null, oversize and over-bound
-    // (the door's stated maximum) honestly.
-    // The read door on this world answers 0 -- the gate serial feeds
+    // (the function's stated maximum) honestly.
+    // The read function on this world answers 0 -- the gate serial feeds
     // no input, so no-input honesty is the deterministic observable
     // -- writes NOTHING into the buffer, and never waits (this check
     // returning is the proof).
@@ -4907,7 +5452,7 @@ mod api_smoke {
         );
         // The over-bound request carries a buffer that is REAL for its
         // whole length, so the refusal is judged on the count alone and
-        // a door that accepted the request would write bytes that exist
+        // a kernel function that accepted the request would write bytes that exist
         // (a control's transcript stays a clean panic, never undefined).
         static OVER_BOUND: [u8; api::CONSOLE_MAX_WRITE as usize + 1] = [b'x'; api::CONSOLE_MAX_WRITE as usize + 1];
         assert!(
@@ -5202,7 +5747,7 @@ mod api_smoke {
     #[cfg(not(rhu_uart_cmsdk))]
     fn check_uart_timeout() {}
 
-    // Check 34: the software-stream door and the declared-quality query.
+    // Check 34: the software-stream function and the declared-quality query.
     // The query's answer is the row's posture, never a constant: 1 where
     // a hardware source serves and its last check passed, 0 otherwise
     // (0 under the build opt-in too). One PASS text per class.
@@ -5230,7 +5775,7 @@ mod api_smoke {
         }
     }
 
-    // Check 34b: the cryptographic door. Three classes, one PASS text
+    // Check 34b: the random-bytes function. Three classes, one PASS text
     // each: the build opt-in (the emulator rows' gate images) serves the
     // software stream; a row with a serving hardware source serves it
     // with its health flags clean and the witness's counts moving as
@@ -6295,7 +6840,7 @@ mod api_smoke {
         }
     }
 
-    /// The PWM doors against the RP2350's slices, every number from the row's
+    /// The kernel's PWM API against the RP2350's slices, every number from the row's
     /// own tables: the count and the lines enumerated against the table; a
     /// line claimed, the line that shares its slice output and the board's
     /// line refused; a period set and tied to the arithmetic AND to the
@@ -6373,11 +6918,11 @@ mod api_smoke {
         kprintln!("[api] PASS pwm-claim ({} lines on {} slices stated and enumerated, line {} claimed and the line sharing its slice output refused, a period of 20000000 ns run as {} ns and tied to the slice's registers, output {} of the slice refused on a different period and served on the same, {} busy and 15 invalid refusals counted, driven and parked, released)", lines.len(), crate::pwm::TIMERS, l0, want, l1, busy_want);
     }
 
-    /// The ADC doors against the RP2350's converter: the count and the
+    /// The kernel's ADC API against the RP2350's converter: the count and the
     /// channels' facts against the table; the temperature sensor's channel
     /// claimed and read inside the die's band; a pin channel claimed and read
     /// (a header line with nothing on it: the sample printed, not judged);
-    /// the reference door; a channel whose line a program holds refused; the
+    /// the reference function; a channel whose line a program holds refused; the
     /// refusals; the releases.
     #[cfg(all(rhu_pwm_adc_rows, not(rhu_pwm_adc_models)))]
     fn check_adc_claim() {
@@ -6530,7 +7075,7 @@ mod rp2350_bus_math;
 #[allow(dead_code)]
 mod net_math;
 
-// The network doors' bodies (every row: the count 0 and RHU_ENODEV
+// The kernel's network API's bodies (every row: the count 0 and RHU_ENODEV
 // where no medium is), the scripted peer behind the emulator rows' virtual
 // medium (the rows with a medium alone).
 mod net;

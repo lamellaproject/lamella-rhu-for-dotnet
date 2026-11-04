@@ -437,7 +437,7 @@ pub fn console_putb(b: u8) {
     ring::putb(b)
 }
 
-/// The room the ring has for a writer, in bytes (the door's back-pressure
+/// The room the ring has for a writer, in bytes (the function's back-pressure
 /// reads it outside the critical section).
 pub fn console_room() -> usize {
     ring::room()

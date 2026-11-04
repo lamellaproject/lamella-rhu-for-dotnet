@@ -12,7 +12,7 @@
 pub use super::stm32f7::*;
 
 pub const NAME: &str = "STM32F746G-DISCO";
-/// The chip, as the SDK's facts file names it (the quiet line of the log doors).
+/// The chip, as the SDK's facts file names it (the quiet line of the log functions).
 pub const CHIP: &str = "STM32F746NG";
 pub const CONSOLE: &str = "USART1 (ST-LINK VCP)";
 

@@ -24,7 +24,7 @@ const TIMEOUT_S: u64 = 900;
 /// The cases pinned, in the order cargo's single-threaded runner reports
 /// them (alphabetical by name). A case added to the host crate joins this
 /// list in the same change, or the gate refuses the run.
-pub const CASES: [&str; 78] = [
+pub const CASES: [&str; 88] = [
     "tests::abi_window_judges_the_window",
     "tests::adc_math_budget_mask_and_channels",
     "tests::arena_overflow_refused_headroom_intact",
@@ -70,6 +70,12 @@ pub const CASES: [&str; 78] = [
     "tests::fpemul_decoder_matches_the_assembler",
     "tests::fpemul_flags_and_directed_rounding_by_hand",
     "tests::fpemul_fma_is_fused_and_matches_the_host",
+    "tests::fs_doors_directories_listing_and_the_tree_verbs",
+    "tests::fs_doors_handle_tables_and_their_limits",
+    "tests::fs_doors_no_volume_shape",
+    "tests::fs_doors_open_read_write_seek_truncate_and_sync",
+    "tests::fs_doors_route_paths_and_refuse_outside_the_mount",
+    "tests::fs_doors_unmount_kills_handles_and_a_remount_starts_fresh",
     "tests::gpio_math_partition_wrap_and_families",
     "tests::kheap_largest_fits_and_one_more_byte_does_not",
     "tests::kheap_rounding_wraps_refused",
@@ -97,6 +103,10 @@ pub const CASES: [&str; 78] = [
     "tests::sdcard_identify_standard_capacity_over_the_scripted_host",
     "tests::sdcard_read_and_write_address_by_capacity_class",
     "tests::sdcard_transfer_refusals_recover_by_cmd12_before_any_retry",
+    "tests::sdspi_identify_high_capacity_over_the_scripted_wire",
+    "tests::sdspi_identify_version1_and_standard_capacity_over_the_scripted_wire",
+    "tests::sdspi_reads_and_writes_blocks_with_the_tokens_and_crcs",
+    "tests::sdspi_refuses_the_doctored_wire",
     "tests::uart_math_effective_pair_on_the_rp2350_rows",
     "tests::uart_math_pin_words_refused_with_the_words",
     "tests::wake_arm_across_the_32bit_wrap",

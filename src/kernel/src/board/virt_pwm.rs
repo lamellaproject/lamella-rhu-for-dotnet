@@ -1,14 +1,14 @@
 //! The virtual PWM backend of the emulator rows: two timers of two channels
-//! in kernel memory, so the doors, the claims of the line and the channel,
+//! in kernel memory, so the functions, the claims of the line and the channel,
 //! the quantization, the shared-period rule and the refusals are gated on
 //! QEMU by the same verbs the boards serve, and only the pads are left to
 //! silicon. Each timer keeps a prescaler and a period register in the
 //! shape the ST timers use (the register holds the value minus one) and
 //! each channel its compare, its polarity and its enable; the timer's own
 //! reading of the period it runs, from those registers, is what the api
-//! flavor's check ties the door's answer to (on silicon the same verb
+//! flavor's check ties the function's answer to (on silicon the same verb
 //! reads the block back). The doctored control `test-pwm-doctored` makes
-//! that reading run the prescaler one step long, so the door's arithmetic
+//! that reading run the prescaler one step long, so the function's arithmetic
 //! and the timer's disagree and the check must refuse.
 
 use core::sync::atomic::{AtomicU32, Ordering};

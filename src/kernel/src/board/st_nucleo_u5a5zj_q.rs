@@ -24,7 +24,7 @@ use core::ptr::{read_volatile, write_volatile};
 use super::ring;
 
 pub const NAME: &str = "NUCLEO-U5A5ZJ-Q";
-/// The chip, as the SDK's facts file names it (the quiet line of the log doors).
+/// The chip, as the SDK's facts file names it (the quiet line of the log functions).
 pub const CHIP: &str = "STM32U5A5ZJ";
 pub const CONSOLE: &str = "USART1 (ST-LINK VCP)";
 
@@ -512,7 +512,7 @@ pub fn console_putb(b: u8) {
     ring::putb(b)
 }
 
-/// The room the ring has for a writer, in bytes (the door's back-pressure
+/// The room the ring has for a writer, in bytes (the function's back-pressure
 /// reads it outside the critical section).
 pub fn console_room() -> usize {
     ring::room()

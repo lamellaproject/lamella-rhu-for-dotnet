@@ -1,9 +1,9 @@
 //! The virtual ADC backend of the emulator rows: two converter blocks in
-//! kernel memory, so the doors, the claims of the line and the channel,
+//! kernel memory, so the functions, the claims of the line and the channel,
 //! the width, the reference and the wait against a budget are gated on
 //! QEMU by the same verbs the boards serve. A conversion is PACED by the
 //! kernel's clock -- it completes after its block's cycles at the block's
-//! clock, never earlier -- so the door's budget is proven against a real
+//! clock, never earlier -- so the function's budget is proven against a real
 //! wait. The channels read constants of the model: a pin channel a fixed
 //! fraction of full scale, the internal reference channel a known voltage
 //! against its block's reference, and the LOOP channel the first PWM line's
@@ -15,7 +15,7 @@
 //! flavor's loop check must refuse at its second reading. Under
 //! `test-adc-flagged` the model flags conversions as the boards' blocks
 //! do -- the first conversion of one pin channel, every conversion of
-//! another -- so the door's discard, retry and bounded refusal are proved
+//! another -- so the function's discard, retry and bounded refusal are proved
 //! on the emulator rows; its doctored control `test-adc-flagged-doctored`
 //! answers a flagged conversion's undefined result as a sample, which the
 //! api flavor's check must refuse at its first reading.
@@ -78,7 +78,7 @@ pub fn ready(index: usize) -> bool {
 /// The sample of a finished conversion, by the channel's kind -- or none
 /// for a conversion the model flags (under `test-adc-flagged`: the first
 /// conversion of `FLAGGED_ONCE`, every conversion of `FLAGGED_ALWAYS`):
-/// the sample discarded, the next conversion started when the door asks
+/// the sample discarded, the next conversion started when the function asks
 /// for another attempt. The doctored converter answers the flagged
 /// conversion's undefined result as a sample instead.
 pub fn sample(index: usize, again: bool) -> Option<u32> {

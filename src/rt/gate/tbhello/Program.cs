@@ -1,4 +1,4 @@
-// The board class's program: it prints the board it was built for, in five lines the gate reads in order.
+// The board class's program: it prints the board it was built for, in six lines the gate reads in order.
 
 using System;
 using System.Device.I2c;
@@ -25,6 +25,31 @@ internal static class Program
             Console.WriteLine("TBHELLO: NotSupportedException: " + e.Message);
         }
 
+        var ports = new System.Text.StringBuilder("TBHELLO: serial ports:");
+        if (board.SerialPorts.Count == 0)
+        {
+            ports.Append(" none");
+        }
+
+        for (int i = 0; i < board.SerialPorts.Count; i++)
+        {
+            UartInfo port = board.SerialPorts[i];
+            ports.Append(i == 0 ? " " : ", ").Append(port.PortName).Append(" (UART").Append(port.Number);
+            ports.Append(port.Tx is BoardPin tx && port.Rx is BoardPin rx ? ", TX pin " + tx.PinNumber + ", RX pin " + rx.PinNumber : ", no lines");
+            if (port.IsConsole)
+            {
+                ports.Append(", the console");
+            }
+
+            if (port.IsLog)
+            {
+                ports.Append(", the log");
+            }
+
+            ports.Append(')');
+        }
+
+        Console.WriteLine(ports.ToString());
         Console.WriteLine("TBHELLO: end");
         return 0;
     }

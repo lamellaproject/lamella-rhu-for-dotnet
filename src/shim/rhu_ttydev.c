@@ -24,16 +24,16 @@
  * back exactly what it set. tcsetattr validates the whole struct first and
  * refuses it whole, the image untouched, when it asks for what no port here
  * has (RTS/CTS flow control, software flow control, split speeds, the
- * hang-up speed B0); then the five values the kernel's configure door takes
- * are derived (the rate from the speed constant or, on the termios2 form,
- * from the speed word; the data bits from CSIZE; the parity from PARENB,
+ * hang-up speed B0); then the five values the kernel's configure function
+ * takes are derived (the rate from the speed constant or, on the termios2
+ * form, from the speed word; the data bits from CSIZE; the parity from PARENB,
  * PARODD and CMSPAR; the stop bits from CSTOPB); the when discipline runs
  * whether or not the values move, as Linux acts on the queues (drain: the
  * pending transmit drained within its bound; flush: drained, then the
- * receive side discarded; now: nothing here, since the configure door
+ * receive side discarded; now: nothing here, since the configure function
  * itself lets the pending transmit leave at the old rate before the block
  * is reprogrammed); and when any of the five differs from the line's, ONE
- * call of rhu_uart_configure; the door's refusal is the caller's EINVAL
+ * call of rhu_uart_configure; the function's refusal is the caller's EINVAL
  * with one line naming the reason, and on success the image takes the
  * struct whole and one line states the achieved rate. Every other flag of
  * the struct is accepted and kept without effect: the line is raw (the
@@ -69,13 +69,13 @@
  * drops the line) and the request answers EBADF; a part without break
  * control (the emulator rows) answers 0 with one line, as Linux answers a
  * driver without it, and a descriptor that went away answers EBADF there
- * too (the status door tells the two apart).
+ * too (the status function tells the two apart).
  *
  * A descriptor's entry belongs to the requests running on it, in the bus
  * unit's shape: a request takes its entry under the table's mutex, counts
  * itself in, and runs on one copy of the entry. The close is such a
  * request too: it marks the entry closed, drains, releases the block (the
- * release bumps the event word and wakes every waiter, whose next door
+ * release bumps the event word and wakes every waiter, whose next
  * call the kernel refuses, so the waiter answers EBADF) and counts itself
  * out; the entry is given back when the last request on it ends, and until
  * then a new open of the same block is refused EBUSY, so the block's
@@ -95,7 +95,7 @@
  * request is ENOTTY with its number in a line. Nothing here masks
  * anything: every call runs on the caller's thread, every wait is a sleep
  * on the kernel's event word or a timed sleep, and the table's mutex holds
- * for a few instructions with no door call under it. */
+ * for a few instructions with no kernel call under it. */
 #include <stddef.h>
 #include <stdint.h>
 #include <fcntl.h>
@@ -111,7 +111,7 @@
 #include "rhu_shim.h"
 
 #include "rhu.h"
-#include "rhu_pal_errno_net11_rc2.h"
+#include "rhu_pal_errno_net11_rc3.h"
 
 extern int *__errno_location(void);
 void *memcpy(void *dst, const void *src, size_t n);
@@ -332,7 +332,7 @@ static int parse_port_name(const char *path, uint32_t *number)
     return parse_number(&p, number) && *p == 0;
 }
 
-/* Whether the board has the block, by the enumeration doors: the rows
+/* Whether the board has the block, by the enumeration functions: the rows
  * answer their block numbers; a number none answers is a missing device
  * (the ST rows answer no row). */
 static int board_has_block(uint32_t number)
@@ -498,7 +498,7 @@ static char parity_letter(uint32_t parity)
 }
 
 /* ------------------------------------------------------------------ */
-/* the waits: the event word, the status door, the deadline            */
+/* the waits: the event word, the status function, the deadline        */
 /* ------------------------------------------------------------------ */
 
 /* The frame's time on the wire at the line's rate, in nanoseconds: the
@@ -515,7 +515,7 @@ static uint64_t frame_ns(const struct tty_node *c)
  * plus ten milliseconds, re-armed whenever the count moves (bytes left,
  * or a writer on another thread added); past the bound with the count
  * unmoved, -1 with EIO and one line. A descriptor closed meanwhile is
- * EBADF: the kernel refuses the released handle at the status door. */
+ * EBADF: the kernel refuses the released handle at the status function. */
 static int drain(const struct tty_node *c, const char *name)
 {
     const uint32_t *word = rhu_uart_event_word(c->h);
@@ -552,7 +552,7 @@ static int drain(const struct tty_node *c, const char *name)
 /* A wait for the receive side on the port's event word until the test
  * passes or the deadline comes (RHU_DEADLINE_NONE for none): 1 when the
  * test passed, 0 at the deadline, -1 with EBADF when the descriptor went
- * away (the kernel refuses the released handle at the status door). The
+ * away (the kernel refuses the released handle at the status function). The
  * test: at least `want` bytes pending. */
 static int wait_rx(const struct tty_node *c, uint32_t want, uint64_t deadline)
 {
@@ -589,7 +589,7 @@ int rhu_ttydev_open(const char *path, int flags)
         rhu_shim_log("%s: not a serial port name (ENOENT)", path);
         return refuse(RHU_GERR_ENOENT);
     }
-    /* The board has the block, by the enumeration doors: a number none of
+    /* The board has the block, by the enumeration functions: a number none of
      * the rows answers is a missing device (the ST rows answer no row). */
     if (!board_has_block(number)) {
         rhu_shim_log("%s: no such serial port on this board (ENOENT)", path);
@@ -860,7 +860,7 @@ long rhu_ttydev_write(int fd, const void *buf, size_t n)
 }
 
 /* ------------------------------------------------------------------ */
-/* the termios verbs: the image, the validation, the one configure door */
+/* the termios verbs: the image, the validation, the configure function */
 /* ------------------------------------------------------------------ */
 
 /* The struct applied to the line (tcsetattr and the TCSETS* requests) on
@@ -880,7 +880,7 @@ static int apply_image_on(struct tty_node *node, const struct tty_node *c, int w
     /* The when discipline, whether or not the line values move: the drain
      * form waits for the pending transmit within its bound; the flush form
      * then discards the receive side. The now form applies at once -- the
-     * configure door itself lets the pending transmit leave at the old
+     * configure function itself lets the pending transmit leave at the old
      * rate before the block is reprogrammed, so nothing is garbled and a
      * stalled line fails nothing here. */
     if (when != TCSANOW) {
@@ -1038,7 +1038,7 @@ int tcdrain(int fd)
     return r;
 }
 
-/* Whether the descriptor's handle is still held, by the status door,
+/* Whether the descriptor's handle is still held, by the status function,
  * which refuses the released handle alone: 0 live, -1 with EBADF when
  * the port went away under the request. */
 static int still_held(const struct tty_node *c)
@@ -1063,9 +1063,9 @@ static void say_no_break(struct tty_node *node, const struct tty_node *c, const 
  * for 0, in slices with the descriptor re-tested at each (a close under
  * the break ends it: the release drops the line, and the request answers
  * EBADF); a part without break control answers 0 with one line, as Linux
- * answers a driver without it. The break door answers the one code for
+ * answers a driver without it. The break function answers the one code for
  * a part without break control and for a handle no longer held, so that
- * answer is re-tested at the status door before the no-op mapping. */
+ * answer is re-tested at the status function before the no-op mapping. */
 static int send_break(struct tty_node *node, const struct tty_node *c, const char *name, int tenths)
 {
     if (drain(c, name) != 0)
@@ -1359,8 +1359,8 @@ int rhu_ttydev_ioctl(int fd, unsigned long request, void *arg)
     case TIOCCBRK: {
         int32_t rc = rhu_uart_break(c.h, request == TIOCSBRK ? 1u : 0u);
         if (rc == RHU_EINVAL) {
-            /* The door's one code for a part without break control and
-             * for a handle no longer held: the status door tells them
+            /* The function's one code for a part without break control and
+             * for a handle no longer held: the status function tells them
              * apart. */
             if (still_held(&c) != 0)
                 result = -1;

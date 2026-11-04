@@ -12,7 +12,7 @@
 pub use super::stm32l4plus::*;
 
 pub const NAME: &str = "NUCLEO-L4R5ZI";
-/// The chip, as the SDK's facts file names it (the quiet line of the log doors).
+/// The chip, as the SDK's facts file names it (the quiet line of the log functions).
 pub const CHIP: &str = "STM32L4R5ZI";
 pub const CONSOLE: &str = "LPUART1 (ST-LINK VCP)";
 

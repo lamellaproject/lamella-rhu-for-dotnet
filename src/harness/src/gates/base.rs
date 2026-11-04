@@ -125,7 +125,17 @@ impl BASE {
             &["flavor: boot", MARKER_ALL_GOOD],
             &["KERNEL PANIC", "EXCEPTION:"],
         );
-        let golden_bytes = std::fs::read(&self.golden).unwrap_or_default();
+        // The golden's banner line carries the token {version}: the version of
+        // record (the VERSION file at the repository root, the line the kernel's
+        // build script hands the banner) takes its place before the comparison,
+        // so the golden itself names no version.
+        let version = match crate::version::read(&self.ctx.repo) {
+            Ok(v) => v,
+            Err(e) => self.ctx.gate_fail(&format!("boot: {e}")),
+        };
+        let golden_bytes = String::from_utf8_lossy(&std::fs::read(&self.golden).unwrap_or_default())
+            .replace("{version}", &version)
+            .into_bytes();
         if !eq_lf_normalized(&run.raw, &golden_bytes) {
             print_first_divergence(&golden_bytes, &run.raw);
             self.fail_case("boot", code, 0, &sha, &path_rel, "transcript differs from golden");
@@ -256,7 +266,7 @@ pub fn run(repo: &Path) -> ! {
         println!("{DISPLAY}: FAIL -- results file failed schema validation");
         exit(1);
     }
-    println!("{DISPLAY}: PASS (3/3)  [{qemu_v} | {rustc_v}]");
+    println!("{DISPLAY}: PASS ({}/{})  [{qemu_v} | {rustc_v}]", base.ctx.results.n_pass, base.ctx.results.cases());
     exit(0);
 }
 

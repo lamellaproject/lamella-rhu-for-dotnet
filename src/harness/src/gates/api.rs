@@ -73,7 +73,7 @@ const MARKERS_C: [&str; 9] = [
 ];
 /// The ten suspension/activation markers, boot order (this family
 /// appends after registry-basic).
-const MARKERS_D: [&str; 10] = [
+const MARKERS_D: [&str; 11] = [
     "[api] PASS susp-pick (suspended spinner stayed ready with zero progress, woken waiter held until resume)",
     "[api] PASS susp-ctx (planted registers exact in ctx, sp inside the target stack, pc inside kernel text)",
     "[api] PASS susp-setctx (sp edit refused exact, the edited pc ran the pad with the planted witness)",
@@ -83,6 +83,7 @@ const MARKERS_D: [&str; 10] = [
     "[api] PASS act-coalesce (three sends delivered exactly one handler run)",
     "[api] PASS act-redeliver (the handler re-entered before the interrupted flow resumed, then the flow continued)",
     "[api] PASS act-eintr (the wait returned RHU_EINTR after the handler ran, the re-wait then woke clean)",
+    "[api] PASS act-wait-across (the handler slept and its timed wait timed out, the broken wait returned RHU_EINTR after it)",
     "[api] PASS act-sleep-rearm (the handler ran early, the sleep still returned not-early)",
 ];
 /// The two module-query markers, boot order (this pair appends after
@@ -91,13 +92,13 @@ const MARKERS_E: [&str; 2] = [
     "[api] PASS mod-find (kernel text resolved to module 0 half-open exact, arena address refused ESRCH, miss wrote nothing)",
     "[api] PASS mod-roots (module 0 ranges tie the link brackets, frozen, exidx, and tls empty in this family, walk ends ESRCH at the table count)",
 ];
-/// The exit-door line: the machine's own exit routed through the door, the
+/// The exit line: the machine's own exit routed through the exit function, the
 /// LAST transcript line of a run that reached it; a run on either emulator
 /// row is judged by it together with the run's exit status.
 const MARKER_EXIT_DOOR: &str = "[api] exit-door: handing the machine exit to rhu_exit(0)";
-/// The four hosting-door markers, boot order: the console-door line is
-/// the write door's own wire output (the door IS the path that emits
-/// it); the exit-door line is the LAST transcript line -- the machine
+/// The four kernel-API markers, boot order: the console line is
+/// the write function's own wire output (the function IS the path that emits
+/// it); the exit line is the LAST transcript line -- the machine
 /// exit itself then rides rhu_exit(0), asserted via the exit status.
 const MARKERS_F: [&str; 4] = [
     "[api] console-door: this line reached the wire through rhu_console_write",
@@ -105,17 +106,17 @@ const MARKERS_F: [&str; 4] = [
     "[api] PASS entropy-honesty (draws filled and distinct, null refused, zero-length trivial, hardware query answers 0 on this class)",
     MARKER_EXIT_DOOR,
 ];
-/// The two debug-facing markers, boot order: the thread-local-base door
+/// The two debug-facing markers, boot order: the thread-local-base function
 /// check (after tls-blocks: the layout record walked from memory against
-/// the doors) and the thread-id-space check (the LAST check, before the
-/// exit-door line: the last two ids handed out, the spawn past the space
+/// the function's answers) and the thread-id-space check (the LAST check, before the
+/// exit line: the last two ids handed out, the spawn past the space
 /// refused).
 const MARKERS_G: [&str; 2] = [
     "[api] PASS tls-base-door (record walked from memory: module-0 base null on every live thread beside empty template brackets, registered-module bases equal to the door's answers on kmain and both workers, non-live slots null)",
     "[api] PASS tid-wrap (ids 0x7ffffffe and 0x7fffffff handed out positive, the spawn past the id space refused EAGAIN twice with the counter unmoved, no negative id)",
 ];
 /// The host-band marker: the thread that hosts a payload
-/// joins the hosted band for the hosting's life -- a door-spawned child
+/// joins the hosted band for the hosting's life -- a child spawned by a kernel call
 /// at the flat priority started through yield alone at one level with
 /// its host, joining re-ran the pick, leaving restored kernel urgency.
 /// Runs after entropy-honesty and before tid-wrap.
@@ -130,8 +131,8 @@ const MARKERS_H: [&str; 1] = [
 const MARKERS_I: [&str; 1] = [
     "[api] PASS act-lazy-fp (the handler ran one floating-point instruction on a target whose interrupted frame was basic, the target resumed and yielded eight times after it -- eight switch entries with its own frame basic -- and the witness counted no abandoned lazy floating-point state)",
 ];
-/// The two sources markers: the cryptographic door under the emulator
-/// row's build opt-in (after entropy-honesty) and the calendar doors
+/// The two sources markers: the random-bytes function under the emulator
+/// row's build opt-in (after entropy-honesty) and the calendar functions
 /// (after host-band, before tid-wrap).
 const MARKERS_J: [&str; 2] = [
     "[api] PASS entropy-secure (the software stream served two distinct cryptographic draws under the build opt-in, null refused, zero-length and over-bound refused, the hardware query 0)",
@@ -185,7 +186,7 @@ const BRACKET_PAIRS: [(&str, &str); 3] = [
     ("__exidx_start", "__exidx_end"),
     ("__rhu_tdata_lo", "__rhu_tdata_hi"),
 ];
-/// The GPIO doors' three checks (the device seam's first peripheral): the
+/// The three checks of the kernel's GPIO API (the device seam's first peripheral): the
 /// armed lines and the PASS lines, pinned as prefixes.
 const MARKERS_L: [&str; 6] = [
     "[api] gpio-claim: the line space stated;",
@@ -217,7 +218,7 @@ const MARKERS_N: [&str; 2] = [
     "[api] PASS module-code (the range predicate true inside the registered range and false before it and past its end; the form from that range computed 3.0 -- through the fault funnel on the single-precision row, by the hardware on the double-precision row)",
 ];
 
-/// The bus doors' three checks (the device seam's second peripheral, on the
+/// The three checks of the kernel's bus API (the device seam's second peripheral, on the
 /// rows whose facts carry a bus): the armed lines and the PASS lines, pinned
 /// as prefixes.
 const MARKERS_O: [&str; 6] = [
@@ -229,19 +230,21 @@ const MARKERS_O: [&str; 6] = [
     "[api] PASS bus-tenancy (the worker's transfer of 4096 bytes intact,",
 ];
 
-/// The PWM and ADC doors' three checks (the device seam's third and fourth
+/// The three checks of the kernel's PWM and ADC APIs (the device seam's third and fourth
 /// peripherals, on the rows whose facts carry the virtual models): the armed
 /// lines and the PASS lines, pinned as prefixes.
-const MARKERS_P: [&str; 6] = [
+const MARKERS_P: [&str; 8] = [
     "[api] pwm-claim: the count and the lines stated;",
     "[api] PASS pwm-claim (3 lines on 2 timers stated and enumerated,",
     "[api] adc-claim: the count and the channels' facts stated;",
     "[api] PASS adc-claim (6 channels on 2 blocks stated with their facts,",
     "[api] pwm-adc-loop: three duty cycles set on the first PWM line",
     "[api] PASS pwm-adc-loop (10, 50 and 90 percent read back as",
+    "[api] gpio-hold: a line a PWM channel of this program holds claimed through the GPIO door",
+    "[api] PASS gpio-hold (the GPIO claim on a line the program's PWM channel holds EBUSY with the PWM channel named,",
 ];
 
-/// The RAM-range doors' check (every row): the armed
+/// The RAM-range functions' check (every row): the armed
 /// line and the PASS line, pinned as prefixes (the count differs by row:
 /// one range on the emulator rows, two on a board with an external RAM).
 const MARKERS_Q: [&str; 2] = [
@@ -250,10 +253,10 @@ const MARKERS_Q: [&str; 2] = [
 ];
 
 /// The console's two checks (after console-pair): the
-/// memory console as a tee (a line through the log door read back from the
-/// mirror) and the log doors in a verbose image (the level 3, a verbose and
+/// memory console as a tee (a line through the log function read back from the
+/// mirror) and the log functions in a verbose image (the level 3, a verbose and
 /// a fatal-level line both on the wire, the refusals) -- the armed lines,
-/// the doors' own wire lines and the PASS lines, whole.
+/// the functions' own wire lines and the PASS lines, whole.
 const MARKERS_R: [&str; 7] = [
     "[api] console-mirror: a line through the log stream lands in the 16 KB memory console whole",
     "[api] console-mirror: this line is read back from the memory console",
@@ -284,12 +287,17 @@ const MARKERS_S: [&str; 12] = [
 ];
 
 
-/// The network doors' eight checks (after uart-timeout, on the
+/// The eight checks of the kernel's network API (after uart-timeout, on the
 /// emulator rows with the `net` feature over the virtual medium and its
 /// scripted peer): the armed line and the PASS line of each, constant text;
 /// the rows' own numbers (the pump's passes and milliseconds, the exchange
 /// counts) are on lines this gate does not pin.
 /// The exit word's marker (the check before tid-wrap, on both rows).
+/// The file family's shape on a row without a card socket (both emulator rows).
+const MARKERS_V: [&str; 2] = [
+    "[api] fs-none: the file family's shape with no socket -- the mount table's count, the index past it, a path, a handle, a NULL path and a NULL record",
+    "[api] PASS fs-none (no mount: the count 0, the index 0 EINVAL, /media/sd0/x ENOENT, the handle 0 EBADF, a NULL path EINVAL, a NULL record EINVAL)",
+];
 const MARKERS_U: [&str; 2] = [
     "[api] PASS exit-word (the magic at offset 0 and the code at offset 12 by symbol: RLOG and 0 while running; RRET beside 42, 70000 and 0 for returned, RABT beside 134, -1 and -2147483648 for aborted, each read back whole and decoded; a magic outside the three refused; RLOG and 0 restored)",
     "[api] PASS handler-stack (the high-water ",
@@ -318,7 +326,7 @@ const MARKERS_T: [&str; 16] = [
 /// bus + PWM + ADC + RAM-range C-ABI surface, pinned in the artifact (the
 /// waistline exists and survives every build of this flavor); the table
 /// names every export.
-const API_SYMS: [&str; 112] = [
+const API_SYMS: [&str; 133] = [
     "rhu_now_ns",
     "rhu_sleep_ns",
     "rhu_futex_wait",
@@ -391,6 +399,27 @@ const API_SYMS: [&str; 112] = [
     "rhu_blk_read",
     "rhu_blk_write",
     "rhu_blk_sync",
+    "rhu_fs_mount_count",
+    "rhu_fs_mount",
+    "rhu_fs_open",
+    "rhu_fs_close",
+    "rhu_fs_read",
+    "rhu_fs_write",
+    "rhu_fs_pread",
+    "rhu_fs_pwrite",
+    "rhu_fs_seek",
+    "rhu_fs_truncate",
+    "rhu_fs_sync",
+    "rhu_fs_fstat",
+    "rhu_fs_stat",
+    "rhu_fs_unlink",
+    "rhu_fs_mkdir",
+    "rhu_fs_rmdir",
+    "rhu_fs_rename",
+    "rhu_fs_opendir",
+    "rhu_fs_readdir",
+    "rhu_fs_closedir",
+    "rhu_fs_statfs",
     "rhu_log_level",
     "rhu_log_write",
     "rhu_uart_count",
@@ -471,12 +500,10 @@ const BOOT_ROUTES: [(&str, &[(&str, &str)], bool); 3] = [
     ("boot-memory", &[("RHU_LOG_CHANNEL", "memory"), ("RHU_CONSOLE_CHANNEL", "memory")], false),
 ];
 
-/// The crate's version as its manifest states it: the banner's number.
+/// The version of record (the VERSION file at the repository root): the
+/// banner's number, which the kernel's build script reads from the same file.
 fn kernel_version(repo: &Path) -> Result<String, String> {
-    let text = std::fs::read_to_string(repo.join("src/kernel/Cargo.toml")).map_err(|e| format!("src/kernel/Cargo.toml: {e}"))?;
-    text.lines()
-        .find_map(|l| l.trim().strip_prefix("version = \"").and_then(|r| r.strip_suffix('"')).map(|v| v.to_string()))
-        .ok_or_else(|| "src/kernel/Cargo.toml states no version".to_string())
+    crate::version::read(repo)
 }
 
 /// The boot images' judge: the wire carries exactly `want` -- the quiet
@@ -581,6 +608,7 @@ impl API {
         markers.extend(MARKERS_S);
         markers.extend(MARKERS_T);
         markers.extend(MARKERS_U);
+        markers.extend(MARKERS_V);
         markers.push(MARKER_OBSERVED_NULL);
         markers.push(MARKER_OBS_ROW);
         self.common_asserts("api", &run, 0, &markers, &["KERNEL PANIC", "EXCEPTION:"]);
@@ -625,7 +653,7 @@ impl API {
         // artifact by symbol through the load segments and tied: the
         // in-image header at its stated load address + 0x400 (the load
         // address the lowest load segment's), the debug-visible layout
-        // record at the door's version or later and equal to the
+        // record at the function's version or later and equal to the
         // header's statement, the generation equal to include/rhu.h.
         let header_text = std::fs::read_to_string(self.ctx.repo.join("src/kernel/include/rhu.h")).unwrap_or_default();
         let Some(abi) = header_abi(&header_text) else {
@@ -637,8 +665,13 @@ impl API {
             Err(e) => self.fail_case("api", code, 0, &sha, &path_rel, &format!("image records: {e}")),
         };
         self.emit_case("api", "pass", code, 0, &sha, &path_rel);
+        // The file family's no-socket shape, its own case over the same
+        // transcript: the two lines of MARKERS_V were asserted above with
+        // the rest, and the twenty-one functions are among API_SYMS.
+        self.emit_case("api-fs-none", "pass", code, 0, &sha, &path_rel);
+        println!("== case api-fs-none: PASS (the file family with no socket on the mps2-an500 row: the mount table's count 0, the index 0 EINVAL, a path under /media/sd0 ENOENT, a handle EBADF, a NULL path and a NULL record EINVAL; the twenty-one functions pinned in the artifact)");
         println!(
-            "== case api: PASS (exit 0, 53 hosting-API checks + the null-read observation (address 0 no-access by the protection unit, the read never attempted: the observation of record, not a check), the protection unit's boot line, contract + API symbols (the lazy floating-point witness among them) + zero-length module-root brackets in-artifact, no payload-entry seam in this family, the image header at {:#x} stating load address {:#010x} and generation {} and the layout record at {:#x} at version {} for {} threads with {} tls slots of {} bytes at offset {} in a {}-byte TCB, read off the artifact and tied) ==",
+            "== case api: PASS (exit 0, 54 hosting-API checks + the null-read observation (address 0 no-access by the protection unit, the read never attempted: the observation of record, not a check), the protection unit's boot line, contract + API symbols (the lazy floating-point witness among them) + zero-length module-root brackets in-artifact, no payload-entry seam in this family, the image header at {:#x} stating load address {:#010x} and generation {} and the layout record at {:#x} at version {} for {} threads with {} tls slots of {} bytes at offset {} in a {}-byte TCB, read off the artifact and tied) ==",
             rec.header_at, rec.load_addr, rec.abi, rec.layout_at, rec.layout_version, rec.max_threads, rec.tls_slots, rec.tls_slot_bytes, rec.tcb_off_tls, rec.tcb_stride
         );
     }
@@ -658,7 +691,7 @@ impl API {
         }
         let run = self.build_and_run_an505("fp-parity", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke,net");
         let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
-        // The ending first: exit 0 through the exit door, no timeout, no death.
+        // The ending first: exit 0 through the exit function, no timeout, no death.
         if let Err(why) = run_ending(code, 0, &run.raw) {
             self.fail_case("fp-parity", code, 0, &sha, &path_rel, &why);
         }
@@ -666,6 +699,7 @@ impl API {
         let mut fp_markers: Vec<&str> = MARKERS_S.to_vec();
         fp_markers.extend_from_slice(&MARKERS_T);
         fp_markers.extend_from_slice(&MARKERS_U);
+        fp_markers.extend_from_slice(&MARKERS_V);
         fp_markers.extend_from_slice(&[
                 MARKER_EXIT_DOOR,
                 MARKER_MPU_AN505,
@@ -692,7 +726,7 @@ impl API {
             self.ctx.gate_fail("fp-doctored-control: the doctored decoder's fp-double block equals the hardware row's (the control did not bite)");
         }
         // The terminal half: the image's last act is a form from a range no module
-        // registers; the funnel must refuse it by name and the exit door must never print.
+        // registers; the funnel must refuse it by name and the exit line must never print.
         let refused = contains_fixed(&run2.raw, "[api] module-code-control: a form from an unregistered range follows")
             && contains_fixed(&run2.raw, "not emulated -- the stacked pc outside every registered code range")
             && !contains_fixed(&run2.raw, "[api] exit-door:");
@@ -776,6 +810,57 @@ impl API {
         println!("== control gpio-edge-control: PASS (one event the program did not make, beside the tenth edge, is refused by the edge check's total: thirteen where twelve were made, no PASS line; the image died by its panic, exit 1)");
     }
 
+    /// The GPIO hold control: the kernel function deciding "held by this
+    /// program" from the claims table's program bit alone, so a line a PWM
+    /// channel of the same program holds is re-configured instead of
+    /// refused. The api flavor's hold check must refuse it at its first
+    /// assertion -- the claim answering 0 where RHU_EBUSY is wanted, no
+    /// PASS line -- so the control shows the check reads the function's answer
+    /// on a line another kernel function of the program holds.
+    fn run_gpio_hold_control(&mut self) {
+        let run = self.build_and_run_echo("gpio-hold-control", &["--features", "api-smoke,test-gpio-doctored-hold"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS gpio-hold (")
+            && contains_fixed(&run.raw, "gpio-hold: the GPIO claim on the line the program's PWM channel holds answered 0 (want RHU_EBUSY)");
+        if !refused {
+            self.emit_control("gpio-hold-control", "fail", GPIO_HOLD_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("gpio-hold-control: the doctored door's hold check passed, or died elsewhere than the claim's answer (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control("gpio-hold-control", "fail", GPIO_HOLD_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("gpio-hold-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control("gpio-hold-control", "pass", GPIO_HOLD_BROKE, code, 1, &sha, &path_rel);
+        println!("== control gpio-hold-control: PASS (the door reading its hold from the program bit alone re-configures a line the program's PWM channel holds and is refused by the hold check's first assertion: 0 where RHU_EBUSY is wanted, no PASS line; the image died by its panic, exit 1)");
+    }
+
+    /// The activation delivery's control: the interrupted wait's tell
+    /// neither saved at the delivery nor restored at the resume, so the
+    /// handler's own sleep clears the broken wait's result and its own
+    /// timed wait consumes the latch. The api flavor's wait-across check
+    /// must refuse it -- the broken wait answering 0 where RHU_EINTR is
+    /// wanted beside the handler's wait answering RHU_EINTR where
+    /// RHU_ETIMEDOUT is wanted, no PASS line -- so the control shows the
+    /// check reads both results after a handler that slept and waited (a
+    /// control that saved at the delivery and skipped the restore alone
+    /// breaks the plain interrupted wait's check first, before this one).
+    fn run_act_restore_control(&mut self) {
+        let run = self.build_and_run_echo("act-restore-control", &["--features", "api-smoke,test-act-doctored-restore"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS act-wait-across (")
+            && contains_fixed(&run.raw, "act-wait-across: the broken wait returned 0 (want RHU_EINTR) and the handler's timed wait returned -4 (want RHU_ETIMEDOUT)");
+        if !refused {
+            self.emit_control("act-restore-control", "fail", ACT_RESTORE_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("act-restore-control: the doctored delivery's wait-across check passed, or died elsewhere than the two waits' answers (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control("act-restore-control", "fail", ACT_RESTORE_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("act-restore-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control("act-restore-control", "pass", ACT_RESTORE_BROKE, code, 1, &sha, &path_rel);
+        println!("== control act-restore-control: PASS (the tell neither saved nor restored makes the broken wait answer 0 and the handler's own timed wait RHU_EINTR, refused by the wait-across check's one assertion over both: no PASS line; the image died by its panic, exit 1)");
+    }
+
     /// The set-context check's control: a landing pad that stores its witness
     /// word before its thread id and sleeps between the two. The check waits
     /// on the witness and then reads the id, so it must refuse at its
@@ -803,7 +888,7 @@ impl API {
     /// api flavor's three model-backed bus checks run over the chip's own
     /// drivers, unchanged in their lines. Then the same image with the
     /// doctored models and the unbounded pump: the three refusals, no bus
-    /// check passing, the image walking on to its exit door. The doctored
+    /// check passing, the image walking on to its exit function. The doctored
     /// run is instruction-counted, as the ST drivers' control is.
     fn run_bus_rp2350(&mut self) {
         let run = self.build_and_run_an505("bus-rp2350", "qemu-exit,board-mps2-an505,entropy-accept-software,api-smoke,test-bus-rp2350");
@@ -852,7 +937,7 @@ impl API {
             self.emit_control_timed("bus-rp2350-doctored-control", "fail", BUS_RP2350_DOCTORED_BROKE, code, 0, &sha, &path_rel, Some("icount-shift0"));
             self.ctx.gate_fail("bus-rp2350-doctored-control: the doctored models' pinned lines were not all read, or a bus check passed (the control did not bite)");
         }
-        // The ending: the refusals are counted and the image walks on to its exit door.
+        // The ending: the refusals are counted and the image walks on to its exit function.
         if let Err(why) = run_ending(code, 0, &raw) {
             self.emit_control_timed("bus-rp2350-doctored-control", "fail", BUS_RP2350_DOCTORED_BROKE, code, 0, &sha, &path_rel, Some("icount-shift0"));
             self.ctx.gate_fail(&format!("bus-rp2350-doctored-control: {why} (the image must walk on to the exit door)"));
@@ -863,8 +948,8 @@ impl API {
 
     /// The emulator rows' bus control: the api flavor's doctored image on the
     /// Cortex-M33 twin, where the sensor model refuses the second data byte of
-    /// a write (the door must answer EIO and name the byte), the block model
-    /// never completes a non-last message (the door must answer ETIMEDOUT
+    /// a write (the kernel function must answer EIO and name the byte), the block model
+    /// never completes a non-last message (the kernel function must answer ETIMEDOUT
     /// inside its budget and reset the block once) and the drivers' pumps run
     /// unbounded (the receive queue's honest overflow then loses bytes and the
     /// exchange times out), and the SPI driver's first transfer after the claim
@@ -873,7 +958,7 @@ impl API {
     /// lines present, no bus check's PASS line.
     ///
     /// The control runs on the Deterministic execution profile: its
-    /// judge in the image counts ticks of the guest's clock across two door
+    /// judge in the image counts ticks of the guest's clock across two kernel
     /// calls ("at once", "inside the budget"), a count-class claim the plain
     /// profile exposes to the host's timing -- a parked emulator thread reads
     /// as ticks inside a few-hundred-instruction refusal. Under the
@@ -899,7 +984,7 @@ impl API {
             self.emit_control_timed("bus-doctored-control", "fail", BUS_DOCTORED_BROKE, code, 0, &sha, &path_rel, Some("icount-shift0"));
             self.ctx.gate_fail("bus-doctored-control: the doctored models' and the wrong write order's pinned lines were not all read, or a bus check passed (the control did not bite)");
         }
-        // The ending: the refusals are counted and the image walks on to its exit door.
+        // The ending: the refusals are counted and the image walks on to its exit function.
         if let Err(why) = run_ending(code, 0, &raw) {
             self.emit_control_timed("bus-doctored-control", "fail", BUS_DOCTORED_BROKE, code, 0, &sha, &path_rel, Some("icount-shift0"));
             self.ctx.gate_fail(&format!("bus-doctored-control: {why} (the image must walk on to the exit door)"));
@@ -910,7 +995,7 @@ impl API {
 
     /// The emulator rows' PWM control: the virtual timer's own reading of
     /// the period it runs made one prescaler step long; the api flavor's
-    /// claim check ties the door's achieved period to the timer's own and
+    /// claim check ties the function's achieved period to the timer's own and
     /// must refuse -- the refusal's words, no PASS line, the image dead by
     /// its panic.
     fn run_pwm_doctored_control(&mut self) {
@@ -951,7 +1036,7 @@ impl API {
 
     /// The converter's conversion-error path on the emulator row's virtual
     /// converter (`test-adc-flagged`): the api flavor's adc-flagged check must
-    /// PASS inside a walk that ends through the exit door -- the flagged first
+    /// PASS inside a walk that ends through the exit function -- the flagged first
     /// conversion of one channel discarded and retried, the channel flagged on
     /// every conversion refused with the input/output code after the bound
     /// with no sample, the first channel read again after it.
@@ -990,9 +1075,9 @@ impl API {
         println!("== control adc-flagged-doctored-control: PASS (the doctored converter answering a flagged conversion's undefined result as a sample is refused by the adc-flagged check at its first reading: the refusal's words, no PASS line; the image died by its panic) ==");
     }
 
-    /// The RAM-range doors' control (every row; run on the default row): the
-    /// count door answering one range more than the board's facts state, with
-    /// a record the range door fills for it; the api flavor's ram-range check
+    /// The RAM-range functions' control (every row; run on the default row): the
+    /// count function answering one range more than the board's facts state, with
+    /// a record the range function fills for it; the api flavor's ram-range check
     /// must refuse the count against the facts -- the refusal's words, no
     /// PASS line, the image dead by its panic.
     fn run_ram_doctored_control(&mut self) {
@@ -1014,7 +1099,7 @@ impl API {
     /// The lazy init modes on one emulator row (window 0 follows the mode
     /// under `test-ram-init-window0`, the boot poison kept): the api flavor
     /// under `ram-init-first-use` must pass its arena family and its
-    /// ram-range check over the lazy window and leave through the exit door;
+    /// ram-range check over the lazy window and leave through the exit function;
     /// under `ram-init-background` the same, plus the ram-init-frontier
     /// check; the doctored control (the hand-out's zeroing skipped) must be
     /// refused by the zero-birth check at its first scan -- the refusal's
@@ -1132,7 +1217,7 @@ impl API {
     /// console), so the check skips its board-line assertion and says so, its
     /// witness bound holds at a floor of 0 EBUSY, the pwm-claim check's
     /// board-line assertion is skipped the same way, and the image walks on
-    /// to the exit door. A bound of 1 EBUSY where the assertion is skipped
+    /// to the exit function. A bound of 1 EBUSY where the assertion is skipped
     /// would kill the image on every Pico row, and the emulator rows alone would
     /// never show it, because their facts claim the virtual console's line. A positive case, not a
     /// doctored control: the row's shape is the one under test.
@@ -2028,6 +2113,8 @@ const REZERO_DOCTORED_BROKE: &str = "the rezero's memset run under the critical 
 const EXIT_WORD_BROKE: &str = "the store of the exit code into the console mirror's header keeps its low 16 bits alone, sign-extended, so a code past 16 bits reads back truncated (test-exit-word-doctored)";
 const GPIO_LATCH_BROKE: &str = "the virtual backend's loopback latch fires the input's event twice per change (test-gpio-doctored-latch)";
 const GPIO_EDGE_BROKE: &str = "the virtual backend makes one event of its own beside the tenth counted edge, an edge the program did not make (test-gpio-doctored-edge)";
+const GPIO_HOLD_BROKE: &str = "the GPIO door deciding its hold from the claims table's program bit alone, so a line a PWM channel of the same program holds is re-configured instead of refused (test-gpio-doctored-hold)";
+const ACT_RESTORE_BROKE: &str = "the interrupted wait's exit tell neither saved at the activation's delivery nor restored at its resume, so a handler's own sleep clears the broken wait's result and its own timed wait consumes the latch (test-act-doctored-restore)";
 const SUSP_ORDER_BROKE: &str = "the set-context landing pad storing its witness word before its thread id, with a sleep between the two (test-susp-doctored-order)";
 const BUS_RP2350_DOCTORED_BROKE: &str = "over the RP2350's bus drivers: the sensor model refusing the second data byte of a write, the I2C block model never performing a repeated start, and the SPI driver's pump unbounded against the receive queue's honest overrun (test-bus-rp2350 with test-bus-doctored); and the events its check arms one at a time through the models' doctor call (a clock held low 25 ms and released, a data line held after a reset, the paths no honest run reaches)";
 const BUS_DOCTORED_BROKE: &str = "the sensor model refusing the second data byte of a write, the I2C block model never completing a non-last message, the drivers' pumps unbounded against the receive queue's honest overflow, and the SPI driver's first transfer after the claim taking the wrong write order (test-bus-doctored); and the events its check arms one at a time through the models' doctor call (a clock held low 25 ms and released, a data line held after a reset, the paths no honest run reaches)";
@@ -2084,7 +2171,7 @@ fn fp_block(raw: &[u8]) -> Vec<String> {
 /// The judge of an emulated run's ending, beside the transcript's lines: a
 /// run killed at the harness's deadline (recorded as exit 124) is a hang and
 /// never a pass; the exit must be the wanted one; a run wanted to exit clean
-/// must have printed the exit-door line (the machine left by the door, not by
+/// must have printed the exit line (the machine left by the exit function, not by
 /// another path); a run wanted to die must not have printed it.
 /// The hexadecimal number printed right after `prefix` in a capture (the
 /// first occurrence): the nullpage control's word read at 4.
@@ -2163,6 +2250,8 @@ pub fn run(repo: &Path) -> ! {
     api.run_fp_parity();
     api.run_gpio_latch_control();
     api.run_gpio_edge_control();
+    api.run_gpio_hold_control();
+    api.run_act_restore_control();
     api.run_susp_order_control();
     api.run_exit_word_control();
     api.run_handler_stack_control();
@@ -2185,7 +2274,7 @@ pub fn run(repo: &Path) -> ! {
         println!("{DISPLAY}: FAIL -- results file failed schema validation");
         exit(1);
     }
-    println!("{DISPLAY}: PASS (56/56)  [{qemu_v} | {rustc_v}]");
+    println!("{DISPLAY}: PASS ({}/{})  [{qemu_v} | {rustc_v}]", api.ctx.results.n_pass, api.ctx.results.cases());
     exit(0);
 }
 
@@ -2453,8 +2542,8 @@ pub fn selfcheck(repo: &Path) -> ! {
         ),
     );
 
-    // Hosting-door reject side 1: a transcript that lost exactly one
-    // door marker (entropy-honesty) must not satisfy the door sweep.
+    // Kernel-API reject side 1: a transcript that lost exactly one
+    // kernel-API marker (entropy-honesty) must not satisfy the kernel-API sweep.
     let fpartial = tmp.join("three-of-four-doors.raw");
     let mut fthree = Vec::new();
     for m in MARKERS_F.iter().filter(|m| !m.contains("entropy-honesty")) {
@@ -2469,7 +2558,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         MARKERS_F.iter().all(|m| contains_fixed(&fpartial_bytes, m)),
     );
 
-    // Hosting-door reject side 2: the door surface half-linked --
+    // Kernel-API reject side 2: the kernel's API surface half-linked --
     // rhu_entropy symbol-eliminated while its rhu_entropy_is_hardware
     // NEIGHBOR stays -- must fail the artifact pin (this fixture also
     // holds the word-BOUNDED matcher to its promise: the surviving
@@ -2503,7 +2592,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         !word_sym_present(&std::fs::read(&seam).unwrap_or_default(), "rhu_payload_entry"),
     );
 
-    // Hosting-door reject side 3: a base-family dump whose tls-template
+    // Kernel-API reject side 3: a base-family dump whose tls-template
     // pair is NOT zero-length must be refused by the bracket-value
     // checker.
     let tunequal = tmp.join("tdata-unequal.nm");
@@ -2817,7 +2906,7 @@ pub fn selfcheck(repo: &Path) -> ! {
     );
 
     // The judge of an emulated run's ending (the Cortex-M33 row's cases and
-    // every control): a hang, a wrong exit, an exit without the door and a
+    // every control): a hang, a wrong exit, an exit without the exit line and a
     // control that stayed alive are each refused; the genuine endings accepted.
     let complete = tmp.join("ending-complete.raw");
     write_fixture(
@@ -2904,7 +2993,17 @@ pub fn selfcheck(repo: &Path) -> ! {
     );
     // The boot images' exact-wire judge: a second line, a bare LF and a
     // stray byte each rejected; the genuine shapes accepted.
-    let banner = b"Lamella RHU v0.2.0, QEMU mps2-an500 (Cortex-M7, 25 MHz)\r\n";
+    // The fixture banner carries the version of record, read from the same
+    // file the kernel's build script reads.
+    let version = match kernel_version(repo) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("rhu-gate: {e}");
+            exit(1);
+        }
+    };
+    let banner_text = format!("Lamella RHU v{version}, QEMU mps2-an500 (Cortex-M7, 25 MHz)\r\n");
+    let banner: &[u8] = banner_text.as_bytes();
     sc.probe(
         "boot-quiet-extra-line",
         "a quiet image's wire with a second line after the banner",
@@ -2913,7 +3012,7 @@ pub fn selfcheck(repo: &Path) -> ! {
     sc.probe(
         "boot-quiet-bare-lf",
         "a quiet image's banner ending in a bare LF (the wire discipline lost)",
-        boot_transcript_fault(b"Lamella RHU v0.2.0, QEMU mps2-an500 (Cortex-M7, 25 MHz)\n", banner).is_none(),
+        boot_transcript_fault(format!("Lamella RHU v{version}, QEMU mps2-an500 (Cortex-M7, 25 MHz)\n").as_bytes(), banner).is_none(),
     );
     sc.probe(
         "boot-silent-one-byte",

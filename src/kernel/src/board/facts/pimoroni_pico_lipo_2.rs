@@ -205,7 +205,7 @@ pub const PWM_CHECK_SIBLING: u32 = 7;
 pub const ADC_LOOP: Option<(usize, usize)> = None;
 
 /// The RAM ranges of this row (the hosted runtime learns them
-/// through the `rhu_ram_count` and `rhu_ram_range` doors): the physical
+/// through the `rhu_ram_count` and `rhu_ram_range` functions): the physical
 /// range as the board's facts file states it in the SDK (`boards/<row>.json`,
 /// its `ram` array; the two kept equal by the hosted-runtime gate's facts
 /// tie), range 0 the internal SRAM the kernel's map calls DATA. Range 0's
@@ -231,7 +231,7 @@ pub const PSRAM_SELECT_LINE: u8 = 47;
 pub const CHANNELS: crate::console::ChannelFacts = crate::console::ChannelFacts { log: crate::console::CH_MEMORY, console: crate::console::CH_MEMORY, legal: &[crate::console::CH_MEMORY, crate::console::CH_OFF, crate::console::CH_UART0, crate::console::CH_UART1] };
 /// The pre-defined UART rows of this row (the SDK's `uart` member), by the
 /// chip's own block number with their pins (none on a row whose UARTs have
-/// no pins); a program's serial doors and the console's wire read them.
+/// no pins); the kernel's UART API and the console's wire read them.
 /// UART1 has NO default pair on this row (no maker document names one) -- the block stays in the
 /// table and becomes claimable when the project's pin words name a legal pair.
 pub const UART_ROWS: &[crate::console::UartRow] = &[crate::console::UartRow { block: 0, tx: 0, rx: 1 }, crate::console::UartRow { block: 1, tx: crate::console::NO_PIN, rx: crate::console::NO_PIN }];

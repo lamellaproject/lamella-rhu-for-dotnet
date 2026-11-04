@@ -133,8 +133,8 @@ and `RHU_RT_ARCHIVES_M33` or by the pointer files `rtarchives-m7.local` and
     mkdir -p /path/to/archives
     tar -xf lamella-rhu-<version>-runtime-archives.tar -C /path/to/archives
     (cd /path/to/archives && sha256sum -c MANIFEST.txt)
-    export RHU_RT_ARCHIVES_M7=/path/to/archives/net11-rc2-rhu-cortex-m7-sgc-enabled
-    export RHU_RT_ARCHIVES_M33=/path/to/archives/net11-rc2-rhu-cortex-m33-sgc-enabled
+    export RHU_RT_ARCHIVES_M7=/path/to/archives/net11-rc3-rhu-cortex-m7-sgc-enabled
+    export RHU_RT_ARCHIVES_M33=/path/to/archives/net11-rc3-rhu-cortex-m33-sgc-enabled
 
 The goldens archive leaves its `MANIFEST.txt` at the repository root, where
 git ignores it. With the tiers in place the chain runs every gate, and the
@@ -281,7 +281,7 @@ identity: its object differs in the sixteen bytes of the assembly's module
 version id alone.
 
 Lamella RHU builds the runtime archives itself from the dotnet/runtime
-source at its pinned tag (.NET 11 RC2), with clang 22.1.8,
+source at its pinned tag (.NET 11 RC3), with clang 22.1.8,
 through the runtime repository's own build entry in a cross environment
 whose target sysroot is Ubuntu 22.04's armhf packages:
 

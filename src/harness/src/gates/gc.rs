@@ -108,8 +108,8 @@ fn cxx_flags(class: Class) -> &'static [&'static str] {
 /// provides. A name appearing here that the image world does not
 /// satisfy, or a NEW import arriving with a header or source change, is
 /// a world change and must fail loudly, never resolve by accident.
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_BARE: [&str; 16] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
@@ -141,8 +141,8 @@ const IMPORTS_HOST: [&str; 4] = [
 /// The skeleton compiled MGC_HEAP_LIVE: the bare 15 plus the seven
 /// allocator-core entry points it delegates to (satisfied in-image by
 /// the heap object).
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_SKEL_HEAP: [&str; 23] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
@@ -175,8 +175,8 @@ const IMPORTS_SKEL_HEAP: [&str; 23] = [
 /// region mmap, the skeleton's census recap, and the console runtime
 /// (`_impure_ptr` is the same stdio reentrancy-pointer artifact the
 /// skeleton carries, satisfied by the host's documented stub).
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_HEAP: [&str; 11] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface17StompWriteBarrierEP22WriteBarrierParameters",
@@ -241,8 +241,8 @@ const INVENTORY_DRIVE: [&str; 7] = [
 /// heap-live 22 MINUS mgc_heap_census (GarbageCollect now routes to
 /// the collector instead of the census-then-fail-fast path) PLUS the
 /// four collector entry points it delegates to.
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_SKEL_COLLECT: [&str; 26] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
@@ -279,8 +279,8 @@ const IMPORTS_SKEL_COLLECT: [&str; 26] = [
 /// arithmetic lowers to (satisfied by the staticlib's
 /// compiler-builtins; the FLOAT `__aeabi_f/d` families stay
 /// forbidden).
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_COLLECT: [&str; 28] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
     "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
@@ -318,8 +318,8 @@ const IMPORTS_COLLECT: [&str; 28] = [
 /// closure with them -- the suppression is visible in the OBJECT, not
 /// just the transcript. (The source's `(void)&` anchors do not survive
 /// -O2; the drop is the honest shape.)
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_COLLECT_BREAK: [&str; 24] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
     "_ZN15GCToEEInterface11GcStartWorkEii",
@@ -401,8 +401,8 @@ const CENSUS_MARK_2: &str = "[mgc-coll] mark census #2: roots=6 marked=7 marked_
 
 /// The sweep-stage skeleton: the collect set plus the four
 /// f-reachable surfaces the finalization-era methods delegate to.
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_SKEL_SWEEP: [&str; 30] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
@@ -442,8 +442,8 @@ const IMPORTS_SKEL_SWEEP: [&str; 30] = [
 /// consumption of rhu_futex_wait/rhu_futex_wake from src/gc. `mincore`
 /// is asked, page by page, how much of a frozen segment's commit the
 /// board's frozen object heap backs.
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_SKEL_TUNE: [&str; 32] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
@@ -482,8 +482,8 @@ const IMPORTS_SKEL_TUNE: [&str; 32] = [
 /// The windows skeleton's closure without the growth (the growth control's
 /// skeleton, MGC_BREAK_HANDLE_GROWTH): the knob compiles the page draw out,
 /// so the shim's mmap leaves the closure.
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_SKEL_TUNE_BREAK_GROWTH: [&str; 31] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
@@ -522,8 +522,8 @@ const IMPORTS_SKEL_TUNE_BREAK_GROWTH: [&str; 31] = [
 /// the collector entry, and the alloc lock's preemptive spin brings
 /// the EE mode switches plus yield. The tune-stage object is
 /// IDENTICAL (the window machinery imports nothing).
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_HEAP_SWEEP: [&str; 16] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface17StompWriteBarrierEP22WriteBarrierParameters",
@@ -545,8 +545,8 @@ const IMPORTS_HEAP_SWEEP: [&str; 16] = [
 
 /// The BREAK_WINDOW_FIX heap object: identical but for `puts` -- the
 /// compiler folds the control's no-argument banner printf into puts.
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_HEAP_TUNE_BREAK: [&str; 16] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface17StompWriteBarrierEP22WriteBarrierParameters",
@@ -571,8 +571,8 @@ const IMPORTS_HEAP_TUNE_BREAK: [&str; 16] = [
 /// size and the free pages of system memory, and the collector's
 /// `mgc_collect_tables_bytes`, the size of the collector tables for a
 /// managed heap of a given size.
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_HEAP_ROW: [&str; 18] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface17StompWriteBarrierEP22WriteBarrierParameters",
@@ -596,8 +596,8 @@ const IMPORTS_HEAP_ROW: [&str; 18] = [
 
 /// The two boot controls' heap objects: the row heap's closure plus
 /// `puts` (the compiler folds the knob's no-argument banner into it).
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_HEAP_ROW_BREAK: [&str; 18] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface17StompWriteBarrierEP22WriteBarrierParameters",
@@ -629,8 +629,8 @@ const IMPORTS_HEAP_ROW_BREAK: [&str; 18] = [
 /// heap's bump setter (`mgc_heap_bump_set`) is the sweep's: a dead run at
 /// the top of the managed heap is zeroed and the bump mark set back over
 /// it, so the run rejoins the untouched tail.
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_COLLECT_SWEEP: [&str; 41] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
     "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
@@ -676,8 +676,8 @@ const IMPORTS_COLLECT_SWEEP: [&str; 41] = [
 ];
 
 /// The tune-stage collector: the enum-time window retire joins.
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_COLLECT_TUNE: [&str; 42] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
     "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
@@ -930,7 +930,7 @@ const HG_DONE: &str = "[gc-host] GC HANDLE GROWTH EXERCISE OK (400 handles over 
 const HG_KNOB: &str = "[mgc-skel] BREAK_HANDLE_GROWTH: the pool's growth is compiled out -- a full pool fail-fasts (the negative control's knob)";
 const HG_EXHAUSTED: &str = "[mgc-skel] FAIL-FAST: handle slot pool exhausted (raise MGC_HANDLE_SLOTS)";
 /// The handle-growth host object's EXACT import closure: the mark-overflow
-/// host's verbs plus the skeleton's two doors (the segment count and the
+/// host's verbs plus the skeleton's two test functions (the segment count and the
 /// test cap).
 const IMPORTS_HOST_HANDLE_GROWTH: [&str; 17] = [
     "__aeabi_memset",
@@ -1349,8 +1349,8 @@ const IMPORTS_HOST_DRIVE_FROZEN: [&str; 12] = [
 /// The frozen-bound control's skeleton (MGC_BREAK_FROZEN_BOUND): the
 /// windows skeleton's closure less `mincore` -- the knob compiles out the
 /// question of how much of a frozen segment's commit is backed.
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_SKEL_TUNE_BREAK_FROZEN: [&str; 31] = [
     "_ZN15GCToEEInterface15GetAllocContextEv",
     "_ZN15GCToEEInterface21GetBooleanConfigValueEPKcS1_Pb",
@@ -1388,8 +1388,8 @@ const IMPORTS_SKEL_TUNE_BREAK_FROZEN: [&str; 31] = [
 /// The tail-rejoin control's collector (MGC_BREAK_TAIL_REJOIN): the
 /// windows collector's closure less the heap's bump setter -- the knob
 /// compiles the rejoin of a dead run at the top out.
-/// The log-door stage: the kernel's log door (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
-/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the door now.
+/// The kernel-log stage: the kernel's log functions (rhu_log_level, rhu_log_write) and vsnprintf in place of the C
+/// library's printf, puts, fflush and its reentrancy pointer -- the collector's lines go through the kernel's log function now.
 const IMPORTS_COLLECT_TUNE_BREAK_REJOIN: [&str; 41] = [
     "_ZN15GCToEEInterface11DiagGCStartEib",
     "_ZN15GCToEEInterface11GcScanRootsEPFvPP6ObjectP11ScanContextjEiiS4_",
@@ -1991,7 +1991,7 @@ const INTERNAL_CASES: [&str; 2] = [
 /// manifest (the payload-gate idiom, one level up -- doctoring the
 /// manifest and the objects together still cannot pass without editing
 /// this reviewed surface).
-const SHA_FROZEN_MANIFEST: &str = "ed993df0212923341938ae884d1a4e4da8eb5b7aa096b2e5d237488944b75ed8";
+const SHA_FROZEN_MANIFEST: &str = "e10ccc9b0822a4c40a8d7d00093dd49e95310dcd5776783bda7bf6df1f70db21";
 
 /// The frozen-object plan of record: file name under goldens/gc/, source
 /// TU, extra defines beyond the class's flag set, and the class (the
@@ -2259,8 +2259,9 @@ struct BoardRow {
 /// board-rows check and the selfcheck's genuine-input probe both read:
 /// the two emulator rows, the Pico 2 and the Pico 2 W, the Pico Plus 2 and
 /// the Pico Plus 2 W, the Nucleo U5A5, the STM32F769 board, the two Feather
-/// RP2350 rows, the Pico LiPo 2 and the Pico LiPo 2 XL W.
-const DECLARED_ROWS: usize = 12;
+/// RP2350 rows, the two Metro RP2350 rows, the Pico LiPo 2, the Pico LiPo 2
+/// XL W and the IoT RedBoard RP2350.
+const DECLARED_ROWS: usize = 15;
 
 /// Parse the row header's per-board blocks: each opens with
 /// `defined(MGC_HOST_ROW_<NAME>)` and carries one `#define MGC_ROW_*`
@@ -5519,7 +5520,7 @@ impl Gc {
     /// every one read back, half destroyed, 100 created again on the released
     /// slots in the free list's order across the segments, one collection
     /// with the 300 live handles as roots, every handle destroyed, the
-    /// segments capped at 2 through the test door and the store asked until
+    /// segments capped at 2 through the test function and the store asked until
     /// it answers no handle (576 served first). The negative control links
     /// the skeleton built with MGC_BREAK_HANDLE_GROWTH (the growth compiled
     /// out, the fixed pool's fail-fast back): the sixty-fifth create
@@ -7235,7 +7236,10 @@ pub fn run(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "{DISPLAY}: PASS (38/38 cases incl. 20 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        "{DISPLAY}: PASS ({}/{} cases incl. {} negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        gc.results.n_pass,
+        gc.results.cases(),
+        gc.results.n_neg,
         PENDING.len(),
         INTERNAL_CASES.len(),
         qemu_v,

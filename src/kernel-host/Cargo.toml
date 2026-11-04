@@ -30,3 +30,8 @@ api-smoke = []
 payload = []
 test-kheap-loud = []
 test-fpemul-doctored = []
+# The kernel's own configuration name fs.rs reads (the rows without a card
+# socket carry the file family's records and none of its table), declared
+# so the compiler knows it; the tier never sets it, so the table compiles here.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rhu_fs_none)'] }

@@ -6,7 +6,7 @@
 //! every boot through the PSRAM crate's generic walks over a plain-access
 //! memory (the caches are off on this row, the family module's law), and
 //! offered to the hosted runtime as the board's second RAM range through
-//! the RAM-range doors ship.
+//! the RAM-range functions ship.
 //!
 //! Every word the controller takes is DERIVED at compile time from the
 //! part's limits (its datasheet), the posture's bus

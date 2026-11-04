@@ -44,7 +44,7 @@
 #include "rhu_shim.h"
 
 #include "rhu.h"
-#include "rhu_rt_entry_net11_rc2.h"
+#include "rhu_rt_entry_net11_rc3.h"
 
 /* The stream-shaped surface the C runtime offers. Declared here rather
  * than included: the standard header spells the stream names as macros,
@@ -182,7 +182,7 @@ static uint32_t line_put_u(char *buf, uint32_t n, uint32_t v)
 }
 
 /* The line ended and written on the kernel's LOG stream at a level (the
- * log-door stage): the host's steps at RHU_LOG_VERBOSE, its FAIL line -- the
+ * kernel-log stage): the host's steps at RHU_LOG_VERBOSE, its FAIL line -- the
  * last words before the exit -- at RHU_LOG_SILENT. */
 static void line_end(char *buf, uint32_t n, uint32_t level)
 {

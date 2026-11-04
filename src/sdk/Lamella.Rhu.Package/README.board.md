@@ -1,9 +1,10 @@
 # Lamella RHU for .NET: a board package
 
-This package carries the board support payload for the board named by its package
-id: the board's prebuilt kernel archives in one or more configurations, its
-linker maps, its facts file and the prebuilt objects built for the board.
-`Lamella.Sdk` restores it when a `net11.0` project names the board in
+This package carries the board support package for the board: the board's
+prebuilt kernel in one or more configurations, its linker maps, its facts
+file and its prebuilt objects.
+
+`Lamella.Sdk` restores it when a `net11.0` project names the board id in
 `LamellaTargetBoard`, together with the runtime package for the board's processor
 class and the tools package for the host; a program never references it directly.
 

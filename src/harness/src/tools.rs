@@ -742,7 +742,7 @@ fn counted_numbers(run: &CountedRun) -> String {
 #[derive(Clone, Copy)]
 pub enum Guest {
     /// Counts the given turns of a two-instruction loop down to zero, then
-    /// leaves through the machine's semihosting door with status 0:
+    /// leaves through the machine's semihosting exit with status 0:
     /// `ldr r0, [pc, #12]` (the turns), `subs r0, #1`, `bne` back to the
     /// `subs`, `movs r0, #0x18` (the exit call), `ldr r1, [pc, #8]` (the
     /// reason 0x20026, the program ended), `bkpt 0xAB`, `b .`, `nop`, then
@@ -834,7 +834,7 @@ static UNIT: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
 /// instruction-counted profile and leave. It is measured once per process,
 /// before the first instruction-counted case, under `floor` on both
 /// clocks, and one line reports it. The measure is refused -- `None`, the
-/// line saying why -- when the guest did not leave through its door with
+/// line saying why -- when the guest did not leave through its semihosting exit with
 /// status 0, when the host gives no reading, or when the reading is under
 /// `UNIT_LEAST`.
 pub fn host_unit(qemu: &Path, scratch: &Path, floor: Duration) -> Option<Duration> {

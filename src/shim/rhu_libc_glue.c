@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #include "rhu.h"
-#include "rhu_pal_errno_net11_rc2.h"
+#include "rhu_pal_errno_net11_rc3.h"
 #include "rhu_shim.h"
 
 extern int *__errno_location(void);
@@ -163,7 +163,7 @@ int posix_memalign(void **out, size_t align, size_t n)
 
 /* --- the console file descriptors --- */
 
-/* The console door takes at most RHU_CONSOLE_MAX_WRITE bytes a call and
+/* The console function takes at most RHU_CONSOLE_MAX_WRITE bytes a call and
  * answers the count: a larger write goes out in bounded pieces and the
  * count written is answered (one call takes at most 0x7FFFFFFF bytes,
  * a count that stays a positive long). A NULL buffer with a count is

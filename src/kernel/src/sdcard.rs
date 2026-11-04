@@ -1,13 +1,13 @@
 //! The SD memory card over the host trait: the
-//! identification sequence, the capacity from the
-//! CSD, the block reads and writes by number, the programming-state wait,
-//! every refusal naming its step. Pure: no register, no chip, no
-//! allocation; the host tier's scripted host proves it on the development machine
-//! (src/kernel-host), a run on the STM32F769 proves it on the socket. AUTHORED
-//! from RM0410's chapter 39 (the native bus: the response formats of 39.5,
-//! the identification process of 39.4.1, the card status) and ChaN's "How to
-//! Use MMC/SDC" (the command table: CMD8's argument, ACMD41's HCS bit).
-//! Nothing of the SD Association's specification is read by this project.
+//! identification sequence (the steps RM0410 39.4.1 names, the response
+//! formats of 39.5), the capacity from the CSD, the block reads and writes
+//! by number, the programming-state wait, every refusal naming its step.
+//! Pure: no register, no chip, no allocation; the host tier's scripted host
+//! proves it on the development machine (src/kernel-host), a run on a board
+//! with a socket proves it on the card (the STM32F769's SDMMC2 host, the
+//! RP2350 boards' SPI-mode host over sdspi.rs). The layer speaks the native
+//! bus's steps to the host trait; a host that drives the SPI mode answers
+//! them from its own frames (sdspi.rs).
 
 #![allow(dead_code)] // the host tier exercises the whole surface (the CRCs the controller computes in hardware, the programming state, the CID words the api flavor alone reads); each kernel image uses what its flavor needs
 
@@ -116,9 +116,9 @@ pub const CMD41_SD_SEND_OP_COND: u8 = 41;
 pub const CMD55_APP_CMD: u8 = 55;
 
 /// CMD8's argument: the supply voltage 2.7 to 3.6 V as [11:8] = 1 and the
-/// check pattern 0xAA (ChaN's table, note 3); the R7 echoes both.
+/// check pattern 0xAA; the R7 echoes both.
 pub const CMD8_ARG: u32 = 0x0000_01AA;
-/// ACMD41's argument: HCS in bit 30 (ChaN's table, note 2) and the
+/// ACMD41's argument: the host capacity support bit (HCS, bit 30) and the
 /// host's voltage window 3.2 to 3.4 V (OCR bits 20 and 21).
 pub const ACMD41_VOLTAGE_WINDOW: u32 = 0x0030_0000;
 pub const ACMD41_HCS: u32 = 1 << 30;

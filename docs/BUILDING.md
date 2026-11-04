@@ -29,12 +29,15 @@ the two hosted-runtime tiers it links are present:
 | QEMU mps2-an505 (Cortex-M33) | `thumbv8m.main-none-eabihf` | `qemu-exit,board-mps2-an505` |
 | Adafruit Feather RP2350 with HSTX (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-adafruit-feather-rp2350-hstx` (`adafruit-feather-rp2350-hstx-xtal12` for the 12 MHz crystal clock) |
 | Adafruit Feather RP2350 with HSTX and PSRAM (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-adafruit-feather-rp2350-hstx-psram` (`adafruit-feather-rp2350-hstx-psram-xtal12` for the 12 MHz crystal clock) |
+| Adafruit Metro RP2350 (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-adafruit-metro-rp2350` (`adafruit-metro-rp2350-xtal12` for the 12 MHz crystal clock) |
+| Adafruit Metro RP2350 with PSRAM (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-adafruit-metro-rp2350-psram` (`adafruit-metro-rp2350-psram-xtal12` for the 12 MHz crystal clock) |
 | Pimoroni Pico LiPo 2 (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-pimoroni-pico-lipo-2` (`pimoroni-pico-lipo-2-xtal12` for the 12 MHz crystal clock) |
 | Pimoroni Pico LiPo 2 XL W (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-pimoroni-pico-lipo-2-xl-w` (`pimoroni-pico-lipo-2-xl-w-xtal12` for the 12 MHz crystal clock) |
 | Pimoroni Pico Plus 2 (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-pimoroni-pico-plus-2` (`pimoroni-pico-plus-2-xtal12` for the 12 MHz crystal clock) |
 | Pimoroni Pico Plus 2 W (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-pimoroni-pico-plus-2-w` (`pimoroni-pico-plus-2-w-xtal12` for the 12 MHz crystal clock) |
-| Raspberry Pi Pico 2 (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-rpi-pico2` (`rpi-pico2-xtal12` for the 12 MHz crystal clock) |
-| Raspberry Pi Pico 2 W (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-rpi-pico2-w` (`rpi-pico2-w-xtal12` for the 12 MHz crystal clock) |
+| Raspberry Pi Pico 2 (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-raspberrypi-pico-2` (`raspberrypi-pico-2-xtal12` for the 12 MHz crystal clock) |
+| Raspberry Pi Pico 2 W (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-raspberrypi-pico-2-w` (`raspberrypi-pico-2-w-xtal12` for the 12 MHz crystal clock) |
+| SparkFun IoT RedBoard RP2350 (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-sparkfun-iot-redboard-rp2350` (`sparkfun-iot-redboard-rp2350-xtal12` for the 12 MHz crystal clock) |
 | ST NUCLEO-U5A5ZJ-Q (Cortex-M33) | `thumbv8m.main-none-eabihf` | `board-st-nucleo-u5a5zj-q` (`st-nucleo-u5a5zj-q-hsi16` for the 16 MHz internal-oscillator clock) |
 | ST STM32F769I-DISCO (Cortex-M7) | `thumbv7em-none-eabihf` | `board-st-stm32f769i-disco` (`st-stm32f769i-disco-hsi16` for the 16 MHz internal-oscillator clock) |
 
@@ -52,7 +55,7 @@ rest.
 A board build names its target and turns the default features off, for
 example:
 
-    cargo build --release --target thumbv8m.main-none-eabihf --no-default-features --features board-rpi-pico2
+    cargo build --release --target thumbv8m.main-none-eabihf --no-default-features --features board-raspberrypi-pico-2
 
 The `qemu-exit` feature belongs to the emulator boards alone: it ends a run
 through the emulator's exit call, which silicon does not have. The SDK
@@ -84,21 +87,27 @@ by exact version. This checkout builds the kernel; the gates build the hosted
 programs. RHU's board table has a row for each emulator machine and each
 supported board.
 
+The SDK compiles every configuration with the code optimization on and keeps
+the configuration's debug information, so the Debug configuration a plain
+`dotnet run` builds links an optimized image too; a build that sets `Optimize`
+to false by a global property gets the unoptimized code, which the smallest
+boards' arena floors refuse at the link, naming the remedy.
+
 The standard `System.Device.Gpio` package runs unchanged. Its Linux driver
 binds the libgpiod v1 API, which the hosting layer presents over the
-kernel's GPIO doors. Two controllers in one program are two owners, as on
+kernel's GPIO API. Two controllers in one program are two owners, as on
 Linux: a pin opened through one is refused through the other until it is
 closed, and the two may be used from separate threads.
 
 The same package's I2C and SPI classes run unchanged the same way. Its Linux
 drivers open `/dev/i2c-<bus>` and `/dev/spidev<bus>.<select>`, which the
-hosting layer presents over the kernel's bus doors. A bus is numbered by the
+hosting layer presents over the kernel's bus API. A bus is numbered by the
 chip's own block number, as Linux names it; an I2C message is at most 255
 bytes; a read clocks out ones.
 
 The same package's PWM class runs unchanged too. Its Linux driver reads and
 writes `/sys/class/pwm/pwmchip0`, which the hosting layer presents over the
-kernel's PWM doors. The channel number is the pin's GPIO number, and the
+kernel's PWM API. The channel number is the pin's GPIO number, and the
 period file reads back the period the timer runs.
 
 Every hosted thread's stack comes from a pool the kernel carves per board.
@@ -119,7 +128,7 @@ zero, or a value above the 32-bit range is refused before anything is
 compiled.
 
 On a board with external RAM (the PSRAM of the Pimoroni Pico Plus 2, Pico
-Plus 2 W, Pico LiPo 2 and Pico LiPo 2 XL W and of the Adafruit Feather RP2350 with PSRAM, the
+Plus 2 W, Pico LiPo 2 and Pico LiPo 2 XL W, of the Adafruit Feather RP2350 with PSRAM, of the Adafruit Metro RP2350 with PSRAM and of the SparkFun IoT RedBoard RP2350, the
 SDRAM of the STM32F769I-DISCO) the SDK property
 `RhuExternalRamInit` chooses when that memory is zeroed: `boot` (the
 default: all of it before the program starts), `first-use` (each piece at
@@ -158,7 +167,7 @@ The standard analog classes' voltage members (`ReadVoltage`, `MinVoltage`,
 runtime host configuration option `Lamella.Hardware.AnalogVoltage.IsSupported`
 is true. The SDK sets it per program: true when the board holds the library
 the classes express a voltage in (the two Pimoroni Pico Plus 2 boards and
-the Pico LiPo 2 and the Pico LiPo 2 XL W; the
+the Pico LiPo 2, the Pico LiPo 2 XL W, the two Adafruit Metro RP2350 boards and the SparkFun IoT RedBoard RP2350; the
 STM32F769I-DISCO under `RhuProgramMemory=external`) and the program's own
 code, or a project it references, names one of the four members. Everywhere
 else the SDK sets the option false: the members throw `NotSupportedException` and the

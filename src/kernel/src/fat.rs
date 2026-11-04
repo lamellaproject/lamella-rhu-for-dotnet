@@ -5,7 +5,7 @@
 //! critical section. The kernel declares it where a row has a card socket
 //! (blk.rs's socket half implements the trait over the identified card under
 //! the device's tenancy); the host tier compiles it from this file over a
-//! sparse in-memory device and pins its cases. The module adds no door: the
+//! sparse in-memory device and pins its cases. The module adds no kernel function: the
 //! api checks of the socket row are its caller.
 //!
 //! THE RULES: the type by the count of clusters alone (3.5 of the
@@ -19,9 +19,9 @@
 
 use crate::calendar_math::{self, Civil};
 
-/// The one sector size supported (the block doors move 512-byte blocks).
+/// The one sector size supported (the kernel's block API moves 512-byte blocks).
 pub const SECTOR: usize = 512;
-/// The most sectors one device call moves (the block doors' RHU_BLK_MAX, 64 KB).
+/// The most sectors one device call moves (the kernel's block API's RHU_BLK_MAX, 64 KB).
 pub const BLK_MAX: u32 = 128;
 /// A name's limit in UTF-8 bytes and in UTF-16 units (Linux's NAME_MAX).
 pub const NAME_MAX: usize = 255;
@@ -42,7 +42,7 @@ const FLOOR_DATE: u16 = (1 << 5) | 1;
 const LONG_OFFSETS: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
 
 /// The one error type: the Linux codes as the values, so the map to the
-/// doors' answers is the identity.
+/// functions' answers is the identity.
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -1527,7 +1527,7 @@ impl<D: BlockDevice> Volume<D> {
         Ok(done)
     }
 
-    /// The seek: 64-bit at the door, a position past 0xFFFFFFFF or below 0
+    /// The seek: 64-bit at the function, a position past 0xFFFFFFFF or below 0
     /// Invalid, past the end allowed (the gap the write side's).
     pub fn seek(&mut self, h: &mut Handle, offset: i64, whence: u32) -> Result<u64, Error> {
         if !h.open {

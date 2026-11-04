@@ -1,9 +1,9 @@
-//! The bus doors' bodies: a program claims an I2C or SPI bus for its whole
+//! The kernel's bus API's bodies: a program claims an I2C or SPI bus for its whole
 //! run and moves bytes over it -- the eight verbs `api.rs` exports and
 //! `include/rhu.h` states. A bus is named by its NUMBER, the chip's own
 //! block number (I2C1 is bus 1, SPI2 is bus 2), as a Linux device node is
-//! named; the count doors say how many buses the board has and the bus
-//! doors answer the number of the index-th, so a program enumerates
+//! named; the count functions say how many buses the board has and the bus
+//! functions answer the number of the index-th, so a program enumerates
 //! without guessing; a number naming no bus of the board answers
 //! RHU_ENODEV. Beneath them: the board's bus tables
 //! (`board::facts::I2C_BUSES` and `SPI_BUSES`), the claims table (a bus's
@@ -28,7 +28,7 @@
 //! block reset), and after it what the recovery found when a device held
 //! the data line. An address not acknowledged is a scan's answer: no line.
 
-#![cfg_attr(not(rhu_bus_rows), allow(dead_code))] // a row without a bus compiles the doors' helpers unused
+#![cfg_attr(not(rhu_bus_rows), allow(dead_code))] // a row without a bus compiles the functions' helpers unused
 
 use core::ptr::{addr_of_mut, read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
@@ -259,7 +259,7 @@ fn claim_lines(lines: impl Iterator<Item = u32> + Clone) -> i32 {
     })
 }
 
-// ---------------- the rows with a bus: the doors over the drivers ----------------
+// ---------------- the rows with a bus: the functions over the drivers ----------------
 
 #[cfg(rhu_bus_rows)]
 mod served {
@@ -526,7 +526,7 @@ mod served {
 #[cfg(rhu_bus_rows)]
 pub use served::{i2c_claim, i2c_recover, i2c_transfer, spi_claim, spi_transfer};
 
-// ---------------- the rows without a bus: every door but the count refuses ----------------
+// ---------------- the rows without a bus: every function but the count refuses ----------------
 
 #[cfg(not(rhu_bus_rows))]
 pub fn i2c_claim(_bus: u32, _hz: u32) -> i32 {

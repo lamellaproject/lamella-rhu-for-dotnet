@@ -23,15 +23,15 @@ extern "C" {
 /* The hosting-API contract generation this header describes, and the
  * window of generations a kernel built from it serves.
  *
- * RHU_ABI is the generation. A door ADDED at the end of this header
+ * RHU_ABI is the generation. A kernel function ADDED at the end of this header
  * leaves it where it stands: a program links against the kernel
- * statically, so a program that calls a door its kernel lacks fails at
+ * statically, so a program that calls a kernel function its kernel lacks fails at
  * the link with an undefined symbol, and no generation check is needed
- * to refuse it. The generation moves when a door's shape or meaning
+ * to refuse it. The generation moves when a kernel function's shape or meaning
  * changes -- a signature, a struct layout, an error value, what an
  * argument or a result means -- since a program compiled against the
- * older header links all the same and would call the door wrongly, and
- * when a door is removed. A change an older program still runs under
+ * older header links all the same and would call the function wrongly, and
+ * when a kernel function is removed. A change an older program still runs under
  * raises RHU_ABI by one and leaves RHU_ABI_COMPAT where it stands; one
  * an older program cannot run under raises both to the same new number.
  *
@@ -44,7 +44,7 @@ extern "C" {
  *     [payload] entry REFUSED: the payload was built for hosting-API
  *     contract generation N, outside this kernel's window C..A
  * where C is RHU_ABI_COMPAT and A is RHU_ABI. */
-#define RHU_ABI 41
+#define RHU_ABI 42
 #define RHU_ABI_COMPAT 31
 
 /* Error surface (RHU-owned values, errno-mirroring by convention). */
@@ -123,7 +123,7 @@ int32_t rhu_futex_wake(const uint32_t *addr, uint32_t n);
  * image; bump-only (individual frees never exist); rezero is the
  * recycling story. Every byte ever handed out was zero at the moment
  * of hand-out (the zero-birth invariant: zeroed at boot or at the
- * hand-out by the image's init mode; the door returns after). All verbs
+ * hand-out by the image's init mode; the function returns after). All verbs
  * run under the kernel critical section: single-core, short, never
  * blocking. */
 
@@ -254,9 +254,9 @@ int32_t rhu_thread_atexit(void (*fn)(void *), void *arg);
  * to it for the entry's life (rhu_payload_entry, below), so a shim that
  * spawns at this value lands its threads level with their host --
  * equal-priority round-robin, and a start waited for by yield alone
- * completes. `name` is copied at the door (at most 15 bytes kept, cut
+ * completes. `name` is copied at the function (at most 15 bytes kept, cut
  * at a character boundary), so the caller's buffer may go away once the
- * door returns; NULL reads as "hosted".
+ * function returns; NULL reads as "hosted".
  * Stacks come from the .kstacks pool with exact-fit reuse of retired
  * stacks. Tid numbering in a hosted image: the idle thread holds tid 1
  * and the payload host thread (the kernel's main thread) tid 2, so the
@@ -366,8 +366,10 @@ int32_t rhu_activation_register(void (*handler)(rhu_ctx *));
  * run re-enters the handler once more before the interrupted flow
  * resumes (re-delivery reuses the same reservation -- the stack cost
  * never nests). A blocked target is broken out promptly: a futex
- * waiter's wait returns RHU_EINTR after the handler has run; a plain
- * sleeper re-arms its remaining time and its caller sees nothing. A
+ * waiter's wait returns RHU_EINTR after the handler has run, whatever
+ * the handler's own sleeps and waits answered (the interrupted wait's
+ * result is kept across the handler); a plain sleeper re-arms its
+ * remaining time and its caller sees nothing. A
  * suspended target latches the flag and delivery waits for resume. A
  * pending activation on a thread that exits is discarded. Self-send
  * is delivered at the sender's own next scheduling point. Refusals:
@@ -375,7 +377,7 @@ int32_t rhu_activation_register(void (*handler)(rhu_ctx *));
  * unknown or dead tid. */
 int32_t rhu_activation_send(int32_t tid);
 
-/* --- Modules/exidx plumbing -- the registry's query doors,
+/* --- Modules/exidx plumbing -- the registry's query functions,
  * completing module 0 (frozen + exidx wired at boot from the link
  * brackets; every board map defines the bracket symbols:
  * section-exact in payload maps, zero-length in base maps -- one
@@ -402,7 +404,7 @@ int32_t rhu_module_find(uint32_t addr, rhu_module_desc *out);
  * (unknown handle; *out untouched). Null out -> RHU_EINVAL. */
 int32_t rhu_module_roots(int32_t handle, rhu_module_desc *out);
 
-/* --- The hosting doors: console, exit, entropy. The C runtime
+/* --- The hosting functions: console, exit, entropy. The C runtime
  * layer's plumbing verbs. Same laws as everything above: none of
  * these blocks (the futex pair stays the kernel's entire blocking
  * surface), NULL arguments are refused RHU_EINVAL, wild pointers
@@ -454,14 +456,14 @@ int32_t rhu_console_read(void *buf, uint32_t n);
  *   either stream lands in it on every row whatever the channel says, and
  *   the channel names the wire. Its header carries the program's end: the
  *   fourth word (offset 12) is the exit code, 0 while the program runs and
- *   the door's code whole at the end, stored first; then, after a barrier,
+ *   the exit function's code whole at the end, stored first; then, after a barrier,
  *   the magic word (offset 0) turns from "RLOG" into "RRET" (returned) or
- *   "RABT" (aborted) in one write by the exit doors and the fault funnel
+ *   "RABT" (aborted) in one write by the exit functions and the fault funnel
  *   after the transcript's last byte. A value illegal for the row is refused at
  *   the SDK's build; an image that reaches the kernel with one boots on the
  *   row's default and says so in one line.
  *   __rhu_uart<n>_tx, __rhu_uart<n>_rx: a project's pin override for a UART
- *     row's pre-defined pair (the UART doors below): 0x100 | gpio when a pin
+ *     row's pre-defined pair (the kernel's UART API below): 0x100 | gpio when a pin
  *     is named (bit 8 the valid flag, the low byte the GPIO number), 0 = the
  *     facts' pair, any other value malformed and refused as an illegal pair;
  *     validated against the chip's legal pin sets (the facts' uartPairs: any
@@ -496,10 +498,10 @@ int32_t rhu_log_level(void);
  * n == 0 writes nothing and returns 0. */
 int32_t rhu_log_write(uint32_t level, const void *buf, uint32_t n);
 
-/* The program's end, two doors. rhu_exit: the program returned or
+/* The program's end, two functions. rhu_exit: the program returned or
  * exited with code. rhu_abort: the program ended without returning (an
  * exception nothing caught, a fail-fast); code is the ending path's.
- * Either door stores the program's end into the console mirror's header
+ * Either function stores the program's end into the console mirror's header
  * (the exit code whole, then the end magic; the channels' note above)
  * and ends the machine:
  * on a hosted-emulator world the code reaches the host's exit status;
@@ -510,7 +512,7 @@ int32_t rhu_log_write(uint32_t level, const void *buf, uint32_t n);
 void rhu_exit(int32_t code);
 void rhu_abort(int32_t code);
 
-/* Random bytes, two doors. rhu_entropy fills buf[0..n) from the
+/* Random bytes, two functions. rhu_entropy fills buf[0..n) from the
  * kernel's software stream -- well mixed, entirely predictable from its
  * seed, seeded at its first draw from the hardware source where one
  * serves -- for everything that does not need secrecy; returns 0, or
@@ -523,13 +525,13 @@ void rhu_abort(int32_t code);
  * the source failed its health check at this draw -- it is then retired
  * for the boot's life, rhu_entropy_is_hardware answers 0 and every later
  * secure draw refuses RHU_ENODEV; RHU_EAGAIN when the source is healthy
- * but the bytes were not ready within the door's bound (retry), or a
+ * but the bytes were not ready within the function's bound (retry), or a
  * draw was already in flight; RHU_EINVAL for NULL with n > 0 or n past
  * RHU_ENTROPY_SECURE_MAX (a larger buffer is filled in bounded pieces by
  * the caller). A refusal writes nothing. The build opt-in named
  * entropy-accept-software, off by default and implied by no board, lets
  * an image -- the emulator rows' gate images -- serve the software
- * stream through this door; the boot banner says so on every image
+ * stream through this function; the boot banner says so on every image
  * that carries it. QUALITY IS DECLARED, never implied:
  * rhu_entropy_is_hardware answers 1 while a hardware source serves and
  * its last check passed, 0 otherwise -- 0 under the opt-in too. */
@@ -539,7 +541,7 @@ void rhu_abort(int32_t code);
 int32_t rhu_entropy(void *buf, uint32_t n);
 int32_t rhu_entropy_secure(void *buf, uint32_t n);
 
-/* The GPIO doors: a program's GPIO driver over the kernel's lines. A line
+/* The kernel's GPIO API: a program's GPIO driver over the kernel's lines. A line
  * is the chip's own number (the RP2350's GPIO index; ST's port letter
  * index times sixteen plus the bit: PA0 = 0, PB0 = 16). rhu_gpio_count is
  * the line SPACE (the highest line plus one); a line inside it with no pad
@@ -551,9 +553,12 @@ int32_t rhu_entropy_secure(void *buf, uint32_t n);
  * line; RHU_EINVAL past the space, on an unpopulated line or a bad
  * selector; RHU_EACCES for an output mode on a line the board's facts mark
  * input-only; RHU_ENODEV on a row with no lines. A claim on a line this
- * program already holds RE-CONFIGURES it (idempotent: the mode and the pull
- * re-applied, an output's initial level re-applied, an armed edge dropped
- * when an input becomes an output). A refusal programs nothing.
+ * program already holds through this function re-configures it (idempotent:
+ * the mode and the pull re-applied, an output's initial level re-applied,
+ * an armed edge dropped when an input becomes an output); a line the
+ * program holds through another function (a PWM channel, an analog channel)
+ * is RHU_EBUSY until that function releases it, as those functions refuse a line
+ * this function holds. A refusal programs nothing.
  * rhu_gpio_release gives the line back (RHU_EINVAL when the program does
  * not hold it). rhu_gpio_write drives a claimed output (RHU_EACCES on an
  * input, RHU_EINVAL on an unclaimed line); rhu_gpio_read returns the pad,
@@ -601,13 +606,13 @@ int32_t rhu_gpio_edge(uint32_t line, uint32_t kind);
 const uint32_t *rhu_gpio_event_word(uint32_t line);
 int32_t rhu_entropy_is_hardware(void);
 
-/* The I2C doors: a program's I2C driver over one of the kernel's buses. A bus is named
+/* The kernel's I2C API: a program's I2C driver over one of the kernel's buses. A bus is named
  * by its NUMBER -- the chip's own block number (I2C1 is bus 1), the number a Linux
  * device node carries (/dev/i2c-1) -- never by an index: rhu_i2c_count answers how
- * many buses the board has (0 on a row with none: every other door of this family then
+ * many buses the board has (0 on a row with none: every other function of this family then
  * answers RHU_ENODEV) and rhu_i2c_bus answers the number of the index-th of them (the
  * index from 0 below the count; RHU_EINVAL past it), so a program enumerates without
- * guessing. A number the board has no bus of answers RHU_ENODEV at every door below.
+ * guessing. A number the board has no bus of answers RHU_ENODEV at every function below.
  * rhu_i2c_claim takes a bus for the program's whole run at a rate in Hz, the bus's
  * mode: its two pins become the board's (a program holding one refuses the claim
  * RHU_EBUSY, nothing programmed), the bus is recovered if a device holds the data line
@@ -652,14 +657,14 @@ int32_t rhu_i2c_bus(uint32_t index);
 int32_t rhu_i2c_claim(uint32_t bus, uint32_t hz);
 int32_t rhu_i2c_transfer(uint32_t bus, const rhu_i2c_msg *msgs, uint32_t count, uint64_t deadline_ns);
 
-/* The SPI doors: a program's SPI driver over one of the kernel's buses, shared
+/* The kernel's SPI API: a program's SPI driver over one of the kernel's buses, shared
  * by any number of devices, each with its own chip select, mode and clock. A
  * bus is named by its NUMBER, the chip's own block number (SPI2 is bus 2), as
  * /dev/spidev2.0 names it; rhu_spi_count is the board's bus count (0 on a row
- * with none: every other door of this family then answers RHU_ENODEV) and
+ * with none: every other function of this family then answers RHU_ENODEV) and
  * rhu_spi_bus the number of the index-th bus (the index from 0 below the
  * count; RHU_EINVAL past it); a number the board has no bus of answers
- * RHU_ENODEV at every door below. rhu_spi_claim takes a bus for the program's
+ * RHU_ENODEV at every function below. rhu_spi_claim takes a bus for the program's
  * whole run: its three pins become the board's (a program holding one refuses
  * the claim RHU_EBUSY, nothing programmed), the block is enabled; 0 when
  * taken, RHU_ENODEV for a bus the board has none of; a claimed bus lives for
@@ -671,7 +676,7 @@ int32_t rhu_i2c_transfer(uint32_t bus, const rhu_i2c_msg *msgs, uint32_t count, 
  * chip-select lines by its index from 0, claimed for the board at its first
  * use (RHU_EBUSY when the program holds it as a GPIO line), or
  * RHU_SPI_SELECT_NONE for a program that drives its own chip select through
- * the GPIO doors around the transfer; the select is asserted low before the
+ * the kernel's GPIO API around the transfer; the select is asserted low before the
  * first clock and released after the last, len bytes are clocked as eight-bit
  * frames, most significant bit first (tx NULL sends 0xFF; rx NULL discards).
  * THE ANSWER IS THE RATE ACHIEVED in Hz, never the request. RHU_ETIMEDOUT when
@@ -700,16 +705,16 @@ int32_t rhu_spi_bus(uint32_t index);
 int32_t rhu_spi_claim(uint32_t bus);
 int32_t rhu_spi_transfer(uint32_t bus, uint32_t select, uint32_t mode, uint32_t hz, const void *tx, void *rx, uint32_t len);
 
-/* The PWM doors: a program drives a line as a timer's output. A row's
+/* The kernel's PWM API: a program drives a line as a timer's output. A row's
  * PWM-capable lines are a TABLE in the board's facts (every pin with a
  * timer output function, its timer and its channel): rhu_pwm_count answers
  * how many, rhu_pwm_line the index-th line's number (RHU_EINVAL past the
  * count), so a program enumerates without guessing; a row with no such
- * line answers 0 and RHU_ENODEV at every other door. rhu_pwm_claim takes
+ * line answers 0 and RHU_ENODEV at every other function. rhu_pwm_claim takes
  * the line in the claims table AND its timer channel (a channel serves one
  * line at a time) for the program's run and answers a handle: RHU_EBUSY
  * when the line or the channel is held (by the board, or by a program
- * through any door family); RHU_EINVAL for a line no timer drives.
+ * through any function family); RHU_EINVAL for a line no timer drives.
  * rhu_pwm_set takes the period and the duty in NANOSECONDS (the Linux PWM
  * class's units) and the polarity (the output high for the duty, or low
  * for it): the timer's clock and its prescaler quantize the period, and
@@ -739,14 +744,14 @@ int32_t rhu_pwm_enable(int32_t h, uint32_t on);
 int32_t rhu_pwm_release(int32_t h);
 int32_t rhu_pwm_info(int32_t h, uint32_t *timer, uint32_t *channel, uint32_t *clock_hz);
 
-/* The ADC doors: a program reads a line as a voltage. A row's channels are
+/* The kernel's ADC API: a program reads a line as a voltage. A row's channels are
  * a TABLE in the board's facts (every converter block, every channel, the
  * pin it reads or the internal source it measures, the sample's width in
  * bits): rhu_adc_count answers how many across the blocks, rhu_adc_channel
  * the index-th channel's facts -- the block's number, the channel's
  * number, the line (RHU_ADC_NO_LINE for an internal source) and the width
  * (RHU_EINVAL past the count or for a NULL pointer); a row with no channel
- * answers 0 and RHU_ENODEV at every other door. rhu_adc_claim takes the
+ * answers 0 and RHU_ENODEV at every other function. rhu_adc_claim takes the
  * channel's line (analog mode) and the channel for the program's run and
  * answers a handle: RHU_EBUSY when either is held; RHU_EINVAL past the
  * count. rhu_adc_read runs ONE conversion and answers the raw sample, 0 to
@@ -768,7 +773,7 @@ int32_t rhu_adc_read(int32_t h);
 int32_t rhu_adc_reference(uint32_t block, uint32_t *millivolts);
 int32_t rhu_adc_release(int32_t h);
 
-/* The UART doors: a program's serial port on a UART block of the
+/* The kernel's UART API: a program's serial port on a UART block of the
  * board's facts table -- every UART the board pre-defines, numbered by the
  * chip's own block number (UART0 is port 0) with its two pins where the row
  * has pins. rhu_uart_count answers how many rows, rhu_uart_port the index-th
@@ -780,7 +785,7 @@ int32_t rhu_adc_release(int32_t h);
  * is claimable once the project's pin words name a legal pair of the chip)
  * and the UART's input clock in Hz (RHU_EINVAL past the count or for a NULL
  * pointer); a row with no
- * UART row answers 0 and RHU_ENODEV at every other door (the ST-Link boards).
+ * UART row answers 0 and RHU_ENODEV at every other function (the ST-Link boards).
  * A block the kernel's console holds as a stream's
  * wire (the channel words above) is IN the table and REFUSED at the claim,
  * so a program enumerates every UART and learns which one it may open.
@@ -793,7 +798,7 @@ int32_t rhu_adc_release(int32_t h);
  * words name no legal pair. The claim's state is 115200 8N1, the FIFOs on, the
  * receiver on, no break. rhu_uart_configure sets the line discipline live
  * -- the rate, 5 to 8 data bits, the parity (RHU_UART_PARITY_*), 1 or 2 stop
- * bits -- once the pending transmit has left at the old rate (the door
+ * bits -- once the pending transmit has left at the old rate (the function
  * discards nothing): the rate rule is the part's divisor rounded to nearest,
  * and a rate the divisor misses by more than 2 percent, or that needs a
  * divisor the part cannot hold, is refused RHU_EINVAL with nothing moved (on
@@ -844,22 +849,22 @@ int32_t rhu_uart_break(int32_t h, uint32_t on);
 int32_t rhu_uart_release(int32_t h);
 int32_t rhu_uart_info(int32_t h, uint32_t *block, uint32_t *tx_line, uint32_t *rx_line, uint32_t *clock_hz);
 
-/* --- The network doors: a program's sockets over the kernel's own
+/* --- The kernel's network API: a program's sockets over the kernel's own
  * TCP/IP stack on the medium the board has (the STM32F769's wired controller,
  * the Pico W rows' wireless module -- each with its driver -- and a
  * VIRTUAL medium in kernel memory on the emulator rows, where the whole
  * family needs no network). Handles are small
- * non-negative integers from a per-row pool; every door answers 0 or a
+ * non-negative integers from a per-row pool; every function answers 0 or a
  * positive count on success and a negative errno-mirroring code otherwise.
- * NO DOOR BLOCKS: every wait is a hosting layer's recipe over
+ * NO FUNCTION BLOCKS: every wait is a hosting layer's recipe over
  * rhu_futex_wait on a word the kernel bumps -- a socket's event word
  * (moved when the socket's readiness mask changes, and at its close), the
  * one global word for all sockets (moved after any socket's mask changed,
  * and by rhu_net_events_bump), the medium's word (the link and the lease),
- * a resolution's word (its answer). The blocking recipe: call the door;
- * on RHU_EAGAIN snapshot the word, call the door again, then
+ * a resolution's word (its answer). The blocking recipe: call the function;
+ * on RHU_EAGAIN snapshot the word, call the function again, then
  * rhu_futex_wait(word, snapshot, deadline) and loop. A row with no medium
- * answers 0 from rhu_net_count and RHU_ENODEV from every other door
+ * answers 0 from rhu_net_count and RHU_ENODEV from every other function
  * (rhu_net_events_word and rhu_net_events_bump stand on every row).
  *
  * The codes joining the surface for this family: */
@@ -885,7 +890,7 @@ int32_t rhu_uart_info(int32_t h, uint32_t *block, uint32_t *tx_line, uint32_t *r
  * IPv4 (the Linux value) with the four octets in the first bytes of addr
  * in the wire's order and the port in the host's order; family 0 is no
  * address (an unconnected peer half); IPv6 (family 10) is refused at
- * every door. rhu_net_lease_desc carries each address as
+ * every function. rhu_net_lease_desc carries each address as
  * its four octets in the wire's order read as one word (the first octet
  * in the word's lowest byte, as sin_addr.s_addr holds it). */
 typedef struct rhu_net_addr   { uint32_t family; uint32_t port; uint8_t addr[16]; uint32_t scope; } rhu_net_addr;
@@ -1049,16 +1054,16 @@ void    rhu_net_events_bump(void);
 int32_t rhu_net_name(int32_t h, rhu_net_addr *local, rhu_net_addr *peer);
 int32_t rhu_net_option(int32_t h, uint32_t option, uint32_t set, int32_t value);
 
-/* The RAM-range doors: the board's RAM as this image offers it to the
+/* The RAM-range functions: the board's RAM as this image offers it to the
  * hosted runtime, so a heap can span more than the chip's own SRAM. A
  * row's ranges are a TABLE in the board's facts (the SDK's per-board file
  * and the kernel's mirror of it, kept equal by the verification chain):
- * range 0 is ALWAYS the internal SRAM -- the arena every door above draws
+ * range 0 is ALWAYS the internal SRAM -- the arena every function above draws
  * from, the behaviour unchanged -- and range 1 an external RAM where a
  * board has one and the image brought it up and proved it by read-back at
  * boot (the Pimoroni Pico Plus 2 boards' 8 MB PSRAM behind the flash
  * interface's second chip select; a boot whose part refuses dies loud
- * before any door answers). rhu_ram_count answers how many ranges THIS
+ * before any function answers). rhu_ram_count answers how many ranges THIS
  * IMAGE serves (at least 1; the emulator rows and the boards without an
  * external part answer 1; a clock posture at which the part's limits
  * cannot be met builds without the window and answers 1 too).
@@ -1079,14 +1084,14 @@ int32_t rhu_net_option(int32_t h, uint32_t option, uint32_t set, int32_t value);
  * alignment among them). Range 0 behaves exactly as
  * rhu_arena_alloc_at. The zero-birth invariant holds per
  * range (zeroed at boot or at the hand-out by the image's init mode;
- * the door returns after), and rhu_arena_rezero accepts a pointer
+ * the function returns after), and rhu_arena_rezero accepts a pointer
  * inside any range's handed-out space.
  *
  * The flags: EXTERNAL, behind a memory controller rather than the chip's
  * own SRAM; CACHED, reached through a cache the kernel manages (the
  * RP2350's flash-interface cache for its PSRAM); EXEC, the memory
  * protection lets code run from it; DMA, a bus master reaches it
- * coherently (clear on every range: no door drives a bus master). */
+ * coherently (clear on every range: no function drives a bus master). */
 #define RHU_RAM_EXTERNAL 1u
 #define RHU_RAM_CACHED 2u
 #define RHU_RAM_EXEC 4u
@@ -1101,12 +1106,13 @@ int32_t rhu_ram_count(void);
 int32_t rhu_ram_range(uint32_t index, rhu_ram_desc *out);
 void *rhu_arena_alloc_from(uint32_t range, uint32_t bytes, uint32_t align, uint32_t site);
 
-/* The block-device doors: a board's block devices as this
- * image serves them, enumerated by index -- the one device is the
- * STM32F769 Discovery board's microSD socket on the chip's SDMMC2
- * controller, named "mmcblk0" as Linux names the first MMC/SD block
+/* The block-device functions: a board's block devices as this
+ * image serves them, enumerated by index -- the one device is a board's
+ * microSD socket (the STM32F769 Discovery board's on the chip's SDMMC2
+ * controller, the Adafruit Metro RP2350 boards' on the chip's first SPI
+ * block), named "mmcblk0" as Linux names the first MMC/SD block
  * device; every other row serves none (the count 0, RHU_ENODEV at every
- * other door). rhu_blk_count answers how many devices THIS IMAGE serves.
+ * other function). rhu_blk_count answers how many devices THIS IMAGE serves.
  * rhu_blk_device fills the index-th device's record, read AT THE CALL (the
  * detect line and the card's identification: a program may poll it for an
  * insertion): block_bytes 512; blocks the card's capacity in blocks, 0 with
@@ -1114,7 +1120,7 @@ void *rhu_arena_alloc_from(uint32_t range, uint32_t bytes, uint32_t align, uint3
  * socket, PRESENT with a card seated (identified or not), WRITE_PROTECTED
  * from the card's own register, HIGH_CAPACITY when the card itself
  * addresses by block (every card is addressed by block NUMBER at these
- * doors either way); name the device's name, NUL-terminated. RHU_EINVAL
+ * functions either way); name the device's name, NUL-terminated. RHU_EINVAL
  * past the count or for a NULL or misaligned record, writing nothing.
  * rhu_blk_read and rhu_blk_write move whole blocks by number -- `blocks`
  * blocks from block `lba` -- and answer the count moved, or a code with
@@ -1125,24 +1131,24 @@ void *rhu_arena_alloc_from(uint32_t range, uint32_t bytes, uint32_t align, uint3
  * identification or a transfer (after the kernel's one retry of a transfer
  * refused by its CRC); RHU_ETIMEDOUT for a transfer past its budget. The
  * buffer is the caller's, in RAM the controller's engine reaches (every RAM
- * range the ram doors state on this row). A card is identified at the first
- * door call after its insertion (that call carries the identification's
- * cost); a card removed drops the identification and the next door call
+ * range the RAM-range functions state on this row). A card is identified at the first
+ * kernel call after its insertion (that call carries the identification's
+ * cost); a card removed drops the identification and the next kernel call
  * reads the socket anew (the hot-swap policy). A
- * door that finds the device busy with another thread's transfer waits for
- * it, never RHU_EBUSY. No door runs under the kernel's critical section.
+ * function that finds the device busy with another thread's transfer waits for
+ * it, never RHU_EBUSY. No function runs under the kernel's critical section.
  * rhu_blk_sync waits for the card's programming of the last write to end
- * (every write at these doors is synchronous already; the door is the seam
+ * (every write at these functions is synchronous already; the function is the seam
  * for an engine that queues) and answers 0, or RHU_ENODEV.
  * RHU_EROFS is this family's code; RHU_ENOENT is declared here for the
- * filesystem doors that follow (Linux's values, both). */
+ * filesystem functions that follow (Linux's values, both). */
 #define RHU_BLK_MAX 128u                 /* blocks per call: 64 KB            */
 #define RHU_BLK_REMOVABLE 1u
 #define RHU_BLK_PRESENT 2u
 #define RHU_BLK_WRITE_PROTECTED 4u
 #define RHU_BLK_HIGH_CAPACITY 8u
 #define RHU_EROFS (-30)     /* a write on a write-protected card         */
-#define RHU_ENOENT (-2)     /* no such path (the filesystem doors')      */
+#define RHU_ENOENT (-2)     /* no such path (the filesystem functions')  */
 typedef struct rhu_blk_desc {
     uint32_t block_bytes;
     uint32_t blocks;
@@ -1154,6 +1160,156 @@ int32_t rhu_blk_device(uint32_t index, rhu_blk_desc *out);
 int32_t rhu_blk_read(uint32_t dev, uint32_t lba, uint32_t blocks, void *buf);
 int32_t rhu_blk_write(uint32_t dev, uint32_t lba, uint32_t blocks, const void *buf);
 int32_t rhu_blk_sync(uint32_t dev);
+/* The kernel's file API: a board's card socket's volume at its mount
+ * point, reached by absolute Linux-style paths, and the files and
+ * directories a program opens on it -- the STM32F769 Discovery board's
+ * socket and the Adafruit Metro RP2350 boards' alike; every other row
+ * serves the same functions with no mount (the count 0, RHU_ENOENT for
+ * every path, RHU_EBADF for every handle). THE MOUNT: the first socket's
+ * card is mounted at /media/sd0 while a card is seated -- the kernel reads
+ * the socket's detect line every 20 ms and takes a level as stable after
+ * three agreeing reads, mounts the volume when a card arrives (FAT12,
+ * FAT16 or FAT32 with long names; a card seated at boot is mounted at
+ * boot) and drops it when the card leaves (the volume's cached sectors go
+ * with it: a program syncs what it must keep) -- never by a program's
+ * access; /media/sd0 does not exist (RHU_ENOENT) while no volume is
+ * mounted there. rhu_fs_mount_count answers the mount table's rows (1 on
+ * a socket row); rhu_fs_mount fills the index-th row's record, read at the
+ * call: point the mount point ("/media/sd0"), device the block device's
+ * index, state RHU_FS_MOUNTED with a volume standing, RHU_FS_NO_CARD with
+ * none, RHU_FS_UNREADABLE for a seated card whose volume the kernel
+ * refused (why its words), fat_width 12, 16 or 32 with the cluster's
+ * bytes, the clusters, the free clusters and the label while mounted;
+ * RHU_EINVAL past the count or for a NULL or misaligned record. THE
+ * PATHS: absolute, NUL-terminated, at most 4096 bytes (RHU_ENAMETOOLONG
+ * past that); the point itself is the volume's root and a path under it
+ * has the point dropped; "." and ".." walk as on Linux; a name is matched
+ * without regard to case and kept as written, UTF-8 here, up to 255 units
+ * (RHU_ENAMETOOLONG past that); RHU_EINVAL for a NULL path, a path without
+ * a leading slash or a name the volume cannot hold; RHU_ENOENT for a path
+ * under no mounted volume and for a missing component. THE HANDLES:
+ * rhu_fs_open answers a file handle, 0 to 15, and rhu_fs_opendir a
+ * directory handle, 0 to 3, each of its own table (RHU_EMFILE when the
+ * table is full, RHU_EBADF for a number outside it or not open); a handle
+ * carries the mount it was opened under, so one whose card left answers
+ * RHU_EIO at every function but its close, which frees the slot and
+ * answers 0. rhu_fs_open takes the flags below (an access bit is required;
+ * RHU_FS_O_TRUNC and RHU_FS_O_APPEND need the write bit; a bit outside the
+ * six RHU_EINVAL) and no mode, since FAT has none; a missing file without
+ * RHU_FS_O_CREATE RHU_ENOENT, an existing one under RHU_FS_O_EXCL
+ * RHU_EEXIST, a directory RHU_EISDIR, a read-only file opened for writing
+ * RHU_EROFS. rhu_fs_read answers the bytes read (0 at the end) and
+ * rhu_fs_write the bytes written -- the bytes moved before a refusal, the
+ * refusal itself at the next call (write(2)'s rule); a write past the end
+ * allocates and zeroes the gap; under RHU_FS_O_APPEND every write goes to
+ * the end; RHU_ENOSPC when the volume is full. rhu_fs_pread and
+ * rhu_fs_pwrite move the bytes at the offset and leave the handle's own
+ * position where it was (pread(2)'s and pwrite(2)'s rule): an offset below
+ * 0 or past 0xFFFFFFFF RHU_EINVAL, a read past the end 0, a write past the
+ * end the gap as above; rhu_fs_pwrite on a handle opened with
+ * RHU_FS_O_APPEND answers RHU_EINVAL, since its every write goes to the end
+ * (a hosted runtime's append mode seeks to the end and writes by position,
+ * so it never opens with the flag). A buffer of any alignment serves;
+ * RHU_EINVAL for a NULL buffer with a count above 0. rhu_fs_seek moves the
+ * position by RHU_FS_SEEK_SET, RHU_FS_SEEK_CUR or RHU_FS_SEEK_END and
+ * writes the new one (past the end allowed; below 0 or past 0xFFFFFFFF
+ * RHU_EINVAL; a file is under 4 GB on FAT). rhu_fs_truncate cuts or
+ * zero-extends to len (0 to 0xFFFFFFFF, else RHU_EINVAL). rhu_fs_sync
+ * writes the file's size and times, the FAT copies and the free count to
+ * the card; rhu_fs_close syncs when owed. rhu_fs_fstat and rhu_fs_stat
+ * fill the status record: size (0 for a directory), kind RHU_FS_FILE or
+ * RHU_FS_DIR, read_only 1 with the attribute set, first_cluster the
+ * entry's first cluster (0 for an empty file), and the write, creation and
+ * access times as Unix seconds (the access time at midnight; the floor of
+ * 1 January 1980 for a field outside its range; the kernel stamps the
+ * times from its calendar where a source set it, else with the floor).
+ * rhu_fs_unlink removes a file (a directory RHU_EISDIR, a read-only file
+ * RHU_EROFS), rhu_fs_mkdir makes an empty directory (RHU_EEXIST),
+ * rhu_fs_rmdir removes an empty one (RHU_ENOTEMPTY; a file RHU_ENOTDIR; the
+ * root RHU_EINVAL), rhu_fs_rename moves within the volume (onto an
+ * existing file the replace, onto an existing directory RHU_EEXIST).
+ * rhu_fs_readdir fills one entry per call -- the name in UTF-8, the kind,
+ * the size (0 for a directory); "." and ".." as Linux lists them -- and
+ * answers 1, or 0 at the end; rhu_fs_closedir frees the handle.
+ * rhu_fs_statfs fills the volume's counts for a path that exists: the
+ * cluster's bytes as block_size, the clusters, the free clusters, name_max
+ * 255. RHU_ETIMEDOUT for a transfer past the host's budget, RHU_EIO for a
+ * card error or a card gone under a handle. Every function waits for
+ * another thread's call on the family to end, never RHU_EBUSY; none runs
+ * under the kernel's critical section. The codes are Linux's values. */
+#define RHU_FS_O_READ 1u
+#define RHU_FS_O_WRITE 2u
+#define RHU_FS_O_CREATE 4u
+#define RHU_FS_O_EXCL 8u
+#define RHU_FS_O_TRUNC 16u
+#define RHU_FS_O_APPEND 32u
+#define RHU_FS_SEEK_SET 0u
+#define RHU_FS_SEEK_CUR 1u
+#define RHU_FS_SEEK_END 2u
+#define RHU_FS_MOUNTED 1u
+#define RHU_FS_NO_CARD 2u
+#define RHU_FS_UNREADABLE 3u
+#define RHU_FS_FILE 1u
+#define RHU_FS_DIR 2u
+#define RHU_EBADF (-9)         /* a handle outside its table or not open   */
+#define RHU_EEXIST (-17)       /* the name exists                           */
+#define RHU_ENOTDIR (-20)      /* a file where a directory is needed        */
+#define RHU_EISDIR (-21)       /* a directory where a file is needed        */
+#define RHU_ENOSPC (-28)       /* the volume is full                        */
+#define RHU_ENAMETOOLONG (-36) /* a name past 255 units or a path past 4096 */
+#define RHU_ENOTEMPTY (-39)    /* the directory holds entries               */
+typedef struct rhu_fs_mount_desc {
+    char point[16];          /* the mount point, NUL-terminated              */
+    uint32_t device;         /* the block device's index                     */
+    uint32_t state;          /* RHU_FS_MOUNTED, RHU_FS_NO_CARD, RHU_FS_UNREADABLE */
+    uint32_t fat_width;      /* 12, 16 or 32 while mounted; 0 otherwise      */
+    uint32_t cluster_bytes;  /* while mounted; 0 otherwise                   */
+    uint32_t clusters;       /* while mounted; 0 otherwise                   */
+    uint32_t free_clusters;  /* while mounted; 0 otherwise                   */
+    char label[12];          /* the volume label, NUL-terminated             */
+    char why[24];            /* the refusal's words while unreadable; else empty */
+} rhu_fs_mount_desc;
+typedef struct rhu_fs_stat_desc {
+    uint32_t size;
+    uint32_t kind;           /* RHU_FS_FILE or RHU_FS_DIR                    */
+    uint32_t read_only;      /* 1 with the read-only attribute set           */
+    uint32_t first_cluster;  /* the entry's first cluster; 0 for an empty file */
+    int64_t mtime;           /* the write time, Unix seconds                 */
+    int64_t ctime;           /* the creation time                            */
+    int64_t atime;           /* the access date, at midnight                 */
+} rhu_fs_stat_desc;
+typedef struct rhu_fs_dirent {
+    char name[256];          /* UTF-8, NUL-terminated, up to 255 bytes       */
+    uint32_t kind;           /* RHU_FS_FILE or RHU_FS_DIR                    */
+    uint32_t size;           /* the entry's bytes; 0 for a directory         */
+} rhu_fs_dirent;
+typedef struct rhu_fs_statfs_desc {
+    uint32_t block_size;     /* the cluster's bytes                          */
+    uint32_t blocks;         /* the volume's clusters                        */
+    uint32_t free;           /* the free clusters                            */
+    uint32_t name_max;       /* 255                                          */
+} rhu_fs_statfs_desc;
+int32_t rhu_fs_mount_count(void);
+int32_t rhu_fs_mount(uint32_t index, rhu_fs_mount_desc *out);
+int32_t rhu_fs_open(const char *path, uint32_t flags);
+int32_t rhu_fs_close(int32_t h);
+int32_t rhu_fs_read(int32_t h, void *buf, uint32_t n);
+int32_t rhu_fs_write(int32_t h, const void *buf, uint32_t n);
+int32_t rhu_fs_pread(int32_t h, void *buf, uint32_t n, int64_t offset);
+int32_t rhu_fs_pwrite(int32_t h, const void *buf, uint32_t n, int64_t offset);
+int32_t rhu_fs_seek(int32_t h, int64_t offset, uint32_t whence, int64_t *pos);
+int32_t rhu_fs_truncate(int32_t h, int64_t len);
+int32_t rhu_fs_sync(int32_t h);
+int32_t rhu_fs_fstat(int32_t h, rhu_fs_stat_desc *out);
+int32_t rhu_fs_stat(const char *path, rhu_fs_stat_desc *out);
+int32_t rhu_fs_unlink(const char *path);
+int32_t rhu_fs_mkdir(const char *path);
+int32_t rhu_fs_rmdir(const char *path);
+int32_t rhu_fs_rename(const char *old_path, const char *new_path);
+int32_t rhu_fs_opendir(const char *path);
+int32_t rhu_fs_readdir(int32_t h, rhu_fs_dirent *out);
+int32_t rhu_fs_closedir(int32_t h);
+int32_t rhu_fs_statfs(const char *path, rhu_fs_statfs_desc *out);
 
 /* --- The payload entry seam: the one member of this surface the
  * kernel CALLS rather than serves. After the platform is up (the

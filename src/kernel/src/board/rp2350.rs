@@ -220,7 +220,7 @@ pub(super) const PAD_IE: u32 = 1 << 6;
 pub(super) const PAD_PUE: u32 = 1 << 3;
 pub(super) const PAD_PDE: u32 = 1 << 2;
 
-/// The chip's two PL011 UART blocks are the UART doors' backend
+/// The chip's two PL011 UART blocks are the kernel's UART API's backend
 /// (`rp2350_uart.rs`): a program's serial ports, and the wire of a
 /// stream whose channel word names a UART of the facts table -- NO block by
 /// default (the memory console takes no pin). The interrupt lines this chip
@@ -295,7 +295,7 @@ mod pll150 {
 /// the system clocks on the crystal, "read the RANDOMBIT register to get a
 /// 1-bit random number; to get an n-bit value, read it n times"; the
 /// register at ROSC_BASE 0x400e8000 + 0x20). Not entropy for anything else
-/// (the datasheet says it is not fit for security, and the entropy doors
+/// (the datasheet says it is not fit for security, and the entropy functions
 /// never see it): the proof wants a pattern a previous boot cannot have
 /// left in the part, nothing more.
 #[cfg(rhu_psram_window)]
@@ -483,7 +483,7 @@ pub fn clock_readback() -> Option<crate::board::ClockReadback> {
 }
 
 /// The console driver's init on this row. The wire, when a stream's channel
-/// names a UART of the facts table, is a port the UART doors' module holds
+/// names a UART of the facts table, is a port the kernel's UART API's module holds
 /// through its PL011 backend (`rp2350_uart.rs`), brought up by the
 /// console's init before this call; so this call keeps the wire record's
 /// mode alone: the boot's call (marked by `clock_init` through the ring
@@ -869,7 +869,7 @@ const BLOCK_BYTES: usize = EHR_WORDS * 4;
 /// average block is the datasheet's two milliseconds on both, so the bound
 /// is about five hundred averages and the datasheet's occasional long
 /// generation ("in excess of 100 times the average") completes inside it
-/// at either posture. A miss is the door's "try again", counted, never a
+/// at either posture. A miss is the function's "try again", counted, never a
 /// retirement on its own; three in a row retire the source. The spin runs
 /// in the caller's thread outside any critical section: the tick and every
 /// interrupt run as always, and only the calling thread waits for the block
@@ -1119,7 +1119,7 @@ pub fn entropy_draw(buf: &mut [u8], counters: &mut super::DrawCounters) -> Resul
 /// at the IO bank, by the handler and by the program; nothing at the
 /// controller's global level, nothing in the zero-latency band, and the
 /// handler itself runs in the lowest kernel band.
-#[cfg(all(feature = "unhosted-main", any(feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2-w")))]
+#[cfg(all(feature = "unhosted-main", any(feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2-w")))]
 pub mod wireless_tenant {
     use core::ptr::addr_of_mut;
     use core::sync::atomic::AtomicU32;

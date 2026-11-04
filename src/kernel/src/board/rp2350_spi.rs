@@ -6,7 +6,7 @@
 //! the Cortex-M33 emulator row's model and the boards' blocks. The block's
 //! clock is the peripheral clock -- the crystal on both clock postures -- so
 //! the prescaler pair is chosen per transfer and the rate achieved is what
-//! the door answers. The block's own frame signal pulses between words when
+//! the function answers. The block's own frame signal pulses between words when
 //! the phase is 0 (12.3.4.10), so a chip select is a plain output line the
 //! backend drives, never the block's. The datasheet states the clock line's
 //! level for an ENABLED block alone (12.3.4.9.1: low at polarity 0, high at
@@ -33,23 +33,25 @@ use crate::bus_math::SpiBus;
 use crate::rp2350_bus_math as rp;
 use crate::sched;
 
-const SSPCR0: usize = 0x000;
-const SSPCR1: usize = 0x004;
-const SSPDR: usize = 0x008;
-const SSPSR: usize = 0x00C;
-const SSPCPSR: usize = 0x010;
-const SSPRIS: usize = 0x018;
+pub(in crate::board) const SSPCR0: usize = 0x000;
+pub(in crate::board) const SSPCR1: usize = 0x004;
+pub(in crate::board) const SSPDR: usize = 0x008;
+pub(in crate::board) const SSPSR: usize = 0x00C;
+pub(in crate::board) const SSPCPSR: usize = 0x010;
+pub(in crate::board) const SSPRIS: usize = 0x018;
 
-const CR0_DSS_8: u32 = 0b0111;
+pub(in crate::board) const CR0_DSS_8: u32 = 0b0111;
 const CR0_SPO: u32 = 1 << 6;
 const CR0_SPH: u32 = 1 << 7;
-const CR0_SCR_SHIFT: u32 = 8;
-const CR1_SSE: u32 = 1 << 1;
-const SR_TNF: u32 = 1 << 1;
-const SR_RNE: u32 = 1 << 2;
+pub(in crate::board) const CR0_SCR_SHIFT: u32 = 8;
+pub(in crate::board) const CR1_SSE: u32 = 1 << 1;
+pub(in crate::board) const SR_TNF: u32 = 1 << 1;
+pub(in crate::board) const SR_RNE: u32 = 1 << 2;
 const SR_BSY: u32 = 1 << 4;
 /// The receiver's overrun, raw: a frame arrived at a full receive queue.
-const RIS_ROR: u32 = 1 << 0;
+/// (The block's register names and flags above are the board's: the card
+/// host of rp2350_sdspi.rs pumps the same block by them.)
+pub(in crate::board) const RIS_ROR: u32 = 1 << 0;
 /// A wait's spin before its first yield is never longer than this.
 const SPIN_MAX_NS: u64 = 1_000_000;
 /// After the enable the clock pad is given this long to rest at the mode's

@@ -6,7 +6,7 @@
 //! version, size, load address, hosting-API contract generation,
 //! debug-layout version, reserved) and the debug-visible layout record
 //! (`__rhu_debug_layout`, version 2 and later carry the thread-local-base
-//! door: the TCB's per-module block slots). A gate reads both OFF THE
+//! function: the TCB's per-module block slots). A gate reads both OFF THE
 //! ARTIFACT, by symbol through the program headers (the layout record
 //! lives inside `.rodata`; a section-name read cannot find it), and ties
 //! them: the header at its stated load address + 0x400, that load
@@ -26,8 +26,8 @@ pub const HEADER_MAGIC: u32 = 0x4955_4852;
 pub const HEADER_LAYOUT: u32 = 1;
 pub const HEADER_BYTES: u32 = 64;
 pub const LAYOUT_MAGIC: u32 = 0x4448_5552;
-/// The debug-visible layout version the thread-local-base door arrived
-/// with; an image whose record predates it has no door to read.
+/// The debug-visible layout version the thread-local-base function arrived
+/// with; an image whose record predates it has no such function to read.
 pub const LAYOUT_DOOR_VERSION: u32 = 2;
 
 #[derive(Clone, Copy)]

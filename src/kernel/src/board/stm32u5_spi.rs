@@ -90,7 +90,7 @@ pub fn claim(d: &SpiBus) {
 /// when it fell out of master mode -- and started, the select asserted, the
 /// bytes pumped, the end of the transfer awaited and cleared, the select
 /// released, the block disabled.
-#[allow(clippy::too_many_arguments)] // the door's arguments, passed through
+#[allow(clippy::too_many_arguments)] // the function's arguments, passed through
 pub fn transfer(d: &SpiBus, sel: Option<u32>, cpol: bool, cpha: bool, divisor: u32, tx: Option<&[u8]>, rx: Option<&mut [u8]>, len: u32, budget_ticks: u32, out: &mut Outcome) -> i32 {
     let base = d.base;
     // A wait spins for two byte times at the achieved rate before its first yield.
@@ -173,5 +173,5 @@ pub fn transfer(d: &SpiBus, sel: Option<u32>, cpol: bool, cpha: bool, divisor: u
 }
 
 /// The divisor for a rate at the block's kernel clock, with the rate it
-/// achieves: this family's ladder, asked by the bus doors through the driver.
+/// achieves: this family's ladder, asked by the kernel's bus API through the driver.
 pub use crate::bus_math::spi_divisor as divisor;

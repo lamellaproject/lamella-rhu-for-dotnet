@@ -1,4 +1,4 @@
-//! The ADC doors' arithmetic (no hardware access) and facts shapes: the block and channel
+//! The kernel's ADC API's arithmetic (no hardware access) and facts shapes: the block and channel
 //! descriptors a board's facts state, a sample's full scale from its
 //! width, a conversion's time from the block's clock and the wait budget it
 //! bounds, the loop channel's expected reading of a duty cycle (the mean a
@@ -7,8 +7,8 @@
 #![allow(dead_code)]
 
 /// A converter block as a board's facts state it: its NUMBER (the chip's
-/// own: ADC1 is block 1, the number the channel door answers and the
-/// reference door takes), its clock in Hz at this posture, the sample's
+/// own: ADC1 is block 1, the number the channel function answers and the
+/// reference function takes), its clock in Hz at this posture, the sample's
 /// width in bits, its reference voltage in millivolts (a board fact) and
 /// the cycles of its clock one conversion takes (the sampling time and the
 /// conversion time together). The table position is the index the channel
@@ -26,7 +26,7 @@ pub struct AdcBlock {
 /// that block (the chip's own), and the GPIO line it reads -- or
 /// `NO_LINE` for an internal source (the reference, the temperature
 /// sensor, the battery). The table position is the enumeration index the
-/// count door and the channel door walk, and the handle a claim answers.
+/// count function and the channel function walk, and the handle a claim answers.
 #[derive(Clone, Copy, Debug)]
 pub struct AdcChannel {
     pub block: u8,
@@ -35,7 +35,7 @@ pub struct AdcChannel {
 }
 
 /// An internal channel's line, as the table states it; the header states
-/// RHU_ADC_NO_LINE for the same fact at the door.
+/// RHU_ADC_NO_LINE for the same fact at the function.
 pub const NO_LINE: u16 = u16::MAX;
 
 /// The claims table's reach: four blocks of thirty-two channels (the
@@ -57,7 +57,7 @@ pub const fn conversion_ns(cycles: u32, clock_hz: u32) -> u64 {
 }
 
 /// A conversion wait's budget in ticks: twice the conversion time in whole
-/// ticks (rounded up) plus two, never fewer than three -- the bus doors'
+/// ticks (rounded up) plus two, never fewer than three -- the kernel's bus API's
 /// wait shape, so a stuck converter fails within milliseconds.
 pub const fn budget_ticks(conversion_ns: u64, tick_hz: u32) -> u32 {
     let wait = (conversion_ns * tick_hz as u64).div_ceil(1_000_000_000) as u32;
@@ -83,7 +83,7 @@ pub const fn within_band(sample: u32, want: u32, band: u32) -> bool {
 }
 
 /// The table position of the block a number names, or None when the board
-/// has no such block (the reference door then answers RHU_ENODEV).
+/// has no such block (the reference function then answers RHU_ENODEV).
 pub fn block_index(table: &[AdcBlock], number: u32) -> Option<usize> {
     table.iter().position(|b| b.number == number)
 }

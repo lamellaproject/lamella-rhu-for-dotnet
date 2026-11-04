@@ -2,13 +2,13 @@
 //! the card
 //! layer's `SdHost` (sdhost.rs) over the controller at 0x4001_1C00 with
 //! DMA2's stream 0 on channel 11, the socket's six bus pins and its detect
-//! line. AUTHORED from RM0410 (chapter 39 the controller: 39.3.1 the
+//! line -- the controller as RM0410's chapter 39 describes it (39.3.1 the
 //! clocks, 39.3.2 the DMA recipes, 39.5 the response formats, 39.8 the
-//! registers; chapter 8 the DMA with its Table 28; 5.3.26 the kernel clock
-//! select), the chip datasheet's Table 13 (the alternate functions) and
-//! UM2033 with the board's schematic (the socket's pins, the 47 kohm
-//! pull-ups on CMD and D0 to D3, the detect switch to ground with the
-//! chip's own pull-up).
+//! registers), the DMA stream as its chapter 8 with Table 28, the kernel
+//! clock select of its 5.3.26, the pins' alternate functions of the chip
+//! datasheet's Table 13, and the socket's wiring as UM2033 and the board's
+//! schematic draw it (the 47 kohm pull-ups on CMD and D0 to D3, the detect
+//! switch to ground with the chip's own pull-up).
 //! The kernel takes no vendor header.
 //!
 //! THE HARDWARE FLOW CONTROL: at the HSI

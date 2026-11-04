@@ -100,15 +100,15 @@ pub const CHECK_UNPOPULATED: Option<u32> = Some(7 * 16 + 2);
 const _: () = assert!(!populated(7 * 16 + 2) && populated(13) && populated(14) && populated(BUTTON0_LINE) && populated(LED2_LINE), "the present list contradicts the check line, the board's own pins or a named signal");
 
 /// The bus tables of this row: empty, so the bus count
-/// doors answer 0, the enumeration doors refuse every index, and every
-/// other bus door answers RHU_ENODEV. The tables are shaped for a board's
+/// functions answer 0, the enumeration functions refuse every index, and every
+/// other bus function answers RHU_ENODEV. The tables are shaped for a board's
 /// every bus (one entry per block, named by the chip's own block number).
 pub const I2C_BUSES: &[crate::bus_math::I2cBus] = &[];
 pub const SPI_BUSES: &[crate::bus_math::SpiBus] = &[];
 
 /// The PWM and ADC tables of this row: empty, so the
-/// count doors answer 0, the enumeration doors refuse every index, and
-/// every other door of the two families answers RHU_ENODEV. The tables
+/// count functions answer 0, the enumeration functions refuse every index, and
+/// every other function of the two families answers RHU_ENODEV. The tables
 /// are shaped for a board's every timer output and every converter
 /// channel (one entry per line and per channel, the blocks named by the
 /// chip's own numbers).
@@ -118,7 +118,7 @@ pub const ADC_BLOCKS: &[crate::adc_math::AdcBlock] = &[];
 pub const ADC_CHANNELS: &[crate::adc_math::AdcChannel] = &[];
 
 /// The RAM ranges of this row (the hosted runtime learns them
-/// through the `rhu_ram_count` and `rhu_ram_range` doors): the physical
+/// through the `rhu_ram_count` and `rhu_ram_range` functions): the physical
 /// range as the board's facts file states it in the SDK (`boards/<row>.json`,
 /// its `ram` array; the two kept equal by the hosted-runtime gate's facts
 /// tie), range 0 the internal SRAM the kernel's map calls DATA. Range 0's
@@ -134,7 +134,7 @@ pub const RAM_RANGES: &[crate::ram::RamFacts] =
 pub const CHANNELS: crate::console::ChannelFacts = crate::console::ChannelFacts { log: crate::console::CH_PROBE, console: crate::console::CH_PROBE, legal: &[crate::console::CH_PROBE, crate::console::CH_MEMORY, crate::console::CH_OFF] };
 /// The pre-defined UART rows of this row (the SDK's `uart` member), by the
 /// chip's own block number with their pins (none on a row whose UARTs have
-/// no pins); a program's serial doors and the console's wire read them.
+/// no pins); the kernel's UART API and the console's wire read them.
 pub const UART_ROWS: &[crate::console::UartRow] = &[];
 /// The gpio banner's line when the kernel holds a UART of this row as its
 /// console wire, by block (empty on a row with no UART row).
@@ -144,7 +144,7 @@ pub const BANNER_UART: &[&str] = &[];
 pub const UART_NAMES: &[&str] = &[];
 /// No pin override on this row (the UART rows have no pins, or there are
 /// none): the SDK's `uartPairs` member is empty.
-#[allow(dead_code)] // no row of this board reads it: the UART doors answer ENODEV here
+#[allow(dead_code)] // no row of this board reads it: the kernel's UART API answers ENODEV here
 pub const UART_PAIRS: &[crate::console::UartPairs] = &[];
 /// No both-held banner line on this row.
 pub const BANNER_UART_BOTH: &str = "";

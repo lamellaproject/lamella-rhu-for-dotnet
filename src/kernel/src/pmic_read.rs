@@ -4,7 +4,7 @@
 //! row's table carries the chip's I2C1 under this feature alone (PB6 the
 //! clock, PB7 the data, alternate function 4; the block's kernel clock the
 //! internal oscillator's 64 MHz, the same at both postures), and this flavor
-//! claims bus 1 at 100 kHz through the kernel's own door bodies, then reads
+//! claims bus 1 at 100 kHz through the kernel's own function bodies, then reads
 //! the chip's identification and regulator registers one at a time -- a
 //! one-byte write of the register's address, a repeated start, a one-byte
 //! read -- and prints each as it reads it. NOTHING IS WRITTEN TO THE CHIP:

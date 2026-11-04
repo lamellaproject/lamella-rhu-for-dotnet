@@ -197,7 +197,7 @@ pub const fn i2c_counts(kernel_hz: u32, rate_hz: u32) -> Option<I2cCounts> {
 /// The prescaler pair for a rate at the block's clock: the pair whose rate is
 /// the HIGHEST at or below the request, packed as CPSDVSR in bits 7:0 and
 /// SCR in bits 15:8, with the rate it achieves in whole Hz -- the answer the
-/// door gives. Every even prescaler from 2 to 254 is tried with the smallest
+/// function gives. Every even prescaler from 2 to 254 is tried with the smallest
 /// SCR that brings the rate to the request or under it; the smallest product
 /// wins. None when even the largest product (254 x 256) leaves the rate
 /// above the request, or the request is 0. At 12 MHz the ladder runs from

@@ -143,7 +143,16 @@ impl SCHED {
             ],
         );
         self.assert_forbidden_cr_exit("core", &run, 0, &["KERNEL PANIC", "EXCEPTION:"]);
-        let golden_bytes = std::fs::read(&self.golden).unwrap_or_default();
+        // The golden's banner line carries the token {version} (the base lineage
+        // owns the record): the version of record (the VERSION file at the
+        // repository root) takes its place before the comparison.
+        let version = match crate::version::read(&self.ctx.repo) {
+            Ok(v) => v,
+            Err(e) => self.ctx.gate_fail(&format!("core: {e}")),
+        };
+        let golden_bytes = String::from_utf8_lossy(&std::fs::read(&self.golden).unwrap_or_default())
+            .replace("{version}", &version)
+            .into_bytes();
         if !eq_lf_normalized(&run.raw, &golden_bytes) {
             print_first_divergence(&golden_bytes, &run.raw);
             self.fail_case("core", code, 0, &sha, &path_rel, "transcript differs from golden");
@@ -304,7 +313,7 @@ pub fn run(repo: &Path) -> ! {
         println!("{DISPLAY}: FAIL -- results file failed schema validation");
         exit(1);
     }
-    println!("{DISPLAY}: PASS (4/4)  [{qemu_v} | {rustc_v}]");
+    println!("{DISPLAY}: PASS ({}/{})  [{qemu_v} | {rustc_v}]", sched.ctx.results.n_pass, sched.ctx.results.cases());
     exit(0);
 }
 

@@ -1,6 +1,6 @@
 # Lamella RHU&trade; for .NET
 
-![Status](https://img.shields.io/badge/status-in_development-orange)
+![Status](https://img.shields.io/badge/status-early_testing-orange)
 
 A runtime-hosting unikernel for .NET: runs full .NET (NativeAOT) on
 microcontrollers. Pronounced "roo."
@@ -15,33 +15,46 @@ Lamella RHU is part of the [Lamella project](https://github.com/lamellaproject/l
 Lamella's toolchain brings C# to even the smallest parts; Lamella RHU runs the
 full .NET runtime wherever the hardware has enough capacity.
 
+C# developers may visit the Lamella website to [get started writing C# apps for microcontrollers](https://lamella.org/get-started).
+
 Lamella RHU is free and open source under the [licenses below](#license).
 
 ## Development status
 
-Lamella RHU is in development and is **not yet ready for use**.
+Lamella RHU 1.0.0-alpha.2 is available for early testing.
 
-What works today:
+Available today:
+- Build and deploy .NET 11 RC3 (NativeAOT) apps to the supported boards and emulators listed below.
+- Peripheral support: ADC, GPIO, I2C, PWM, SPI and UART (using the standard `System.Device`, `System.Device.Analog` and `System.IO.Ports` classes)
+- SD card support (using the standard `System.IO` classes)
+- `Lamella.Hardware.TargetBoard` offers convenient access to board details and peripherals
+- .NET IoT Libraries support on boards with sufficient flash and RAM
+- For kernel evaluators, a quality gate chain: build and validate the unikernel and a hosted .NET program on an emulator
 
-- The verification chain runs a hosted .NET program on the emulator.
-- The supported boards run the test suite's peripheral sections on their silicon: GPIO on every board, I2C and SPI where the board has a bus, PWM on the RP2350 boards.
-- GPIO, I2C, SPI, PWM and the serial port use the standard System.Device and System.IO.Ports packages.
-- Analog inputs are read through the standard `System.Device.Analog` classes.
-- Supported boards:
-  Adafruit Feather RP2350 with HSTX;
-  Adafruit Feather RP2350 with HSTX and PSRAM;
-  Pimoroni Pico LiPo 2; Pimoroni Pico LiPo 2 XL W;
-  Pimoroni Pico Plus 2; Pimoroni Pico Plus 2 W;
-  Raspberry Pi Pico 2; Raspberry Pi Pico 2 W;
-  ST NUCLEO-U5A5ZJ-Q; ST STM32F769I-DISCO.
+Not in this release:
+- Networking or TLS support
+- Compression support
+
+Supported boards:
+- Adafruit Feather RP2350 with HSTX
+- Adafruit Feather RP2350 with HSTX and PSRAM
+- Adafruit Metro RP2350
+- Adafruit Metro RP2350 with PSRAM
+- Pimoroni Pico LiPo 2
+- Pimoroni Pico LiPo 2 XL W
+- Pimoroni Pico Plus 2
+- Pimoroni Pico Plus 2 W
+- Raspberry Pi Pico 2
+- SparkFun IoT RedBoard RP2350
+
+Supported emulators:
+- ARM MPS2-AN500 (Cortex-M7) under QEMU
+- ARM MPS2-AN505 (Cortex-M33) under QEMU
 
 To be notified when releases are available, click **Watch** at the top of this
 repo, select **Custom**, and check **Releases**.
 
-Start with [GETTING-STARTED](docs/GETTING-STARTED.md).
-See [PERIPHERALS](docs/PERIPHERALS.md) for hardware APIs and runtime behavior.
-
-## Build the kernel
+## Build the kernel (optional)
 
 From the checkout root, using Rust's cargo:
 
@@ -77,7 +90,7 @@ If you find a bug, please [open an issue](https://github.com/lamellaproject/lame
 ## How this repo is managed
 
 Lamella RHU is built by humans using traditional software engineering practices, in
-collaboration with frontier AI models. @lamella-mel, AI co-author for this project,
+collaboration with frontier AI models. [@lamella-mel](https://github.com/lamella-mel), AI co-author for this project,
 will often interact with community members to help support and accelerate
 their requests.
 
@@ -86,8 +99,8 @@ their requests.
 **RHU** stands for **Runtime-Hosting Unikernel**, pronounced "roo."
 A unikernel is an operating system built as a single thin layer under a single application.
 RHU takes that shape to its logical end for .NET: the whole OS is one
-purpose-built kernel whose only job is hosting the runtime, so nothing sits
-between your program and the hardware that does not serve it.
+purpose-built kernel whose only job is hosting the runtime. Nothing that doesn't serve your
+program sits between it and the hardware.
 
 "For .NET" describes what it runs.
 Lamella is an independent project and is not affiliated with or endorsed by Microsoft.

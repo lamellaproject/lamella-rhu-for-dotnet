@@ -18,19 +18,19 @@
 //!              not an armed mirror (0 between the boot's clear and its
 //!              "RLOG")
 //!   offset 12  the exit code, a 32-bit two's complement integer, whole:
-//!              0 while the program runs, the door's code at its end
+//!              0 while the program runs, the exit function's code at its end
 //! THE STATES: running -- the boot clears the magic, writes the other
 //! words and writes "RLOG" last, so a mirror retained from the last run
 //! never reads as this one; returned -- the program returned or called the
-//! exit door `rhu_exit`, and the code is the program's own; aborted -- the
+//! exit function `rhu_exit`, and the code is the program's own; aborted -- the
 //! program ended without returning: the hosted runtime ended it after an
-//! exception nothing caught or a fail-fast (the door `rhu_abort`),
+//! exception nothing caught or a fail-fast (the function `rhu_abort`),
 //! or the kernel's fault funnel ended the run after a panic or a processor
 //! fault; the code is the ending path's.
 
 /// The program runs: the boot's state, announced by "RLOG".
 pub const STATE_RUNNING: u32 = 0;
-/// The program returned or called the exit door; the code is its own.
+/// The program returned or called the exit function; the code is its own.
 pub const STATE_RETURNED: u32 = 1;
 /// The program ended without returning; the code is the ending path's.
 pub const STATE_ABORTED: u32 = 2;

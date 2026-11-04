@@ -21,7 +21,7 @@
 use core::ptr::{read_volatile, write_volatile};
 
 pub const NAME: &str = "QEMU mps2-an505";
-/// The chip, as the SDK's facts file names it (the quiet line of the log doors).
+/// The chip, as the SDK's facts file names it (the quiet line of the log functions).
 pub const CHIP: &str = "Cortex-M33";
 pub const CONSOLE: &str = "CMSDK UART0";
 
@@ -100,7 +100,7 @@ const STATE: *mut u32 = (UART0 + 0x04) as *mut u32;
 const CTRL: *mut u32 = (UART0 + 0x08) as *mut u32;
 const BAUDDIV: *mut u32 = (UART0 + 0x10) as *mut u32;
 
-/// The row's two CMSDK UART blocks for the UART doors' backend:
+/// The row's two CMSDK UART blocks for the kernel's UART API's backend:
 /// UART0 (the consoles' polled default wire above) and UART1 at
 /// 0x4020_1000 through the secure alias, each with its receive and transmit
 /// interrupt lines (QEMU's mps2-tz.c AN505 table: uart0 {32, 33}, uart1
@@ -144,7 +144,7 @@ pub fn console_putb(b: u8) {
 
 /// The room the console has for a writer: a polled transmitter takes
 /// every byte at the wire's pace inside the critical section, so the
-/// door's back-pressure never waits here.
+/// function's back-pressure never waits here.
 pub fn console_room() -> usize {
     usize::MAX
 }

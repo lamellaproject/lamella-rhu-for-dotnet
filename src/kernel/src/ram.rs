@@ -1,4 +1,4 @@
-//! The RAM-range doors' bodies: the board's RAM as the
+//! The RAM-range functions' bodies: the board's RAM as the
 //! kernel offers it to the hosted runtime, so a program's heap can span
 //! more than the chip's own SRAM -- the three verbs `api.rs` exports and
 //! `include/rhu.h` states. A row's ranges are a TABLE in its facts
@@ -7,13 +7,13 @@
 //! two): range 0 is always the internal SRAM (the arena's window 0, the
 //! range behind `rhu_arena_alloc_at`), range 1 an external RAM
 //! where a board has one and the image brought it up and proved it at boot
-//! (the Pimoroni rows' PSRAM; the STM32F769's SDRAM; the emulator rows' PSRAM bank). The count door says how many ranges
-//! THIS IMAGE serves, the range door the index-th range's record -- the
+//! (the Pimoroni rows' PSRAM; the STM32F769's SDRAM; the emulator rows' PSRAM bank). The count function says how many ranges
+//! THIS IMAGE serves, the range function the index-th range's record -- the
 //! physical range as the facts state it, the arena window inside it the
 //! runtime may be handed, that window's headroom at the call, the flags --
-//! and the allocation door draws from a named range (`arena::alloc_from`).
+//! and the allocation function draws from a named range (`arena::alloc_from`).
 //!
-//! Behind the doors on the rows that carry the part (`rhu_psram_window`):
+//! Behind the functions on the rows that carry the part (`rhu_psram_window`):
 //! the bring-up through the PSRAM crate (`lamella-psram-qspi`:
 //! the second chip select's pad, the part's direct-mode sequence, the
 //! window's timing derived from the part's limits and the system clock) and
@@ -51,7 +51,7 @@ pub struct RamFacts {
 /// One flash range as a board's facts state it (`board::facts::FLASH_RANGES`
 /// on the rows that state them; the SDK's facts file's `flash` array, the
 /// two kept equal by the hosted-runtime gate's facts tie): the chip's own
-/// flash and, on the STM32F769 row, the quad-SPI window. No door serves
+/// flash and, on the STM32F769 row, the quad-SPI window. No function serves
 /// these: a program's code has its home by its map.
 #[allow(dead_code)] // the rows that state flash ranges and the quad-SPI bring-up read it
 pub struct FlashFacts {
@@ -66,7 +66,7 @@ pub struct FlashFacts {
     pub executable: bool,
 }
 
-/// The record the range door fills (`rhu_ram_desc` in `include/rhu.h`):
+/// The record the range function fills (`rhu_ram_desc` in `include/rhu.h`):
 /// six 32-bit words, C layout.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -97,7 +97,7 @@ const _: () = assert!(SERVED <= facts::RAM_RANGES.len(), "the image serves a ran
 const _: () = assert!(facts::RAM_RANGES.len() <= arena::WINDOWS, "more ranges than the arena has windows");
 const _: () = assert!(!facts::RAM_RANGES[0].external && !facts::RAM_RANGES[0].cached, "range 0 is the internal SRAM");
 
-/// The DMA-coherence flag is clear on every range: no door of
+/// The DMA-coherence flag is clear on every range: no function of
 /// the kernel drives a bus master, and the PSRAM is behind a cache a
 /// bus master would not see through.
 const DMA: bool = false;
@@ -109,18 +109,18 @@ fn flags_of(f: &RamFacts) -> u32 {
         | (if DMA { FLAG_DMA } else { 0 })
 }
 
-/// The count door: the ranges this image serves (at least 1).
+/// The count function: the ranges this image serves (at least 1).
 pub fn count() -> i32 {
     let n = arena::count() as i32;
     // The doctored control: one range more than the facts state, with a
-    // record the range door fills below; the api flavor's check must refuse
+    // record the range function fills below; the api flavor's check must refuse
     // the count against the facts.
     #[cfg(feature = "test-ram-doctored")]
     let n = n + 1;
     n
 }
 
-/// The range door: the index-th range's record; the invalid code past the
+/// The range function: the index-th range's record; the invalid code past the
 /// count or for a NULL or misaligned record.
 pub fn range(index: u32, out: *mut RamRange) -> i32 {
     if out.is_null() || (out as usize) & 3 != 0 {

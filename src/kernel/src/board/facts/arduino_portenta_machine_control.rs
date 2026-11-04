@@ -121,11 +121,11 @@ const _: () = {
 /// chip and the part behind the terminal, from the carrier's schematic
 /// (sheets 1, 2, 4, 6, 7, 9, 10 and 12 to 19) and full-pinout document. In
 /// RHU a program opens a terminal's line by number through the
-/// GPIO door and drives the part itself (the switches' inputs, the mode
+/// kernel's GPIO API and drives the part itself (the switches' inputs, the mode
 /// lines, the selects); the expanders behind the digital inputs and the
 /// programmable block, the thermocouple and RTD front-ends and the two
 /// transceivers are bus devices on I2C3, SPI2, UART4 and FDCAN1, which no
-/// door of this row serves. Every line is asserted inside the package's
+/// kernel function of this row serves. Every line is asserted inside the package's
 /// present list; the two on a board-claimed line are the debug pins, whose
 /// claim and its effect the row states (`DEBUG_SWDIO`, `DEBUG_SWCLK`). The
 /// directions: `in` a signal into the chip, `out` a chip output into a part,
@@ -260,8 +260,8 @@ pub const SYSCFG_EXTICR1: usize = 0x5800_0408;
 pub const RCC_SYSCFG_EN: *mut u32 = 0x5802_44F4 as *mut u32;
 pub const RCC_SYSCFG_EN_BIT: u32 = 1 << 1;
 
-/// The bus tables of this row: empty, so the count doors
-/// answer 0, the enumeration doors refuse every index and every other door
+/// The bus tables of this row: empty, so the count functions
+/// answer 0, the enumeration functions refuse every index and every other function
 /// of the two families answers RHU_ENODEV.
 /// Under the power-management chip's reading flavor alone
 /// (`test-h7-pmic-read`) the I2C table carries that chip's bus, the
@@ -281,7 +281,7 @@ pub const ADC_BLOCKS: &[crate::adc_math::AdcBlock] = &[];
 pub const ADC_CHANNELS: &[crate::adc_math::AdcChannel] = &[];
 
 /// The RAM ranges of this row (the hosted runtime learns them
-/// through the `rhu_ram_count` and `rhu_ram_range` doors): the physical
+/// through the `rhu_ram_count` and `rhu_ram_range` functions): the physical
 /// range as the board's facts file states it in the SDK (`boards/<row>.json`,
 /// its `ram` array; the two kept equal by the hosted-runtime gate's facts
 /// tie), range 0 the internal SRAM the kernel's map calls DATA, whole: the
@@ -333,7 +333,7 @@ pub const HAS_VIDEO_BRIDGE: bool = true;
 /// refusal line.
 pub const CHANNELS: crate::console::ChannelFacts = crate::console::ChannelFacts { log: crate::console::CH_MEMORY, console: crate::console::CH_MEMORY, legal: &[crate::console::CH_MEMORY, crate::console::CH_OFF] };
 /// The pre-defined UART rows of this row (the SDK's `uart` member): none;
-/// a program's serial doors answer that the board has none.
+/// the kernel's UART API answers that the board has none.
 pub const UART_ROWS: &[crate::console::UartRow] = &[];
 /// The gpio banner's line when the kernel holds a UART of this row as its
 /// console wire, by block (empty on a row with no UART row).
@@ -343,7 +343,7 @@ pub const BANNER_UART: &[&str] = &[];
 pub const UART_NAMES: &[&str] = &[];
 /// No pin override on this row (there are no UART rows): the SDK's
 /// `uartPairs` member is empty.
-#[allow(dead_code)] // no row of this board reads it: the UART doors answer ENODEV here
+#[allow(dead_code)] // no row of this board reads it: the kernel's UART API answers ENODEV here
 pub const UART_PAIRS: &[crate::console::UartPairs] = &[];
 /// No both-held banner line on this row.
 pub const BANNER_UART_BOTH: &str = "";

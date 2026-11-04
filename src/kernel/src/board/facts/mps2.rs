@@ -66,7 +66,7 @@ pub const fn populated(line: u32) -> bool {
 /// the APB1 bus clock, 16 MHz at the internal-oscillator posture), the
 /// Cortex-M33 twin the STM32U5 family's I2C1 and SPI1 (both blocks on the
 /// 16 MHz internal oscillator). Each bus carries its NUMBER, the chip's
-/// own block number, the name the doors take (I2C1 = 1 on both rows; the
+/// own block number, the name the functions take (I2C1 = 1 on both rows; the
 /// F7's SPI2 = 2, the U5's SPI1 = 1). The tables are shaped for a board's
 /// every bus (one entry per block: the number, the base, the clock enable,
 /// the kernel-clock selection, the pads, the selects); the models have no pins, so the pad
@@ -141,7 +141,7 @@ pub const SPI_BUSES: &[bus_math::SpiBus] = &[crate::rp2350_bus_math::spi_bus(0, 
 
 /// The PWM facts of the emulator rows: two VIRTUAL timers of two channels
 /// each on a 1 MHz clock with 16-bit prescaler and period registers (the
-/// ST shape, so the quantization the door reports is measurable here),
+/// ST shape, so the quantization the function reports is measurable here),
 /// driving three of the virtual lines as their alternate function -- lines
 /// 0 and 2 on timer 1 (so the shared-period rule is exercised), line 3 on
 /// timer 2 -- the way a real pin carries a timer output beside its GPIO
@@ -187,7 +187,7 @@ pub const ADC_LOOP_SOURCE: usize = 0;
 pub const ADC_REFERENCE_MV: u32 = 1212;
 
 /// The RAM ranges of this row (the hosted runtime learns them
-/// through the `rhu_ram_count` and `rhu_ram_range` doors): the physical
+/// through the `rhu_ram_count` and `rhu_ram_range` functions): the physical
 /// range as the board's facts file states it in the SDK (`boards/<row>.json`,
 /// its `ram` array; the two kept equal by the hosted-runtime gate's facts
 /// tie), range 0 the internal SRAM the kernel's map calls DATA. Range 0's
@@ -216,7 +216,7 @@ pub const RAM_RANGES: &[crate::ram::RamFacts] = &[
 pub const CHANNELS: crate::console::ChannelFacts = crate::console::ChannelFacts { log: crate::console::CH_UART0, console: crate::console::CH_UART0, legal: &[crate::console::CH_UART0, crate::console::CH_UART1, crate::console::CH_MEMORY, crate::console::CH_OFF] };
 /// The pre-defined UART rows of this row (the SDK's `uart` member), by the
 /// chip's own block number with their pins (none on a row whose UARTs have
-/// no pins); a program's serial doors and the console's wire read them.
+/// no pins); the kernel's UART API and the console's wire read them.
 pub const UART_ROWS: &[crate::console::UartRow] = &[crate::console::UartRow { block: 0, tx: crate::console::NO_PIN, rx: crate::console::NO_PIN }, crate::console::UartRow { block: 1, tx: crate::console::NO_PIN, rx: crate::console::NO_PIN }];
 /// The gpio banner's line when the kernel holds a UART of this row as its
 /// console wire, by block (empty on a row with no UART row).
@@ -226,7 +226,7 @@ pub const BANNER_UART: &[&str] = &[];
 pub const UART_NAMES: &[&str] = &[];
 /// No pin override on this row (the UART rows have no pins, or there are
 /// none): the SDK's `uartPairs` member is empty.
-#[allow(dead_code)] // no row of this board reads it: the UART doors answer ENODEV here
+#[allow(dead_code)] // no row of this board reads it: the kernel's UART API answers ENODEV here
 pub const UART_PAIRS: &[crate::console::UartPairs] = &[];
 /// No both-held banner line on this row.
 pub const BANNER_UART_BOTH: &str = "";

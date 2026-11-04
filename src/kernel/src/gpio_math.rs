@@ -1,4 +1,4 @@
-//! The GPIO doors' pure arithmetic: the selectors the header states and
+//! The kernel's GPIO API's pure arithmetic: the selectors the header states and
 //! their partition (served, refused as unsupported, refused as invalid),
 //! the event counter's modular difference, and the families' line
 //! arithmetic (the ST port and bit of a line, the F7's grouped and the U5's

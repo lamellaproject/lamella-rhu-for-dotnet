@@ -92,8 +92,8 @@ impl GateCtx {
         println!("== case {name} ==");
         let log = self.out.join(format!("build-{name}.log"));
         // Every emulator image built here names the entropy opt-in: the
-        // gate images accept the software stream for the cryptographic
-        // door, and their banner says so.
+        // gate images accept the software stream for the random-bytes
+        // function, and their banner says so.
         let mut feats: Vec<&str> = features.to_vec();
         feats.extend_from_slice(&["--features", "entropy-accept-software"]);
         let ok = match cargo_build_kernel(&self.repo, &feats, &log) {

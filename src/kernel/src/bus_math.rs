@@ -1,4 +1,4 @@
-//! The bus doors' pure arithmetic and facts shapes: the block descriptors a
+//! The kernel's bus API's pure arithmetic and facts shapes: the block descriptors a
 //! board's facts state per bus, the I2C message record as the header lays
 //! it out, the partition of a transaction's arguments into served and
 //! refused, the I2C timing word, the SPI divisor ladder and the wire-wait
@@ -30,14 +30,14 @@ pub struct Pad {
 }
 
 /// An I2C bus as a board's facts state it: its NUMBER -- the chip's own
-/// block number (I2C1 is bus 1), the name a program gives the doors, as a
+/// block number (I2C1 is bus 1), the name a program gives the functions, as a
 /// Linux device node is named -- the block's base, its clock enable (a
 /// register and a bit), its kernel-clock selection (a register, a shift and
 /// the value that selects the fixed source: 16 MHz on the F7 and the U5,
 /// the 64 MHz internal kernel clock on the H7), the block's kernel
 /// clock in Hz, and the two pads with their alternate function (an empty
 /// list on a row whose model has no pins). The table position is the
-/// enumeration index the count and the bus doors walk.
+/// enumeration index the count and bus functions walk.
 #[derive(Clone, Copy, Debug)]
 pub struct I2cBus {
     pub number: u32,
@@ -62,12 +62,12 @@ pub enum SpiFile {
 }
 
 /// An SPI bus as a board's facts state it: its NUMBER (the chip's own block
-/// number: SPI2 is bus 2, the name the doors take, as a Linux device node is
+/// number: SPI2 is bus 2, the name the functions take, as a Linux device node is
 /// named), the block's base and file, its clock enable, its kernel-clock
 /// selection (a register of 0 where the block follows a bus clock), the
 /// block's kernel clock in Hz at this posture, the three pads, the chip-select
 /// lines the bus offers (the list empty on a row whose model has no pins;
-/// `select_count` the number the door accepts), and the pump's bound -- how
+/// `select_count` the number the function accepts), and the pump's bound -- how
 /// many bytes may be sent ahead of the bytes received, half the receive queue.
 #[derive(Clone, Copy, Debug)]
 pub struct SpiBus {
@@ -115,7 +115,7 @@ pub const I2C_BITS_PER_BYTE: u32 = 9;
 pub const SPI_BITS_PER_BYTE: u32 = 8;
 
 /// The table position of the bus a number names, or None when the board
-/// has no such bus (the door then answers RHU_ENODEV).
+/// has no such bus (the function then answers RHU_ENODEV).
 pub fn i2c_index(table: &[I2cBus], number: u32) -> Option<usize> {
     table.iter().position(|b| b.number == number)
 }
@@ -259,7 +259,7 @@ pub const fn mode_bits(mode: u32) -> Option<(bool, bool)> {
 }
 
 /// A transfer's chip-select argument: one of the bus's selects, the
-/// no-select value (the program drives its own through the GPIO doors), or invalid.
+/// no-select value (the program drives its own through the kernel's GPIO API), or invalid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectClass {
     Index(u32),

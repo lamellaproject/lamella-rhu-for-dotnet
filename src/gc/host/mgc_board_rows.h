@@ -221,7 +221,7 @@
  * the board has no room for a larger table's SRAM. Cover 1M
  * is minimal: a 512K granule at 0x20000000 ends at 0x20080000, 8K
  * short of the window's end 0x20082000; the 1M granule holds it. */
-#define MGC_ROW_BOARD             "rpi-pico2"
+#define MGC_ROW_BOARD             "raspberrypi-pico-2"
 #define MGC_ROW_PROFILE           "mini"
 #define MGC_ROW_BASIS             "boot"
 #define MGC_ROW_HEAP_MIN_GUARANTEED_BYTES          98304u
@@ -245,7 +245,7 @@
  * lines the kernel never touches -- the same chip, the same 520K window
  * and map floor, so the same small row (the finalization table 256, 240
  * usable) and the same 1M cover. */
-#define MGC_ROW_BOARD             "rpi-pico2-w"
+#define MGC_ROW_BOARD             "raspberrypi-pico-2-w"
 #define MGC_ROW_PROFILE           "mini"
 #define MGC_ROW_BASIS             "boot"
 #define MGC_ROW_HEAP_MIN_GUARANTEED_BYTES          98304u
@@ -371,6 +371,55 @@
 #define MGC_ROW_WINDOW_FLOOR          256u
 #define MGC_ROW_WALL_RETRIES            4u
 #define MGC_ROW_FROZEN_SEGS             8u
+#elif defined(MGC_HOST_ROW_METRO2350)
+/* Adafruit Metro RP2350 (the variant without PSRAM): the Pico 2's chip
+ * family (the RP2350B), the same 520K SRAM window and map floor, no
+ * external RAM, so the Pico 2's small row whole: the finalization table
+ * 256 (240 usable) and the 1M cover. The flash is 16 MB; nothing of this
+ * row reads it. */
+#define MGC_ROW_BOARD             "adafruit-metro-rp2350"
+#define MGC_ROW_PROFILE           "mini"
+#define MGC_ROW_BASIS             "boot"
+#define MGC_ROW_HEAP_MIN_GUARANTEED_BYTES          98304u
+#define MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES     8192u
+#define MGC_ROW_COVER_BYTES       1048576u
+#define MGC_ROW_KHEAP_BYTES         16384u
+#define MGC_ROW_STACK_DEFAULT       16384u
+#define MGC_ROW_STACK_CLAMP         24576u
+#define MGC_ROW_HANDLE_SLOTS           64u
+#define MGC_ROW_FOH_POOL_BYTES      16384u
+#define MGC_ROW_MARKSTACK_ENTRIES    2048u
+#define MGC_ROW_FINQ_CAP              256u
+#define MGC_ROW_FINQ_RESERVE           16u
+#define MGC_ROW_OOM_RESERVE          8192u
+#define MGC_ROW_WINDOW_BYTES         4096u
+#define MGC_ROW_WINDOW_FLOOR          256u
+#define MGC_ROW_WALL_RETRIES            4u
+#define MGC_ROW_FROZEN_SEGS             8u
+#elif defined(MGC_HOST_ROW_METRO2350PSRAM)
+/* Adafruit Metro RP2350 with PSRAM: the Pico Plus 2's chip (the RP2350B),
+ * SRAM window, map floor and 8 MB PSRAM at the same window behind the same
+ * chip select (GPIO 47), so the Pico Plus 2's small row whole: the cover
+ * the PSRAM's granule 8M, the finalization table 2048 (2032 usable). */
+#define MGC_ROW_BOARD             "adafruit-metro-rp2350-psram"
+#define MGC_ROW_PROFILE           "mini"
+#define MGC_ROW_BASIS             "boot"
+#define MGC_ROW_HEAP_MIN_GUARANTEED_BYTES          98304u
+#define MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES     8192u
+#define MGC_ROW_COVER_BYTES       8388608u
+#define MGC_ROW_KHEAP_BYTES         16384u
+#define MGC_ROW_STACK_DEFAULT       16384u
+#define MGC_ROW_STACK_CLAMP         24576u
+#define MGC_ROW_HANDLE_SLOTS           64u
+#define MGC_ROW_FOH_POOL_BYTES      16384u
+#define MGC_ROW_MARKSTACK_ENTRIES    2048u
+#define MGC_ROW_FINQ_CAP             2048u
+#define MGC_ROW_FINQ_RESERVE           16u
+#define MGC_ROW_OOM_RESERVE          8192u
+#define MGC_ROW_WINDOW_BYTES         4096u
+#define MGC_ROW_WINDOW_FLOOR          256u
+#define MGC_ROW_WALL_RETRIES            4u
+#define MGC_ROW_FROZEN_SEGS             8u
 #elif defined(MGC_HOST_ROW_PICOLIPO2)
 /* Pimoroni Pico LiPo 2: the Pico Plus 2's chip (the RP2350B), SRAM
  * window, map floor and 8 MB PSRAM at the same window behind the same
@@ -399,6 +448,29 @@
  * window, map floor and 8 MB PSRAM at the same window behind the same
  * chip select (GPIO 47), so the Pico Plus 2's small row whole. */
 #define MGC_ROW_BOARD             "pimoroni-pico-lipo-2-xl-w"
+#define MGC_ROW_PROFILE           "mini"
+#define MGC_ROW_BASIS             "boot"
+#define MGC_ROW_HEAP_MIN_GUARANTEED_BYTES          98304u
+#define MGC_ROW_SYSTEM_MEMORY_UNALLOCATED_BYTES     8192u
+#define MGC_ROW_COVER_BYTES       8388608u
+#define MGC_ROW_KHEAP_BYTES         16384u
+#define MGC_ROW_STACK_DEFAULT       16384u
+#define MGC_ROW_STACK_CLAMP         24576u
+#define MGC_ROW_HANDLE_SLOTS           64u
+#define MGC_ROW_FOH_POOL_BYTES      16384u
+#define MGC_ROW_MARKSTACK_ENTRIES    2048u
+#define MGC_ROW_FINQ_CAP             2048u
+#define MGC_ROW_FINQ_RESERVE           16u
+#define MGC_ROW_OOM_RESERVE          8192u
+#define MGC_ROW_WINDOW_BYTES         4096u
+#define MGC_ROW_WINDOW_FLOOR          256u
+#define MGC_ROW_WALL_RETRIES            4u
+#define MGC_ROW_FROZEN_SEGS             8u
+#elif defined(MGC_HOST_ROW_SPARKFUNIOTREDBOARD)
+/* SparkFun IoT RedBoard RP2350: the Pico Plus 2's chip (the RP2350B), SRAM
+ * window, map floor and 8 MB PSRAM at the same window behind the same
+ * chip select (GPIO 47), so the Pico Plus 2's small row whole. */
+#define MGC_ROW_BOARD             "sparkfun-iot-redboard-rp2350"
 #define MGC_ROW_PROFILE           "mini"
 #define MGC_ROW_BASIS             "boot"
 #define MGC_ROW_HEAP_MIN_GUARANTEED_BYTES          98304u

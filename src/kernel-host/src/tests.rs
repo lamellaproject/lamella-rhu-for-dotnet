@@ -979,7 +979,7 @@ fn rp2350_bus_math_rows_roles_and_aborts() {
 fn rp2350_bus_math_i2c_modes() {
     use crate::bus_math;
     use crate::rp2350_bus_math as rp;
-    // The three modes against the bus doors' rate set, in its order.
+    // The three modes against the kernel's bus API's rate set, in its order.
     for (i, m) in rp::I2C_MODES.iter().enumerate() {
         assert_eq!(m.rate_hz, bus_math::I2C_RATES_HZ[i]);
         assert_eq!(bus_math::i2c_mode_index(m.rate_hz), Some(i as u8));
@@ -1293,6 +1293,311 @@ fn sdcard_read_and_write_address_by_capacity_class() {
     }
     let mut h = Script::new(steps);
     assert_eq!(sdcard::write(&mut h, &card(true, false), 5, 1, &buf), Err(Stuck { step: Step::Cmd13, why: Why::Busy }));
+}
+
+// ---------------- the SPI-mode host over a scripted wire ----------------
+
+use crate::sdspi::{self, SpiHost, SpiWire};
+use std::collections::VecDeque;
+
+/// A wire played from a byte transcript: every byte the host writes is
+/// logged (the frames, the tokens, the data, the trailing clocks); every byte
+/// the host reads comes off a queue the case filled with the card's answers,
+/// the idle line (0xFF) once the queue is empty; the selects, the rates, the
+/// pauses, the breaths and the witness words are recorded. A queued refusal
+/// is answered to the next write.
+struct Wire {
+    written: Vec<u8>,
+    answers: VecDeque<u8>,
+    selects: Vec<bool>,
+    rates: Vec<Rate>,
+    present: Option<bool>,
+    pauses: u32,
+    breaths: u32,
+    faults: Vec<(u8, u8)>,
+    refuse_write: Option<Refusal>,
+}
+
+impl Wire {
+    fn new(answers: &[u8]) -> Wire {
+        Wire { written: Vec::new(), answers: answers.iter().copied().collect(), selects: Vec::new(), rates: Vec::new(), present: Some(true), pauses: 0, breaths: 0, faults: Vec::new(), refuse_write: None }
+    }
+}
+
+impl SpiWire for Wire {
+    fn attach(&mut self) -> Result<(), Refusal> {
+        Ok(())
+    }
+    fn card_present(&mut self) -> Option<bool> {
+        self.present
+    }
+    fn rate(&mut self, rate: Rate) -> Result<u32, Refusal> {
+        self.rates.push(rate);
+        Ok(match rate {
+            Rate::Identification => 375_000,
+            Rate::Default => 6_000_000,
+        })
+    }
+    fn select(&mut self, low: bool) {
+        self.selects.push(low);
+    }
+    fn write(&mut self, tx: &[u8]) -> Result<(), Refusal> {
+        if let Some(r) = self.refuse_write.take() {
+            return Err(r);
+        }
+        self.written.extend_from_slice(tx);
+        Ok(())
+    }
+    fn read(&mut self, rx: &mut [u8]) -> Result<(), Refusal> {
+        for b in rx.iter_mut() {
+            *b = self.answers.pop_front().unwrap_or(0xFF);
+        }
+        Ok(())
+    }
+    fn pause(&mut self, _micros: u32) {
+        self.pauses += 1;
+    }
+    fn breathe(&mut self) {
+        self.breaths += 1;
+    }
+    fn fault(&mut self, r1: u8, token: u8) {
+        self.faults.push((r1, token));
+    }
+}
+
+/// A register's four words as the sixteen bytes the card sends, most significant first.
+fn wire_be(words: &[u32; 4]) -> Vec<u8> {
+    words.iter().flat_map(|w| w.to_be_bytes()).collect()
+}
+/// A card's R1 after one byte of the idle line.
+fn wire_r1(b: u8) -> Vec<u8> {
+    vec![0xFF, b]
+}
+/// A data block as the card sends it: two bytes of the idle line, the start token, the bytes, their CRC16.
+fn wire_block(data: &[u8]) -> Vec<u8> {
+    let mut v = vec![0xFF, 0xFF, sdspi::TOKEN_START];
+    v.extend_from_slice(data);
+    let c = sdcard::crc16(data);
+    v.push((c >> 8) as u8);
+    v.push(c as u8);
+    v
+}
+/// What the host writes for one command: its frame, then the trailing clocks after the select is released.
+fn wire_cmd(index: u8, arg: u32) -> Vec<u8> {
+    let mut v = sdspi::frame(index, arg).to_vec();
+    v.push(0xFF);
+    v
+}
+/// The bytes a write's data phase puts on the wire: the token, the block, its CRC16.
+fn wire_data(token: u8, data: &[u8]) -> Vec<u8> {
+    let mut v = vec![token];
+    v.extend_from_slice(data);
+    let c = sdcard::crc16(data);
+    v.push((c >> 8) as u8);
+    v.push(c as u8);
+    v
+}
+fn pattern(seed: u8) -> Vec<u8> {
+    (0..512).map(|i| (i as u8).wrapping_mul(3).wrapping_add(seed)).collect()
+}
+fn cat(parts: &[Vec<u8>]) -> Vec<u8> {
+    parts.iter().flatten().copied().collect()
+}
+
+#[test]
+fn sdspi_identify_high_capacity_over_the_scripted_wire() {
+    // The frames' CRC7 bytes the fact sheets give, and the status maps.
+    assert_eq!(sdspi::frame(0, 0), [0x40, 0, 0, 0, 0, 0x95]);
+    assert_eq!(sdspi::frame(8, 0x1AA), [0x48, 0, 0, 0x01, 0xAA, 0x87]);
+    assert_eq!(sdspi::status_of_r1(sdspi::R1_IDLE), 0);
+    assert_eq!(sdspi::status_of_r1(sdspi::R1_ILLEGAL_COMMAND | sdspi::R1_COM_CRC_ERROR), sdcard::STATUS_ILLEGAL_COMMAND | sdcard::STATUS_COM_CRC_ERROR);
+    assert_eq!(sdspi::status_of_r1(sdspi::R1_ADDRESS_ERROR | sdspi::R1_PARAMETER_ERROR), sdcard::STATUS_ADDRESS_ERROR | sdcard::STATUS_OUT_OF_RANGE);
+    assert_eq!(sdspi::status_of_r2(0, 0), STATUS_TRAN_READY);
+    assert_eq!(sdspi::status_of_r2(0, sdspi::R2_WP_VIOLATION | sdspi::R2_CC_ERROR), STATUS_TRAN_READY | sdcard::STATUS_WP_VIOLATION | sdcard::STATUS_CC_ERROR);
+    // A version 2 high-capacity card: CMD8 echoed, ACMD41 idle once then ready, the OCR with CCS, the CID and the CSD as blocks.
+    let answers = cat(&[
+        wire_r1(0x01),
+        wire_r1(0x01), vec![0x00, 0x00, 0x01, 0xAA],
+        wire_r1(0x01), wire_r1(0x01),
+        wire_r1(0x01), wire_r1(0x00),
+        wire_r1(0x00), vec![0xC0, 0xFF, 0x80, 0x00],
+        wire_r1(0x00), wire_block(&wire_be(&CID)),
+        wire_r1(0x00), wire_block(&wire_be(&CSD_V2)),
+        wire_r1(0x00),
+        wire_r1(0x00),
+    ]);
+    let mut h = SpiHost::new(Wire::new(&answers));
+    let c = sdcard::identify(&mut h).unwrap();
+    assert!(c.version2 && c.high_capacity && c.width == Width::One && !c.write_protected);
+    assert_eq!((c.capacity_blocks, c.rca, c.cid, c.csd), ((0x3B37 + 1) * 1024, sdspi::RCA, CID, CSD_V2));
+    // The wire saw: the power-up clocks, then every command the SPI mode carries, each with its trailing clocks --
+    // ACMD41 with the host capacity bit alone, CMD58 after the ready R1, CMD10 for the CID, CMD9 with a zero argument,
+    // the second CMD55 with the card layer's address argument, CMD16; no CMD2, CMD3, CMD7 or CMD6.
+    let mut want = vec![0xFF; sdspi::POWER_UP_BYTES];
+    for (i, a) in [(0u8, 0u32), (8, 0x1AA), (55, 0), (41, 0x4000_0000), (55, 0), (41, 0x4000_0000), (58, 0), (10, 0), (9, 0), (55, 0x1_0000), (16, 512)] {
+        want.extend(wire_cmd(i, a));
+    }
+    assert_eq!(h.wire.written, want);
+    assert_eq!(h.wire.rates, vec![Rate::Identification, Rate::Identification, Rate::Default]);
+    assert_eq!(h.wire.pauses, 1);
+    assert!(h.wire.faults.is_empty());
+    // The selects: released at the attach, then asserted and released once per command on the wire.
+    let mut selects = vec![false];
+    for _ in 0..11 {
+        selects.extend([true, false]);
+    }
+    assert_eq!(h.wire.selects, selects);
+    // Four data lines are not a width this host drives.
+    assert_eq!(h.set_bus(Rate::Default, Width::Four), Err(Refusal::Argument));
+}
+
+#[test]
+fn sdspi_identify_version1_and_standard_capacity_over_the_scripted_wire() {
+    // A version 1 card calls CMD8 illegal; ACMD41 goes without the host capacity bit and is ready at once; the OCR has no CCS; the CSD is version 1.0.
+    let answers = cat(&[
+        wire_r1(0x01),
+        wire_r1(0x05),
+        wire_r1(0x01), wire_r1(0x00),
+        wire_r1(0x00), vec![0x80, 0xFF, 0x80, 0x00],
+        wire_r1(0x00), wire_block(&wire_be(&CID)),
+        wire_r1(0x00), wire_block(&wire_be(&CSD_V1)),
+        wire_r1(0x00),
+        wire_r1(0x00),
+    ]);
+    let mut h = SpiHost::new(Wire::new(&answers));
+    let c = sdcard::identify(&mut h).unwrap();
+    assert!(!c.version2 && !c.high_capacity && c.width == Width::One);
+    assert_eq!(c.capacity_blocks, 4096 * (1 << 18) / 512);
+    let mut want = vec![0xFF; sdspi::POWER_UP_BYTES];
+    for (i, a) in [(0u8, 0u32), (8, 0x1AA), (55, 0), (41, 0), (58, 0), (10, 0), (9, 0), (55, 0x1_0000), (16, 512)] {
+        want.extend(wire_cmd(i, a));
+    }
+    assert_eq!(h.wire.written, want);
+    assert_eq!(h.wire.pauses, 0);
+    // The address rule follows the class: a standard-capacity card's read carries the byte address.
+    let mut buf = [0u8; 512];
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), wire_block(&pattern(1))])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    let mut card1 = card(false, false);
+    card1.capacity_blocks = c.capacity_blocks;
+    sdcard::read(&mut h, &card1, 100, 1, &mut buf).unwrap();
+    assert_eq!(h.wire.written, wire_cmd(17, 100 * 512));
+    assert_eq!(buf.to_vec(), pattern(1));
+}
+
+#[test]
+fn sdspi_reads_and_writes_blocks_with_the_tokens_and_crcs() {
+    let hc = card(true, false);
+    // One block: CMD17, the token, the bytes and the CRC; the host releases the select and clocks once after.
+    let mut buf = [0u8; 1024];
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), wire_block(&pattern(7))])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    sdcard::read(&mut h, &hc, 7, 1, &mut buf).unwrap();
+    assert_eq!(buf[..512].to_vec(), pattern(7));
+    assert_eq!(h.wire.written, wire_cmd(17, 7));
+    assert_eq!(h.wire.selects, vec![true, false]);
+    // Two blocks: CMD18, two blocks, then CMD12 with its stuff byte, its R1 and its busy signal.
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), wire_block(&pattern(1)), wire_block(&pattern(2)), vec![0xFF, 0xFF, 0x00, 0x00, 0x00, 0xFF]])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    sdcard::read(&mut h, &hc, 20, 2, &mut buf).unwrap();
+    assert_eq!((buf[..512].to_vec(), buf[512..].to_vec()), (pattern(1), pattern(2)));
+    assert_eq!(h.wire.written, cat(&[wire_cmd(18, 20), wire_cmd(12, 0)]));
+    // One block written: CMD24, the token, the bytes, the CRC, the data response, the busy signal; then the card layer's CMD13 (R2 both zero).
+    let data = cat(&[pattern(3), pattern(4)]);
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), vec![0xFF, 0x05, 0x00, 0x00, 0xFF], wire_r1(0x00), vec![0x00]])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    sdcard::write(&mut h, &hc, 5, 1, &data).unwrap();
+    assert_eq!(h.wire.written, cat(&[sdspi::frame(24, 5).to_vec(), wire_data(sdspi::TOKEN_START, &data[..512]), vec![0xFF], wire_cmd(13, 0)]));
+    assert_eq!(h.wire.breaths, 0);
+    // Two blocks written: CMD25, each block behind its multiple-write token with its data response and busy signal, the stop token,
+    // a skipped byte and the busy signal after it; then CMD13.
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), vec![0x05, 0x00, 0xFF], vec![0x05, 0xFF], vec![0xFF, 0x00, 0xFF], wire_r1(0x00), vec![0x00]])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    sdcard::write(&mut h, &hc, 8, 2, &data).unwrap();
+    assert_eq!(
+        h.wire.written,
+        cat(&[sdspi::frame(25, 8).to_vec(), wire_data(sdspi::TOKEN_START_MULTI, &data[..512]), wire_data(sdspi::TOKEN_START_MULTI, &data[512..]), vec![sdspi::TOKEN_STOP, 0xFF], wire_cmd(13, 0)])
+    );
+    // A card the detect line says is gone refuses the data path without a byte on the wire.
+    let mut h = SpiHost::new(Wire::new(&[]));
+    h.wire.present = Some(false);
+    assert_eq!(h.read_blocks(17, 0, 1, &mut buf), Err(Refusal::NoCard));
+    assert!(h.wire.written.is_empty());
+    // A long busy signal is breathed through: the yield point every sixteen polls.
+    let mut busy = vec![0x05];
+    busy.extend(vec![0x00; 100]);
+    busy.push(0xFF);
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), busy, wire_r1(0x00), vec![0x00]])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    sdcard::write(&mut h, &hc, 5, 1, &data).unwrap();
+    assert_eq!(h.wire.breaths, 100 / sdspi::BREATH_BYTES);
+}
+
+#[test]
+fn sdspi_refuses_the_doctored_wire() {
+    let hc = card(true, false);
+    let data = pattern(9);
+    let mut buf = [0u8; 512];
+    // A CRC16 broken on the wire: the host refuses Crc; the card layer recovers by CMD12 and CMD13 and reads once more, which passes.
+    let mut bad = wire_block(&data);
+    let n = bad.len();
+    bad[n - 1] ^= 0x01;
+    let recover = cat(&[vec![0xFF, 0xFF, 0x00, 0xFF], wire_r1(0x00), vec![0x00]]);
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), bad, recover.clone(), wire_r1(0x00), wire_block(&data)])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    sdcard::read(&mut h, &hc, 7, 1, &mut buf).unwrap();
+    assert_eq!(buf.to_vec(), data);
+    assert_eq!(h.wire.written, cat(&[wire_cmd(17, 7), wire_cmd(12, 0), wire_cmd(13, 0), wire_cmd(17, 7)]));
+    assert_eq!(h.wire.faults, vec![(0x00, sdspi::TOKEN_START)]);
+    // An error token in the start token's place: the card's ECC failure is retried once as a CRC refusal; an out-of-range
+    // token is final, as the timeout, after the recovery.
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), vec![0xFF, sdspi::ERROR_TOKEN_OUT_OF_RANGE], recover.clone()])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    assert_eq!(sdcard::read(&mut h, &hc, 7, 1, &mut buf), Err(Stuck { step: Step::Transfer, why: Why::Refused(Refusal::Timeout) }));
+    assert_eq!(h.wire.faults, vec![(0x00, sdspi::ERROR_TOKEN_OUT_OF_RANGE)]);
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), vec![sdspi::ERROR_TOKEN_CARD_ECC_FAILED], recover.clone(), wire_r1(0x00), wire_block(&data)])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    sdcard::read(&mut h, &hc, 7, 1, &mut buf).unwrap();
+    // A data response refusing the CRC: retried once after the recovery; a write error is final after it.
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), vec![sdspi::DATA_CRC_ERROR], recover.clone(), wire_r1(0x00), vec![sdspi::DATA_ACCEPTED, 0xFF], wire_r1(0x00), vec![0x00]])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    sdcard::write(&mut h, &hc, 5, 1, &data).unwrap();
+    assert_eq!(h.wire.faults, vec![(0x00, sdspi::DATA_CRC_ERROR)]);
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), vec![sdspi::DATA_WRITE_ERROR], recover.clone()])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    assert_eq!(sdcard::write(&mut h, &hc, 5, 1, &data), Err(Stuck { step: Step::Transfer, why: Why::Refused(Refusal::Timeout) }));
+    // A busy signal that lasts the write time's budget (the bytes of 250 ms at 6 MHz): the host's Busy, final after the recovery.
+    let busy = vec![0x00; (6_000_000 / 8_000 * sdspi::WRITE_TIMEOUT_MS) as usize];
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), vec![sdspi::DATA_ACCEPTED], busy, recover.clone()])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    assert_eq!(sdcard::write(&mut h, &hc, 5, 1, &data), Err(Stuck { step: Step::Transfer, why: Why::Refused(Refusal::Busy) }));
+    // The R1 that never comes: the idle line for eight bytes, the native timeout at CMD0.
+    let mut h = SpiHost::new(Wire::new(&[]));
+    assert_eq!(sdcard::identify(&mut h), Err(Stuck { step: Step::Cmd0, why: Why::Refused(Refusal::Timeout) }));
+    assert_eq!(h.wire.faults, vec![(0xFF, 0xFF)]);
+    assert_eq!(h.wire.written.len(), sdspi::POWER_UP_BYTES + 6 + 1);
+    // A card that never leaves idle: the card layer's budget of polls, a pause between each.
+    let mut answers = cat(&[wire_r1(0x01), wire_r1(0x01), vec![0x00, 0x00, 0x01, 0xAA]]);
+    for _ in 0..sdcard::ACMD41_TRIES {
+        answers.extend(wire_r1(0x01));
+        answers.extend(wire_r1(0x01));
+    }
+    let mut h = SpiHost::new(Wire::new(&answers));
+    assert_eq!(sdcard::identify(&mut h), Err(Stuck { step: Step::Acmd41, why: Why::Busy }));
+    assert_eq!(h.wire.pauses, sdcard::ACMD41_TRIES - 1);
+    // A card that calls CMD55 illegal (not an SD memory card): unsupported.
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x01), wire_r1(0x01), vec![0x00, 0x00, 0x01, 0xAA], wire_r1(0x05)])));
+    assert_eq!(sdcard::identify(&mut h), Err(Stuck { step: Step::Acmd41, why: Why::Unsupported }));
+    // A write-protect violation in R2 after a write: the card layer's ReadOnly.
+    let mut h = SpiHost::new(Wire::new(&cat(&[wire_r1(0x00), vec![sdspi::DATA_ACCEPTED, 0xFF], wire_r1(0x00), vec![sdspi::R2_WP_VIOLATION]])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    assert_eq!(sdcard::write(&mut h, &hc, 5, 1, &data), Err(Stuck { step: Step::Cmd13, why: Why::ReadOnly }));
+    // The wire's own refusal on a write reaches the card layer as the host's: the overrun is recovered from and retried once.
+    let mut h = SpiHost::new(Wire::new(&cat(&[recover.clone(), wire_r1(0x00), wire_block(&data)])));
+    h.set_bus(Rate::Default, Width::One).unwrap();
+    h.wire.refuse_write = Some(Refusal::Overrun);
+    sdcard::read(&mut h, &hc, 7, 1, &mut buf).unwrap();
+    assert_eq!(h.wire.written, cat(&[vec![0xFF], wire_cmd(12, 0), wire_cmd(13, 0), wire_cmd(17, 7)]));
 }
 
 // The checksum matcher against the vendored stack's own parser.
@@ -3512,4 +3817,509 @@ fn exit_word_refuses_the_words_outside_the_contract() {
     assert_eq!(decode(u32::from_le_bytes(*b"TERR"), 42), None); // "RRET" read in the wrong byte order
     assert_eq!(decode(1, 0), None); // a state number is not a magic
     assert_eq!(decode(2, 134), None);
+}
+
+// ---- The kernel's file API's table (fs.rs) over the sparse device: the routing against the mount
+// ---- point, the two handle tables with their generation, the verbs through the table, the codes.
+use crate::fs::{self, Dirent, MountDesc, StatDesc, StatfsDesc, Table};
+
+fn fs_no_clock() -> Option<crate::calendar_math::Civil> {
+    None
+}
+/// A table mounted over a fresh copy of the named golden (a 4 KB scratch, as the kernel's).
+fn fs_table(name: &str) -> Table<Sparse> {
+    let mut t: Table<Sparse> = Table::new();
+    let mut scratch = vec![0u8; 4096];
+    t.mount(golden(name), &mut scratch, fs_no_clock).unwrap_or_else(|r| panic!("{name}: the table's mount refused: {}", r.words()));
+    t
+}
+/// The root's entries through the table: (name, is_dir, size).
+fn fs_list(t: &mut Table<Sparse>, path: &[u8]) -> Vec<(String, bool, u32)> {
+    let d = t.opendir(path);
+    assert!(d >= 0, "opendir {:?} answered {d}", std::str::from_utf8(path));
+    let mut e = Dirent::EMPTY;
+    let mut out = vec![];
+    loop {
+        match t.readdir(d, &mut e) {
+            1 => out.push((String::from_utf8_lossy(e.name()).into_owned(), e.kind == fs::KIND_DIR, e.size)),
+            0 => break,
+            c => panic!("readdir answered {c} after {} entries", out.len()),
+        }
+    }
+    assert_eq!(t.closedir(d), 0);
+    out
+}
+fn fs_read_all(t: &mut Table<Sparse>, h: i32, len: usize) -> Vec<u8> {
+    let mut out = vec![0u8; len];
+    let mut done = 0;
+    while done < len {
+        let n = t.read(h, &mut out[done..]);
+        assert!(n > 0, "the read answered {n} after {done} bytes");
+        done += n as usize;
+    }
+    out
+}
+
+#[test]
+fn fs_doors_route_paths_and_refuse_outside_the_mount() {
+    // No volume: the table's row exists with the no-card state, every path absent, every handle outside the tables.
+    let mut t: Table<Sparse> = Table::new();
+    let mut d = MountDesc::EMPTY;
+    assert_eq!(t.mount_count(), 1);
+    assert_eq!(t.mount_desc(0, &mut d), 0);
+    assert_eq!((d.state, d.fat_width, d.clusters, d.device), (fs::STATE_NO_CARD, 0, 0, 0));
+    assert_eq!(MountDesc::text(&d.point), b"/media/sd0");
+    assert_eq!(t.mount_desc(1, &mut d), fs::ERR_INVAL);
+    let mut st = StatDesc::EMPTY;
+    assert_eq!(t.stat(b"/media/sd0", &mut st), fs::ERR_NOENT);
+    assert_eq!(t.open(b"/media/sd0/x", fs::O_READ), fs::ERR_NOENT);
+    assert_eq!(t.opendir(b"/media/sd0", ), fs::ERR_NOENT);
+    assert_eq!(t.read(0, &mut [0u8; 4]), fs::ERR_BADF);
+    assert_eq!(t.close(0), fs::ERR_BADF);
+    assert_eq!(t.closedir(0), fs::ERR_BADF);
+    // The flags are judged before the path: an empty flag word, a bit outside the six, the truncate and append bits without the write bit.
+    assert_eq!(t.open(b"/media/sd0/x", 0), fs::ERR_INVAL);
+    assert_eq!(t.open(b"/media/sd0/x", 64), fs::ERR_INVAL);
+    assert_eq!(t.open(b"/media/sd0/x", fs::O_READ | fs::O_TRUNC), fs::ERR_INVAL);
+    assert_eq!(t.open(b"/media/sd0/x", fs::O_READ | fs::O_APPEND), fs::ERR_INVAL);
+    // A volume: the point itself and the point with a slash are the root; a look-alike, another socket's point and the rest of the tree are absent.
+    let mut t = fs_table("fat32-64m");
+    assert_eq!(t.mount_desc(0, &mut d), 0);
+    assert_eq!((d.state, d.fat_width), (fs::STATE_MOUNTED, 32));
+    assert!(d.cluster_bytes >= 512 && d.clusters > 0 && d.free_clusters <= d.clusters);
+    assert_eq!(t.stat(b"/media/sd0", &mut st), 0);
+    assert_eq!((st.kind, st.size), (fs::KIND_DIR, 0));
+    assert_eq!(t.stat(b"/media/sd0/", &mut st), 0);
+    assert_eq!(t.stat(b"/media/sd0x", &mut st), fs::ERR_NOENT);
+    assert_eq!(t.stat(b"/media/sd1", &mut st), fs::ERR_NOENT);
+    assert_eq!(t.stat(b"/media", &mut st), fs::ERR_NOENT);
+    assert_eq!(t.stat(b"/tmp/x", &mut st), fs::ERR_NOENT);
+    assert_eq!(t.stat(b"/", &mut st), fs::ERR_NOENT);
+    assert_eq!(t.stat(b"media/sd0", &mut st), fs::ERR_INVAL);
+    assert_eq!(t.stat(b"", &mut st), fs::ERR_INVAL);
+    assert_eq!(t.stat(b"/media/sd0/no-such-name", &mut st), fs::ERR_NOENT);
+    // The window: a path past 4096 bytes; a component past 255 units.
+    let mut long = b"/media/sd0/".to_vec();
+    long.extend(std::iter::repeat(b'a').take(4096));
+    assert_eq!(t.stat(&long, &mut st), fs::ERR_NAMETOOLONG);
+    let mut comp = b"/media/sd0/".to_vec();
+    comp.extend(std::iter::repeat(b'b').take(256));
+    assert_eq!(t.stat(&comp, &mut st), fs::ERR_NAMETOOLONG);
+    assert_eq!(t.open(&comp, fs::O_WRITE | fs::O_CREATE), fs::ERR_NAMETOOLONG);
+    // "." and ".." walk as on Linux: the first directory of the root reached through them.
+    let entries = fs_list(&mut t, b"/media/sd0");
+    assert_eq!(&entries[..2], &[(".".to_string(), true, 0), ("..".to_string(), true, 0)]);
+    let dir = entries.iter().skip(2).find(|e| e.1).map(|e| e.0.clone()).expect("the golden's root holds a directory");
+    let walked = format!("/media/sd0/./{dir}/../{dir}");
+    assert_eq!(t.stat(walked.as_bytes(), &mut st), 0);
+    assert_eq!(st.kind, fs::KIND_DIR);
+    assert_eq!(t.stat(format!("/media/sd0/{dir}/..").as_bytes(), &mut st), 0);
+    // statfs for a path that exists, and not for one that does not.
+    let mut sf = StatfsDesc::EMPTY;
+    assert_eq!(t.statfs(b"/media/sd0", &mut sf), 0);
+    assert_eq!((sf.block_size, sf.blocks, sf.free, sf.name_max), (d.cluster_bytes, d.clusters, d.free_clusters, 255));
+    assert_eq!(t.statfs(b"/media/sd0/no-such-name", &mut sf), fs::ERR_NOENT);
+    assert_eq!(t.statfs(b"/tmp", &mut sf), fs::ERR_NOENT);
+}
+
+#[test]
+fn fs_doors_open_read_write_seek_truncate_and_sync() {
+    let mut t = fs_table("fat16-32m");
+    let p: &[u8] = b"/media/sd0/doors.bin";
+    let mut st = StatDesc::EMPTY;
+    assert_eq!(t.stat(p, &mut st), fs::ERR_NOENT);
+    assert_eq!(t.open(p, fs::O_READ), fs::ERR_NOENT);
+    let h = t.open(p, fs::O_READ | fs::O_WRITE | fs::O_CREATE | fs::O_EXCL);
+    assert_eq!(h, 0);
+    assert_eq!(t.open(p, fs::O_WRITE | fs::O_CREATE | fs::O_EXCL), fs::ERR_EXIST);
+    let data: Vec<u8> = (0..100_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    // The write, then a positional write of the rest: the handle's position stays where the write left it.
+    assert_eq!(t.write(h, &data[..60_000]), 60_000);
+    assert_eq!(t.pwrite(h, &data[60_000..], 60_000), 40_000);
+    let mut pos = -1i64;
+    assert_eq!(t.seek(h, 0, fs::SEEK_CUR, &mut pos), 0);
+    assert_eq!(pos, 60_000);
+    assert_eq!(t.sync(h), 0);
+    assert_eq!(t.fstat(h, &mut st), 0);
+    assert_eq!((st.size, st.kind, st.read_only), (100_000, fs::KIND_FILE, 0));
+    assert!(st.first_cluster >= 2);
+    let mut by_path = StatDesc::EMPTY;
+    assert_eq!(t.stat(p, &mut by_path), 0);
+    assert_eq!(by_path, st);
+    assert_eq!(t.close(h), 0);
+    // Read back: an aligned run, then a misaligned run, then by position; the end answers 0.
+    let h = t.open(p, fs::O_READ);
+    assert_eq!(h, 0);
+    let mut back = vec![0u8; 100_016];
+    let mut done = 0;
+    while done < 50_000 {
+        let n = t.read(h, &mut back[done..50_000]);
+        assert!(n > 0);
+        done += n as usize;
+    }
+    let mut done = 50_001;
+    while done < 100_001 {
+        let n = t.read(h, &mut back[done..100_001]);
+        assert!(n > 0);
+        done += n as usize;
+    }
+    assert_eq!(&back[..50_000], &data[..50_000]);
+    assert_eq!(&back[50_001..100_001], &data[50_000..]);
+    assert_eq!(t.read(h, &mut back[..16]), 0);
+    assert_eq!(t.seek(h, 0, fs::SEEK_CUR, &mut pos), 0);
+    assert_eq!(pos, 100_000);
+    let mut piece = vec![0u8; 1000];
+    assert_eq!(t.pread(h, &mut piece, 10_000), 1000);
+    assert_eq!(&piece[..], &data[10_000..11_000]);
+    assert_eq!(t.seek(h, 0, fs::SEEK_CUR, &mut pos), 0);
+    assert_eq!(pos, 100_000, "the positional read moved the handle's position");
+    assert_eq!(t.pread(h, &mut piece, 100_000), 0);
+    assert_eq!(t.pread(h, &mut piece, 99_990), 10);
+    assert_eq!(&piece[..10], &data[99_990..]);
+    assert_eq!(t.pread(h, &mut piece, -1), fs::ERR_INVAL);
+    assert_eq!(t.pread(h, &mut piece, 1 << 32), fs::ERR_INVAL);
+    // The seek by every whence; past the end allowed; below 0 or past the layer's size refused; a bad whence refused.
+    assert_eq!(t.seek(h, -10, fs::SEEK_END, &mut pos), 0);
+    assert_eq!(pos, 99_990);
+    assert_eq!(t.read(h, &mut piece[..100]), 10);
+    assert_eq!(&piece[..10], &data[99_990..]);
+    assert_eq!(t.seek(h, 200_000, fs::SEEK_SET, &mut pos), 0);
+    assert_eq!(pos, 200_000);
+    assert_eq!(t.read(h, &mut piece), 0);
+    assert_eq!(t.seek(h, -1, fs::SEEK_SET, &mut pos), fs::ERR_INVAL);
+    assert_eq!(t.seek(h, 1 << 32, fs::SEEK_SET, &mut pos), fs::ERR_INVAL);
+    assert_eq!(t.seek(h, 0, 3, &mut pos), fs::ERR_INVAL);
+    // A read-only handle takes no write, truncate or positional write.
+    assert_eq!(t.write(h, &data[..10]), fs::ERR_BADF);
+    assert_eq!(t.pwrite(h, &data[..10], 0), fs::ERR_BADF);
+    assert_eq!(t.truncate(h, 10), fs::ERR_BADF);
+    assert_eq!(t.close(h), 0);
+    // The truncate both ways, with the gap zeroed; the limits refused.
+    let h = t.open(p, fs::O_READ | fs::O_WRITE);
+    assert_eq!(t.truncate(h, 4096), 0);
+    assert_eq!(t.fstat(h, &mut st), 0);
+    assert_eq!(st.size, 4096);
+    assert_eq!(t.truncate(h, 8192), 0);
+    assert_eq!(t.seek(h, 0, fs::SEEK_SET, &mut pos), 0);
+    let whole = fs_read_all(&mut t, h, 8192);
+    assert_eq!(&whole[..4096], &data[..4096]);
+    assert!(whole[4096..].iter().all(|&b| b == 0), "the gap of a zero-extending truncate is not zero");
+    assert_eq!(t.truncate(h, -1), fs::ERR_INVAL);
+    assert_eq!(t.truncate(h, 1 << 32), fs::ERR_INVAL);
+    // A positional write past the end allocates and zeroes the gap, the position unmoved.
+    assert_eq!(t.seek(h, 100, fs::SEEK_SET, &mut pos), 0);
+    assert_eq!(t.pwrite(h, &data[..100], 10_000), 100);
+    assert_eq!(t.seek(h, 0, fs::SEEK_CUR, &mut pos), 0);
+    assert_eq!(pos, 100);
+    assert_eq!(t.fstat(h, &mut st), 0);
+    assert_eq!(st.size, 10_100);
+    assert_eq!(t.pread(h, &mut piece, 9_000), 1000);
+    assert!(piece[..].iter().all(|&b| b == 0));
+    assert_eq!(t.pread(h, &mut piece[..100], 10_000), 100);
+    assert_eq!(&piece[..100], &data[..100]);
+    assert_eq!(t.close(h), 0);
+    // The truncate flag at the open; the append flag's writes at the end and its refusal of a positional write.
+    let h = t.open(p, fs::O_WRITE | fs::O_TRUNC);
+    assert_eq!(t.fstat(h, &mut st), 0);
+    assert_eq!(st.size, 0);
+    assert_eq!(t.write(h, &data[..10]), 10);
+    assert_eq!(t.close(h), 0);
+    let h = t.open(p, fs::O_WRITE | fs::O_APPEND);
+    assert_eq!(t.write(h, &data[10..20]), 10);
+    assert_eq!(t.pwrite(h, &data[..10], 0), fs::ERR_INVAL);
+    assert_eq!(t.close(h), 0);
+    assert_eq!(t.stat(p, &mut st), 0);
+    assert_eq!(st.size, 20);
+    let h = t.open(p, fs::O_READ);
+    assert_eq!(fs_read_all(&mut t, h, 20), &data[..20]);
+    assert_eq!(t.close(h), 0);
+    assert_eq!(t.unlink(p), 0);
+    assert_eq!(t.stat(p, &mut st), fs::ERR_NOENT);
+    // A read-only entry, where a golden carries one: opened for writing and unlinked, the read-only code.
+    let mut ro = None;
+    for name in GOLDENS {
+        let mut v = mount(name);
+        let mut d = v.opendir(b"/").unwrap();
+        let mut e = Entry::EMPTY;
+        while v.readdir(&mut d, &mut e).unwrap() {
+            if e.read_only() && !e.is_dir() {
+                ro = Some((name, String::from_utf8_lossy(e.name()).into_owned()));
+            }
+        }
+        v.closedir(&mut d).unwrap();
+    }
+    match ro {
+        Some((name, entry)) => {
+            let mut t = fs_table(name);
+            let path = format!("/media/sd0/{entry}");
+            assert_eq!(t.stat(path.as_bytes(), &mut st), 0);
+            assert_eq!(st.read_only, 1);
+            assert_eq!(t.open(path.as_bytes(), fs::O_WRITE), fs::ERR_ROFS);
+            assert_eq!(t.unlink(path.as_bytes()), fs::ERR_ROFS);
+            let h = t.open(path.as_bytes(), fs::O_READ);
+            assert!(h >= 0);
+            assert_eq!(t.close(h), 0);
+        }
+        None => println!("fs_doors: no golden carries a read-only file at its root; the read-only code is the layer's own case's"),
+    }
+    // write(2)'s rule through the table on the smallest golden: the bytes moved before the volume filled, then the no-space code.
+    let mut t = fs_table("fat12-1m");
+    let h = t.open(b"/media/sd0/fill.bin", fs::O_WRITE | fs::O_CREATE | fs::O_EXCL);
+    assert!(h >= 0);
+    let chunk = vec![0x5Au8; 64 * 1024];
+    let mut total = 0u64;
+    let mut short = false;
+    for _ in 0..64 {
+        let n = t.write(h, &chunk);
+        if n == fs::ERR_NOSPC {
+            assert!(short, "the no-space code came before a short write");
+            break;
+        }
+        assert!(n > 0, "the write answered {n}");
+        total += n as u64;
+        if (n as usize) < chunk.len() {
+            short = true;
+        }
+    }
+    assert!(short && total > 0, "the volume never filled ({total} bytes written)");
+    assert_eq!(t.write(h, &chunk), fs::ERR_NOSPC);
+    assert_eq!(t.close(h), 0);
+    assert_eq!(t.stat(b"/media/sd0/fill.bin", &mut st), 0);
+    assert_eq!(st.size as u64, total);
+    assert_eq!(t.unlink(b"/media/sd0/fill.bin"), 0);
+}
+
+#[test]
+fn fs_doors_handle_tables_and_their_limits() {
+    let mut t = fs_table("fat32-64m");
+    let p: &[u8] = b"/media/sd0/handles.bin";
+    let h = t.open(p, fs::O_WRITE | fs::O_CREATE | fs::O_EXCL);
+    assert_eq!(h, 0);
+    assert_eq!(t.write(h, b"sixteen handles"), 15);
+    assert_eq!(t.close(h), 0);
+    // Sixteen file handles, the seventeenth refused; a close frees its slot and the next open takes it.
+    let handles: Vec<i32> = (0..fs::FILES).map(|_| t.open(p, fs::O_READ)).collect();
+    assert_eq!(handles, (0..fs::FILES as i32).collect::<Vec<_>>());
+    assert_eq!(t.open(p, fs::O_READ), fs::ERR_MFILE);
+    assert_eq!(t.close(3), 0);
+    assert_eq!(t.open(p, fs::O_READ), 3);
+    assert_eq!(t.open(p, fs::O_READ), fs::ERR_MFILE);
+    for h in 0..fs::FILES as i32 {
+        assert_eq!(t.close(h), 0);
+    }
+    // A closed handle, and the numbers outside the table.
+    let mut buf = [0u8; 8];
+    for h in [0, 15, 16, -1, 1_000_000, i32::MIN, i32::MAX] {
+        assert_eq!(t.read(h, &mut buf), fs::ERR_BADF, "handle {h}");
+        assert_eq!(t.write(h, &buf), fs::ERR_BADF, "handle {h}");
+        assert_eq!(t.close(h), fs::ERR_BADF, "handle {h}");
+        let mut st = StatDesc::EMPTY;
+        assert_eq!(t.fstat(h, &mut st), fs::ERR_BADF, "handle {h}");
+        let mut pos = 0;
+        assert_eq!(t.seek(h, 0, fs::SEEK_SET, &mut pos), fs::ERR_BADF, "handle {h}");
+        assert_eq!(t.sync(h), fs::ERR_BADF, "handle {h}");
+        assert_eq!(t.truncate(h, 0), fs::ERR_BADF, "handle {h}");
+        assert_eq!(t.pread(h, &mut buf, 0), fs::ERR_BADF, "handle {h}");
+        assert_eq!(t.pwrite(h, &buf, 0), fs::ERR_BADF, "handle {h}");
+    }
+    // Four directory handles, the fifth refused; the numbers of the two tables are separate spaces.
+    let dirs: Vec<i32> = (0..fs::DIRS).map(|_| t.opendir(b"/media/sd0")).collect();
+    assert_eq!(dirs, (0..fs::DIRS as i32).collect::<Vec<_>>());
+    assert_eq!(t.opendir(b"/media/sd0"), fs::ERR_MFILE);
+    let f = t.open(p, fs::O_READ);
+    assert_eq!(f, 0);
+    let mut e = Dirent::EMPTY;
+    assert_eq!(t.readdir(0, &mut e), 1, "the directory table's 0 is a directory while the file table's 0 is a file");
+    assert_eq!(e.name(), b".");
+    assert_eq!(t.read(0, &mut buf), 8);
+    assert_eq!(&buf, b"sixteen ");
+    assert_eq!(t.readdir(4, &mut e), fs::ERR_BADF);
+    assert_eq!(t.readdir(-1, &mut e), fs::ERR_BADF);
+    for d in dirs {
+        assert_eq!(t.closedir(d), 0);
+    }
+    assert_eq!(t.closedir(0), fs::ERR_BADF);
+    assert_eq!(t.readdir(0, &mut e), fs::ERR_BADF);
+    assert_eq!(t.read(0, &mut buf), 7);
+    assert_eq!(t.close(f), 0);
+    assert_eq!(t.unlink(p), 0);
+}
+
+#[test]
+fn fs_doors_directories_listing_and_the_tree_verbs() {
+    let mut t = fs_table("fat32-64m");
+    // The listing through the table equals the layer's own listing of the golden: names, kinds, sizes, the dots first.
+    let ours = fs_list(&mut t, b"/media/sd0");
+    let mut v = mount("fat32-64m");
+    let theirs: Vec<(String, bool, u32)> = list(&mut v, "/").into_iter().map(|e| (e.0, e.1, if e.1 { 0 } else { e.2 })).collect();
+    assert_eq!(ours, theirs, "the table's listing differs from the layer's");
+    assert!(ours.len() > 2);
+    // The tree verbs: a directory made (once), a file inside it, the refusals, the rename within the volume and onto the kinds, the removal.
+    let d1: &[u8] = b"/media/sd0/d1";
+    let inner: &[u8] = b"/media/sd0/d1/inner.txt";
+    let mut st = StatDesc::EMPTY;
+    assert_eq!(t.mkdir(d1), 0);
+    assert_eq!(t.mkdir(d1), fs::ERR_EXIST);
+    assert_eq!(t.mkdir(b"/media/sd0/no-such-parent/x"), fs::ERR_NOENT);
+    assert_eq!(t.stat(d1, &mut st), 0);
+    assert_eq!((st.kind, st.size), (fs::KIND_DIR, 0));
+    assert_eq!(fs_list(&mut t, d1), vec![(".".to_string(), true, 0), ("..".to_string(), true, 0)]);
+    let h = t.open(inner, fs::O_WRITE | fs::O_CREATE | fs::O_EXCL);
+    assert!(h >= 0);
+    assert_eq!(t.write(h, b"inner"), 5);
+    assert_eq!(t.close(h), 0);
+    assert_eq!(fs_list(&mut t, d1)[2], ("inner.txt".to_string(), false, 5));
+    assert_eq!(t.open(d1, fs::O_READ), fs::ERR_ISDIR);
+    assert_eq!(t.opendir(inner), fs::ERR_NOTDIR);
+    assert_eq!(t.stat(b"/media/sd0/d1/inner.txt/x", &mut st), fs::ERR_NOTDIR);
+    assert_eq!(t.rmdir(d1), fs::ERR_NOTEMPTY);
+    assert_eq!(t.rmdir(inner), fs::ERR_NOTDIR);
+    assert_eq!(t.unlink(d1), fs::ERR_ISDIR);
+    assert_eq!(t.rmdir(b"/media/sd0"), fs::ERR_INVAL);
+    assert_eq!(t.rename(inner, b"/media/sd0/moved.txt"), 0);
+    assert_eq!(t.stat(inner, &mut st), fs::ERR_NOENT);
+    assert_eq!(t.stat(b"/media/sd0/moved.txt", &mut st), 0);
+    assert_eq!(st.size, 5);
+    assert_eq!(t.rename(b"/media/sd0/moved.txt", d1), fs::ERR_EXIST);
+    assert_eq!(t.rename(b"/media/sd0/moved.txt", b"/tmp/moved.txt"), fs::ERR_NOENT);
+    assert_eq!(t.rename(b"/media/sd0/no-such", b"/media/sd0/x"), fs::ERR_NOENT);
+    let h = t.open(b"/media/sd0/other.txt", fs::O_WRITE | fs::O_CREATE | fs::O_EXCL);
+    assert_eq!(t.close(h), 0);
+    assert_eq!(t.rename(b"/media/sd0/moved.txt", b"/media/sd0/other.txt"), 0);
+    assert_eq!(t.stat(b"/media/sd0/moved.txt", &mut st), fs::ERR_NOENT);
+    assert_eq!(t.stat(b"/media/sd0/other.txt", &mut st), 0);
+    assert_eq!(st.size, 5);
+    assert_eq!(t.rename(d1, b"/media/sd0/d2"), 0);
+    assert_eq!(t.stat(b"/media/sd0/d2", &mut st), 0);
+    assert_eq!(t.rmdir(b"/media/sd0/d2"), 0);
+    assert_eq!(t.unlink(b"/media/sd0/other.txt"), 0);
+    assert_eq!(t.stat(b"/media/sd0/d2", &mut st), fs::ERR_NOENT);
+    let after = fs_list(&mut t, b"/media/sd0");
+    assert_eq!(after, theirs, "the root is not as it was after the tree verbs");
+    // The counts through the table equal the layer's.
+    let mut sf = StatfsDesc::EMPTY;
+    assert_eq!(t.statfs(b"/media/sd0", &mut sf), 0);
+    let s = v.statfs();
+    assert_eq!((sf.block_size, sf.blocks, sf.name_max), (s.block_size, s.blocks, 255));
+    assert_eq!(sf.free, s.free, "the free count after the verbs is not the untouched golden's");
+}
+
+#[test]
+fn fs_doors_unmount_kills_handles_and_a_remount_starts_fresh() {
+    let mut t = fs_table("fat16-32m");
+    let g0 = t.generation();
+    let p: &[u8] = b"/media/sd0/kept.bin";
+    let h = t.open(p, fs::O_READ | fs::O_WRITE | fs::O_CREATE | fs::O_EXCL);
+    assert_eq!(h, 0);
+    assert_eq!(t.write(h, b"kept"), 4);
+    assert_eq!(t.sync(h), 0);
+    let d = t.opendir(b"/media/sd0");
+    assert_eq!(d, 0);
+    // The card leaves: the volume dropped, the state no card, the handles dead until their close, which answers 0.
+    t.unmount();
+    assert!(!t.mounted() && t.state() == fs::STATE_NO_CARD && t.generation() != g0);
+    let mut d_rec = MountDesc::EMPTY;
+    assert_eq!(t.mount_desc(0, &mut d_rec), 0);
+    assert_eq!((d_rec.state, d_rec.fat_width, d_rec.clusters, MountDesc::text(&d_rec.why)), (fs::STATE_NO_CARD, 0, 0, &b""[..]));
+    let mut buf = [0u8; 4];
+    let mut st = StatDesc::EMPTY;
+    let mut e = Dirent::EMPTY;
+    let mut pos = 0;
+    assert_eq!(t.read(h, &mut buf), fs::ERR_IO);
+    assert_eq!(t.write(h, &buf), fs::ERR_IO);
+    assert_eq!(t.pread(h, &mut buf, 0), fs::ERR_IO);
+    assert_eq!(t.fstat(h, &mut st), fs::ERR_IO);
+    assert_eq!(t.seek(h, 0, fs::SEEK_SET, &mut pos), fs::ERR_IO);
+    assert_eq!(t.sync(h), fs::ERR_IO);
+    assert_eq!(t.readdir(d, &mut e), fs::ERR_IO);
+    assert_eq!(t.stat(b"/media/sd0", &mut st), fs::ERR_NOENT);
+    assert_eq!(t.open(p, fs::O_READ), fs::ERR_NOENT);
+    assert_eq!(t.close(h), 0);
+    assert_eq!(t.close(h), fs::ERR_BADF);
+    assert_eq!(t.closedir(d), 0);
+    assert_eq!(t.closedir(d), fs::ERR_BADF);
+    // A handle kept across a remount is dead too: the generation moved twice.
+    let mut scratch = vec![0u8; 4096];
+    t.mount(golden("fat16-32m"), &mut scratch, fs_no_clock).unwrap();
+    let kept = t.open(b"/media/sd0", fs::O_READ);
+    assert_eq!(kept, fs::ERR_ISDIR);
+    let h1 = t.open(b"/media/sd0/kept.bin", fs::O_WRITE | fs::O_CREATE);
+    assert_eq!(h1, 0);
+    let g1 = t.generation();
+    t.unmount();
+    t.mount(golden("fat16-32m"), &mut scratch, fs_no_clock).unwrap();
+    assert!(t.generation() != g1 && t.mounted() && t.state() == fs::STATE_MOUNTED);
+    assert_eq!(t.read(h1, &mut buf), fs::ERR_IO);
+    assert_eq!(t.close(h1), 0);
+    // A fresh copy of the golden stands: the file of the first mount is not there (the device is a new copy), a fresh open takes slot 0.
+    assert_eq!(t.stat(b"/media/sd0/kept.bin", &mut st), fs::ERR_NOENT);
+    let h2 = t.open(b"/media/sd0/fresh.bin", fs::O_WRITE | fs::O_CREATE | fs::O_EXCL);
+    assert_eq!(h2, 0);
+    assert_eq!(t.close(h2), 0);
+    // A refused volume: the unreadable state with the refusal's words, kept until the unmount.
+    assert!(t.mount(Sparse::blank(2048), &mut scratch, fs_no_clock).is_err());
+    assert_eq!((t.state(), t.why(), t.mounted()), (fs::STATE_UNREADABLE, "no boot signature", false));
+    assert_eq!(t.mount_desc(0, &mut d_rec), 0);
+    assert_eq!((d_rec.state, MountDesc::text(&d_rec.why)), (fs::STATE_UNREADABLE, &b"no boot signature"[..]));
+    assert_eq!(t.open(b"/media/sd0/x", fs::O_READ), fs::ERR_NOENT);
+    t.unmount();
+    assert_eq!((t.state(), t.why()), (fs::STATE_NO_CARD, ""));
+    // A device that answers no device at the mount is the no-card state, not unreadable.
+    struct Gone;
+    impl crate::fat::BlockDevice for Gone {
+        fn blocks(&mut self) -> u32 {
+            0
+        }
+        fn read(&mut self, _lba: u32, _buf: &mut [u8]) -> Result<(), crate::fat::Error> {
+            Err(crate::fat::Error::NoDevice)
+        }
+        fn write(&mut self, _lba: u32, _data: &[u8]) -> Result<(), crate::fat::Error> {
+            Err(crate::fat::Error::NoDevice)
+        }
+        fn sync(&mut self) -> Result<(), crate::fat::Error> {
+            Err(crate::fat::Error::NoDevice)
+        }
+    }
+    let mut g: Table<Gone> = Table::new();
+    assert!(g.mount(Gone, &mut scratch, fs_no_clock).is_err());
+    assert_eq!((g.state(), g.why()), (fs::STATE_NO_CARD, ""));
+}
+
+#[test]
+fn fs_doors_no_volume_shape() {
+    // A socket with no card: the table's row with the no-card state and no figures, every path absent, every handle outside the tables, the flags judged first.
+    let mut t: Table<Sparse> = Table::new();
+    assert_eq!((t.state(), t.mounted(), t.fat_width(), t.why()), (fs::STATE_NO_CARD, false, 0, ""));
+    let mut d = MountDesc::EMPTY;
+    assert_eq!(t.mount_desc(0, &mut d), 0);
+    assert_eq!(d, MountDesc { point: *b"/media/sd0\0\0\0\0\0\0", device: 0, state: fs::STATE_NO_CARD, fat_width: 0, cluster_bytes: 0, clusters: 0, free_clusters: 0, label: [0; 12], why: [0; 24] });
+    let mut st = StatDesc::EMPTY;
+    let mut sf = StatfsDesc::EMPTY;
+    let mut e = Dirent::EMPTY;
+    let mut pos = 0;
+    let mut buf = [0u8; 4];
+    for p in [&b"/media/sd0"[..], b"/media/sd0/x", b"/", b"/tmp/x"] {
+        assert_eq!(t.open(p, fs::O_READ), fs::ERR_NOENT);
+        assert_eq!(t.stat(p, &mut st), fs::ERR_NOENT);
+        assert_eq!(t.unlink(p), fs::ERR_NOENT);
+        assert_eq!(t.mkdir(p), fs::ERR_NOENT);
+        assert_eq!(t.rmdir(p), fs::ERR_NOENT);
+        assert_eq!(t.rename(p, b"/media/sd0/y"), fs::ERR_NOENT);
+        assert_eq!(t.opendir(p), fs::ERR_NOENT);
+        assert_eq!(t.statfs(p, &mut sf), fs::ERR_NOENT);
+    }
+    assert_eq!(t.open(b"media/sd0/x", fs::O_READ), fs::ERR_INVAL);
+    assert_eq!(t.open(b"/media/sd0/x", 0), fs::ERR_INVAL);
+    for h in [0, 3, 15, 16, -1] {
+        assert_eq!(t.read(h, &mut buf), fs::ERR_BADF);
+        assert_eq!(t.close(h), fs::ERR_BADF);
+        assert_eq!(t.fstat(h, &mut st), fs::ERR_BADF);
+        assert_eq!(t.seek(h, 0, fs::SEEK_SET, &mut pos), fs::ERR_BADF);
+        assert_eq!(t.readdir(h, &mut e), fs::ERR_BADF);
+        assert_eq!(t.closedir(h), fs::ERR_BADF);
+    }
+    assert_eq!(t.seek(0, 0, 9, &mut pos), fs::ERR_INVAL, "a bad whence is judged before the handle");
+    assert_eq!(t.pread(0, &mut buf, -5), fs::ERR_INVAL, "a bad offset is judged before the handle");
+    // The records' sizes are the header's.
+    assert_eq!((std::mem::size_of::<MountDesc>(), std::mem::size_of::<StatDesc>(), std::mem::size_of::<Dirent>(), std::mem::size_of::<StatfsDesc>()), (76, 40, 264, 16));
 }

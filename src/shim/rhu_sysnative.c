@@ -26,19 +26,19 @@
 #include "mgc_board_rows.h"
 #include "rhu.h"
 #include "rhu_glibc_arm32.h"
-#include "rhu_pal_console_net11_rc2.h"
-#include "rhu_pal_environment_net11_rc2.h"
-#include "rhu_pal_errno_net11_rc2.h"
-#include "rhu_pal_io_net11_rc2.h"
-#include "rhu_pal_log_net11_rc2.h"
-#include "rhu_pal_memory_net11_rc2.h"
-#include "rhu_pal_process_net11_rc2.h"
-#include "rhu_pal_random_net11_rc2.h"
-#include "rhu_pal_signal_net11_rc2.h"
-#include "rhu_pal_surface_net11_rc2.h"
-#include "rhu_pal_threading_net11_rc2.h"
-#include "rhu_pal_time_net11_rc2.h"
-#include "rhu_pal_uid_net11_rc2.h"
+#include "rhu_pal_console_net11_rc3.h"
+#include "rhu_pal_environment_net11_rc3.h"
+#include "rhu_pal_errno_net11_rc3.h"
+#include "rhu_pal_io_net11_rc3.h"
+#include "rhu_pal_log_net11_rc3.h"
+#include "rhu_pal_memory_net11_rc3.h"
+#include "rhu_pal_process_net11_rc3.h"
+#include "rhu_pal_random_net11_rc3.h"
+#include "rhu_pal_signal_net11_rc3.h"
+#include "rhu_pal_surface_net11_rc3.h"
+#include "rhu_pal_threading_net11_rc3.h"
+#include "rhu_pal_time_net11_rc3.h"
+#include "rhu_pal_uid_net11_rc3.h"
 
 #ifndef RHU_SHIM_BREAK_FD_BASE
 _Static_assert(RHU_SHIM_FD_FILE_LO >= RHU_SHIM_FD_CONSOLE_HI, "the file band starts above the console band");
@@ -102,7 +102,7 @@ int32_t SystemNative_ConvertErrorPalToPlatform(int32_t error)
     }
 }
 
-/* The errno doors carry the RAW platform errno, as the runtime's own
+/* The errno functions carry the RAW platform errno, as the runtime's own
  * pal_errno.c does, and the managed side converts the number to its own
  * code through ConvertErrorPlatformToPal itself. A P/Invoke marked
  * SetLastError saves what GetErrNo answers, and a caller's
@@ -310,10 +310,11 @@ static int file_find(const char *path)
     return -1;
 }
 
-/* The implicit roots exist without being made. */
+/* The implicit roots exist without being made; /media is the one the
+ * card's point lives under. */
 static int dir_exists(const char *path)
 {
-    if (strcmp(path, "/") == 0 || strcmp(path, "/tmp") == 0 || strcmp(path, "/dev") == 0)
+    if (strcmp(path, "/") == 0 || strcmp(path, "/tmp") == 0 || strcmp(path, "/dev") == 0 || strcmp(path, "/media") == 0)
         return 1;
     for (int i = 0; i < RFS_DIRS; i++) {
         if (g_dirs[i].used != 0 && strcmp(g_dirs[i].path, path) == 0)
@@ -649,8 +650,712 @@ static intptr_t open_locked(const char *path, int32_t flags, int32_t mode)
     return RHU_SHIM_FD_FILE_LO + di;
 }
 
+/* ------------------------------------------------------------------ */
+/* the card's files: the volume the kernel mounts at /media/sd0        */
+/* ------------------------------------------------------------------ */
+
+/* A path under the mount point reaches the kernel's file API (rhu.h's
+ * rhu_fs_* family over the FAT layer); every other path reaches the store
+ * above. The kernel mounts the first socket's card at /media/sd0 while a
+ * card is seated and drops the mount when it leaves, so the point exists,
+ * or answers ENOENT, by the kernel's answer alone: nothing here caches
+ * the mount, and /media itself is a directory of the store that lists
+ * sd0 while the volume stands. THE DESCRIPTORS: the storage band
+ * (RHU_SHIM_FD_STORAGE_LO, sixteen descriptors) carries one descriptor
+ * per open of a kernel file handle; a dup is a second descriptor on the
+ * same handle, the position shared as Linux shares it, and the handle
+ * closes with its last descriptor. A directory stream is an iterator
+ * over one kernel directory handle. THE ERRORS: the kernel's negative
+ * code is Linux's errno, so the map is the sign; a handle whose card left
+ * answers EIO at every verb but its close, the kernel's hot-swap rule
+ * passed through. THE LOCK: the kernel's calls run outside the store's
+ * lock (each waits for another thread's call on the family to end); the
+ * band's table is kept under the store's lock, taken for the slot alone.
+ * THE RECORDS: a status record carries the kind and the read-only
+ * attribute as the mode, the size, the write time as the modification
+ * and change times, the creation time as the birth time, the access date,
+ * the first cluster as the inode number and this unit's own device
+ * number; the mount-point list names the point while the volume stands,
+ * its space is the kernel's cluster counts and its type name is the one
+ * Linux gives a FAT volume. Not served on the card, each an honest
+ * refusal (ENOTSUP) because the layer carries no such attribute: a mode
+ * change and a set of the times. */
+#define SDFS_POINT "/media/sd0"
+#define SDFS_POINT_LEN 10
+#define SDFS_MEDIA "/media"
+#define SDFS_DEV 2           /* the status record's device number for the card (the store's is 1) */
+#define SDFS_TYPE_NAME "vfat"
+#define SDFS_TYPE_NUMBER (-1) /* the name is in the buffer: the number the library's own answer carries where the system names its types (-1), the managed side taking the name from the buffer on it alone */
+#define SDFS_HANDLES 16      /* the kernel's file handles, 0 to 15 */
+#define SDFS_NORM 256        /* a path copied for one dropped trailing slash; longer paths go as given */
+#define SDFS_COPY_CHUNK 256
+
+/* The kernel's file family as this unit calls it, a table of the exports:
+ * the gate's ladder scripts a kernel through the weak hook below (an image
+ * that defines rhu_sdfs_kernel_hook strongly serves its own table, in this
+ * order; every other image keeps the kernel's own functions). */
+typedef struct sdfs_kernel {
+    int32_t (*mount_count)(void);
+    int32_t (*mount)(uint32_t index, rhu_fs_mount_desc *out);
+    int32_t (*open)(const char *path, uint32_t flags);
+    int32_t (*close)(int32_t h);
+    int32_t (*read)(int32_t h, void *buf, uint32_t n);
+    int32_t (*write)(int32_t h, const void *buf, uint32_t n);
+    int32_t (*pread)(int32_t h, void *buf, uint32_t n, int64_t offset);
+    int32_t (*pwrite)(int32_t h, const void *buf, uint32_t n, int64_t offset);
+    int32_t (*seek)(int32_t h, int64_t offset, uint32_t whence, int64_t *pos);
+    int32_t (*truncate)(int32_t h, int64_t len);
+    int32_t (*sync)(int32_t h);
+    int32_t (*fstat)(int32_t h, rhu_fs_stat_desc *out);
+    int32_t (*stat)(const char *path, rhu_fs_stat_desc *out);
+    int32_t (*unlink)(const char *path);
+    int32_t (*mkdir)(const char *path);
+    int32_t (*rmdir)(const char *path);
+    int32_t (*rename)(const char *old_path, const char *new_path);
+    int32_t (*opendir)(const char *path);
+    int32_t (*readdir)(int32_t h, rhu_fs_dirent *out);
+    int32_t (*closedir)(int32_t h);
+    int32_t (*statfs)(const char *path, rhu_fs_statfs_desc *out);
+} sdfs_kernel;
+
+static const sdfs_kernel g_sdfs_exports = {
+    rhu_fs_mount_count, rhu_fs_mount, rhu_fs_open, rhu_fs_close, rhu_fs_read, rhu_fs_write, rhu_fs_pread, rhu_fs_pwrite,
+    rhu_fs_seek, rhu_fs_truncate, rhu_fs_sync, rhu_fs_fstat, rhu_fs_stat, rhu_fs_unlink, rhu_fs_mkdir, rhu_fs_rmdir,
+    rhu_fs_rename, rhu_fs_opendir, rhu_fs_readdir, rhu_fs_closedir, rhu_fs_statfs,
+};
+
+const sdfs_kernel *rhu_sdfs_kernel_hook(void) __attribute__((weak));
+
+static const sdfs_kernel *sdfs_k(void)
+{
+    return rhu_sdfs_kernel_hook != NULL ? rhu_sdfs_kernel_hook() : &g_sdfs_exports;
+}
+
+/* A descriptor of the storage band. */
+typedef struct sdfs_fd {
+    uint8_t used;
+    uint8_t handle;   /* the kernel's file handle, 0 to 15 */
+    uint8_t cloexec;  /* the close-on-exec bit, kept as bookkeeping */
+    uint8_t nonblock; /* the non-blocking flag, kept as bookkeeping */
+    int32_t access;   /* the access mode the open named */
+} sdfs_fd;
+
+static sdfs_fd g_sdfds[RHU_SHIM_FD_STORAGE_COUNT];
+static uint8_t g_sdfs_opens[SDFS_HANDLES]; /* the band's descriptors on each kernel handle */
+
+/* A directory stream over one kernel directory handle; its first byte, 1,
+ * tells it from the store's iterator, whose first byte is 0. */
+typedef struct sdfs_iter {
+    uint8_t card;
+    int32_t handle;
+    char name[256];
+} sdfs_iter;
+
+static int sdfs_owns(const char *path)
+{
+    return path != NULL && strncmp(path, SDFS_POINT, SDFS_POINT_LEN) == 0 && (path[SDFS_POINT_LEN] == 0 || path[SDFS_POINT_LEN] == '/');
+}
+
+/* One trailing slash dropped, as the store keys its paths; a path too long
+ * for the copy goes to the kernel as given. */
+static const char *sdfs_norm(const char *path, char *buf)
+{
+    size_t n = strlen(path);
+    if (n <= SDFS_POINT_LEN + 1 || path[n - 1] != '/' || n >= SDFS_NORM)
+        return path;
+    memcpy(buf, path, n - 1);
+    buf[n - 1] = 0;
+    return buf;
+}
+
+/* The kernel's refusal as errno: the sign. */
+static int32_t sdfs_fail(int32_t r)
+{
+#ifdef RHU_SHIM_BREAK_SDFS_SIGN
+    ERRNO = r;
+#else
+    ERRNO = r < 0 ? -r : RHU_GERR_EIO;
+#endif
+    return -1;
+}
+
+static int sdfs_fd_in(intptr_t fd)
+{
+    return fd >= RHU_SHIM_FD_STORAGE_LO && fd < RHU_SHIM_FD_STORAGE_LO + RHU_SHIM_FD_STORAGE_COUNT;
+}
+
+/* The descriptor's handle and access mode, copied under the store's lock;
+ * -1 with EBADF for a slot not in use. */
+static int sdfs_take(intptr_t fd, uint8_t *handle, int32_t *access)
+{
+    if (!sdfs_fd_in(fd)) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    store_lock();
+    sdfs_fd *d = &g_sdfds[fd - RHU_SHIM_FD_STORAGE_LO];
+    if (d->used == 0) {
+        store_unlock();
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    *handle = d->handle;
+    *access = d->access;
+    store_unlock();
+    return 0;
+}
+
+/* Whether the volume stands: the kernel's mount record, read at the call. */
+static int sdfs_mounted(void)
+{
+    rhu_fs_mount_desc md;
+    const sdfs_kernel *k = sdfs_k();
+    if (k->mount_count() < 1 || k->mount(0, &md) != 0)
+        return 0;
+    return md.state == RHU_FS_MOUNTED;
+}
+
+static void sdfs_status(rhu_pal_filestatus *st, const rhu_fs_stat_desc *sd)
+{
+    memset(st, 0, sizeof *st);
+    st->Flags = 1; /* the birth time is stated */
+    if (sd->kind == RHU_FS_DIR) {
+        st->Mode = (int32_t)(RHU_PAL_S_IFDIR | 0x1EDu);
+    } else {
+        st->Mode = (int32_t)(RHU_PAL_S_IFREG | (sd->read_only != 0 ? 0x124u : 0x1B6u));
+        st->Size = (int64_t)sd->size;
+    }
+    st->ATime = sd->atime;
+    st->MTime = sd->mtime;
+    st->CTime = sd->mtime;
+    st->BirthTime = sd->ctime;
+    st->Dev = SDFS_DEV;
+    st->Ino = (int64_t)sd->first_cluster;
+    st->HardLinkCount = 1;
+}
+
+static intptr_t sdfs_open(const char *path, int32_t flags)
+{
+    char nb[SDFS_NORM];
+    uint32_t kf;
+    int32_t access = flags & RHU_PAL_O_ACCESS_MODE_MASK;
+    if (access == RHU_PAL_O_RDONLY)
+        kf = RHU_FS_O_READ;
+    else if (access == RHU_PAL_O_WRONLY)
+        kf = RHU_FS_O_WRITE;
+    else if (access == RHU_PAL_O_RDWR)
+        kf = RHU_FS_O_READ | RHU_FS_O_WRITE;
+    else {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    if ((flags & RHU_PAL_O_CREAT) != 0)
+        kf |= RHU_FS_O_CREATE;
+    if ((flags & RHU_PAL_O_EXCL) != 0)
+        kf |= RHU_FS_O_EXCL;
+    if ((flags & RHU_PAL_O_TRUNC) != 0)
+        kf |= RHU_FS_O_TRUNC;
+    /* The slot is taken before the kernel's call, so two openers never
+     * share it; a refused open gives it back. */
+    store_lock();
+    int di = -1;
+    for (int i = 0; i < RHU_SHIM_FD_STORAGE_COUNT && di < 0; i++) {
+        if (g_sdfds[i].used == 0)
+            di = i;
+    }
+    if (di < 0) {
+        store_unlock();
+        rhu_shim_log("%s: no descriptor free (EMFILE: %d card descriptors are open)", path, RHU_SHIM_FD_STORAGE_COUNT);
+        ERRNO = RHU_GERR_EMFILE;
+        return -1;
+    }
+    g_sdfds[di].used = 1;
+    store_unlock();
+    int32_t h = sdfs_k()->open(sdfs_norm(path, nb), kf);
+    if (h >= 0 && h >= SDFS_HANDLES) {
+        sdfs_k()->close(h);
+        h = RHU_EIO;
+    }
+    store_lock();
+    if (h < 0) {
+        memset(&g_sdfds[di], 0, sizeof g_sdfds[di]);
+        store_unlock();
+        return sdfs_fail(h);
+    }
+    g_sdfds[di].handle = (uint8_t)h;
+    g_sdfds[di].cloexec = (flags & RHU_PAL_O_CLOEXEC) != 0;
+    g_sdfds[di].nonblock = 0;
+    g_sdfds[di].access = access;
+    g_sdfs_opens[h]++;
+    store_unlock();
+    return RHU_SHIM_FD_STORAGE_LO + di;
+}
+
+static int32_t sdfs_close(intptr_t fd)
+{
+    store_lock();
+    sdfs_fd *d = &g_sdfds[fd - RHU_SHIM_FD_STORAGE_LO];
+    if (d->used == 0) {
+        store_unlock();
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    uint8_t h = d->handle;
+#ifdef RHU_SHIM_BREAK_SDFS_DUP_CLOSES
+    int last = 1;
+    g_sdfs_opens[h] = 0;
+#else
+    int last = --g_sdfs_opens[h] == 0;
+#endif
+    memset(d, 0, sizeof *d);
+#ifdef RHU_SHIM_BREAK_SDFS_CLOSE_KEEPS
+    d->used = 1; /* built with this define, the slot stays in use */
+#endif
+    store_unlock();
+    if (!last)
+        return 0;
+    int32_t r = sdfs_k()->close(h);
+    return r < 0 ? sdfs_fail(r) : 0;
+}
+
+static intptr_t sdfs_dup(intptr_t oldfd)
+{
+    store_lock();
+    sdfs_fd *d = &g_sdfds[oldfd - RHU_SHIM_FD_STORAGE_LO];
+    if (d->used == 0) {
+        store_unlock();
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    int di = -1;
+    for (int i = 0; i < RHU_SHIM_FD_STORAGE_COUNT && di < 0; i++) {
+        if (g_sdfds[i].used == 0)
+            di = i;
+    }
+    if (di < 0) {
+        store_unlock();
+        ERRNO = RHU_GERR_EMFILE;
+        return -1;
+    }
+    g_sdfds[di].used = 1;
+    g_sdfds[di].handle = d->handle;
+    g_sdfds[di].cloexec = 0;
+    g_sdfds[di].nonblock = d->nonblock;
+    g_sdfds[di].access = d->access;
+    g_sdfs_opens[d->handle]++;
+    store_unlock();
+    return RHU_SHIM_FD_STORAGE_LO + di;
+}
+
+/* A transfer at the handle's position (use_pos) or at an offset; a
+ * descriptor opened without the access refuses as the store does. */
+static int32_t sdfs_pread(intptr_t fd, void *buffer, int32_t bufferSize, int64_t offset, int use_pos)
+{
+    uint8_t h;
+    int32_t access;
+    if (sdfs_take(fd, &h, &access) != 0)
+        return -1;
+    if (access == RHU_PAL_O_WRONLY) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    if (bufferSize < 0 || (buffer == NULL && bufferSize > 0)) {
+        ERRNO = RHU_GERR_EFAULT;
+        return -1;
+    }
+    int32_t r = use_pos ? sdfs_k()->read(h, buffer, (uint32_t)bufferSize) : sdfs_k()->pread(h, buffer, (uint32_t)bufferSize, offset);
+    return r < 0 ? sdfs_fail(r) : r;
+}
+
+static int32_t sdfs_pwrite(intptr_t fd, const void *buffer, int32_t bufferSize, int64_t offset, int use_pos)
+{
+    uint8_t h;
+    int32_t access;
+    if (sdfs_take(fd, &h, &access) != 0)
+        return -1;
+    if (access == RHU_PAL_O_RDONLY) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    if (bufferSize < 0 || (buffer == NULL && bufferSize > 0)) {
+        ERRNO = RHU_GERR_EFAULT;
+        return -1;
+    }
+    int32_t r = use_pos ? sdfs_k()->write(h, buffer, (uint32_t)bufferSize) : sdfs_k()->pwrite(h, buffer, (uint32_t)bufferSize, offset);
+    return r < 0 ? sdfs_fail(r) : r;
+}
+
+static int64_t sdfs_lseek(intptr_t fd, int64_t offset, int32_t whence)
+{
+    uint8_t h;
+    int32_t access;
+    int64_t pos = 0;
+    if (sdfs_take(fd, &h, &access) != 0)
+        return -1;
+    uint32_t kw = whence == RHU_PAL_SEEK_SET ? RHU_FS_SEEK_SET : whence == RHU_PAL_SEEK_CUR ? RHU_FS_SEEK_CUR : whence == RHU_PAL_SEEK_END ? RHU_FS_SEEK_END : 0xFFFFFFFFu;
+    if (kw == 0xFFFFFFFFu) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    int32_t r = sdfs_k()->seek(h, offset, kw, &pos);
+    return r < 0 ? sdfs_fail(r) : pos;
+}
+
+static int32_t sdfs_fstat(intptr_t fd, rhu_pal_filestatus *output)
+{
+    uint8_t h;
+    int32_t access;
+    rhu_fs_stat_desc sd;
+    if (sdfs_take(fd, &h, &access) != 0) {
+        memset(output, 0, sizeof *output);
+        return -1;
+    }
+    int32_t r = sdfs_k()->fstat(h, &sd);
+    if (r < 0) {
+        memset(output, 0, sizeof *output);
+        return sdfs_fail(r);
+    }
+    sdfs_status(output, &sd);
+    return 0;
+}
+
+static int32_t sdfs_stat(const char *path, rhu_pal_filestatus *output)
+{
+    char nb[SDFS_NORM];
+    rhu_fs_stat_desc sd;
+    int32_t r = sdfs_k()->stat(sdfs_norm(path, nb), &sd);
+    if (r < 0) {
+        memset(output, 0, sizeof *output);
+        return sdfs_fail(r);
+    }
+    sdfs_status(output, &sd);
+    return 0;
+}
+
+/* Present when the kernel's status answers; a write asked of a read-only
+ * file is refused, and a file is never executable. */
+static int32_t sdfs_access(const char *path, int32_t mode)
+{
+    char nb[SDFS_NORM];
+    rhu_fs_stat_desc sd;
+    int32_t r = sdfs_k()->stat(sdfs_norm(path, nb), &sd);
+    if (r < 0)
+        return sdfs_fail(r);
+    if ((mode & RHU_PAL_W_OK) != 0 && sd.read_only != 0) {
+        ERRNO = RHU_GERR_EACCES;
+        return -1;
+    }
+    if ((mode & RHU_PAL_X_OK) != 0 && sd.kind != RHU_FS_DIR) {
+        ERRNO = RHU_GERR_EACCES;
+        return -1;
+    }
+    return 0;
+}
+
+static int32_t sdfs_ftruncate(intptr_t fd, int64_t length)
+{
+    uint8_t h;
+    int32_t access;
+    if (sdfs_take(fd, &h, &access) != 0)
+        return -1;
+    if (access == RHU_PAL_O_RDONLY) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    int32_t r = sdfs_k()->truncate(h, length);
+    return r < 0 ? sdfs_fail(r) : 0;
+}
+
+static int32_t sdfs_fsync(intptr_t fd)
+{
+    uint8_t h;
+    int32_t access;
+    if (sdfs_take(fd, &h, &access) != 0)
+        return -1;
+    int32_t r = sdfs_k()->sync(h);
+    return r < 0 ? sdfs_fail(r) : 0;
+}
+
+/* The region grows to cover the request, zero-filled by the kernel's
+ * extension, as the library's preallocation does past the end. */
+static int32_t sdfs_fallocate(intptr_t fd, int64_t offset, int64_t length)
+{
+    uint8_t h;
+    int32_t access;
+    rhu_fs_stat_desc sd;
+    if (offset < 0 || length <= 0 || offset > 0xFFFFFFFFll - length) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    if (sdfs_take(fd, &h, &access) != 0)
+        return -1;
+    if (access == RHU_PAL_O_RDONLY) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    int32_t r = sdfs_k()->fstat(h, &sd);
+    if (r < 0)
+        return sdfs_fail(r);
+    if (offset + length <= (int64_t)sd.size)
+        return 0;
+    r = sdfs_k()->truncate(h, offset + length);
+    return r < 0 ? sdfs_fail(r) : 0;
+}
+
+static int32_t sdfs_unlink(const char *path)
+{
+    char nb[SDFS_NORM];
+    int32_t r = sdfs_k()->unlink(sdfs_norm(path, nb));
+    return r < 0 ? sdfs_fail(r) : 0;
+}
+
+static int32_t sdfs_mkdir(const char *path)
+{
+    char nb[SDFS_NORM];
+    int32_t r = sdfs_k()->mkdir(sdfs_norm(path, nb));
+    return r < 0 ? sdfs_fail(r) : 0;
+}
+
+static int32_t sdfs_rmdir(const char *path)
+{
+    char nb[SDFS_NORM];
+    int32_t r = sdfs_k()->rmdir(sdfs_norm(path, nb));
+    return r < 0 ? sdfs_fail(r) : 0;
+}
+
+/* A rename stays within the volume: one end on the card and the other in
+ * the store is a move across file systems, which the library's rename
+ * refuses (EXDEV) and the class library then does as a copy. */
+static int32_t sdfs_rename(const char *oldPath, const char *newPath)
+{
+    char ob[SDFS_NORM];
+    char nb[SDFS_NORM];
+    if (!sdfs_owns(oldPath) || !sdfs_owns(newPath)) {
+        ERRNO = RHU_GERR_EXDEV;
+        return -1;
+    }
+    int32_t r = sdfs_k()->rename(sdfs_norm(oldPath, ob), sdfs_norm(newPath, nb));
+    return r < 0 ? sdfs_fail(r) : 0;
+}
+
+static void *sdfs_opendir(const char *path)
+{
+    char nb[SDFS_NORM];
+    int32_t h = sdfs_k()->opendir(sdfs_norm(path, nb));
+    if (h < 0) {
+        sdfs_fail(h);
+        return NULL;
+    }
+    sdfs_iter *it = (sdfs_iter *)malloc(sizeof *it);
+    if (it == NULL) {
+        sdfs_k()->closedir(h);
+        ERRNO = RHU_GERR_ENOMEM;
+        return NULL;
+    }
+    memset(it, 0, sizeof *it);
+    it->card = 1;
+    it->handle = h;
+    return it;
+}
+
+/* One entry per call from the kernel, the name kept in the iterator until
+ * the next call: 0 with an entry, -1 at the end, an errno value on a
+ * refusal (the PAL's contract for the directory reader). */
+static int32_t sdfs_readdir(sdfs_iter *it, rhu_pal_directoryentry *outputEntry)
+{
+    rhu_fs_dirent de;
+    int32_t r = sdfs_k()->readdir(it->handle, &de);
+    if (r < 0) {
+        memset(outputEntry, 0, sizeof *outputEntry);
+        return -r;
+    }
+    if (r == 0) {
+        memset(outputEntry, 0, sizeof *outputEntry);
+        return -1;
+    }
+    memcpy(it->name, de.name, sizeof it->name);
+    it->name[sizeof it->name - 1] = 0;
+    outputEntry->Name = it->name;
+    outputEntry->NameLength = -1;
+    outputEntry->InodeType = de.kind == RHU_FS_DIR ? RHU_PAL_DT_DIR : RHU_PAL_DT_REG;
+    return 0;
+}
+
+static int32_t sdfs_closedir(sdfs_iter *it)
+{
+    int32_t r = sdfs_k()->closedir(it->handle);
+    free(it);
+    return r < 0 ? sdfs_fail(r) : 0;
+}
+
+/* The copy runs over the two descriptors' own bands through the public
+ * verbs, so either end may be the card or the store: the source read by
+ * position from its start, the destination written at its position. */
+static int32_t sdfs_copy(intptr_t sourceFd, intptr_t destinationFd)
+{
+    uint8_t chunk[SDFS_COPY_CHUNK];
+    int64_t at = 0;
+    for (;;) {
+        int32_t n = SystemNative_PRead(sourceFd, chunk, (int32_t)sizeof chunk, at);
+        if (n < 0)
+            return -1;
+        if (n == 0)
+            return 0;
+        int32_t done = 0;
+        while (done < n) {
+            int32_t w = SystemNative_Write(destinationFd, chunk + done, n - done);
+            if (w <= 0) {
+                if (w == 0)
+                    ERRNO = RHU_GERR_ENOSPC;
+                return -1;
+            }
+            done += w;
+        }
+        at += n;
+    }
+}
+
+/* The kernel's sync of every handle the band holds open. */
+static void sdfs_sync_all(void)
+{
+    for (int h = 0; h < SDFS_HANDLES; h++) {
+        store_lock();
+        int open = g_sdfs_opens[h] != 0;
+        store_unlock();
+        if (open)
+            sdfs_k()->sync(h);
+    }
+}
+
+/* The volume's space as the kernel counts it, for the point or a path
+ * under it; ENOENT while no volume stands. */
+static int32_t sdfs_space(const char *name, rhu_pal_mountpointinformation *mpi)
+{
+    char nb[SDFS_NORM];
+    rhu_fs_statfs_desc sf;
+    int32_t r = sdfs_k()->statfs(sdfs_norm(name, nb), &sf);
+    if (r < 0)
+        return sdfs_fail(r);
+    mpi->TotalSize = (uint64_t)sf.blocks * (uint64_t)sf.block_size;
+    mpi->TotalFreeSpace = (uint64_t)sf.free * (uint64_t)sf.block_size;
+    mpi->AvailableFreeSpace = mpi->TotalFreeSpace;
+    return 0;
+}
+
+static int32_t sdfs_type_name(const char *name, char *formatNameBuffer, int32_t bufferLength, int64_t *formatType)
+{
+    char nb[SDFS_NORM];
+    rhu_fs_stat_desc sd;
+    if (bufferLength < (int32_t)sizeof SDFS_TYPE_NAME) {
+        ERRNO = RHU_GERR_EINVAL;
+        return -1;
+    }
+    int32_t r = sdfs_k()->stat(sdfs_norm(name, nb), &sd);
+    if (r < 0)
+        return sdfs_fail(r);
+    memcpy(formatNameBuffer, SDFS_TYPE_NAME, sizeof SDFS_TYPE_NAME);
+    *formatType = SDFS_TYPE_NUMBER;
+    return 0;
+}
+
+/* The descriptor's bookkeeping bits, read and written under the store's
+ * lock; a slot not in use is EBADF. sdfs_valid_locked serves a caller
+ * that already holds the lock (the poll loop). */
+static int sdfs_valid_locked(intptr_t fd)
+{
+    return sdfs_fd_in(fd) && g_sdfds[fd - RHU_SHIM_FD_STORAGE_LO].used != 0;
+}
+
+static int sdfs_valid(intptr_t fd)
+{
+    store_lock();
+    int v = sdfs_valid_locked(fd);
+    store_unlock();
+    return v;
+}
+
+static int32_t sdfs_fcntl_getfd(intptr_t fd)
+{
+    store_lock();
+    sdfs_fd *d = &g_sdfds[fd - RHU_SHIM_FD_STORAGE_LO];
+    int32_t r = d->used != 0 ? (d->cloexec != 0 ? 1 : 0) : -1;
+    store_unlock();
+    if (r < 0)
+        ERRNO = RHU_GERR_EBADF;
+    return r;
+}
+
+static int32_t sdfs_fcntl_setfd(intptr_t fd, int32_t flags)
+{
+    store_lock();
+    sdfs_fd *d = &g_sdfds[fd - RHU_SHIM_FD_STORAGE_LO];
+    int used = d->used != 0;
+    if (used)
+        d->cloexec = (flags & 1) != 0 ? 1u : 0u;
+    store_unlock();
+    if (!used) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    return 0;
+}
+
+/* The non-blocking flag: read into *out when out is given, else set to
+ * value. */
+static int32_t sdfs_nonblock(intptr_t fd, int32_t *out, int32_t value)
+{
+    store_lock();
+    sdfs_fd *d = &g_sdfds[fd - RHU_SHIM_FD_STORAGE_LO];
+    int used = d->used != 0;
+    if (used) {
+        if (out != NULL)
+            *out = d->nonblock != 0 ? 1 : 0;
+        else
+            d->nonblock = value != 0 ? 1u : 0u;
+    }
+    store_unlock();
+    if (!used) {
+        ERRNO = RHU_GERR_EBADF;
+        return -1;
+    }
+    return 0;
+}
+
+static void temp_stamp(char *tmpl, size_t xs_end); /* the store's stamper, defined with its makers below */
+
+/* The temporary makers on the card: the stamped name tried exclusively,
+ * as the store's makers try theirs; a name taken moves on. */
+static char *sdfs_mkdtemp(char *pathTemplate, size_t xe)
+{
+    for (int tries = 0; tries < 64; tries++) {
+        temp_stamp(pathTemplate, xe);
+        if (sdfs_mkdir(pathTemplate) == 0)
+            return pathTemplate;
+        if (ERRNO != RHU_GERR_EEXIST)
+            return NULL;
+    }
+    ERRNO = RHU_GERR_EEXIST;
+    return NULL;
+}
+
+static intptr_t sdfs_mkstemps(char *pathTemplate, size_t xe)
+{
+    for (int tries = 0; tries < 64; tries++) {
+        temp_stamp(pathTemplate, xe);
+        intptr_t fd = sdfs_open(pathTemplate, RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL);
+        if (fd >= 0)
+            return fd;
+        if (ERRNO != RHU_GERR_EEXIST)
+            return -1;
+    }
+    ERRNO = RHU_GERR_EEXIST;
+    return -1;
+}
+
 intptr_t SystemNative_Open(const char *path, int32_t flags, int32_t mode)
 {
+    if (sdfs_owns(path))
+        return sdfs_open(path, flags);
     if (rhu_iiofs_owns(path))
         return rhu_iiofs_open(path, flags);
     if (rhu_pwmfs_owns(path))
@@ -665,6 +1370,8 @@ int32_t SystemNative_Close(intptr_t fd)
 {
     if (fd_is_console(fd))
         return 0;
+    if (sdfs_fd_in(fd))
+        return sdfs_close(fd);
     if (rhu_iiofs_fd(fd))
         return rhu_iiofs_close(fd);
     if (rhu_pwmfs_fd(fd))
@@ -687,6 +1394,8 @@ intptr_t SystemNative_Dup(intptr_t oldfd)
 {
     if (fd_is_console(oldfd))
         return oldfd;
+    if (sdfs_fd_in(oldfd))
+        return sdfs_dup(oldfd);
     if (rhu_iiofs_fd(oldfd))
         return rhu_iiofs_dup(oldfd);
     if (rhu_pwmfs_fd(oldfd))
@@ -707,6 +1416,8 @@ int32_t SystemNative_Read(intptr_t fd, void *buffer, int32_t bufferSize)
 {
     if (fd == 0)
         return rhu_console_read(buffer, (uint32_t)bufferSize);
+    if (sdfs_fd_in(fd))
+        return sdfs_pread(fd, buffer, bufferSize, 0, 1);
     if (rhu_iiofs_fd(fd))
         return rhu_iiofs_pread(fd, buffer, bufferSize, 0, 1);
     if (rhu_pwmfs_fd(fd))
@@ -725,7 +1436,7 @@ int32_t SystemNative_Read(intptr_t fd, void *buffer, int32_t bufferSize)
     return n;
 }
 
-/* The console door takes at most RHU_CONSOLE_MAX_WRITE bytes a call and
+/* The console function takes at most RHU_CONSOLE_MAX_WRITE bytes a call and
  * answers the count: a larger write goes out in bounded pieces and the
  * count written is answered. A NULL buffer with a count is EFAULT, a
  * negative count EINVAL; a refusal after some bytes went answers the
@@ -766,6 +1477,8 @@ int32_t SystemNative_Write(intptr_t fd, const void *buffer, int32_t bufferSize)
 {
     if (fd == 1 || fd == 2)
         return console_write_pieces(buffer, bufferSize);
+    if (sdfs_fd_in(fd))
+        return sdfs_pwrite(fd, buffer, bufferSize, 0, 1);
     if (rhu_iiofs_fd(fd))
         return rhu_iiofs_pwrite(fd, buffer, bufferSize, 0, 1);
     if (rhu_pwmfs_fd(fd))
@@ -786,6 +1499,8 @@ int32_t SystemNative_Write(intptr_t fd, const void *buffer, int32_t bufferSize)
 
 int32_t SystemNative_PRead(intptr_t fd, void *buffer, int32_t bufferSize, int64_t fileOffset)
 {
+    if (sdfs_fd_in(fd))
+        return sdfs_pread(fd, buffer, bufferSize, fileOffset, 0);
     if (rhu_iiofs_fd(fd))
         return rhu_iiofs_pread(fd, buffer, bufferSize, fileOffset, 0);
     if (rhu_pwmfs_fd(fd))
@@ -804,6 +1519,8 @@ int32_t SystemNative_PRead(intptr_t fd, void *buffer, int32_t bufferSize, int64_
 
 int32_t SystemNative_PWrite(intptr_t fd, void *buffer, int32_t bufferSize, int64_t fileOffset)
 {
+    if (sdfs_fd_in(fd))
+        return sdfs_pwrite(fd, buffer, bufferSize, fileOffset, 0);
     if (rhu_iiofs_fd(fd))
         return rhu_iiofs_pwrite(fd, buffer, bufferSize, fileOffset, 0);
     if (rhu_pwmfs_fd(fd))
@@ -827,6 +1544,21 @@ static int64_t vectored(intptr_t fd, rhu_pal_iovector *v, int32_t n, int64_t at,
     if (v == NULL || n < 0) {
         ERRNO = RHU_GERR_EFAULT;
         return -1;
+    }
+    if (sdfs_fd_in(fd)) {
+        /* A card descriptor takes its vectors one by one, the offsets as the
+         * plain forms take them. */
+        int64_t total = 0;
+        for (int32_t i = 0; i < n; i++) {
+            int32_t r = writing ? sdfs_pwrite(fd, v[i].Base, (int32_t)v[i].Count, at + total, !positional)
+                                : sdfs_pread(fd, v[i].Base, (int32_t)v[i].Count, at + total, !positional);
+            if (r < 0)
+                return total > 0 ? total : -1;
+            total += r;
+            if ((uintptr_t)r < v[i].Count)
+                break;
+        }
+        return total;
     }
     if (rhu_iiofs_fd(fd)) {
         /* An analog input device file takes its vectors one by one: each a
@@ -912,6 +1644,8 @@ int64_t SystemNative_PWriteV(intptr_t fd, rhu_pal_iovector *vectors, int32_t vec
  * the gap) but never past the maximum file size, and never below zero. */
 int64_t SystemNative_LSeek(intptr_t fd, int64_t offset, int32_t whence)
 {
+    if (sdfs_fd_in(fd))
+        return sdfs_lseek(fd, offset, whence);
     if (rhu_iiofs_fd(fd))
         return rhu_iiofs_lseek(fd, offset, whence);
     if (rhu_pwmfs_fd(fd))
@@ -991,6 +1725,8 @@ static int32_t ttydev_stat(const char *path, rhu_pal_filestatus *st)
  * other band is asked of its own owner, and a closed one is invalid. */
 int32_t SystemNative_FStat(intptr_t fd, rhu_pal_filestatus *output)
 {
+    if (sdfs_fd_in(fd))
+        return sdfs_fstat(fd, output);
     if (rhu_iiofs_fd(fd))
         return rhu_iiofs_fstat(fd, output);
     if (rhu_pwmfs_fd(fd))
@@ -1016,6 +1752,8 @@ int32_t SystemNative_FStat(intptr_t fd, rhu_pal_filestatus *output)
 
 int32_t SystemNative_Stat(const char *path, rhu_pal_filestatus *output)
 {
+    if (sdfs_owns(path))
+        return sdfs_stat(path, output);
     if (rhu_iiofs_owns(path))
         return rhu_iiofs_stat(path, output);
     if (rhu_pwmfs_owns(path))
@@ -1050,6 +1788,8 @@ int32_t SystemNative_LStat(const char *path, rhu_pal_filestatus *output)
 int32_t SystemNative_Unlink(const char *path)
 {
     char nb[RFS_PATH];
+    if (sdfs_owns(path))
+        return sdfs_unlink(path);
     path = path_norm(path, nb);
     store_lock();
     int fi = file_find(path);
@@ -1093,6 +1833,8 @@ int32_t SystemNative_MkDir(const char *path, int32_t mode)
 {
     char nb[RFS_PATH];
     (void)mode;
+    if (sdfs_owns(path))
+        return sdfs_mkdir(path);
     path = path_norm(path, nb);
     store_lock();
     int32_t r = mkdir_locked(path);
@@ -1131,6 +1873,8 @@ static int32_t rmdir_locked(const char *path)
 int32_t SystemNative_RmDir(const char *path)
 {
     char nb[RFS_PATH];
+    if (sdfs_owns(path))
+        return sdfs_rmdir(path);
     path = path_norm(path, nb);
     store_lock();
     int32_t r = rmdir_locked(path);
@@ -1173,6 +1917,8 @@ int32_t SystemNative_Rename(const char *oldPath, const char *newPath)
 {
     char ob[RFS_PATH];
     char nb[RFS_PATH];
+    if (sdfs_owns(oldPath) || sdfs_owns(newPath))
+        return sdfs_rename(oldPath, newPath);
     oldPath = path_norm(oldPath, ob);
     newPath = path_norm(newPath, nb);
     store_lock();
@@ -1185,6 +1931,8 @@ int32_t SystemNative_FSync(intptr_t fd)
 {
     if (fd_is_console(fd))
         return 0;
+    if (sdfs_fd_in(fd))
+        return sdfs_fsync(fd);
     if (rhu_iiofs_fd(fd))
         return rhu_iiofs_fsync(fd);
     if (rhu_pwmfs_fd(fd))
@@ -1247,6 +1995,12 @@ static int32_t flock_locked(intptr_t fd, int32_t operation)
 
 int32_t SystemNative_FLock(intptr_t fd, int32_t operation)
 {
+    if (sdfs_fd_in(fd)) {
+        /* One program: a lock on a card descriptor is granted and records nothing. */
+        uint8_t h;
+        int32_t access;
+        return sdfs_take(fd, &h, &access) == 0 ? 0 : -1;
+    }
     if (rhu_iiofs_fd(fd))
         return rhu_iiofs_flock(fd, operation);
     if (rhu_pwmfs_fd(fd))
@@ -1272,10 +2026,16 @@ char *realpath(const char *path, char *resolved)
         ERRNO = RHU_GERR_EINVAL;
         return NULL;
     }
-    path = path_norm(path, nb);
-    store_lock();
-    int present = file_find(path) >= 0 || dir_exists(path);
-    store_unlock();
+    int present;
+    if (sdfs_owns(path)) {
+        rhu_fs_stat_desc sd;
+        present = sdfs_k()->stat(path, &sd) == 0;
+    } else {
+        path = path_norm(path, nb);
+        store_lock();
+        present = file_find(path) >= 0 || dir_exists(path);
+        store_unlock();
+    }
     if (!present) {
         ERRNO = RHU_GERR_ENOENT;
         return NULL;
@@ -1294,6 +2054,8 @@ char *realpath(const char *path, char *resolved)
 
 int32_t SystemNative_Access(const char *path, int32_t mode)
 {
+    if (sdfs_owns(path))
+        return sdfs_access(path, mode);
     if (rhu_iiofs_owns(path))
         return rhu_iiofs_access(path, mode);
     if (rhu_pwmfs_owns(path))
@@ -1358,6 +2120,8 @@ static int32_t ftruncate_locked(intptr_t fd, int64_t length)
 
 int32_t SystemNative_FTruncate(intptr_t fd, int64_t length)
 {
+    if (sdfs_fd_in(fd))
+        return sdfs_ftruncate(fd, length);
     if (rhu_iiofs_fd(fd))
         return rhu_iiofs_ftruncate(fd, length);
     if (rhu_pwmfs_fd(fd))
@@ -1369,6 +2133,8 @@ int32_t SystemNative_FTruncate(intptr_t fd, int64_t length)
 }
 
 typedef struct rfs_iter {
+    uint8_t card;  /* 0: the store's iterator; the card's (sdfs_iter) carries 1 in its first byte */
+    uint8_t media; /* under /media: the card's point listed first while its volume stands */
     char dir[RFS_PATH];
     int idx;
     uint32_t tty; /* under /dev: the serial device files listed so far */
@@ -1378,6 +2144,8 @@ typedef struct rfs_iter {
 void *SystemNative_OpenDir(const char *path)
 {
     char nb[RFS_PATH];
+    if (sdfs_owns(path))
+        return sdfs_opendir(path);
     path = path_norm(path, nb);
     store_lock();
     if (!dir_exists(path)) {
@@ -1398,18 +2166,23 @@ void *SystemNative_OpenDir(const char *path)
     }
     memset(it, 0, sizeof *it);
     strcpy(it->dir, path);
+    it->media = strcmp(path, SDFS_MEDIA) == 0;
     return it;
 }
 
 int32_t SystemNative_CloseDir(void *dir)
 {
+    if (dir != NULL && *(const uint8_t *)dir != 0)
+        return sdfs_closedir((sdfs_iter *)dir);
     free(dir);
     return 0;
 }
 
-/* The entry's name lives in the iterator until the next call. Under /dev
+/* The entry's name lives in the iterator until the next call. A card
+ * iterator reads the kernel's directory handle. Under /dev
  * the serial device files come first, in the board's row order, as
- * character devices; then the index
+ * character devices; under /media the card's point comes first while its
+ * volume stands; then the index
  * walks the file table (the named objects), then the directory table.
  * Returns 0 with an entry, -1 at the end of the stream, and an errno
  * value on a broken iterator. */
@@ -1419,6 +2192,18 @@ int32_t SystemNative_ReadDir(void *dir, rhu_pal_directoryentry *outputEntry)
     if (it == NULL) {
         memset(outputEntry, 0, sizeof *outputEntry);
         return RHU_GERR_EBADF;
+    }
+    if (it->card != 0)
+        return sdfs_readdir((sdfs_iter *)dir, outputEntry);
+    if (it->media != 0) {
+        it->media = 0;
+        if (sdfs_mounted()) {
+            strcpy(it->name, "sd0");
+            outputEntry->Name = it->name;
+            outputEntry->NameLength = -1;
+            outputEntry->InodeType = RHU_PAL_DT_DIR;
+            return 0;
+        }
     }
     if (strcmp(it->dir, "/dev") == 0 && rhu_ttydev_name(it->tty, it->name, sizeof it->name)) {
         it->tty++;
@@ -1487,7 +2272,7 @@ int32_t SystemNative_Poll(rhu_pal_pollevent *pollEvents, uint32_t eventCount, in
                     e->TriggeredEvents = RHU_PAL_POLLOUT;
             } else if (fd == 0) {
                 e->TriggeredEvents = 0;
-            } else if (fd_file(fd) != NULL) {
+            } else if (fd_file(fd) != NULL || sdfs_valid_locked(fd)) {
                 e->TriggeredEvents = (int16_t)(want & (RHU_PAL_POLLIN | RHU_PAL_POLLOUT));
             } else {
                 e->TriggeredEvents = RHU_PAL_POLLNVAL;
@@ -1509,6 +2294,10 @@ int32_t SystemNative_Poll(rhu_pal_pollevent *pollEvents, uint32_t eventCount, in
 int32_t SystemNative_ChMod(const char *path, int32_t mode)
 {
     char nb[RFS_PATH];
+    if (sdfs_owns(path)) {
+        ERRNO = RHU_GERR_ENOTSUP;
+        return -1;
+    }
     path = path_norm(path, nb);
     store_lock();
     int fi = file_find(path);
@@ -1529,6 +2318,10 @@ int32_t SystemNative_FChMod(intptr_t fd, int32_t mode)
 {
     if (fd_is_console(fd))
         return 0;
+    if (sdfs_fd_in(fd)) {
+        ERRNO = RHU_GERR_ENOTSUP;
+        return -1;
+    }
     store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
@@ -1569,6 +2362,10 @@ static int32_t set_times(int fi, const rhu_pal_timespec *times)
 int32_t SystemNative_UTimensat(const char *path, rhu_pal_timespec *times)
 {
     char nb[RFS_PATH];
+    if (sdfs_owns(path)) {
+        ERRNO = RHU_GERR_ENOTSUP;
+        return -1;
+    }
     path = path_norm(path, nb);
     store_lock();
     int fi = file_find(path);
@@ -1587,6 +2384,10 @@ int32_t SystemNative_UTimensat(const char *path, rhu_pal_timespec *times)
 
 int32_t SystemNative_FUTimens(intptr_t fd, rhu_pal_timespec *times)
 {
+    if (sdfs_fd_in(fd)) {
+        ERRNO = RHU_GERR_ENOTSUP;
+        return -1;
+    }
     store_lock();
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
@@ -1991,7 +2792,7 @@ double SystemNative_GetCpuUtilization(rhu_pal_processcpuinformation *previousCpu
 }
 
 /* ------------------------------------------------------------------ */
-/* random bytes: the kernel's two doors; the door's answer reported     */
+/* random bytes: the kernel's two functions; their answer reported      */
 /* ------------------------------------------------------------------ */
 
 /* The non-cryptographic draw: the kernel's software stream. */
@@ -2000,8 +2801,8 @@ void SystemNative_GetNonCryptographicallySecureRandomBytes(uint8_t *buffer, int3
     rhu_entropy(buffer, (uint32_t)bufferLength);
 }
 
-/* The secure door's refusal, in words, for the line the first refusal
- * prints. */
+/* The random-bytes function's refusal, in words, for the line the first
+ * refusal prints. */
 static const char *entropy_refusal_text(int32_t code)
 {
     switch (code) {
@@ -2018,13 +2819,13 @@ static const char *entropy_refusal_text(int32_t code)
     }
 }
 
-/* The cryptographic draw: the kernel's secure door, asked in pieces of at
- * most its bound, all or nothing. A refusal by the door fails the whole
- * draw -- the bytes already served are cleared, so the buffer never
- * carries a partial draw -- and the runtime surfaces the failure to its
- * caller; the first refusal is announced with the door's reason. A
- * negative length is refused before the door is asked; a zero length is
- * served trivially. */
+/* The cryptographic draw: the kernel's random-bytes function, asked in
+ * pieces of at most its bound, all or nothing. A refusal by the function
+ * fails the whole draw -- the bytes already served are cleared, so the
+ * buffer never carries a partial draw -- and the runtime surfaces the
+ * failure to its caller; the first refusal is announced with the
+ * function's reason. A negative length is refused before the function is
+ * asked; a zero length is served trivially. */
 int32_t SystemNative_GetCryptographicallySecureRandomBytes(uint8_t *buffer, int32_t bufferLength)
 {
     static uint32_t served_announced;
@@ -2039,8 +2840,8 @@ int32_t SystemNative_GetCryptographicallySecureRandomBytes(uint8_t *buffer, int3
             piece = RHU_ENTROPY_SECURE_MAX;
         int32_t r = rhu_entropy_secure(buffer == NULL ? NULL : buffer + off, piece);
 #ifdef RHU_SHIM_BREAK_ENTROPY_REFUSAL
-        /* Built with this define, the door's answer is ignored and every draw
-         * is reported as served. Never set in a hosted image. */
+        /* Built with this define, the function's answer is ignored and every
+         * draw is reported as served. Never set in a hosted image. */
         r = 0;
 #endif
         if (r != 0) {
@@ -2055,6 +2856,83 @@ int32_t SystemNative_GetCryptographicallySecureRandomBytes(uint8_t *buffer, int3
     if (n != 0 && served_announced++ == 0)
         rhu_shim_log("entropy: cryptographic draws through the kernel's secure entropy call; hardware source: %s", rhu_entropy_is_hardware() != 0 ? "yes" : "no");
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* the cryptography library's three served names                      */
+/* ------------------------------------------------------------------ */
+
+/* The runtime's cryptography library is not carried in this image: every
+ * exported name of its family but these three answers the library's own
+ * failure value from the generated refusal source, so a hash or a cipher
+ * call raises the runtime's cryptographic exception per call, and the
+ * library's initializer answers the runtime's success value, so the
+ * cryptography types initialize. The three names served here are the ones a
+ * program reaches before any algorithm: the secure random draw, which goes to
+ * the kernel's random-bytes function as the runtime's own draw above does,
+ * and the two readers of the library's error record, which answer that no
+ * error is recorded, so the exception the runtime raises is its plain one. */
+
+/* The bound on asking the function again for a piece that was not ready in
+ * time (the function's not-ready answer), per draw. */
+#define CRYPTO_DRAW_RETRIES 8u
+
+/* The library's secure draw: the kernel's random-bytes function asked in
+ * pieces of at most its bound, all or nothing. A piece not ready in time is
+ * asked again, a bounded number of times per draw; any other refusal, or the
+ * bound spent, fails the whole draw with the bytes already served cleared, so
+ * the buffer never carries a partial draw. Answers 1 when every byte is served
+ * and 0 otherwise -- the library's own convention, which the runtime reads as
+ * a failed draw and surfaces as a cryptographic exception. A negative length
+ * is refused before the function is asked; a zero length is served trivially.
+ * The first refusal is announced once with the function's reason. */
+int32_t CryptoNative_GetRandomBytes(uint8_t *buf, int32_t num)
+{
+    static uint32_t refusal_announced;
+    if (num < 0)
+        return 0;
+    uint32_t n = (uint32_t)num;
+    uint32_t off = 0;
+    uint32_t again = 0;
+    while (off < n) {
+        uint32_t piece = n - off;
+        if (piece > RHU_ENTROPY_SECURE_MAX)
+            piece = RHU_ENTROPY_SECURE_MAX;
+        int32_t r = rhu_entropy_secure(buf == NULL ? NULL : buf + off, piece);
+        if (r == RHU_EAGAIN && again < CRYPTO_DRAW_RETRIES) {
+            again++;
+            continue;
+        }
+        if (r != 0) {
+            if (buf != NULL && off > 0)
+                memset(buf, 0, off);
+            if (refusal_announced++ == 0)
+                rhu_shim_log("entropy: the kernel's secure entropy call refused the cryptography library's draw (%s); the draw fails and nothing is served (further refusals counted, not printed)", entropy_refusal_text(r));
+            return 0;
+        }
+        off += piece;
+    }
+    return 1;
+}
+
+/* The library's error record, read for the exception the runtime raises: no
+ * error is ever recorded here, so the code is 0 and the allocation-failure
+ * flag is written false; the runtime then raises its plain cryptographic
+ * exception. */
+uint64_t CryptoNative_ErrGetExceptionError(int32_t *isAllocFailure)
+{
+    if (isAllocFailure != NULL)
+        *isAllocFailure = 0;
+    return 0;
+}
+
+/* The text of an error code, written into the caller's buffer: the empty
+ * string when the buffer has room, since no code is ever recorded here. */
+void CryptoNative_ErrErrorStringN(uint64_t e, char *buf, int32_t len)
+{
+    (void)e;
+    if (buf != NULL && len > 0)
+        buf[0] = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2301,6 +3179,8 @@ int32_t SystemNative_SetSignalForBreak(int32_t signalForBreak)
  * reads 0; and the non-blocking read is the plain read. */
 int32_t SystemNative_FcntlGetIsNonBlocking(intptr_t fd, int32_t *isNonBlocking)
 {
+    if (sdfs_fd_in(fd))
+        return sdfs_nonblock(fd, isNonBlocking, 0);
     rfs_fd *h = fd_file(fd);
     if (!(fd_is_console(fd) || h != NULL)) {
         ERRNO = RHU_GERR_EBADF;
@@ -2393,7 +3273,7 @@ char *SystemNative_GetEnv(const char *variable)
 
 /* The two log streams are the console: the bytes go out as given, no
  * line ending added, exactly as the library function this row stands
- * for writes them, a long message in the door's pieces. */
+ * for writes them, a long message in the function's pieces. */
 void SystemNative_Log(uint8_t *buffer, int32_t length)
 {
     (void)console_write_pieces(buffer, length);
@@ -2656,6 +3536,20 @@ int32_t SystemNative_ChDir(const char *path)
         ERRNO = RHU_GERR_ENAMETOOLONG;
         return -1;
     }
+    if (sdfs_owns(path)) {
+        rhu_fs_stat_desc sd;
+        int32_t r = sdfs_k()->stat(path, &sd);
+        if (r < 0)
+            return sdfs_fail(r);
+        if (sd.kind != RHU_FS_DIR) {
+            ERRNO = RHU_GERR_ENOTDIR;
+            return -1;
+        }
+        store_lock();
+        strcpy(g_cwd, path);
+        store_unlock();
+        return 0;
+    }
     store_lock();
     int is_dir = dir_exists(path);
     int is_file = !is_dir && file_find(path) >= 0;
@@ -2674,6 +3568,8 @@ int32_t SystemNative_ChDir(const char *path)
 int32_t SystemNative_CopyFile(intptr_t sourceFd, intptr_t destinationFd, int64_t sourceLength)
 {
     uint8_t chunk[256];
+    if (sdfs_fd_in(sourceFd) || sdfs_fd_in(destinationFd))
+        return sdfs_copy(sourceFd, destinationFd);
     (void)sourceLength; /* the store knows the source's length */
     store_lock();
     rfs_fd *s = fd_file(sourceFd);
@@ -2707,6 +3603,8 @@ int32_t SystemNative_CopyFile(intptr_t sourceFd, intptr_t destinationFd, int64_t
  * preallocation does when the region lies past the end. */
 int32_t SystemNative_FAllocate(intptr_t fd, int64_t offset, int64_t length)
 {
+    if (sdfs_fd_in(fd))
+        return sdfs_fallocate(fd, offset, length);
     if (offset < 0 || length <= 0) {
         ERRNO = RHU_GERR_EINVAL;
         return -1;
@@ -2746,14 +3644,14 @@ int32_t SystemNative_PosixFAdvise(intptr_t fd, int64_t offset, int64_t length, i
     (void)offset;
     (void)length;
     (void)advice;
-    return (fd_is_console(fd) || fd_file(fd) != NULL) ? 0 : RHU_GERR_EBADF;
+    return (fd_is_console(fd) || fd_file(fd) != NULL || sdfs_valid(fd)) ? 0 : RHU_GERR_EBADF;
 }
 
 uint32_t SystemNative_FileSystemSupportsLocking(intptr_t fd, int32_t lockOperation, int32_t accessWrite)
 {
     (void)lockOperation;
     (void)accessWrite;
-    return fd_file(fd) != NULL ? 1u : 0u;
+    return (fd_file(fd) != NULL || sdfs_valid(fd)) ? 1u : 0u;
 }
 
 /* Region locks are the process's own in the library function this row
@@ -2764,6 +3662,11 @@ uint32_t SystemNative_FileSystemSupportsLocking(intptr_t fd, int32_t lockOperati
  * a write lock 1, an unlock 2. */
 int32_t SystemNative_LockFileRegion(intptr_t fd, int64_t offset, int64_t length, int16_t lockType)
 {
+    if (sdfs_fd_in(fd) && offset >= 0 && length >= 0 && lockType >= 0 && lockType <= 2) {
+        uint8_t h;
+        int32_t access;
+        return sdfs_take(fd, &h, &access) == 0 ? 0 : -1;
+    }
     if (offset < 0 || length < 0 || lockType < 0 || lockType > 2) {
         ERRNO = RHU_GERR_EINVAL;
         return -1;
@@ -2781,6 +3684,8 @@ int32_t SystemNative_FcntlGetFD(intptr_t fd)
 {
     if (fd_is_console(fd))
         return 0;
+    if (sdfs_fd_in(fd))
+        return sdfs_fcntl_getfd(fd);
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
         ERRNO = RHU_GERR_EBADF;
@@ -2793,6 +3698,8 @@ int32_t SystemNative_FcntlSetFD(intptr_t fd, int32_t flags)
 {
     if (fd_is_console(fd))
         return 0;
+    if (sdfs_fd_in(fd))
+        return sdfs_fcntl_setfd(fd, flags);
     if (rhu_iiofs_fd(fd))
         return rhu_iiofs_fcntl_setfd(fd, flags);
     if (rhu_pwmfs_fd(fd))
@@ -2810,6 +3717,8 @@ int32_t SystemNative_FcntlSetIsNonBlocking(intptr_t fd, int32_t isNonBlocking)
 {
     if (fd_is_console(fd))
         return 0;
+    if (sdfs_fd_in(fd))
+        return sdfs_nonblock(fd, NULL, isNonBlocking);
     rfs_fd *h = fd_file(fd);
     if (h == NULL) {
         ERRNO = RHU_GERR_EBADF;
@@ -2889,6 +3798,8 @@ char *SystemNative_MkdTemp(char *pathTemplate)
         ERRNO = RHU_GERR_EINVAL;
         return NULL;
     }
+    if (sdfs_owns(pathTemplate))
+        return sdfs_mkdtemp(pathTemplate, xe);
     store_lock();
     for (int tries = 0; tries < 64; tries++) {
         temp_stamp(pathTemplate, xe);
@@ -2913,6 +3824,8 @@ intptr_t SystemNative_MksTemps(char *pathTemplate, int32_t suffixLength)
         ERRNO = RHU_GERR_EINVAL;
         return -1;
     }
+    if (sdfs_owns(pathTemplate))
+        return sdfs_mkstemps(pathTemplate, xe);
     store_lock();
     for (int tries = 0; tries < 64; tries++) {
         temp_stamp(pathTemplate, xe);
@@ -2933,7 +3846,9 @@ intptr_t SystemNative_MksTemps(char *pathTemplate, int32_t suffixLength)
 
 void SystemNative_Sync(void)
 {
-    /* the store is memory: every write is already durable as far as it goes */
+    /* the store is memory: every write is already durable as far as it goes;
+     * the card's open handles are synced by the kernel */
+    sdfs_sync_all();
 }
 
 int32_t SystemNative_WriteToNonblocking(intptr_t fd, const void *buffer, int32_t bufferSize)
@@ -2941,9 +3856,10 @@ int32_t SystemNative_WriteToNonblocking(intptr_t fd, const void *buffer, int32_t
     return SystemNative_Write(fd, buffer, bufferSize);
 }
 
-/* One mount point, the store's root; its space is the store's stated
- * bounds (the file slots times the maximum file size) less what the files
- * hold; its type name the store's own. */
+/* The store's root, and the card's point while the kernel's volume stands
+ * (its queries answered from the kernel's records); the root's space is
+ * the store's stated bounds (the file slots times the maximum file size)
+ * less what the files hold; its type name the store's own. */
 static int mount_known(const char *name, char *nb)
 {
     const char *p = path_norm(name, nb);
@@ -2957,6 +3873,8 @@ int32_t SystemNative_GetAllMountPoints(MountPointFound onFound, void *context)
         return -1;
     }
     onFound(context, "/");
+    if (sdfs_mounted())
+        onFound(context, SDFS_POINT);
     return 0;
 }
 
@@ -2967,6 +3885,8 @@ int32_t SystemNative_GetSpaceInfoForMountPoint(const char *name, rhu_pal_mountpo
         ERRNO = RHU_GERR_EINVAL;
         return -1;
     }
+    if (sdfs_owns(name))
+        return sdfs_space(name, mpi);
     store_lock();
     int known = mount_known(name, nb);
     uint64_t used = 0;
@@ -2994,6 +3914,8 @@ int32_t SystemNative_GetFileSystemTypeNameForMountPoint(const char *name, char *
         ERRNO = RHU_GERR_EINVAL;
         return -1;
     }
+    if (sdfs_owns(name))
+        return sdfs_type_name(name, formatNameBuffer, bufferLength, formatType);
     store_lock();
     int known = mount_known(name, nb);
     store_unlock();
@@ -3002,7 +3924,7 @@ int32_t SystemNative_GetFileSystemTypeNameForMountPoint(const char *name, char *
         return -1;
     }
     memcpy(formatNameBuffer, fs_name, sizeof fs_name);
-    *formatType = 0;
+    *formatType = -1; /* the name is in the buffer (the managed side reads it on -1 alone) */
     return 0;
 }
 

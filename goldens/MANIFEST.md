@@ -21,12 +21,12 @@ hosted-runtime tiers are rebuilt against.
 
 Each release carries two archives and a SHA256SUMS file beside them.
 
-- `lamella-rhu-1.0.0-alpha.1-goldens.tar` holds the tiers `goldens/rt-m7`
+- `lamella-rhu-1.0.0-alpha.2-goldens.tar` holds the tiers `goldens/rt-m7`
   and `goldens/rt-m33`, a directory per tier. It is unpacked at the
   repository root.
-- `lamella-rhu-1.0.0-alpha.1-runtime-archives.tar` holds the runtime library
-  sets `net11-rc2-rhu-cortex-m7-sgc-enabled` (Cortex-M7) and
-  `net11-rc2-rhu-cortex-m33-sgc-enabled` (Cortex-M33), a directory per set.
+- `lamella-rhu-1.0.0-alpha.2-runtime-archives.tar` holds the runtime library
+  sets `net11-rc3-rhu-cortex-m7-sgc-enabled` (Cortex-M7) and
+  `net11-rc3-rhu-cortex-m33-sgc-enabled` (Cortex-M33), a directory per set.
   It is unpacked into a directory of your own.
 
 Every archive carries its own MANIFEST.txt at its root: what the archive
@@ -48,36 +48,36 @@ list, so a checkout verifies a download against the revision it holds.
 | Tier | Manifest | Files | Bytes | Where |
 |---|---|---|---|---|
 | the garbage-collector tier | `goldens/gc/MANIFEST.md` | 63 | 2654281 | in this directory |
-| the shim tier | `goldens/shim/MANIFEST.md` | 110 | 4269747 | in this directory |
+| the shim tier | `goldens/shim/MANIFEST.md` | 115 | 4913504 | in this directory |
 | the payload tier | `goldens/payload/MANIFEST.md` | 5 | 74718 | in this directory |
-| the Cortex-M7 hosted-runtime tier | `goldens/rt-m7/MANIFEST.md` | 17 | 35379849 | in the release archive `lamella-rhu-1.0.0-alpha.1-goldens.tar` |
-| the Cortex-M33 hosted-runtime tier | `goldens/rt-m33/MANIFEST.md` | 15 | 22914360 | in the release archive `lamella-rhu-1.0.0-alpha.1-goldens.tar` |
+| the Cortex-M7 hosted-runtime tier | `goldens/rt-m7/MANIFEST.md` | 17 | 35490367 | in the release archive `lamella-rhu-1.0.0-alpha.2-goldens.tar` |
+| the Cortex-M33 hosted-runtime tier | `goldens/rt-m33/MANIFEST.md` | 15 | 22972017 | in the release archive `lamella-rhu-1.0.0-alpha.2-goldens.tar` |
 
 | Manifest | SHA256 |
 |---|---|
-| `goldens/gc/MANIFEST.md` | `ed993df0212923341938ae884d1a4e4da8eb5b7aa096b2e5d237488944b75ed8` |
-| `goldens/shim/MANIFEST.md` | `320e308d956f51d37bbec0e6c4ee3057134772168032d28ad07048c01302fe44` |
-| `goldens/payload/MANIFEST.md` | `6c43bc48a345f5e68daa88a23d2f57e6f22821170364a8490407c7d348d08eec` |
-| `goldens/rt-m7/MANIFEST.md` | `7c133332cd22c00c4f35a160f64db0a0daebe9141e816b7957e341783a7481cf` |
-| `goldens/rt-m33/MANIFEST.md` | `3b9e56a1251d987ff4adea3cd92903d013e9f36dacc7beedfd6b13c68fa3fb94` |
+| `goldens/gc/MANIFEST.md` | `e10ccc9b0822a4c40a8d7d00093dd49e95310dcd5776783bda7bf6df1f70db21` |
+| `goldens/shim/MANIFEST.md` | `fb44374bb9565f1e396eb73b12a042bed253183d521cabc63966ce1c08ba41d9` |
+| `goldens/payload/MANIFEST.md` | `c6cae88b10d135af4f05baa52b44c4f297f051d00fb3761d001ece7acf6e8bde` |
+| `goldens/rt-m7/MANIFEST.md` | `26af45129561e224edae764e9c974a02b930ed5c36791c714232d3f7b8c92f1a` |
+| `goldens/rt-m33/MANIFEST.md` | `bc558252e4d6d3b9a2331ad70716ca1f8b09e2cfb227fdcf3ed979d10f88f40d` |
 
 ## The release archives
 
 | Archive | Members | Bytes | SHA256 |
 |---|---|---|---|
-| `lamella-rhu-1.0.0-alpha.1-goldens.tar` | 33 | 58326016 | `2de8d099d14d56e5f6ba9e94feddbe7a2ebeb4aec5eba8dd153827c6e647d1c0` |
-| `lamella-rhu-1.0.0-alpha.1-runtime-archives.tar` | 11 | 11142144 | `3b5a2b1c8e6c5e0bced182e25e004bda0330cddc08727fe876c7dc095fbb70f5` |
+| `lamella-rhu-1.0.0-alpha.2-goldens.tar` | 33 | 58493952 | `f490aed5faf246cb25746e300baeeba0b3f8b51c6d6c3e09391cd6fd5da84421` |
+| `lamella-rhu-1.0.0-alpha.2-runtime-archives.tar` | 11 | 11142144 | `312818350ef277e267d0cf8f5d1d2a46f5f566b5a4cabcc6f4798ac52270a173` |
 
-### lamella-rhu-1.0.0-alpha.1-goldens.tar
+### lamella-rhu-1.0.0-alpha.2-goldens.tar
 
-33 members, 58326016 bytes. The block lists every member in the archive's
+33 members, 58493952 bytes. The block lists every member in the archive's
 order with its SHA256 digest. Its first line is the archive's own
 MANIFEST.txt; the rest is that file's text, as the archive carries it, so a
 copy of the block checks the unpacked files the same way.
 
 ```
-3526a96480db428e7a6e90a511c76e75917d9f17bae2d434f347b7f420dc43a0  MANIFEST.txt
-# lamella-rhu-1.0.0-alpha.1-goldens.tar
+0835150192ee81188e13241567b0c021aae90cfdb07e7993b332c56472924619  MANIFEST.txt
+# lamella-rhu-1.0.0-alpha.2-goldens.tar
 #
 # This archive holds two of the five frozen tiers of expected outputs
 # that the verification chain of Lamella RHU compares its results with,
@@ -92,8 +92,8 @@ copy of the block checks the unpacked files the same way.
 #
 # The members and their sizes in bytes:
 #
-#      14742  goldens/rt-m33/MANIFEST.md
-#       4490  goldens/rt-m33/archives-net11-rc2-rhu-cortex-m33-sgc-enabled.txt
+#      14963  goldens/rt-m33/MANIFEST.md
+#       4486  goldens/rt-m33/archives-net11-rc3-rhu-cortex-m33-sgc-enabled.txt
 #         76  goldens/rt-m33/attr-donor-v8m.bin
 #         60  goldens/rt-m33/control-attr-a-profile.bin
 #        928  goldens/rt-m33/control-d32-site.o
@@ -103,12 +103,12 @@ copy of the block checks the unpacked files the same way.
 #    7530932  goldens/rt-m33/rthello-merged.o
 #       3414  goldens/rt-m33/rthello-merged.undef.txt
 #        167  goldens/rt-m33/rthello.golden.txt
-#   15167852  goldens/rt-m33/rtsuite-merged.o
-#       5584  goldens/rt-m33/rtsuite-merged.undef.txt
-#       2634  goldens/rt-m33/rtsuite.golden.txt
+#   15224704  goldens/rt-m33/rtsuite-merged.o
+#       6027  goldens/rt-m33/rtsuite-merged.undef.txt
+#       2779  goldens/rt-m33/rtsuite.golden.txt
 #      35392  goldens/rt-m33/startup-cookie-copied.o
-#      19166  goldens/rt-m7/MANIFEST.md
-#       4480  goldens/rt-m7/archives-net11-rc2-rhu-cortex-m7-sgc-enabled.txt
+#      19444  goldens/rt-m7/MANIFEST.md
+#       4475  goldens/rt-m7/archives-net11-rc3-rhu-cortex-m7-sgc-enabled.txt
 #         50  goldens/rt-m7/attr-donor-v7em.bin
 #         60  goldens/rt-m7/control-attr-a-profile.bin
 #        928  goldens/rt-m7/control-d32-site.o
@@ -119,51 +119,51 @@ copy of the block checks the unpacked files the same way.
 #       3196  goldens/rt-m7/rthello-merged.undef.txt
 #        167  goldens/rt-m7/rthello.golden.txt
 #    2608051  goldens/rt-m7/rthello.o
-#   15180546  goldens/rt-m7/rtsuite-merged.o
-#       5366  goldens/rt-m7/rtsuite-merged.undef.txt
-#       2634  goldens/rt-m7/rtsuite.golden.txt
-#    9834875  goldens/rt-m7/rtsuite.o
+#   15237390  goldens/rt-m7/rtsuite-merged.o
+#       5809  goldens/rt-m7/rtsuite-merged.undef.txt
+#       2779  goldens/rt-m7/rtsuite.golden.txt
+#    9887688  goldens/rt-m7/rtsuite.o
 #      35404  goldens/rt-m7/startup-cookie-copied.o
 #
 # Each line below is a member's SHA256 digest, two spaces and its path.
 # The lines above, which start with a number sign, are comments that
 # sha256sum skips.
 #
-3b9e56a1251d987ff4adea3cd92903d013e9f36dacc7beedfd6b13c68fa3fb94  goldens/rt-m33/MANIFEST.md
-11d4223702deedd89f84676e49160a53947bb22c0a3168ee8802da5a92d5f221  goldens/rt-m33/archives-net11-rc2-rhu-cortex-m33-sgc-enabled.txt
+bc558252e4d6d3b9a2331ad70716ca1f8b09e2cfb227fdcf3ed979d10f88f40d  goldens/rt-m33/MANIFEST.md
+b2bf20c072493861ec2890ed79acfacaaac35432511c521e9e8804cd21f2d64f  goldens/rt-m33/archives-net11-rc3-rhu-cortex-m33-sgc-enabled.txt
 e8ebecc9e0784f841ca9f09a6bfa415ad9d04431976db2d0fad100a74e81c3b1  goldens/rt-m33/attr-donor-v8m.bin
 5c1121c6df6659326c8e22a43d54080ea3dc2f495078f57e375625d93349e6ca  goldens/rt-m33/control-attr-a-profile.bin
 762ff2df1f0504c23347bdb47435b6ed48c3932c678a455aada60c994a441f14  goldens/rt-m33/control-d32-site.o
 e29d4d1c92e619fb9e2b53e50a52ec1b643c5902a353b5b9108beaf54b0cf533  goldens/rt-m33/control-ldrexd-site.o
 d07a3ab13c7de6e761a8a880b4c606e1b35f493ffc19ca51c238607422ed6347  goldens/rt-m33/rt-libc.members.txt
 787fa5a3f597591438811736480ac183d88305654a26fd5648ebf160224795fe  goldens/rt-m33/rt-libc.o
-d8b44ebadfdee553bbe51cf45eb4b350d31f2e13c5c9cb563e700f8f7d6f96f4  goldens/rt-m33/rthello-merged.o
+926cd9c3e3ef14cf142ed8aded012b1de6b7c894ec4867060b2f7091c07e24f6  goldens/rt-m33/rthello-merged.o
 e4e032fb62f715d7173e73a81088f3581aa85c973c1a39422f3156c11a74b8de  goldens/rt-m33/rthello-merged.undef.txt
 66c7f87ca29b27cf4b8ed05c8fb2d0eb30d16b48375325ec65c726e835a5fa7b  goldens/rt-m33/rthello.golden.txt
-bbc89f0d73c01659439bbb2ec46cb526296e885134895e678534fc537ef26c66  goldens/rt-m33/rtsuite-merged.o
-481be2b4fb378b52d104ef32ab5eea9416cb47be99c3dbb838de3df424951cf1  goldens/rt-m33/rtsuite-merged.undef.txt
-c61409238d54da2bb6d38de937a48a72a5077c80adabda215dade67f4bc54632  goldens/rt-m33/rtsuite.golden.txt
-f1cbb245803a82240435a283b197f671b1550651f5a70b964817802f6a37e662  goldens/rt-m33/startup-cookie-copied.o
-7c133332cd22c00c4f35a160f64db0a0daebe9141e816b7957e341783a7481cf  goldens/rt-m7/MANIFEST.md
-b1e82b9e578f83b99788185d85476469319dd4982771dd4d212ba82eec6c66d7  goldens/rt-m7/archives-net11-rc2-rhu-cortex-m7-sgc-enabled.txt
+31b5ffc8687fdeb357e86467db7acff74323f35f0bdb1e512c4349e6611b42d6  goldens/rt-m33/rtsuite-merged.o
+f616d9623b94cb5382574b28118e312e516787ff07f7202058f3375720e5e0e6  goldens/rt-m33/rtsuite-merged.undef.txt
+8a3f0dcdccf41c2c0b2c0b4ba08fed8a44269c96b6a905cf5afb3b10e33ca325  goldens/rt-m33/rtsuite.golden.txt
+51530c50da7f4bff7d37eabfcdf3ce9b2488dc5f1480f301bfe0dbfa280c6805  goldens/rt-m33/startup-cookie-copied.o
+26af45129561e224edae764e9c974a02b930ed5c36791c714232d3f7b8c92f1a  goldens/rt-m7/MANIFEST.md
+3bc101c75e3c3e06f0f8d3f60873e3b9d06251bc636eab75135e42bb3a5a7b46  goldens/rt-m7/archives-net11-rc3-rhu-cortex-m7-sgc-enabled.txt
 f0806a5d3672b24489ff1c896f7e3b74e3c3d1fe030bcacd9f010ee3cdf5216d  goldens/rt-m7/attr-donor-v7em.bin
 5c1121c6df6659326c8e22a43d54080ea3dc2f495078f57e375625d93349e6ca  goldens/rt-m7/control-attr-a-profile.bin
 762ff2df1f0504c23347bdb47435b6ed48c3932c678a455aada60c994a441f14  goldens/rt-m7/control-d32-site.o
 e29d4d1c92e619fb9e2b53e50a52ec1b643c5902a353b5b9108beaf54b0cf533  goldens/rt-m7/control-ldrexd-site.o
 12f814c7d5d6d310ba9643d1f2fbdbf82dac2a9491ff4cd06e89f37f1eeacb5f  goldens/rt-m7/rt-libc.members.txt
 536d99f34384bde7003e0b9c3dd52df97739977254e1eae4c1d12f5e623fcacf  goldens/rt-m7/rt-libc.o
-d189d3d6279bec42b2dbec337e907daa700330c1189ba25d8c936e2698485b41  goldens/rt-m7/rthello-merged.o
+15bfb99277a36ff8f8d6d958f28f29b5474426bef33d24ad74a9c0a95e8ab2f3  goldens/rt-m7/rthello-merged.o
 6e6696c5a4606ba86ee8e70b7e29a763797669ec0dfaa19e4364fd75a94eaaee  goldens/rt-m7/rthello-merged.undef.txt
 66c7f87ca29b27cf4b8ed05c8fb2d0eb30d16b48375325ec65c726e835a5fa7b  goldens/rt-m7/rthello.golden.txt
-c5e8727a9e5ef1215f14aaca0d247a015cf1e8fbd21a06c294cdede8bf612008  goldens/rt-m7/rthello.o
-88196e54593d27084810c70c4775d65c662275a76e11830078a0abf1d6d9838a  goldens/rt-m7/rtsuite-merged.o
-349a11704291142a9de061df1e6ffc292ce20560ccb8ce3e62c030ddc709b856  goldens/rt-m7/rtsuite-merged.undef.txt
-c61409238d54da2bb6d38de937a48a72a5077c80adabda215dade67f4bc54632  goldens/rt-m7/rtsuite.golden.txt
-de71fbc159273766b8896084debf9fff0c5d6038c7fda2399be36a6aef3ee5ab  goldens/rt-m7/rtsuite.o
-e3c15b19cd5798e0c34cf3524497e8f0cd52e57559715622f7421a4f93a8d53c  goldens/rt-m7/startup-cookie-copied.o
+0906b4d3aeac24dd451cbab3f899e86c9f3bcac6df62ce534006edd771dc3a9c  goldens/rt-m7/rthello.o
+40e40d3dd280148b95e0a5152f74971bbbdbff5da15da2977ddffff8461c77a1  goldens/rt-m7/rtsuite-merged.o
+0b5b3ed43b2b1732bdb5b1120f28431dbac03a916673e75ca81264427bc9ac98  goldens/rt-m7/rtsuite-merged.undef.txt
+8a3f0dcdccf41c2c0b2c0b4ba08fed8a44269c96b6a905cf5afb3b10e33ca325  goldens/rt-m7/rtsuite.golden.txt
+33d47d9a4949171617332d4c1fc903e9f7b08918a6d64cf33ba8d1823ddb2a1e  goldens/rt-m7/rtsuite.o
+b815a377c4fccad85f421bae165fbebdea08c8be66abb870e2777845ff28d351  goldens/rt-m7/startup-cookie-copied.o
 ```
 
-### lamella-rhu-1.0.0-alpha.1-runtime-archives.tar
+### lamella-rhu-1.0.0-alpha.2-runtime-archives.tar
 
 11 members, 11142144 bytes. The block lists every member in the archive's
 order with its SHA256 digest. Its first line is the archive's own
@@ -171,17 +171,17 @@ MANIFEST.txt; the rest is that file's text, as the archive carries it, so a
 copy of the block checks the unpacked files the same way.
 
 ```
-c93da396f175b3c8e02bca03aba818717f786acd443e048d55fcb43d7c3aca48  MANIFEST.txt
-# lamella-rhu-1.0.0-alpha.1-runtime-archives.tar
+b66cceb76c395db15ffcf873a1d02c9b86e45998ea306dbf8c6fefd45226664d  MANIFEST.txt
+# lamella-rhu-1.0.0-alpha.2-runtime-archives.tar
 #
 # This archive holds two sets of .NET runtime libraries that Lamella RHU
 # built for its processor classes, each in its own directory:
-# net11-rc2-rhu-cortex-m7-sgc-enabled (Cortex-M7) and
-# net11-rc2-rhu-cortex-m33-sgc-enabled (Cortex-M33). The hosted-runtime
+# net11-rc3-rhu-cortex-m7-sgc-enabled (Cortex-M7) and
+# net11-rc3-rhu-cortex-m33-sgc-enabled (Cortex-M33). The hosted-runtime
 # tiers are rebuilt against these libraries. How each set was built is
 # recorded beside the tier that uses it, in
-# goldens/rt-m7/archives-net11-rc2-rhu-cortex-m7-sgc-enabled.txt and
-# goldens/rt-m33/archives-net11-rc2-rhu-cortex-m33-sgc-enabled.txt.
+# goldens/rt-m7/archives-net11-rc3-rhu-cortex-m7-sgc-enabled.txt and
+# goldens/rt-m33/archives-net11-rc3-rhu-cortex-m33-sgc-enabled.txt.
 #
 # Unpack this archive into a directory of your own. Then check every
 # unpacked file against this list, from that directory:
@@ -190,42 +190,42 @@ c93da396f175b3c8e02bca03aba818717f786acd443e048d55fcb43d7c3aca48  MANIFEST.txt
 #
 # Name the Cortex-M7 set's directory for the verification chain: put its
 # path (the directory you unpacked into, then
-# net11-rc2-rhu-cortex-m7-sgc-enabled) into
+# net11-rc3-rhu-cortex-m7-sgc-enabled) into
 # tools/toolchains/rtarchives-m7.local, or set RHU_RT_ARCHIVES_M7 to it.
 #
 # Name the Cortex-M33 set's directory for the verification chain: put
 # its path (the directory you unpacked into, then
-# net11-rc2-rhu-cortex-m33-sgc-enabled) into
+# net11-rc3-rhu-cortex-m33-sgc-enabled) into
 # tools/toolchains/rtarchives-m33.local, or set RHU_RT_ARCHIVES_M33 to
 # it.
 #
 # The members and their sizes in bytes:
 #
-#    5055834  net11-rc2-rhu-cortex-m33-sgc-enabled/libRuntime.WorkstationGC.a
-#     169324  net11-rc2-rhu-cortex-m33-sgc-enabled/libaotminipal.a
-#     222138  net11-rc2-rhu-cortex-m33-sgc-enabled/libeventpipe-disabled.a
-#     101254  net11-rc2-rhu-cortex-m33-sgc-enabled/libstandalonegc-enabled.a
-#       9734  net11-rc2-rhu-cortex-m33-sgc-enabled/libstdc++compat.a
-#    5067648  net11-rc2-rhu-cortex-m7-sgc-enabled/libRuntime.WorkstationGC.a
-#     170128  net11-rc2-rhu-cortex-m7-sgc-enabled/libaotminipal.a
-#     222126  net11-rc2-rhu-cortex-m7-sgc-enabled/libeventpipe-disabled.a
-#     101454  net11-rc2-rhu-cortex-m7-sgc-enabled/libstandalonegc-enabled.a
-#       9754  net11-rc2-rhu-cortex-m7-sgc-enabled/libstdc++compat.a
+#    5055834  net11-rc3-rhu-cortex-m33-sgc-enabled/libRuntime.WorkstationGC.a
+#     169324  net11-rc3-rhu-cortex-m33-sgc-enabled/libaotminipal.a
+#     222138  net11-rc3-rhu-cortex-m33-sgc-enabled/libeventpipe-disabled.a
+#     101254  net11-rc3-rhu-cortex-m33-sgc-enabled/libstandalonegc-enabled.a
+#       9734  net11-rc3-rhu-cortex-m33-sgc-enabled/libstdc++compat.a
+#    5067648  net11-rc3-rhu-cortex-m7-sgc-enabled/libRuntime.WorkstationGC.a
+#     170128  net11-rc3-rhu-cortex-m7-sgc-enabled/libaotminipal.a
+#     222126  net11-rc3-rhu-cortex-m7-sgc-enabled/libeventpipe-disabled.a
+#     101454  net11-rc3-rhu-cortex-m7-sgc-enabled/libstandalonegc-enabled.a
+#       9754  net11-rc3-rhu-cortex-m7-sgc-enabled/libstdc++compat.a
 #
 # Each line below is a member's SHA256 digest, two spaces and its path.
 # The lines above, which start with a number sign, are comments that
 # sha256sum skips.
 #
-1d177b20eaf1f976666c20950292f5629d46e9aa0e34953f4ef4a43b00fd39a1  net11-rc2-rhu-cortex-m33-sgc-enabled/libRuntime.WorkstationGC.a
-1b2234511db7e42d7f9becd97b7969d57e3a441da490d7d5e9778e0b9a2f1ac2  net11-rc2-rhu-cortex-m33-sgc-enabled/libaotminipal.a
-c46b9cc02766a3b85ecee29e61dff98b3b2e210f37e681ddfd164bf0a1f200f2  net11-rc2-rhu-cortex-m33-sgc-enabled/libeventpipe-disabled.a
-0f1fe21a7eed484596eb5dd7aa01b1971283e351ed28f04b58f12a111b964d22  net11-rc2-rhu-cortex-m33-sgc-enabled/libstandalonegc-enabled.a
-5c8af92e1445285951d30b53df5be5a93a650cc0661b80ed6f7bf89f37688113  net11-rc2-rhu-cortex-m33-sgc-enabled/libstdc++compat.a
-7822045ee5ac157e1f1f6ecc57f757c89ed65d8eb3b3e79e514138a6f3bca40b  net11-rc2-rhu-cortex-m7-sgc-enabled/libRuntime.WorkstationGC.a
-679954796d867ff5aec06fd8651ac0974d1fe7fdaf721f2dd86285464a1826c6  net11-rc2-rhu-cortex-m7-sgc-enabled/libaotminipal.a
-552eb2ecbc2b1d87e906db814cba1dfa3553391727c25e7c4b906c53076ee1bd  net11-rc2-rhu-cortex-m7-sgc-enabled/libeventpipe-disabled.a
-4e4b8b2cf6034756fbbdf3240fa0208356a0b808785c2d5d51dd83a540f7df2b  net11-rc2-rhu-cortex-m7-sgc-enabled/libstandalonegc-enabled.a
-362e7a5e41290dcbef5db1905a6528b5cbe8302d04696097e48776b31d56f999  net11-rc2-rhu-cortex-m7-sgc-enabled/libstdc++compat.a
+c2f2c2fa6f4f252468c801892d7f86da0c349d00e1e6c4ffccb9166c8fdc3d40  net11-rc3-rhu-cortex-m33-sgc-enabled/libRuntime.WorkstationGC.a
+299bfc5af734c2f16612520656d198de2d154e2169bd8695d5db7fd3ac4da67c  net11-rc3-rhu-cortex-m33-sgc-enabled/libaotminipal.a
+c6397dc58ef42dbac80d9b58fc3bef448a2f601a7ae72f477f38ed0c059d562a  net11-rc3-rhu-cortex-m33-sgc-enabled/libeventpipe-disabled.a
+f42dd3711cd71a09a7aea336ee0a0388f0f978e31d3f98c07dabc65ed3c1668d  net11-rc3-rhu-cortex-m33-sgc-enabled/libstandalonegc-enabled.a
+a5f54fa2bc70b124eccce7a45dfadfd67be2c1c817031f6f77a449d84371a641  net11-rc3-rhu-cortex-m33-sgc-enabled/libstdc++compat.a
+0eec549a9595ba0de120ec00fb0343bfa7f0faca070ef7b68014c0366c1c3f69  net11-rc3-rhu-cortex-m7-sgc-enabled/libRuntime.WorkstationGC.a
+14f323ae1948568a933ce9dabb320ee82669203096c2ddfe7eb2905f2906cbab  net11-rc3-rhu-cortex-m7-sgc-enabled/libaotminipal.a
+1620d51a23c2bc356880ea8256f5280dea58826c9dd358fe6ce3252e1740e7ff  net11-rc3-rhu-cortex-m7-sgc-enabled/libeventpipe-disabled.a
+03cb710b0fc73ae9d9634cca163c2902d18898da762d981685946c4e04322bf2  net11-rc3-rhu-cortex-m7-sgc-enabled/libstandalonegc-enabled.a
+fc71fcd4daa1c19eeb09ae0fa021fbf64d7a12b514d275397bcb03e148e103b0  net11-rc3-rhu-cortex-m7-sgc-enabled/libstdc++compat.a
 ```
 
 ## How the archives are made

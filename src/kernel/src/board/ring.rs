@@ -3,7 +3,7 @@
 //! in it whatever the stream's channel says -- the transcript a debug probe
 //! or a debugger reads out of RAM by symbol, with its layout and its reader
 //! protocol
-//! unchanged by the UART doors. THE WIRE RING, on
+//! unchanged by the kernel's UART API. THE WIRE RING, on
 //! the rows whose wire is driven the ring way (the ST rows' probe port),
 //! takes the same bytes after the mirror: the board's
 //! transmitter is primed from it while it has room (a bounded register loop,
@@ -15,7 +15,7 @@
 //! through synchronously, so a report is complete on the wire before the
 //! machine parks. The emulator rows carry the mirror alone (their default
 //! wire is the polled CMSDK UART0 the board module drives); on the rows with
-//! a UART table a stream's UART wire is a port the UART doors' module holds
+//! a UART table a stream's UART wire is a port the kernel's UART API's module holds
 //! (`uart.rs`: its own rings and interrupt, this record's counts kept).
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
@@ -35,7 +35,7 @@ pub const CONSOLE_LOG_MAGIC: u32 = crate::exit_word::MAGIC_RUNNING;
 /// written since the clock came up (a count past the size means the buffer
 /// wrapped and the earliest bytes are gone -- exactly the oldest
 /// `written - size` bytes at the moment of a read), the exit code (0
-/// while the program runs; the door's code, whole, stored by the exit paths
+/// while the program runs; the exit function's code, whole, stored by the exit paths
 /// after the transcript's last byte and before the magic turns into the end
 /// state's "RRET" or "RABT" -- `exit_word.rs` states the three magics), then the bytes. The writer lands a byte before it
 /// moves the count; it never waits for a reader. The block sits in its own section after the thread
@@ -227,13 +227,13 @@ fn stored(code: i32) -> i32 {
 }
 /// The doctored store (the api gate's control, never a shipped image): the
 /// code's low 16 bits alone, sign-extended, so a code past 16 bits reads
-/// back truncated and the check's read-back disagrees with the door's code.
+/// back truncated and the check's read-back disagrees with the exit function's code.
 #[cfg(feature = "test-exit-word-doctored")]
 fn stored(code: i32) -> i32 {
     (code as i16) as i32
 }
 
-/// The wire record's counts for a wire the UART doors' module drives (a
+/// The wire record's counts for a wire the kernel's UART API's module drives (a
 /// console-held UART port on the rows with a UART table): the bytes
 /// handed to the transmitter, the bytes lost to a lapped transmit ring, the
 /// interrupts taken -- so `__rhu_console_ring` reads the same by symbol
@@ -267,7 +267,7 @@ pub fn account_irq() {
 /// transmitter, after the mirror. Sized to absorb a verbose transcript's
 /// bursts (16 KB, the mirror's lap tolerance).
 /// On the rows with a UART table a stream's UART wire is a port the UART
-/// doors' module holds, with that module's rings (`uart.rs`).
+/// functions' module holds, with that module's rings (`uart.rs`).
 #[cfg(rhu_console_probe)]
 pub const WIRE_BYTES: usize = 16 * 1024;
 
@@ -382,7 +382,7 @@ pub fn putb(b: u8) {
 
 /// The room the wire ring has for a writer, in bytes: the buffer less the
 /// backlog (a writer that outran the wire reads zero until the interrupt
-/// drains). Read outside the critical section by the door's back-pressure
+/// drains). Read outside the critical section by the function's back-pressure
 /// and re-checked inside it before the write commits.
 #[cfg(rhu_console_probe)]
 pub fn room() -> usize {

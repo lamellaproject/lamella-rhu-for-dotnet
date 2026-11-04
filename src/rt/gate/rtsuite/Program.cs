@@ -12,6 +12,7 @@ using System.IO;
 using System.IO.Ports;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using Lamella.Hardware;
@@ -1351,6 +1352,53 @@ internal static class Program
         }
     }
 
+    private static void Section20Crypto()
+    {
+        const string section = "rt-crypto";
+        int before = s_failures;
+
+        // (1) Two draws of 32 secure random bytes through the standard generator,
+        // served from the kernel's secure entropy call: a draw not all zero and
+        // the two draws differing.
+        byte[] first = RandomNumberGenerator.GetBytes(32);
+        byte[] second = RandomNumberGenerator.GetBytes(32);
+        bool allZero = true;
+        bool differ = false;
+        for (int i = 0; i < 32; i++)
+        {
+            if (first[i] != 0) allZero = false;
+            if (first[i] != second[i]) differ = true;
+        }
+        Check(first.Length == 32 && second.Length == 32, section, "two draws of 32 bytes, " + first.Length + " and " + second.Length);
+        Check(!allZero, section, "the first draw is all zero");
+        Check(differ, section, "the two draws are equal");
+
+        // (2) A hash call throws the runtime's cryptographic exception, on each
+        // call: the type is read twice.
+        for (int call = 1; call <= 2; call++)
+        {
+            string thrown = "nothing";
+            try
+            {
+                SHA256.HashData(new byte[] { 0x61, 0x62, 0x63 });
+            }
+            catch (CryptographicException)
+            {
+                thrown = "CryptographicException";
+            }
+            catch (Exception e)
+            {
+                thrown = e.GetType().Name;
+            }
+            Check(thrown == "CryptographicException", section, "hash call " + call + " threw " + thrown);
+        }
+
+        if (s_failures == before)
+        {
+            Pass(section, "(two draws of 32 secure random bytes served, not all zero and differing; a hash call throws CryptographicException on each call)");
+        }
+    }
+
     private static int Main()
     {
         Console.WriteLine("RTSUITE: start");
@@ -1373,6 +1421,7 @@ internal static class Program
         Guarded("rt-null", Section17Null);
         Guarded("rt-serial", Section18Serial);
         Guarded("rt-adc", Section19Adc);
+        Guarded("rt-crypto", Section20Crypto);
         if (s_failures != 0)
         {
             Console.WriteLine("RTSUITE: FAIL (" + s_failures + " checks)");

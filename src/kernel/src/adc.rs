@@ -1,16 +1,16 @@
-//! The ADC doors' bodies: a program claims a converter channel, reads it
+//! The kernel's ADC API's bodies: a program claims a converter channel, reads it
 //! one conversion at a time, asks a block's reference voltage and releases
 //! the channel -- the six verbs `api.rs` exports and `include/rhu.h`
 //! states. A row's channels are a TABLE in its facts
-//! (`board::facts::ADC_CHANNELS` over `ADC_BLOCKS`): the count door says
-//! how many across the blocks, the channel door the index-th channel's
-//! facts, so a program enumerates without guessing. Beneath the doors: the
+//! (`board::facts::ADC_CHANNELS` over `ADC_BLOCKS`): the count function says
+//! how many across the blocks, the channel function the index-th channel's
+//! facts, so a program enumerates without guessing. Beneath the functions: the
 //! claims table (a claim takes the channel's line in analog mode AND the
 //! channel bit of its block), the pure arithmetic (`adc_math`: the width's
 //! full scale, the conversion time and the budget it bounds) and the
 //! board's backend (`board::adc_backend`: the registers). A read starts one
 //! conversion and polls for its end against a budget from the block's
-//! clock -- spinning, then yielding, the bus doors' wait -- and a budget
+//! clock -- spinning, then yielding, the kernel's bus API's wait -- and a budget
 //! passed resets the block and answers the timeout code. A conversion the
 //! block flags as erroneous is discarded and the next started, at most
 //! eight in one read; the eighth flagged refuses the read with the
@@ -29,7 +29,7 @@ use crate::sched;
 /// The code this module adds to the hosting API's set (`include/rhu.h`).
 pub const ERR_BUSY: i32 = -16;
 /// The code a read answers when the block flagged every one of its attempts
-/// (`include/rhu.h` RHU_EIO, the value the other doors answer for a part
+/// (`include/rhu.h` RHU_EIO, the value the other functions answer for a part
 /// that failed).
 pub const ERR_IO: i32 = sched::ERR_IO;
 /// The conversions one read runs at most. A conversion the block flags as

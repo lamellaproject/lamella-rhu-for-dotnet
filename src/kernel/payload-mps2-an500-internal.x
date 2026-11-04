@@ -76,7 +76,7 @@ SECTIONS
   } > CODE
 
   /* The code above the first page: the null-page guard denies the
-   * first 4 KB, so the hosting doors and every other routine start at
+   * first 4 KB, so the hosting functions and every other routine start at
    * 0x1000; the 3 KB between the header and the page's end are zero fill
    * inside the same load segment. The vector table stays at 0: exception
    * vector reads bypass the protection unit (the ARMv7-M ARM, B3.5.1). */

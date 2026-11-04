@@ -1,5 +1,5 @@
 //! The RP2350's ADC backend: the chip's one successive-approximation
-//! converter behind the doors, in the shape of the emulator rows' virtual
+//! converter behind the functions, in the shape of the emulator rows' virtual
 //! converter. The block (the RP2350 datasheet, chapter 12.4) at
 //! 0x400a0000: CS (EN bit 0, TS_EN bit 1, START_ONCE bit 2, READY bit 8,
 //! ERR bit 9, AINSEL 15:12; Table 1121) and RESULT (11:0; Table 1122). One
@@ -18,10 +18,10 @@
 //! sensor is the channel past the package's last input; its bias (TS_EN)
 //! stays on for the block's life. One conversion at a time: the block has
 //! one owner, and a second channel's start waits its turn inside the
-//! door's budget. A conversion the block flags (CS.ERR; the RP2350
+//! function's budget. A conversion the block flags (CS.ERR; the RP2350
 //! datasheet's section 12.4.3: the result undefined, the sample discarded)
 //! answers no sample: the next conversion is started with the block kept
-//! while the door asks for another attempt, and the block is released at
+//! while the function asks for another attempt, and the block is released at
 //! its last.
 //! No interrupt, no FIFO, no free running; nothing masks.
 //! The record `__rhu_rp2350_adc` is read by symbol.
@@ -294,7 +294,7 @@ pub fn start(index: usize) {
 }
 
 /// The owner's conversion is done when READY is high; a queued channel
-/// takes the block and starts once it is free (the door's wait polls this).
+/// takes the block and starts once it is free (the function's wait polls this).
 pub fn ready(index: usize) -> bool {
     if OWNER.load(Ordering::Acquire) == index as u32 {
         return unsafe { read_volatile(CS) } & CS_READY != 0;
@@ -312,7 +312,7 @@ pub fn ready(index: usize) -> bool {
 /// conversion the block flagged (CS.ERR; the RP2350 datasheet's section 12.4.3
 /// leaves its result undefined and says such samples are discarded): the
 /// flagged conversion counted in the record and discarded, the next
-/// conversion started with the block kept when the door asks for another
+/// conversion started with the block kept when the function asks for another
 /// attempt, the block released otherwise. No sample is answered from a
 /// flagged conversion.
 pub fn sample(index: usize, again: bool) -> Option<u32> {

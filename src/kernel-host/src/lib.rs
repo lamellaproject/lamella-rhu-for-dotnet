@@ -27,17 +27,17 @@ mod wake;
 mod calendar_math;
 #[path = "../../kernel/src/abi_window.rs"]
 mod abi_window;
-/// The GPIO doors' pure halves: the claims table and the doors' arithmetic.
+/// The kernel's GPIO API's pure halves: the claims table and the functions' arithmetic.
 #[path = "../../kernel/src/claims.rs"]
 mod claims;
 #[path = "../../kernel/src/gpio_math.rs"]
 mod gpio_math;
-/// The bus doors' pure half: the descriptors, the message partition, the timing word, the divisor ladder and the budget.
+/// The kernel's bus API's pure half: the descriptors, the message partition, the timing word, the divisor ladder and the budget.
 #[path = "../../kernel/src/bus_math.rs"]
 mod bus_math;
 #[path = "../../kernel/src/rp2350_bus_math.rs"]
 mod rp2350_bus_math;
-/// The PWM and ADC doors' pure halves: the quantization and the conversion budget.
+/// The PWM and ADC functions' pure halves: the quantization and the conversion budget.
 #[path = "../../kernel/src/pwm_math.rs"]
 mod pwm_math;
 #[path = "../../kernel/src/adc_math.rs"]
@@ -50,10 +50,17 @@ mod rp2350_map;
 mod sdhost;
 #[path = "../../kernel/src/sdcard.rs"]
 mod sdcard;
+/// The SPI-mode host for the card layer, pure over its wire trait, proven over a scripted wire.
+#[path = "../../kernel/src/sdspi.rs"]
+mod sdspi;
 /// The FAT filesystem layer, compiled from the kernel's own file over the host tier's sparse device;
 /// the manifest check takes the harness's SHA-256 by path (dependency-free).
 #[path = "../../kernel/src/fat.rs"]
 mod fat;
+/// The kernel's file API's table over the FAT layer, pure: the mount's record and states, the two
+/// handle tables with their generation, the paths' routing and the codes, pinned here over the sparse device.
+#[path = "../../kernel/src/fs.rs"]
+mod fs;
 #[path = "../../harness/src/sha256.rs"]
 mod sha256;
 /// The sparse in-memory block device the FAT cases run over (host-only).
@@ -64,7 +71,7 @@ mod fatread;
 /// The network checksum arithmetic, pure: the matcher the host cases pin against the vendored stack's own parser.
 #[path = "../../kernel/src/net_math.rs"]
 mod net_math;
-/// The network doors' scripted peer, pure: the virtual medium's other end, every reply it builds parsed here by the stack's own wire types.
+/// The kernel's network API's scripted peer, pure: the virtual medium's other end, every reply it builds parsed here by the stack's own wire types.
 #[path = "../../kernel/src/net_peer.rs"]
 mod net_peer;
 /// The UART pin words' arithmetic, pure: the effective pair of a UART block from the row's pair, the chip's legal sets and the project's words.

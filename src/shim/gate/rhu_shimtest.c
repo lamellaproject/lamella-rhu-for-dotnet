@@ -13,11 +13,12 @@
  *   RHU_SHIMTEST_LADDER_TLS         the image's thread-local template: the
  *                                   kernel's per-thread copy of module 0
  *   RHU_SHIMTEST_LADDER_PWMFS       the PWM device files (/sys/class/pwm/pwmchip0)
- *                                   from a native caller's side, over the kernel's PWM doors
+ *                                   from a native caller's side, over the kernel's PWM API
  *   RHU_SHIMTEST_LADDER_IIOFS       the analog input device files (/sys/bus/iio/devices)
- *                                   from a native caller's side, over the kernel's ADC doors
+ *   RHU_SHIMTEST_LADDER_SDFS        the card's files (/media/sd0) over a scripted kernel
+ *                                   from a native caller's side, over the kernel's ADC API
  *   RHU_SHIMTEST_LADDER_TTYDEV      the serial device files (/dev/ttyS<n>) from a
- *                                   native caller's side, over the kernel's UART doors,
+ *                                   native caller's side, over the kernel's UART API,
  *                                   with the stock serial layer through its own entry points
  *   RHU_SHIMTEST_LADDER_BUSDEV      the bus device nodes (/dev/i2c-<bus>,
  *                                   /dev/spidev<bus>.<select>) from a native
@@ -58,19 +59,19 @@
 
 #include "rhu.h"
 #include "rhu_glibc_arm32.h"
-#include "rhu_pal_errno_net11_rc2.h"
-#include "rhu_pal_io_net11_rc2.h"
-#include "rhu_pal_memory_net11_rc2.h"
-#include "rhu_pal_random_net11_rc2.h"
-#include "rhu_pal_signal_net11_rc2.h"
-#include "rhu_pal_threading_net11_rc2.h"
-#include "rhu_pal_time_net11_rc2.h"
+#include "rhu_pal_errno_net11_rc3.h"
+#include "rhu_pal_io_net11_rc3.h"
+#include "rhu_pal_memory_net11_rc3.h"
+#include "rhu_pal_random_net11_rc3.h"
+#include "rhu_pal_signal_net11_rc3.h"
+#include "rhu_pal_threading_net11_rc3.h"
+#include "rhu_pal_time_net11_rc3.h"
 
 #if !defined(RHU_SHIMTEST_LADDER_CORE) && !defined(RHU_SHIMTEST_LADDER_FDMAP) \
     && !defined(RHU_SHIMTEST_LADDER_ACTIVATION) && !defined(RHU_SHIMTEST_LADDER_TLS) \
     && !defined(RHU_SHIMTEST_LADDER_HOST) && !defined(RHU_SHIMTEST_LADDER_BUSDEV) \
-    && !defined(RHU_SHIMTEST_LADDER_GPIOD) && !defined(RHU_SHIMTEST_LADDER_FROZEN) && !defined(RHU_SHIMTEST_LADDER_PWMFS) && !defined(RHU_SHIMTEST_LADDER_TTYDEV) && !defined(RHU_SHIMTEST_LADDER_IIOFS)
-#error "a tenant build names its ladder (RHU_SHIMTEST_LADDER_CORE, RHU_SHIMTEST_LADDER_FDMAP, RHU_SHIMTEST_LADDER_ACTIVATION, RHU_SHIMTEST_LADDER_TLS, RHU_SHIMTEST_LADDER_HOST, RHU_SHIMTEST_LADDER_BUSDEV, RHU_SHIMTEST_LADDER_GPIOD, RHU_SHIMTEST_LADDER_PWMFS, RHU_SHIMTEST_LADDER_IIOFS, RHU_SHIMTEST_LADDER_TTYDEV or RHU_SHIMTEST_LADDER_FROZEN)"
+    && !defined(RHU_SHIMTEST_LADDER_GPIOD) && !defined(RHU_SHIMTEST_LADDER_FROZEN) && !defined(RHU_SHIMTEST_LADDER_PWMFS) && !defined(RHU_SHIMTEST_LADDER_TTYDEV) && !defined(RHU_SHIMTEST_LADDER_IIOFS) && !defined(RHU_SHIMTEST_LADDER_SDFS)
+#error "a tenant build names its ladder (RHU_SHIMTEST_LADDER_CORE, RHU_SHIMTEST_LADDER_FDMAP, RHU_SHIMTEST_LADDER_ACTIVATION, RHU_SHIMTEST_LADDER_TLS, RHU_SHIMTEST_LADDER_HOST, RHU_SHIMTEST_LADDER_BUSDEV, RHU_SHIMTEST_LADDER_GPIOD, RHU_SHIMTEST_LADDER_PWMFS, RHU_SHIMTEST_LADDER_IIOFS, RHU_SHIMTEST_LADDER_TTYDEV, RHU_SHIMTEST_LADDER_SDFS or RHU_SHIMTEST_LADDER_FROZEN)"
 #endif
 
 /* --- the C-runtime surface, declared as the caller sees it --- */
@@ -162,7 +163,7 @@ typedef struct dl_phdr_info {
 int dl_iterate_phdr(int (*cb)(dl_phdr_info *, size_t, void *), void *data);
 
 /* --- output: unprefixed payload lines, EACH ONE console write: the
- * kernel's door writes a call whole, and a second thread's log line can
+ * kernel function writes a call whole, and a second thread's log line can
  * land between two calls of one thread, tearing a verdict line the gate
  * matches as fixed text. --- */
 #define LINE_MAX 512u
@@ -260,7 +261,7 @@ extern char __rhu_hydrated_hi[] __attribute__((weak));
 /* The managed heap's window as the hosting layer chooses it: window 1
  * when the image serves two ranges and the brackets lie inside range 1's
  * physical range, window 0 otherwise. The chosen window's record is
- * filled at the call (zeroed should the range door refuse). Returns 1
+ * filled at the call (zeroed should the range function refuse). Returns 1
  * for window 1, 0 for window 0. */
 static int heap_window_read(rhu_ram_desc *w)
 {
@@ -359,7 +360,7 @@ static int spawn(uint32_t *tid, void *(*fn)(void *), void *arg, uint32_t stack)
 #endif
 
 #if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_BUSDEV) || defined(RHU_SHIMTEST_LADDER_GPIOD) || defined(RHU_SHIMTEST_LADDER_TTYDEV)
-/* A second thread BELOW the ladder's: spawned through the kernel's door one
+/* A second thread BELOW the ladder's: spawned by a kernel call one
  * step less urgent than the flat hosted level every shim thread runs at,
  * so it runs only while the ladder's thread is blocked and never takes a
  * step of its own before the ladder's thread has stopped to wait for it --
@@ -577,7 +578,7 @@ static void realtime_after(struct ts64 *t, int ms)
 }
 
 /* A timestamp's Unix count as calendar ticks since the year 1, for the
- * calendar door. */
+ * calendar function. */
 static uint64_t calendar_ticks_of(const struct ts64 *t)
 {
     return (uint64_t)((int64_t)t->sec * 10000000ll + (int64_t)(t->nsec / 100) + RHU_SHIM_UNIX_EPOCH_TICKS);
@@ -1022,7 +1023,7 @@ static int core_ladder(void)
         pass("shim-alloc", " (realloc keeps bytes; calloc zero and overflow-checked; aligned forms aligned)");
     }
 
-    /* entropy: the two doors */
+    /* entropy: the kernel's two entropy functions */
     {
         uint8_t buf[16];
         uint8_t again[16];
@@ -2365,7 +2366,7 @@ static int tls_ladder(void)
  * stand-ins carry the prototypes the generated header declares and read
  * the table by the slot names and export names it declares: a stand-in
  * that disagreed with the pin would prove the wrong contract. */
-#include "rhu_rt_entry_net11_rc2.h"
+#include "rhu_rt_entry_net11_rc3.h"
 
 _Static_assert(RHU_RT_CLASSLIB_SLOTS > RHU_RT_CLASSLIB_SLOT_ResolveDispatch, "the table holds the dispatch slot");
 _Static_assert(RHU_RT_CLASSLIB_EXPORTS == 8, "eight slots carry an export at this pin");
@@ -4011,6 +4012,836 @@ static int frozen_ladder(void)
 }
 #endif /* RHU_SHIMTEST_LADDER_FROZEN */
 
+#ifdef RHU_SHIMTEST_LADDER_SDFS
+#include "rhu_pal_surface_net11_rc3.h"
+int strncmp(const char *a, const char *b, size_t n);
+char *strcpy(char *dst, const char *src);
+char *strncpy(char *dst, const char *src, size_t n);
+char *strchr(const char *s, int c);
+int32_t SystemNative_UTimensat(const char *path, rhu_pal_timespec *times);
+int32_t SystemNative_FUTimens(intptr_t fd, rhu_pal_timespec *times);
+#endif
+#ifdef RHU_SHIMTEST_LADDER_SDFS
+
+/* --- the card's files from a native caller's side: the paths under
+ * /media/sd0 and the storage band, over a SCRIPTED kernel. The emulator
+ * row has no card socket, so this ladder serves the kernel's file family
+ * itself through the unit's weak hook: a volume of a few files in memory
+ * in the kernel's own shapes (the records, the two handle tables, the
+ * codes at Linux's values), a mount the ladder raises and drops, a
+ * card-out state that answers EIO on the handles open at the time, a full
+ * state that answers ENOSPC on a write. What the ladder reads through the
+ * runtime's portability verbs is the unit's own work: the routing of a
+ * path, the storage band and its exhaustion, the dup on one handle, the
+ * errno map by sign, the status and directory records, the mount-point
+ * list and the space and type-name queries, and the store standing beside
+ * the card untouched. --- */
+#define SK_FILES 12
+#define SK_DATA 2048
+#define SK_HANDLES 16
+#define SK_DIRS 4
+#define SK_PATH 64
+#define SK_CLUSTER 4096u
+#define SK_CLUSTERS 1000u
+
+struct sk_file {
+    uint8_t used, dir, ro;
+    char key[SK_PATH]; /* the path with the point dropped: "/a.txt", "/d", "/d/b.txt" */
+    uint32_t size;
+    uint8_t data[SK_DATA];
+};
+struct sk_handle {
+    uint8_t used, gone;
+    int32_t file;
+    uint32_t pos, flags;
+};
+struct sk_dir {
+    uint8_t used, gone;
+    char key[SK_PATH];
+    int idx; /* -2 ".", -1 "..", then the table's rows */
+};
+static struct sk_file g_skf[SK_FILES];
+static struct sk_handle g_skh[SK_HANDLES];
+static struct sk_dir g_skd[SK_DIRS];
+static int g_sk_mounted, g_sk_full;
+static uint32_t g_sk_opens, g_sk_closes, g_sk_dopens, g_sk_dcloses, g_sk_syncs;
+
+/* The path's key: the point dropped, one trailing slash dropped, the root "/". */
+static int32_t sk_key(const char *path, char *key)
+{
+    if (path == NULL || path[0] != '/')
+        return RHU_EINVAL;
+    if (!g_sk_mounted)
+        return RHU_ENOENT;
+    if (strncmp(path, "/media/sd0", 10) != 0 || (path[10] != 0 && path[10] != '/'))
+        return RHU_ENOENT;
+    const char *rest = path + 10;
+    size_t n = strlen(rest);
+    if (n == 0 || (n == 1 && rest[0] == '/')) {
+        key[0] = '/';
+        key[1] = 0;
+        return 0;
+    }
+    if (n >= SK_PATH)
+        return RHU_ENAMETOOLONG;
+    memcpy(key, rest, n + 1);
+    if (n > 1 && key[n - 1] == '/')
+        key[n - 1] = 0;
+    return 0;
+}
+
+static int sk_find(const char *key)
+{
+    for (int i = 0; i < SK_FILES; i++) {
+        if (g_skf[i].used != 0 && strcmp(g_skf[i].key, key) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static int sk_is_dir_key(const char *key)
+{
+    if (strcmp(key, "/") == 0)
+        return 1;
+    int i = sk_find(key);
+    return i >= 0 && g_skf[i].dir != 0;
+}
+
+static int sk_parent_exists(const char *key)
+{
+    char parent[SK_PATH];
+    size_t n = strlen(key);
+    while (n > 0 && key[n - 1] != '/')
+        n--;
+    if (n <= 1)
+        return 1;
+    memcpy(parent, key, n - 1);
+    parent[n - 1] = 0;
+    return sk_is_dir_key(parent);
+}
+
+static int sk_child_of(const char *key, const char *dir)
+{
+    size_t dl = strlen(dir);
+    if (dl == 1)
+        dl = 0;
+    if (strncmp(key, dir, dl) != 0 || key[dl] != '/')
+        return 0;
+    return strchr(key + dl + 1, '/') == NULL;
+}
+
+static int sk_has_child(const char *dir)
+{
+    for (int i = 0; i < SK_FILES; i++) {
+        if (g_skf[i].used != 0 && sk_child_of(g_skf[i].key, dir))
+            return 1;
+    }
+    return 0;
+}
+
+static int32_t sk_mount_count(void)
+{
+    return 1;
+}
+
+static int32_t sk_mount(uint32_t index, rhu_fs_mount_desc *out)
+{
+    if (index != 0 || out == NULL)
+        return RHU_EINVAL;
+    memset(out, 0, sizeof *out);
+    memcpy(out->point, "/media/sd0", 11);
+    out->state = g_sk_mounted ? RHU_FS_MOUNTED : RHU_FS_NO_CARD;
+    if (g_sk_mounted) {
+        out->fat_width = 32;
+        out->cluster_bytes = SK_CLUSTER;
+        out->clusters = SK_CLUSTERS;
+        out->free_clusters = g_sk_full ? 0 : SK_CLUSTERS - 100;
+        memcpy(out->label, "SCRIPTED", 9);
+    }
+    return 0;
+}
+
+static int32_t sk_open(const char *path, uint32_t flags)
+{
+    char key[SK_PATH];
+    if ((flags & ~63u) != 0 || (flags & (RHU_FS_O_READ | RHU_FS_O_WRITE)) == 0)
+        return RHU_EINVAL;
+    if ((flags & (RHU_FS_O_TRUNC | RHU_FS_O_APPEND)) != 0 && (flags & RHU_FS_O_WRITE) == 0)
+        return RHU_EINVAL;
+    int32_t r = sk_key(path, key);
+    if (r != 0)
+        return r;
+    if (sk_is_dir_key(key))
+        return RHU_EISDIR;
+    int fi = sk_find(key);
+    if (fi < 0) {
+        if ((flags & RHU_FS_O_CREATE) == 0)
+            return RHU_ENOENT;
+        if (!sk_parent_exists(key))
+            return RHU_ENOENT;
+        for (int i = 0; i < SK_FILES && fi < 0; i++) {
+            if (g_skf[i].used == 0)
+                fi = i;
+        }
+        if (fi < 0)
+            return RHU_ENOSPC;
+        memset(&g_skf[fi], 0, sizeof g_skf[fi]);
+        g_skf[fi].used = 1;
+        strcpy(g_skf[fi].key, key);
+    } else if ((flags & RHU_FS_O_EXCL) != 0) {
+        return RHU_EEXIST;
+    }
+    if ((flags & RHU_FS_O_WRITE) != 0 && g_skf[fi].ro != 0)
+        return RHU_EROFS;
+    int h = -1;
+    for (int i = 0; i < SK_HANDLES && h < 0; i++) {
+        if (g_skh[i].used == 0)
+            h = i;
+    }
+    if (h < 0)
+        return RHU_EMFILE;
+    if ((flags & RHU_FS_O_TRUNC) != 0)
+        g_skf[fi].size = 0;
+    g_skh[h].used = 1;
+    g_skh[h].gone = 0;
+    g_skh[h].file = fi;
+    g_skh[h].pos = 0;
+    g_skh[h].flags = flags;
+    g_sk_opens++;
+    return h;
+}
+
+static struct sk_handle *sk_h(int32_t h)
+{
+    if (h < 0 || h >= SK_HANDLES || g_skh[h].used == 0)
+        return NULL;
+    return &g_skh[h];
+}
+
+static int32_t sk_close(int32_t h)
+{
+    struct sk_handle *p = sk_h(h);
+    if (p == NULL)
+        return RHU_EBADF;
+    memset(p, 0, sizeof *p);
+    g_sk_closes++;
+    return 0;
+}
+
+static int32_t sk_transfer(int32_t h, void *buf, uint32_t n, int64_t at, int positional, int writing)
+{
+    struct sk_handle *p = sk_h(h);
+    if (p == NULL)
+        return RHU_EBADF;
+    if (p->gone)
+        return RHU_EIO;
+    if (buf == NULL && n > 0)
+        return RHU_EINVAL;
+    if ((p->flags & (writing ? RHU_FS_O_WRITE : RHU_FS_O_READ)) == 0)
+        return RHU_EBADF;
+    if (positional && (at < 0 || at > 0xFFFFFFFFll))
+        return RHU_EINVAL;
+    if (positional && writing && (p->flags & RHU_FS_O_APPEND) != 0)
+        return RHU_EINVAL;
+    struct sk_file *f = &g_skf[p->file];
+    uint64_t pos = positional ? (uint64_t)at : (uint64_t)p->pos;
+    if (writing) {
+        if (g_sk_full)
+            return RHU_ENOSPC;
+        if ((p->flags & RHU_FS_O_APPEND) != 0)
+            pos = f->size;
+        if (pos + n > SK_DATA)
+            return RHU_ENOSPC;
+        if (pos > f->size)
+            memset(f->data + f->size, 0, (size_t)(pos - f->size));
+        memcpy(f->data + pos, buf, n);
+        if (pos + n > f->size)
+            f->size = (uint32_t)(pos + n);
+    } else {
+        if (pos >= f->size)
+            n = 0;
+        else if (pos + n > f->size)
+            n = (uint32_t)(f->size - pos);
+        memcpy(buf, f->data + pos, n);
+    }
+    if (!positional)
+        p->pos = (uint32_t)(pos + n);
+    return (int32_t)n;
+}
+
+static int32_t sk_read(int32_t h, void *buf, uint32_t n)
+{
+    return sk_transfer(h, buf, n, 0, 0, 0);
+}
+
+static int32_t sk_write(int32_t h, const void *buf, uint32_t n)
+{
+    return sk_transfer(h, (void *)buf, n, 0, 0, 1);
+}
+
+static int32_t sk_pread(int32_t h, void *buf, uint32_t n, int64_t offset)
+{
+    return sk_transfer(h, buf, n, offset, 1, 0);
+}
+
+static int32_t sk_pwrite(int32_t h, const void *buf, uint32_t n, int64_t offset)
+{
+    return sk_transfer(h, (void *)buf, n, offset, 1, 1);
+}
+
+static int32_t sk_seek(int32_t h, int64_t offset, uint32_t whence, int64_t *pos)
+{
+    struct sk_handle *p = sk_h(h);
+    if (p == NULL)
+        return RHU_EBADF;
+    if (p->gone)
+        return RHU_EIO;
+    int64_t base = whence == RHU_FS_SEEK_SET ? 0 : whence == RHU_FS_SEEK_CUR ? (int64_t)p->pos : whence == RHU_FS_SEEK_END ? (int64_t)g_skf[p->file].size : -1;
+    if (base < 0 || pos == NULL || base + offset < 0 || base + offset > 0xFFFFFFFFll)
+        return RHU_EINVAL;
+    p->pos = (uint32_t)(base + offset);
+    *pos = (int64_t)p->pos;
+    return 0;
+}
+
+static int32_t sk_truncate(int32_t h, int64_t len)
+{
+    struct sk_handle *p = sk_h(h);
+    if (p == NULL)
+        return RHU_EBADF;
+    if (p->gone)
+        return RHU_EIO;
+    if (len < 0 || len > 0xFFFFFFFFll)
+        return RHU_EINVAL;
+    if ((p->flags & RHU_FS_O_WRITE) == 0)
+        return RHU_EBADF;
+    if (len > SK_DATA)
+        return RHU_ENOSPC;
+    struct sk_file *f = &g_skf[p->file];
+    if ((uint32_t)len > f->size)
+        memset(f->data + f->size, 0, (size_t)len - f->size);
+    f->size = (uint32_t)len;
+    return 0;
+}
+
+static int32_t sk_sync(int32_t h)
+{
+    struct sk_handle *p = sk_h(h);
+    if (p == NULL)
+        return RHU_EBADF;
+    if (p->gone)
+        return RHU_EIO;
+    g_sk_syncs++;
+    return 0;
+}
+
+static void sk_fill_stat(const char *key, int fi, rhu_fs_stat_desc *out)
+{
+    memset(out, 0, sizeof *out);
+    if (fi < 0) {
+        out->kind = RHU_FS_DIR; /* the root */
+        out->first_cluster = 2;
+    } else {
+        out->kind = g_skf[fi].dir ? RHU_FS_DIR : RHU_FS_FILE;
+        out->size = g_skf[fi].dir ? 0 : g_skf[fi].size;
+        out->read_only = g_skf[fi].ro;
+        out->first_cluster = g_skf[fi].size != 0 || g_skf[fi].dir ? (uint32_t)fi + 3u : 0u;
+    }
+    (void)key;
+    out->mtime = 1700000000ll + (fi < 0 ? 0 : fi);
+    out->ctime = out->mtime - 10;
+    out->atime = 1699920000ll;
+}
+
+static int32_t sk_fstat(int32_t h, rhu_fs_stat_desc *out)
+{
+    struct sk_handle *p = sk_h(h);
+    if (p == NULL)
+        return RHU_EBADF;
+    if (p->gone)
+        return RHU_EIO;
+    sk_fill_stat(g_skf[p->file].key, p->file, out);
+    return 0;
+}
+
+static int32_t sk_stat(const char *path, rhu_fs_stat_desc *out)
+{
+    char key[SK_PATH];
+    int32_t r = sk_key(path, key);
+    if (r != 0)
+        return r;
+    if (strcmp(key, "/") == 0) {
+        sk_fill_stat(key, -1, out);
+        return 0;
+    }
+    int fi = sk_find(key);
+    if (fi < 0)
+        return RHU_ENOENT;
+    sk_fill_stat(key, fi, out);
+    return 0;
+}
+
+static int32_t sk_unlink(const char *path)
+{
+    char key[SK_PATH];
+    int32_t r = sk_key(path, key);
+    if (r != 0)
+        return r;
+    if (strcmp(key, "/") == 0)
+        return RHU_EISDIR; /* the root is a directory, as the kernel's FAT layer answers it */
+    int fi = sk_find(key);
+    if (fi < 0)
+        return RHU_ENOENT;
+    if (g_skf[fi].dir)
+        return RHU_EISDIR;
+    if (g_skf[fi].ro)
+        return RHU_EROFS;
+    g_skf[fi].used = 0;
+    return 0;
+}
+
+static int32_t sk_mkdir(const char *path)
+{
+    char key[SK_PATH];
+    int32_t r = sk_key(path, key);
+    if (r != 0)
+        return r;
+    if (strcmp(key, "/") == 0 || sk_find(key) >= 0)
+        return RHU_EEXIST;
+    if (!sk_parent_exists(key))
+        return RHU_ENOENT;
+    for (int i = 0; i < SK_FILES; i++) {
+        if (g_skf[i].used == 0) {
+            memset(&g_skf[i], 0, sizeof g_skf[i]);
+            g_skf[i].used = 1;
+            g_skf[i].dir = 1;
+            strcpy(g_skf[i].key, key);
+            return 0;
+        }
+    }
+    return RHU_ENOSPC;
+}
+
+static int32_t sk_rmdir(const char *path)
+{
+    char key[SK_PATH];
+    int32_t r = sk_key(path, key);
+    if (r != 0)
+        return r;
+    if (strcmp(key, "/") == 0)
+        return RHU_EINVAL;
+    int fi = sk_find(key);
+    if (fi < 0)
+        return RHU_ENOENT;
+    if (!g_skf[fi].dir)
+        return RHU_ENOTDIR;
+    if (sk_has_child(key))
+        return RHU_ENOTEMPTY;
+    g_skf[fi].used = 0;
+    return 0;
+}
+
+static int32_t sk_rename(const char *old_path, const char *new_path)
+{
+    char ok[SK_PATH];
+    char nk[SK_PATH];
+    int32_t r = sk_key(old_path, ok);
+    if (r != 0)
+        return r;
+    r = sk_key(new_path, nk);
+    if (r != 0)
+        return r;
+    int fi = sk_find(ok);
+    if (fi < 0)
+        return RHU_ENOENT;
+    int ni = sk_find(nk);
+    if (ni >= 0) {
+        if (g_skf[ni].dir)
+            return RHU_EEXIST;
+        g_skf[ni].used = 0;
+    }
+    if (!sk_parent_exists(nk))
+        return RHU_ENOENT;
+    strcpy(g_skf[fi].key, nk);
+    return 0;
+}
+
+static int32_t sk_opendir(const char *path)
+{
+    char key[SK_PATH];
+    int32_t r = sk_key(path, key);
+    if (r != 0)
+        return r;
+    if (strcmp(key, "/") != 0) {
+        int fi = sk_find(key);
+        if (fi < 0)
+            return RHU_ENOENT;
+        if (!g_skf[fi].dir)
+            return RHU_ENOTDIR;
+    }
+    for (int i = 0; i < SK_DIRS; i++) {
+        if (g_skd[i].used == 0) {
+            g_skd[i].used = 1;
+            g_skd[i].gone = 0;
+            strcpy(g_skd[i].key, key);
+            g_skd[i].idx = -2;
+            g_sk_dopens++;
+            return i;
+        }
+    }
+    return RHU_EMFILE;
+}
+
+static int32_t sk_readdir(int32_t h, rhu_fs_dirent *out)
+{
+    if (h < 0 || h >= SK_DIRS || g_skd[h].used == 0)
+        return RHU_EBADF;
+    if (g_skd[h].gone)
+        return RHU_EIO;
+    if (out == NULL)
+        return RHU_EINVAL;
+    struct sk_dir *d = &g_skd[h];
+    memset(out, 0, sizeof *out);
+    if (d->idx == -2 || d->idx == -1) {
+        strcpy(out->name, d->idx == -2 ? "." : "..");
+        out->kind = RHU_FS_DIR;
+        d->idx++;
+        return 1;
+    }
+    while (d->idx < SK_FILES) {
+        int i = d->idx++;
+        if (g_skf[i].used != 0 && sk_child_of(g_skf[i].key, d->key)) {
+            const char *leaf = g_skf[i].key + strlen(d->key) + (strlen(d->key) == 1 ? 0 : 1);
+            strcpy(out->name, leaf);
+            out->kind = g_skf[i].dir ? RHU_FS_DIR : RHU_FS_FILE;
+            out->size = g_skf[i].dir ? 0 : g_skf[i].size;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int32_t sk_closedir(int32_t h)
+{
+    if (h < 0 || h >= SK_DIRS || g_skd[h].used == 0)
+        return RHU_EBADF;
+    memset(&g_skd[h], 0, sizeof g_skd[h]);
+    g_sk_dcloses++;
+    return 0;
+}
+
+static int32_t sk_statfs(const char *path, rhu_fs_statfs_desc *out)
+{
+    char key[SK_PATH];
+    int32_t r = sk_key(path, key);
+    if (r != 0)
+        return r;
+    if (strcmp(key, "/") != 0 && sk_find(key) < 0)
+        return RHU_ENOENT;
+    out->block_size = SK_CLUSTER;
+    out->blocks = SK_CLUSTERS;
+    out->free = g_sk_full ? 0 : SK_CLUSTERS - 100;
+    out->name_max = 255;
+    return 0;
+}
+
+/* The unit's table shape (rhu_sysnative.c's sdfs_kernel: twenty-one
+ * functions in the header's order), served through the weak hook. */
+struct sk_table {
+    int32_t (*mount_count)(void);
+    int32_t (*mount)(uint32_t, rhu_fs_mount_desc *);
+    int32_t (*open)(const char *, uint32_t);
+    int32_t (*close)(int32_t);
+    int32_t (*read)(int32_t, void *, uint32_t);
+    int32_t (*write)(int32_t, const void *, uint32_t);
+    int32_t (*pread)(int32_t, void *, uint32_t, int64_t);
+    int32_t (*pwrite)(int32_t, const void *, uint32_t, int64_t);
+    int32_t (*seek)(int32_t, int64_t, uint32_t, int64_t *);
+    int32_t (*truncate)(int32_t, int64_t);
+    int32_t (*sync)(int32_t);
+    int32_t (*fstat)(int32_t, rhu_fs_stat_desc *);
+    int32_t (*stat)(const char *, rhu_fs_stat_desc *);
+    int32_t (*unlink)(const char *);
+    int32_t (*mkdir)(const char *);
+    int32_t (*rmdir)(const char *);
+    int32_t (*rename)(const char *, const char *);
+    int32_t (*opendir)(const char *);
+    int32_t (*readdir)(int32_t, rhu_fs_dirent *);
+    int32_t (*closedir)(int32_t);
+    int32_t (*statfs)(const char *, rhu_fs_statfs_desc *);
+};
+static const struct sk_table g_sk_table = {
+    sk_mount_count, sk_mount, sk_open, sk_close, sk_read, sk_write, sk_pread, sk_pwrite, sk_seek, sk_truncate, sk_sync,
+    sk_fstat, sk_stat, sk_unlink, sk_mkdir, sk_rmdir, sk_rename, sk_opendir, sk_readdir, sk_closedir, sk_statfs,
+};
+const struct sk_table *rhu_sdfs_kernel_hook(void)
+{
+    return &g_sk_table;
+}
+
+/* The card's events the ladder scripts: a card seated (the volume
+ * standing, its files kept as a re-seated card keeps them) and a card
+ * pulled (the volume gone, every open handle answering EIO). */
+static void sk_card_in(void)
+{
+    g_sk_mounted = 1;
+}
+
+static void sk_card_out(void)
+{
+    g_sk_mounted = 0;
+    for (int i = 0; i < SK_HANDLES; i++)
+        g_skh[i].gone = g_skh[i].used;
+    for (int i = 0; i < SK_DIRS; i++)
+        g_skd[i].gone = g_skd[i].used;
+}
+
+/* The mount-point callback's collection. */
+static char g_mp[4][32];
+static int g_mp_n;
+static void mp_found(void *ctx, const char *name)
+{
+    (void)ctx;
+    if (g_mp_n < 4) {
+        strncpy(g_mp[g_mp_n], name, 31);
+        g_mp[g_mp_n][31] = 0;
+    }
+    g_mp_n++;
+}
+
+static int mp_has(const char *name)
+{
+    for (int i = 0; i < g_mp_n && i < 4; i++) {
+        if (strcmp(g_mp[i], name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+#define SD_ERRNO_IS(e) (SystemNative_GetErrNo() == (e))
+#define SD_FD_LO 80
+#define SD_FD_HI 96
+
+static int sdfs_ladder(void)
+{
+    rhu_pal_filestatus st;
+    rhu_pal_mountpointinformation mpi;
+    rhu_pal_directoryentry de;
+    char buf[64];
+    char fmt[16];
+    int64_t ftype = 0;
+    intptr_t fds[SK_HANDLES + 2];
+
+    out("shimtest-sdfs: the card's files from a native caller's side over a scripted kernel");
+    CHECK(rhu_shim_init() == 0, "shim-sdfs-init", "(initialization refused)");
+
+    /* no card: the point is absent, /media stands, the store's one mount point */
+    CHECK(SystemNative_Stat("/media", &st) == 0 && (st.Mode & RHU_PAL_S_IFMT) == RHU_PAL_S_IFDIR, "shim-sdfs-absent", "(/media is not a directory)");
+    CHECK(SystemNative_Stat("/media/sd0", &st) == -1 && SD_ERRNO_IS(RHU_GERR_ENOENT), "shim-sdfs-absent", "(the point answered with no card)");
+    CHECK(SystemNative_Open("/media/sd0/a.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT, 0644) == -1 && SD_ERRNO_IS(RHU_GERR_ENOENT), "shim-sdfs-absent", "(an open under the absent point was not ENOENT)");
+    g_mp_n = 0;
+    CHECK(SystemNative_GetAllMountPoints(mp_found, NULL) == 0 && g_mp_n == 1 && mp_has("/"), "shim-sdfs-absent", "(the mount-point list is not the store's root alone)");
+    CHECK(SystemNative_GetSpaceInfoForMountPoint("/media/sd0", &mpi) == -1 && SD_ERRNO_IS(RHU_GERR_ENOENT), "shim-sdfs-absent", "(the space query answered with no card)");
+    CHECK(g_sk_opens == 0, "shim-sdfs-absent", "(the scripted kernel opened a handle)");
+    pass("shim-sdfs-absent", " (no card: the point ENOENT, /media a directory, the store's root the one mount point)");
+
+    /* the card seated: the point a directory, listed under /media, the volume's space and type */
+    sk_card_in();
+    CHECK(SystemNative_Stat("/media/sd0", &st) == 0 && (st.Mode & RHU_PAL_S_IFMT) == RHU_PAL_S_IFDIR && st.Dev == 2, "shim-sdfs-mounted", "(the point is not a directory on device 2)");
+    g_mp_n = 0;
+    CHECK(SystemNative_GetAllMountPoints(mp_found, NULL) == 0 && g_mp_n == 2 && mp_has("/") && mp_has("/media/sd0"), "shim-sdfs-mounted", "(the mount-point list lacks the point)");
+    CHECK(SystemNative_GetSpaceInfoForMountPoint("/media/sd0", &mpi) == 0 && mpi.TotalSize == 4096000ull && mpi.TotalFreeSpace == 3686400ull && mpi.AvailableFreeSpace == 3686400ull, "shim-sdfs-mounted", "(the space is not the kernel's cluster counts)");
+    CHECK(SystemNative_GetFileSystemTypeNameForMountPoint("/media/sd0", fmt, (int32_t)sizeof fmt, &ftype) == 0 && strcmp(fmt, "vfat") == 0 && ftype == -1, "shim-sdfs-mounted", "(the type name is not vfat with the number -1, the number)");
+    {
+        void *d = SystemNative_OpenDir("/media");
+        int seen = 0;
+        CHECK(d != NULL, "shim-sdfs-mounted", "(/media did not open as a directory)");
+        while (SystemNative_ReadDir(d, &de) == 0) {
+            if (strcmp(de.Name, "sd0") == 0 && de.InodeType == RHU_PAL_DT_DIR)
+                seen++;
+        }
+        SystemNative_CloseDir(d);
+        CHECK(seen == 1, "shim-sdfs-mounted", "(a listing of /media does not show sd0 once as a directory)");
+    }
+    pass("shim-sdfs-mounted", " (the point a directory on its own device, listed under /media; the space from the kernel's clusters; the type vfat)");
+
+    /* a file written and read back: the band, the position, the status record */
+    {
+        intptr_t fd = SystemNative_Open("/media/sd0/a.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0644);
+        CHECK(fd == SD_FD_LO, "shim-sdfs-roundtrip", "(the first card descriptor is not the storage band's first)");
+        CHECK(SystemNative_Write(fd, "0123456789", 10) == 10, "shim-sdfs-roundtrip", "(the write did not move ten bytes)");
+        CHECK(SystemNative_Read(fd, buf, 4) == -1 && SD_ERRNO_IS(RHU_GERR_EBADF), "shim-sdfs-roundtrip", "(a write-only descriptor read)");
+        CHECK(SystemNative_FSync(fd) == 0 && g_sk_syncs == 1, "shim-sdfs-roundtrip", "(the sync did not reach the kernel)");
+        CHECK(SystemNative_Close(fd) == 0 && g_sk_closes == 1, "shim-sdfs-roundtrip", "(the close did not reach the kernel)");
+        fd = SystemNative_Open("/media/sd0/a.txt", RHU_PAL_O_RDONLY, 0);
+        CHECK(fd == SD_FD_LO, "shim-sdfs-roundtrip", "(the closed descriptor was not reused)");
+        CHECK(SystemNative_FStat(fd, &st) == 0 && st.Size == 10 && (st.Mode & RHU_PAL_S_IFMT) == RHU_PAL_S_IFREG && (st.Mode & 0x1FF) == 0x1B6 && st.Dev == 2 && st.Ino == 3 && st.MTime == 1700000000ll && st.CTime == 1700000000ll && st.BirthTime == 1699999990ll && st.ATime == 1699920000ll && (st.Flags & 1) != 0 && st.HardLinkCount == 1, "shim-sdfs-roundtrip", "(the status record is not the kernel's record mapped)");
+        memset(buf, 0, sizeof buf);
+        CHECK(SystemNative_Read(fd, buf, 4) == 4 && memcmp(buf, "0123", 4) == 0, "shim-sdfs-roundtrip", "(the first read)");
+        CHECK(SystemNative_LSeek(fd, 0, RHU_PAL_SEEK_CUR) == 4 && SystemNative_LSeek(fd, 0, RHU_PAL_SEEK_END) == 10 && SystemNative_LSeek(fd, 2, RHU_PAL_SEEK_SET) == 2, "shim-sdfs-roundtrip", "(the seeks)");
+        CHECK(SystemNative_PRead(fd, buf, 3, 7) == 3 && memcmp(buf, "789", 3) == 0 && SystemNative_LSeek(fd, 0, RHU_PAL_SEEK_CUR) == 2, "shim-sdfs-roundtrip", "(a positional read moved the position)");
+        CHECK(SystemNative_Read(fd, buf, 64) == 8 && memcmp(buf, "23456789", 8) == 0 && SystemNative_Read(fd, buf, 4) == 0, "shim-sdfs-roundtrip", "(the read to the end)");
+        CHECK(SystemNative_Write(fd, "x", 1) == -1 && SD_ERRNO_IS(RHU_GERR_EBADF), "shim-sdfs-roundtrip", "(a read-only descriptor wrote)");
+        CHECK(SystemNative_Close(fd) == 0, "shim-sdfs-roundtrip", "(the second close)");
+        CHECK(SystemNative_Stat("/media/sd0/a.txt", &st) == 0 && st.Size == 10 && SystemNative_Access("/media/sd0/a.txt", RHU_PAL_R_OK | RHU_PAL_W_OK) == 0 && SystemNative_Access("/media/sd0/a.txt", RHU_PAL_X_OK) == -1 && SD_ERRNO_IS(RHU_GERR_EACCES), "shim-sdfs-roundtrip", "(stat and access by path)");
+        pass("shim-sdfs-roundtrip", " (the storage band's first descriptor; ten bytes out and back; seeks and a positional read that leaves the position; the status record mapped; access by path)");
+    }
+
+    /* a positional write leaves the position; a truncation grows and cuts */
+    {
+        intptr_t fd = SystemNative_Open("/media/sd0/a.txt", RHU_PAL_O_RDWR, 0);
+        CHECK(fd >= SD_FD_LO && fd < SD_FD_HI, "shim-sdfs-pwrite", "(the open)");
+        CHECK(SystemNative_LSeek(fd, 3, RHU_PAL_SEEK_SET) == 3 && SystemNative_PWrite(fd, "AB", 2, 8) == 2 && SystemNative_LSeek(fd, 0, RHU_PAL_SEEK_CUR) == 3, "shim-sdfs-pwrite", "(a positional write moved the position)");
+        CHECK(SystemNative_PRead(fd, buf, 10, 0) == 10 && memcmp(buf, "01234567AB", 10) == 0, "shim-sdfs-pwrite", "(the bytes at the offset)");
+        CHECK(SystemNative_FTruncate(fd, 14) == 0 && SystemNative_FStat(fd, &st) == 0 && st.Size == 14 && SystemNative_PRead(fd, buf, 4, 10) == 4 && buf[0] == 0 && buf[3] == 0, "shim-sdfs-pwrite", "(the growth is not zero-filled)");
+        CHECK(SystemNative_FTruncate(fd, 5) == 0 && SystemNative_FStat(fd, &st) == 0 && st.Size == 5, "shim-sdfs-pwrite", "(the cut)");
+        CHECK(SystemNative_FAllocate(fd, 2, 10) == 0 && SystemNative_FStat(fd, &st) == 0 && st.Size == 12, "shim-sdfs-pwrite", "(the preallocation did not grow the file)");
+        CHECK(SystemNative_Close(fd) == 0, "shim-sdfs-pwrite", "(the close)");
+        pass("shim-sdfs-pwrite", " (a positional write leaves the position; truncation grows zero-filled and cuts; preallocation grows)");
+    }
+
+    /* a dup: two descriptors on one kernel handle, the handle closed with the last */
+    {
+        uint32_t closes = g_sk_closes;
+        intptr_t fd = SystemNative_Open("/media/sd0/a.txt", RHU_PAL_O_RDONLY, 0);
+        intptr_t dup = SystemNative_Dup(fd);
+        CHECK(fd >= SD_FD_LO && dup >= SD_FD_LO && dup < SD_FD_HI && dup != fd, "shim-sdfs-dup", "(the dup is not a second descriptor of the band)");
+        CHECK(SystemNative_Read(fd, buf, 2) == 2 && SystemNative_Read(dup, buf, 2) == 2 && memcmp(buf, "23", 2) == 0, "shim-sdfs-dup", "(the position is not shared by the two descriptors)");
+        CHECK(SystemNative_Close(fd) == 0 && g_sk_closes == closes, "shim-sdfs-dup", "(the first close closed the kernel's handle)");
+        CHECK(SystemNative_Read(dup, buf, 2) == 2 && buf[0] == '4' && buf[1] == 0, "shim-sdfs-dup", "(the surviving descriptor does not read the fifth byte and the first of the preallocated zeros)");
+        CHECK(SystemNative_Close(dup) == 0 && g_sk_closes == closes + 1, "shim-sdfs-dup", "(the last close did not close the kernel's handle)");
+        CHECK(SystemNative_Read(dup, buf, 2) == -1 && SD_ERRNO_IS(RHU_GERR_EBADF), "shim-sdfs-dup", "(a closed descriptor read)");
+        pass("shim-sdfs-dup", " (two descriptors on one kernel handle share the position; the handle closes with the last)");
+    }
+
+    /* directories: mkdir, a listing with types, rename within the volume and across, rmdir, unlink */
+    {
+        void *d;
+        int files = 0, dirs = 0, dots = 0;
+        CHECK(SystemNative_MkDir("/media/sd0/d", 0755) == 0 && SystemNative_MkDir("/media/sd0/d", 0755) == -1 && SD_ERRNO_IS(RHU_GERR_EEXIST), "shim-sdfs-dirs", "(mkdir, and a second mkdir EEXIST)");
+        CHECK(SystemNative_MkDir("/media/sd0/none/x", 0755) == -1 && SD_ERRNO_IS(RHU_GERR_ENOENT), "shim-sdfs-dirs", "(a mkdir under a missing parent)");
+        {
+            intptr_t fd = SystemNative_Open("/media/sd0/d/b.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0644);
+            CHECK(fd >= SD_FD_LO && SystemNative_Write(fd, "bb", 2) == 2 && SystemNative_Close(fd) == 0, "shim-sdfs-dirs", "(a file in the directory)");
+            CHECK(SystemNative_Open("/media/sd0/d/b.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0644) == -1 && SD_ERRNO_IS(RHU_GERR_EEXIST), "shim-sdfs-dirs", "(an exclusive open of an existing file)");
+        }
+        d = SystemNative_OpenDir("/media/sd0");
+        CHECK(d != NULL, "shim-sdfs-dirs", "(the point did not open as a directory)");
+        while (SystemNative_ReadDir(d, &de) == 0) {
+            if (strcmp(de.Name, ".") == 0 || strcmp(de.Name, "..") == 0)
+                dots++;
+            else if (de.InodeType == RHU_PAL_DT_DIR)
+                dirs++;
+            else if (de.InodeType == RHU_PAL_DT_REG)
+                files++;
+        }
+        CHECK(SystemNative_CloseDir(d) == 0 && g_sk_dopens == 1 && g_sk_dcloses == 1, "shim-sdfs-dirs", "(the directory handle did not close in the kernel)");
+        CHECK(dots == 2 && dirs == 1 && files == 1, "shim-sdfs-dirs", "(the listing is not the two dots, one directory and one file)");
+        CHECK(SystemNative_OpenDir("/media/sd0/a.txt") == NULL && SD_ERRNO_IS(RHU_GERR_ENOTDIR), "shim-sdfs-dirs", "(a file opened as a directory)");
+        CHECK(SystemNative_OpenDir("/media/sd0/none") == NULL && SD_ERRNO_IS(RHU_GERR_ENOENT), "shim-sdfs-dirs", "(a missing directory opened)");
+        CHECK(SystemNative_RmDir("/media/sd0/d") == -1 && SD_ERRNO_IS(RHU_GERR_ENOTEMPTY), "shim-sdfs-dirs", "(a non-empty directory removed)");
+        CHECK(SystemNative_Rename("/media/sd0/d/b.txt", "/media/sd0/c.txt") == 0 && SystemNative_Stat("/media/sd0/c.txt", &st) == 0 && st.Size == 2 && SystemNative_Stat("/media/sd0/d/b.txt", &st) == -1 && SD_ERRNO_IS(RHU_GERR_ENOENT), "shim-sdfs-dirs", "(the rename within the volume)");
+        CHECK(SystemNative_Rename("/media/sd0/c.txt", "/tmp/c.txt") == -1 && SD_ERRNO_IS(RHU_GERR_EXDEV), "shim-sdfs-dirs", "(a rename off the volume was not EXDEV)");
+        CHECK(SystemNative_Rename("/tmp/none.txt", "/media/sd0/c.txt") == -1 && SD_ERRNO_IS(RHU_GERR_EXDEV), "shim-sdfs-dirs", "(a rename onto the volume was not EXDEV)");
+        CHECK(SystemNative_RmDir("/media/sd0/d") == 0 && SystemNative_Stat("/media/sd0/d", &st) == -1 && SD_ERRNO_IS(RHU_GERR_ENOENT), "shim-sdfs-dirs", "(rmdir of the emptied directory)");
+        CHECK(SystemNative_Unlink("/media/sd0/c.txt") == 0 && SystemNative_Unlink("/media/sd0/c.txt") == -1 && SD_ERRNO_IS(RHU_GERR_ENOENT), "shim-sdfs-dirs", "(unlink, and a second unlink ENOENT)");
+        CHECK(SystemNative_Unlink("/media/sd0") == -1 && SD_ERRNO_IS(RHU_GERR_EISDIR), "shim-sdfs-dirs", "(an unlink of the point was not EISDIR)");
+        pass("shim-sdfs-dirs", " (mkdir and its refusals; a listing with the two dots and the types; rename within the volume, EXDEV across; rmdir refuses non-empty; unlink)");
+    }
+
+    /* a copy between the bands through the library's copy verb */
+    {
+        intptr_t s = SystemNative_Open("/tmp/src.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0644);
+        intptr_t t = SystemNative_Open("/media/sd0/copy.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0644);
+        CHECK(s >= 3 && s < 16 && t >= SD_FD_LO, "shim-sdfs-copy", "(the two ends are not in their bands)");
+        CHECK(SystemNative_Write(s, "store-to-card", 13) == 13 && SystemNative_CopyFile(s, t, 13) == 0 && SystemNative_FStat(t, &st) == 0 && st.Size == 13 && SystemNative_PRead(t, buf, 13, 0) == 13 && memcmp(buf, "store-to-card", 13) == 0, "shim-sdfs-copy", "(the store's bytes did not land on the card)");
+        CHECK(SystemNative_Close(s) == 0 && SystemNative_Close(t) == 0 && SystemNative_Unlink("/tmp/src.txt") == 0, "shim-sdfs-copy", "(the closes)");
+        s = SystemNative_Open("/media/sd0/copy.txt", RHU_PAL_O_RDONLY, 0);
+        t = SystemNative_Open("/media/sd0/copy2.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0644);
+        CHECK(s >= SD_FD_LO && t >= SD_FD_LO && SystemNative_CopyFile(s, t, 13) == 0 && SystemNative_Close(s) == 0 && SystemNative_Close(t) == 0 && SystemNative_Stat("/media/sd0/copy2.txt", &st) == 0 && st.Size == 13, "shim-sdfs-copy", "(the copy within the card)");
+        CHECK(SystemNative_Unlink("/media/sd0/copy.txt") == 0 && SystemNative_Unlink("/media/sd0/copy2.txt") == 0, "shim-sdfs-copy", "(the cleanup)");
+        pass("shim-sdfs-copy", " (the library's copy verb moves bytes from the store to the card and within the card)");
+    }
+
+    /* the refusals: the errno map by sign, a full volume, a read-only file, a directory opened as a file, the attributes the layer lacks */
+    {
+        intptr_t fd = SystemNative_Open("/media/sd0/full.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0644);
+        CHECK(fd >= SD_FD_LO, "shim-sdfs-errors", "(the open)");
+        g_sk_full = 1;
+        CHECK(SystemNative_Write(fd, "x", 1) == -1 && SD_ERRNO_IS(RHU_GERR_ENOSPC), "shim-sdfs-errors", "(a write on the full volume was not ENOSPC: the errno map)");
+        CHECK(SystemNative_GetSpaceInfoForMountPoint("/media/sd0/full.txt", &mpi) == 0 && mpi.TotalFreeSpace == 0, "shim-sdfs-errors", "(the space of the full volume)");
+        g_sk_full = 0;
+        CHECK(SystemNative_Close(fd) == 0, "shim-sdfs-errors", "(the close)");
+        g_skf[sk_find("/full.txt")].ro = 1;
+        CHECK(SystemNative_Open("/media/sd0/full.txt", RHU_PAL_O_WRONLY, 0) == -1 && SD_ERRNO_IS(RHU_GERR_EROFS), "shim-sdfs-errors", "(a read-only file opened for writing was not EROFS)");
+        CHECK(SystemNative_Access("/media/sd0/full.txt", RHU_PAL_W_OK) == -1 && SD_ERRNO_IS(RHU_GERR_EACCES) && SystemNative_Stat("/media/sd0/full.txt", &st) == 0 && (st.Mode & 0x1FF) == 0x124, "shim-sdfs-errors", "(the read-only attribute as the mode and the access refusal)");
+        CHECK(SystemNative_Unlink("/media/sd0/full.txt") == -1 && SD_ERRNO_IS(RHU_GERR_EROFS), "shim-sdfs-errors", "(an unlink of the read-only file was not EROFS)");
+        g_skf[sk_find("/full.txt")].ro = 0;
+        CHECK(SystemNative_Unlink("/media/sd0/full.txt") == 0, "shim-sdfs-errors", "(the cleanup)");
+        CHECK(SystemNative_Open("/media/sd0", RHU_PAL_O_RDONLY, 0) == -1 && SD_ERRNO_IS(RHU_GERR_EISDIR), "shim-sdfs-errors", "(the point opened as a file)");
+        CHECK(SystemNative_Open("/media/sd0/none.txt", RHU_PAL_O_RDONLY, 0) == -1 && SD_ERRNO_IS(RHU_GERR_ENOENT), "shim-sdfs-errors", "(a missing file opened)");
+        CHECK(SystemNative_ChMod("/media/sd0/a.txt", 0600) == -1 && SD_ERRNO_IS(RHU_GERR_ENOTSUP), "shim-sdfs-errors", "(a mode change was not ENOTSUP)");
+        CHECK(SystemNative_UTimensat("/media/sd0/a.txt", NULL) == -1 && SD_ERRNO_IS(RHU_GERR_ENOTSUP), "shim-sdfs-errors", "(a set of the times was not ENOTSUP)");
+        fd = SystemNative_Open("/media/sd0/a.txt", RHU_PAL_O_RDWR, 0);
+        CHECK(fd >= SD_FD_LO && SystemNative_FChMod(fd, 0600) == -1 && SD_ERRNO_IS(RHU_GERR_ENOTSUP) && SystemNative_FUTimens(fd, NULL) == -1 && SD_ERRNO_IS(RHU_GERR_ENOTSUP), "shim-sdfs-errors", "(the descriptor forms of the two attributes)");
+        CHECK(SystemNative_FLock(fd, RHU_PAL_LOCK_EX) == 0 && SystemNative_FLock(fd, RHU_PAL_LOCK_UN) == 0 && SystemNative_LockFileRegion(fd, 0, 4, 1) == 0 && SystemNative_FileSystemSupportsLocking(fd, 0, 0) == 1 && SystemNative_PosixFAdvise(fd, 0, 0, 0) == 0, "shim-sdfs-errors", "(the locks and the advice)");
+        CHECK(SystemNative_FcntlGetFD(fd) == 0 && SystemNative_FcntlSetFD(fd, 1) == 0 && SystemNative_FcntlGetFD(fd) == 1, "shim-sdfs-errors", "(the close-on-exec bookkeeping)");
+        CHECK(SystemNative_Close(fd) == 0, "shim-sdfs-errors", "(the close)");
+        pass("shim-sdfs-errors", " (ENOSPC on a full volume by the sign map; EROFS and the mode of a read-only file; EISDIR and ENOENT; the attributes the layer lacks refused ENOTSUP; the locks granted without effect)");
+    }
+
+    /* the band's exhaustion: sixteen descriptors, the seventeenth EMFILE from the band while the kernel has a handle free */
+    {
+        int n = 0;
+        for (int i = 0; i < SK_HANDLES; i++) {
+            fds[i] = i == 0 ? SystemNative_Open("/media/sd0/a.txt", RHU_PAL_O_RDONLY, 0) : SystemNative_Dup(fds[0]);
+            if (fds[i] >= SD_FD_LO && fds[i] < SD_FD_HI)
+                n++;
+        }
+        CHECK(n == SK_HANDLES, "shim-sdfs-band", "(sixteen descriptors did not open)");
+        CHECK(SystemNative_Open("/media/sd0/a.txt", RHU_PAL_O_RDONLY, 0) == -1 && SD_ERRNO_IS(RHU_GERR_EMFILE), "shim-sdfs-band", "(the seventeenth open was not EMFILE)");
+        CHECK(SystemNative_Dup(fds[0]) == -1 && SD_ERRNO_IS(RHU_GERR_EMFILE), "shim-sdfs-band", "(a dup past the band was not EMFILE)");
+        for (int i = 0; i < SK_HANDLES; i++)
+            CHECK(SystemNative_Close(fds[i]) == 0, "shim-sdfs-band", "(a close of the sixteen)");
+        fds[0] = SystemNative_Open("/media/sd0/a.txt", RHU_PAL_O_RDONLY, 0);
+        CHECK(fds[0] == SD_FD_LO && SystemNative_Close(fds[0]) == 0, "shim-sdfs-band", "(the band did not free: the first slot not reused after the closes)");
+        pass("shim-sdfs-band", " (sixteen descriptors on the band, the seventeenth EMFILE, every slot free again after the closes)");
+    }
+
+    /* the card pulled under an open handle: EIO at every verb but the close; the point gone; the card back */
+    {
+        intptr_t fd = SystemNative_Open("/media/sd0/a.txt", RHU_PAL_O_RDWR, 0);
+        void *d = SystemNative_OpenDir("/media/sd0");
+        CHECK(fd >= SD_FD_LO && d != NULL, "shim-sdfs-hotswap", "(the open and the directory)");
+        sk_card_out();
+        CHECK(SystemNative_Read(fd, buf, 2) == -1 && SD_ERRNO_IS(RHU_GERR_EIO) && SystemNative_Write(fd, "x", 1) == -1 && SD_ERRNO_IS(RHU_GERR_EIO) && SystemNative_FStat(fd, &st) == -1 && SD_ERRNO_IS(RHU_GERR_EIO) && SystemNative_FSync(fd) == -1 && SD_ERRNO_IS(RHU_GERR_EIO), "shim-sdfs-hotswap", "(a handle whose card left did not answer EIO)");
+        CHECK(SystemNative_ReadDir(d, &de) == RHU_GERR_EIO, "shim-sdfs-hotswap", "(a directory stream whose card left did not answer EIO)");
+        CHECK(SystemNative_Stat("/media/sd0", &st) == -1 && SD_ERRNO_IS(RHU_GERR_ENOENT), "shim-sdfs-hotswap", "(the point still answered)");
+        g_mp_n = 0;
+        CHECK(SystemNative_GetAllMountPoints(mp_found, NULL) == 0 && g_mp_n == 1, "shim-sdfs-hotswap", "(the mount-point list still names the point)");
+        CHECK(SystemNative_Close(fd) == 0 && SystemNative_CloseDir(d) == 0, "shim-sdfs-hotswap", "(the closes after the card left)");
+        sk_card_in();
+        CHECK(SystemNative_Stat("/media/sd0/a.txt", &st) == 0 && st.Size == 12, "shim-sdfs-hotswap", "(the card back: its file not found)");
+        pass("shim-sdfs-hotswap", " (a card pulled under an open handle: EIO at every verb, the close 0, the point ENOENT; the card back with its file)");
+    }
+
+    /* the store beside the card: its own paths and bands untouched by the routing */
+    {
+        intptr_t fd = SystemNative_Open("/tmp/beside.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0644);
+        uint32_t opens = g_sk_opens;
+        CHECK(fd >= 3 && fd < 16 && SystemNative_Write(fd, "store", 5) == 5 && SystemNative_Close(fd) == 0 && SystemNative_Unlink("/tmp/beside.txt") == 0, "shim-sdfs-beside", "(the store's file)");
+        CHECK(SystemNative_MkDir("/media/x", 0755) == 0 && SystemNative_RmDir("/media/x") == 0, "shim-sdfs-beside", "(a store directory under /media)");
+        CHECK(g_sk_opens == opens, "shim-sdfs-beside", "(a store path reached the kernel)");
+        CHECK(SystemNative_Stat("/media/sd01", &st) == -1 && SD_ERRNO_IS(RHU_GERR_ENOENT) && g_sk_opens == opens, "shim-sdfs-beside", "(a name that only begins like the point was routed)");
+        pass("shim-sdfs-beside", " (the store's paths and band untouched; a name that only begins like the point stays in the store)");
+    }
+
+    SystemNative_Sync();
+    out("SHIMTEST-SDFS: ALL GOOD (the card's files from a native caller's side over a scripted kernel)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_SDFS */
+
 /* The managed entry, spelled as the runtime's own bootstrapper declares
  * it: the kernel's default entry calls it in every ladder but the host's,
  * where the host does. */
@@ -4041,6 +4872,9 @@ int __managed__Main(int argc, char *argv[])
 #elif defined(RHU_SHIMTEST_LADDER_IIOFS)
     (void)argc;
     return iiofs_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_SDFS)
+    (void)argc;
+    return sdfs_ladder();
 #elif defined(RHU_SHIMTEST_LADDER_TTYDEV)
     (void)argc;
     return ttydev_ladder();

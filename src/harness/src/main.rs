@@ -7,6 +7,7 @@ mod image;
 mod objfile;
 mod release;
 mod results;
+mod version;
 mod selfcheck;
 mod sha256;
 mod text;

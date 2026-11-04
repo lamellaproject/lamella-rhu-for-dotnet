@@ -7,7 +7,7 @@
 //! driven over the register seam so the same code runs against the
 //! emulator row's model and the boards' blocks. The block's clock is the
 //! APB bus clock, so the divisor is chosen per transfer from the posture's
-//! clock and the rate achieved is what the door answers. The pump keeps at
+//! clock and the rate achieved is what the function answers. The pump keeps at
 //! most two bytes ahead of the bytes received (half the receive queue) so
 //! the queue never overflows. Every wait is a poll of the status register
 //! against its own budget. At the end of an exchange the transmitter's
@@ -110,5 +110,5 @@ pub fn transfer(d: &SpiBus, sel: Option<u32>, cpol: bool, cpha: bool, divisor: u
 }
 
 /// The divisor for a rate at the block's kernel clock, with the rate it
-/// achieves: this family's ladder, asked by the bus doors through the driver.
+/// achieves: this family's ladder, asked by the kernel's bus API through the driver.
 pub use crate::bus_math::spi_divisor as divisor;

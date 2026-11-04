@@ -26,7 +26,7 @@
 #include "mgc_board_rows.h"
 #include "rhu.h"
 #include "rhu_glibc_arm32.h"
-#include "rhu_pal_errno_net11_rc2.h"
+#include "rhu_pal_errno_net11_rc3.h"
 
 void *memcpy(void *dst, const void *src, size_t n);
 void *memset(void *dst, int c, size_t n);
@@ -153,7 +153,7 @@ static void line_format(fmt_sink *l, const char *fmt, va_list ap)
 }
 
 /* One diagnostic line of this layer on the kernel's LOG stream at a level
- * (the log-door stage): "[shim] ", the formatted text and the newline as
+ * (the kernel-log stage): "[shim] ", the formatted text and the newline as
  * ONE write through rhu_log_write, which prints the line when the image's
  * output level reaches the line's and drops it otherwise. */
 static void shim_line(uint32_t level, const char *fmt, va_list ap)
@@ -252,7 +252,7 @@ int *__errno_location(void)
  * entry and compares at exit (the archives were built with the stack
  * protector on, and the glibc personality reads the word through this
  * global). It starts as a fixed pattern and is re-seeded from the entropy
- * door at initialization, before any protected frame exists; a mismatch
+ * function at initialization, before any protected frame exists; a mismatch
  * at a frame's exit ends the run through the loud path below, never by
  * returning into an overwritten frame. Answering both names here keeps
  * the C library's own stack-protector member, and the signal member it
@@ -517,7 +517,7 @@ void *mmap64(void *addr, size_t len, int prot, int flags, int fd, int64_t off)
 /* The collector's own mapping entry: the managed heap's one region, its
  * mark bitmap and its mark stack are asked for through this name and
  * served from the managed heap's window -- window 1 through the kernel's
- * named-range door when the heap lives in the external RAM, window 0 as
+ * named-range function when the heap lives in the external RAM, window 0 as
  * mmap64 above otherwise. Page-rounded, page-aligned, zero-born and
  * attributed to the caller as mmap64's mappings are; (void *)-1 with
  * ENOMEM when that window is exhausted, so a heap that does not fit is
@@ -1347,7 +1347,7 @@ static int spawn_thread(uint32_t stack_bytes, void *(*fn)(void *), void *arg, ui
     }
     if (tid < 0) {
         rhu_kheap_free(s);
-        /* The door answers one code for four reasons; the kernel's own
+        /* The kernel function answers one code for four reasons; the kernel's own
          * [sched] line above carries the pool's numbers and the reason,
          * this line the request's story in the same words. */
         rhu_shim_log("pthread_create: refused by the kernel after %u tries: a stack of %u B asked (the row's default %u B, the clamp %u B); the [sched] line above names the reason -> EAGAIN",
@@ -2046,12 +2046,12 @@ int __libc_current_sigrtmax(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* entropy: the cryptographic sources on the kernel's secure door       */
+/* entropy: the cryptographic sources on the random-bytes function      */
 /* ------------------------------------------------------------------ */
 
-/* The kernel's secure door asked in pieces of at most its bound, all or
- * nothing: the door's first refusal ends the draw, clears the bytes
- * already served so the buffer never carries a partial draw, and is
+/* The kernel's random-bytes function asked in pieces of at most its bound,
+ * all or nothing: the function's first refusal ends the draw, clears the
+ * bytes already served so the buffer never carries a partial draw, and is
  * returned. */
 static int32_t secure_fill(void *buf, size_t len)
 {
@@ -2074,8 +2074,8 @@ static int32_t secure_fill(void *buf, size_t len)
 
 /* The C library's cryptographic sources -- the runtime's portability
  * layer draws its cryptographic bytes through getrandom, then getentropy
- * -- take the secure door; a refusal is EIO for the two with an error
- * channel. getentropy serves at most 256 bytes per call by its own
+ * -- take the random-bytes function; a refusal is EIO for the two with an
+ * error channel. getentropy serves at most 256 bytes per call by its own
  * contract. */
 int getentropy(void *buf, size_t len)
 {

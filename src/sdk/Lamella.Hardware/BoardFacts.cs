@@ -8,7 +8,7 @@ namespace Lamella.Hardware;
 /// <paramref name="Posture"/> names the image's clock posture in words ("the PLL posture") for the sentences the
 /// class prints; <paramref name="AnalogResolutionBits"/> is the width in bits of a conversion on the chip's converter
 /// and <paramref name="AnalogReferenceMillivolts"/> the voltage a full-scale conversion stands for, both 0 where the
-/// image serves no analog input.
+/// image serves no analog input; <paramref name="SerialPorts"/> is the row's UART blocks with the build's two channel words applied.
 /// </summary>
 internal sealed record BoardFacts(
     string Name,
@@ -20,5 +20,6 @@ internal sealed record BoardFacts(
     IReadOnlyList<BoardPin> Pins,
     IReadOnlyList<I2cBusInfo> I2cBuses,
     IReadOnlyList<SpiBusInfo> SpiBuses,
+    IReadOnlyList<UartInfo> SerialPorts,
     int AnalogResolutionBits,
     int AnalogReferenceMillivolts);

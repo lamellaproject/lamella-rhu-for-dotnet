@@ -18,7 +18,7 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <!-- The gate's posture: the kernel's whole boot report, what the goldens measure. -->
     <RhuLogLevel>verbose</RhuLogLevel>
-    <LamellaHardwareVersion Condition="'$(LamellaHardwareVersion)' == ''">1.0.0-alpha.1</LamellaHardwareVersion>
+    <LamellaHardwareVersion Condition="'$(LamellaHardwareVersion)' == ''">$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../../../VERSION').Trim())</LamellaHardwareVersion>
   </PropertyGroup>
 
   <ItemGroup>

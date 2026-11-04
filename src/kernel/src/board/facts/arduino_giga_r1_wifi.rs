@@ -116,8 +116,8 @@ pub const SYSCFG_EXTICR1: usize = 0x5800_0408;
 pub const RCC_SYSCFG_EN: *mut u32 = 0x5802_44F4 as *mut u32;
 pub const RCC_SYSCFG_EN_BIT: u32 = 1 << 1;
 
-/// The bus tables of this row: empty, so the count doors
-/// answer 0, the enumeration doors refuse every index and every other door
+/// The bus tables of this row: empty, so the count functions
+/// answer 0, the enumeration functions refuse every index and every other function
 /// of the two families answers RHU_ENODEV.
 pub const I2C_BUSES: &[crate::bus_math::I2cBus] = &[];
 pub const SPI_BUSES: &[crate::bus_math::SpiBus] = &[];
@@ -130,7 +130,7 @@ pub const ADC_BLOCKS: &[crate::adc_math::AdcBlock] = &[];
 pub const ADC_CHANNELS: &[crate::adc_math::AdcChannel] = &[];
 
 /// The RAM ranges of this row (the hosted runtime learns them
-/// through the `rhu_ram_count` and `rhu_ram_range` doors): the physical
+/// through the `rhu_ram_count` and `rhu_ram_range` functions): the physical
 /// range as the board's facts file states it in the SDK (`boards/<row>.json`,
 /// its `ram` array; the two kept equal by the hosted-runtime gate's facts
 /// tie), range 0 the internal SRAM the kernel's map calls DATA, whole: the
@@ -173,7 +173,7 @@ pub const HAS_VIDEO_BRIDGE: bool = false;
 /// (`crate::console`: 1 off, 2 memory, 3 probe).
 pub const CHANNELS: crate::console::ChannelFacts = crate::console::ChannelFacts { log: crate::console::CH_MEMORY, console: crate::console::CH_MEMORY, legal: &[crate::console::CH_MEMORY, crate::console::CH_PROBE, crate::console::CH_OFF] };
 /// The pre-defined UART rows of this row (the SDK's `uart` member): none;
-/// a program's serial doors answer that the board has none.
+/// the kernel's UART API answers that the board has none.
 pub const UART_ROWS: &[crate::console::UartRow] = &[];
 /// The gpio banner's line when the kernel holds a UART of this row as its
 /// console wire, by block (empty on a row with no UART row).
@@ -183,7 +183,7 @@ pub const BANNER_UART: &[&str] = &[];
 pub const UART_NAMES: &[&str] = &[];
 /// No pin override on this row (there are no UART rows): the SDK's
 /// `uartPairs` member is empty.
-#[allow(dead_code)] // no row of this board reads it: the UART doors answer ENODEV here
+#[allow(dead_code)] // no row of this board reads it: the kernel's UART API answers ENODEV here
 pub const UART_PAIRS: &[crate::console::UartPairs] = &[];
 /// No both-held banner line on this row.
 pub const BANNER_UART_BOTH: &str = "";

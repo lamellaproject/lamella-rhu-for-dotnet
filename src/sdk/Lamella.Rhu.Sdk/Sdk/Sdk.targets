@@ -116,7 +116,7 @@
       <_RhuFactsAssembly>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', 'Lamella.Hardware.Facts.dll'))</_RhuFactsAssembly>
     </PropertyGroup>
     <Error Condition="!Exists('$(_RhuFacts)')" Code="RHU1005" Text="REFUSE: no board facts for $(LamellaTargetBoard) (boards/$(LamellaTargetBoard).json is not in the board package)" />
-    <BoardFactsSource FactsFile="$(_RhuFacts)" Board="$(LamellaTargetBoard)" Output="$(_RhuFactsSource)" />
+    <BoardFactsSource FactsFile="$(_RhuFacts)" Board="$(LamellaTargetBoard)" Output="$(_RhuFactsSource)" ConsoleChannel="$(_RhuConsoleChannelEffective)" LogChannel="$(_RhuLogChannelEffective)" />
   </Target>
 
   <Target Name="_RhuBoardFactsCompile" DependsOnTargets="_RhuBoardFactsSource" Inputs="$(_RhuFactsSource);@(ReferencePathWithRefAssemblies)" Outputs="$(_RhuFactsAssembly)">
@@ -146,7 +146,7 @@
   <Target Name="RhuValidate" BeforeTargets="BeforeBuild;BuildOnlySettings">
     <Error Condition="'$(LamellaShellContract)' == '' or '$(RhuShellContract)' == ''" Code="RHU4003" Text="REFUSE: the contract between the SDK shell and this build package is not stated on both sides (LamellaShellContract '$(LamellaShellContract)', RhuShellContract '$(RhuShellContract)'): a net11.0 project names Sdk=&quot;Lamella.Sdk&quot;, whose shell restores this build package, reads its properties file and imports these targets" />
     <Error Condition="'$(LamellaShellContract)' != '' and '$(RhuShellContract)' != '' and '$(LamellaShellContract)' != '$(RhuShellContract)'" Code="RHU4002" Text="REFUSE: the shell's contract $(LamellaShellContract) is not this build package's $(RhuShellContract) (Lamella.Rhu.Build $(RhuSdkVersion)): the shell and the build package are of different releases" />
-    <Error Condition="'$(RhuHostRid)' == 'osx-x64'" Code="RHU4001" Text="REFUSE: this release has no tools package for macOS on Intel processors (osx-x64): the LLVM release the linker is taken from has no macOS x64 binary; the SDK runs on win-x64, win-arm64, osx-arm64, linux-x64 and linux-arm64" />
+    <Error Condition="'$(RhuHostRid)' != 'win-x64' and '$(RhuHostRid)' != 'win-arm64' and '$(RhuHostRid)' != 'osx-arm64' and '$(RhuHostRid)' != 'linux-x64' and '$(RhuHostRid)' != 'linux-arm64'" Code="RHU4001" Text="REFUSE: this release has no tools package for the host $(RhuHostRid) (Lamella.Rhu.Tools.$(RhuHostRid)): the tools packages of this release are win-x64, win-arm64, osx-arm64, linux-x64 and linux-arm64" />
     <Error Condition="'$(RhuDiag)' != 'min' and '$(RhuDiag)' != 'rich'" Code="RHU2001" Text="REFUSE: RhuDiag='$(RhuDiag)' is not one of: min, rich" />
     <Error Condition="'$(RhuReflection)' != 'on' and '$(RhuReflection)' != 'off'" Code="RHU2002" Text="REFUSE: RhuReflection='$(RhuReflection)' is not one of: on, off" />
     <Error Condition="'$(RhuExternalRamInit)' != 'boot' and '$(RhuExternalRamInit)' != 'first-use' and '$(RhuExternalRamInit)' != 'background'" Code="RHU2003" Text="REFUSE: RhuExternalRamInit='$(RhuExternalRamInit)' is not one of: boot, first-use, background" />
@@ -571,7 +571,15 @@
       <Output TaskParameter="ExitCode" PropertyName="_RhuLdRc" />
       <Output TaskParameter="ConsoleOutput" ItemName="_RhuLdOut" />
     </Exec>
-    <Error Condition="'$(_RhuLdRc)' != '0' or '@(_RhuLdOut)' != ''" Code="RHU5001" Text="REFUSE: the link printed a diagnostic or failed (rc $(_RhuLdRc)): @(_RhuLdOut, ' | ')" />
+    <!-- The linker's words as one line. The arena floor's refusal (the row's
+         map asserts the window its board guarantees) names the remedy: the
+         optimization turned back on where a build turned it off, a board
+         with more memory where the optimized image still does not fit. -->
+    <PropertyGroup>
+      <_RhuLdWords>@(_RhuLdOut, ' | ')</_RhuLdWords>
+    </PropertyGroup>
+    <Error Condition="('$(_RhuLdRc)' != '0' or '$(_RhuLdWords)' != '') and $(_RhuLdWords.Contains('arena window under this board'))" Code="RHU5001" Text="REFUSE: the link printed a diagnostic or failed (rc $(_RhuLdRc)): $(_RhuLdWords); the image's data leaves this board less than the arena window its map guarantees: this SDK compiles every configuration with the code optimization on, so a build that turned it off (Optimize=false) is built again with it on, and a program whose optimized image still does not fit names a board with more memory" />
+    <Error Condition="'$(_RhuLdRc)' != '0' or '$(_RhuLdWords)' != ''" Code="RHU5001" Text="REFUSE: the link printed a diagnostic or failed (rc $(_RhuLdRc)): $(_RhuLdWords)" />
     <!-- The line tables' separators, before anything reads or hashes the image (its record, the publish copy, a run). -->
     <DebugLineSeparators Image="$(_RhuElf)" />
     <Message Importance="high" Text="Lamella RHU: $(NativeBinary) linked for $(LamellaTargetBoard) under $(RhuMap)" />

@@ -1,5 +1,5 @@
 //! The virtual GPIO backend of the emulator rows: latches and a loopback
-//! pair in kernel memory, so the doors, the claims table, the refusals, the
+//! pair in kernel memory, so the functions, the claims table, the refusals, the
 //! event counting, the coalescing and the futex recipe are gated on QEMU
 //! by the same verbs the boards serve, and only the real interrupt path is
 //! left to silicon. Line 2 is an output wired to line 3: a write on 2 sets
@@ -77,7 +77,7 @@ fn doctored(high: bool) {
 }
 
 /// The edge control's extra event: ONE event of the backend's own, beside the
-/// tenth edge the doors counted and no other -- an edge the program did not
+/// tenth edge the functions counted and no other -- an edge the program did not
 /// make, which a check's total must refuse.
 #[cfg(all(feature = "test-gpio-doctored-edge", not(feature = "test-gpio-doctored-latch")))]
 fn doctored(high: bool) {

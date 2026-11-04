@@ -432,7 +432,7 @@ pub fn run() -> ! {
     }
 
     // The host thread joins the hosted band for the entry's life: the
-    // one flat priority the door hands every hosted thread, so a thread
+    // one flat priority the function hands every hosted thread, so a thread
     // the payload starts and waits for by yield alone can run (a yield
     // rotates equal-priority peers only; at kernel urgency the host
     // could never release it). Kernel urgency returns with the entry,

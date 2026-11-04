@@ -102,7 +102,7 @@
 #include "rhu_shim.h"
 
 #include "rhu.h"
-#include "rhu_pal_errno_net11_rc2.h"
+#include "rhu_pal_errno_net11_rc3.h"
 
 extern int *__errno_location(void);
 void *memcpy(void *dst, const void *src, size_t n);
@@ -388,7 +388,7 @@ int rhu_busdev_open(const char *path, int flags)
         return refuse(RHU_GERR_ENOENT);
     }
     if (kind == KIND_I2C) {
-        /* The board has the bus, by the enumeration doors (no claim here:
+        /* The board has the bus, by the enumeration functions (no claim here:
          * the bus is claimed at the first transfer, or earlier by the rate
          * request); a number none of them answers is a missing node. */
         int32_t count = rhu_i2c_count();

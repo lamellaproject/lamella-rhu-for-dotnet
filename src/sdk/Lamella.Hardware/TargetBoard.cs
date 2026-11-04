@@ -50,7 +50,7 @@ public sealed class TargetBoard
         s_facts = facts;
     }
 
-    /// <summary>The board's id, the value the build named: "rpi-pico2-w".</summary>
+    /// <summary>The board's id, the value the build named: "raspberrypi-pico-2-w".</summary>
     public string Name => _f.Name;
 
     /// <summary>The board's maker, as printed: "Raspberry Pi".</summary>
@@ -74,13 +74,16 @@ public sealed class TargetBoard
     /// <summary>The SPI buses the image serves, with their rate ladders.</summary>
     public IReadOnlyList<SpiBusInfo> SpiBuses => _f.SpiBuses;
 
+    /// <summary>The serial ports: the chip's UART blocks, each with the device file a program opens, its pins in this image and the image's own use of it.</summary>
+    public IReadOnlyList<UartInfo> SerialPorts => _f.SerialPorts;
+
     /// <summary>The width in bits of a conversion on the chip's converter; 0 where the image serves no analog input.</summary>
     internal int AnalogResolutionBits => _f.AnalogResolutionBits;
 
     /// <summary>The voltage a full-scale conversion stands for, in millivolts; 0 where the image serves no analog input.</summary>
     internal int AnalogReferenceMillivolts => _f.AnalogReferenceMillivolts;
 
-    /// <summary>One line: the board, the chip, the clock, the pins, the buses.</summary>
+    /// <summary>One line: the board, the chip, the clock, the pins, the buses, the serial ports.</summary>
     public override string ToString()
     {
         var b = new StringBuilder();
@@ -90,6 +93,8 @@ public sealed class TargetBoard
         AppendNumbers(b, I2cBuses.Count, i => I2cBuses[i].Number);
         b.Append(", SPI ");
         AppendNumbers(b, SpiBuses.Count, i => SpiBuses[i].Number);
+        b.Append(", UART ");
+        AppendNumbers(b, SerialPorts.Count, i => SerialPorts[i].Number);
         return b.ToString();
     }
 

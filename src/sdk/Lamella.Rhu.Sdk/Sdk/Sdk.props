@@ -14,13 +14,14 @@
     <UsingLamellaRhuSdk>true</UsingLamellaRhuSdk>
     <!-- This build package's version: the pack stamps the shipped line with
          its own version, unconditioned (this line defaults it for the desk
-         alone); the targets refuse a resolved package at another version. -->
-    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">1.0.0-alpha.1</RhuSdkVersion>
+         alone, from the VERSION file at the repository root); the targets
+         refuse a resolved package at another version. -->
+    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../../../VERSION').Trim())</RhuSdkVersion>
     <!-- The runtime build this release is pinned to: the shell pins the
          ILCompiler pack, the runtime pack and the reference assemblies'
          package at it from the release manifest, whose runtime entry is this
          string; the targets record the build an image was compiled against. -->
-    <RhuRuntimeVersionTested>11.0.0-rc.2.26504.105</RhuRuntimeVersionTested>
+    <RhuRuntimeVersionTested>11.0.0-rc.3.26522.148</RhuRuntimeVersionTested>
     <RhuHostRid Condition="'$(RhuHostRid)' == ''">$(NETCoreSdkPortableRuntimeIdentifier)</RhuHostRid>
   </PropertyGroup>
 
@@ -160,6 +161,28 @@
     <CppCompilerAndLinker Condition="'$(CppCompilerAndLinker)' == ''">sh</CppCompilerAndLinker>
   </PropertyGroup>
 
+  <!-- Every configuration compiles with the code optimization on. The .NET
+       SDK's own default turns it off for the Debug configuration, which a
+       plain dotnet run builds, and the compiler pack then hands the native
+       compiler no optimization switch at all (its -O switch and its size
+       switch follow the Optimize property), so a Debug image carries every method it compiles
+       unoptimized, the framework's included: measured on the Raspberry Pi
+       Pico 2 row, the board class's program and the app template's program
+       then compile to larger code and more zero-filled statics than the
+       row's RAM holds beside the arena window its map guarantees, and the
+       link refuses each (RHU5001) where the same program's Release image
+       links with room. The .NET SDK's default is set before the project's
+       body and this file is read after it (the shell's dispatch), so the
+       value is set here for every configuration that did not set it on; the
+       configuration's debug information (DebugType, DebugSymbols, the
+       compiler's -g) is its own and stays. A build that wants the
+       unoptimized code gives Optimize=false as a global property
+       (-p:Optimize=false), which no project assignment overrides; its image
+       links only where it fits, and the link's refusal names this. -->
+  <PropertyGroup Condition="'$(Optimize)' != 'true'">
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+
   <!-- The build is deterministic and the project's directory is mapped to
        one fixed string, the same on every host, so a program's assembly,
        its compiled object and its image are byte-identical across desks
@@ -192,7 +215,7 @@
 
   <!-- The standard GPIO package's Linux driver binds the libgpiod v1 C
        API by this library name; on RHU the shim's frozen GPIO API object
-       defines those entry points over the kernel's GPIO doors, so the name
+       defines those entry points over the kernel's GPIO API, so the name
        is a direct P/Invoke: the compiler binds the calls at link time and
        the runtime's loader is never asked. A program that never touches
        the package carries no such call, and the item then binds nothing. -->
@@ -201,7 +224,7 @@
     <!-- The same package's I2C and SPI drivers open Linux device files and
          drive them through three C-library calls; the shim's core answers
          those three for the bus device nodes it presents over the kernel's
-         bus doors, so each is a direct P/Invoke by entry point. The
+         bus API, so each is a direct P/Invoke by entry point. The
          package's other C-library names stay unbound: no served path
          reaches them, and the loader refuses them if one ever does. -->
     <DirectPInvoke Include="libc!open" />
@@ -216,7 +239,7 @@
          layer by this library name; on RHU that layer's own sources are
          compiled unchanged into the shim's frozen serial layer object, which
          defines those entry points over the serial device files the shim
-         presents on the kernel's UART doors, so the name is a direct
+         presents on the kernel's UART API, so the name is a direct
          P/Invoke like the GPIO library's above. -->
     <DirectPInvoke Include="libSystem.IO.Ports.Native" />
   </ItemGroup>

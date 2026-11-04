@@ -32,10 +32,10 @@ C (-x c -std=gnu11) with no implicit floating-point use
 carries no floating-point instruction, and the gate pins every object's
 count.
 
-The objects are compiled against the .NET 11 RC2 runtime pack
-(v11.0.0-rc.2.26504.105): the contract headers carry the .NET major and
-the pin generation in their names (rhu_pal_<area>_net11_rc2.h,
-rhu_rt_entry_net11_rc2.h) and are generated from that pack's source. The
+The objects are compiled against the .NET 11 RC3 runtime pack
+(v11.0.0-rc.3.26522.148): the contract headers carry the .NET major and
+the pin generation in their names (rhu_pal_<area>_net11_rc3.h,
+rhu_rt_entry_net11_rc3.h) and are generated from that pack's source. The
 shim answers two names the runtime archives demand of the C library,
 getauxval (no auxiliary vector: 0 with ENOENT) and realpath (over the RAM
 file store), and the test program checks both.
@@ -49,6 +49,21 @@ named the same; file times range-checked; a refused open of the process
 identity line giving back the object it materialized. Each clause is a
 check in the test program's file ladder, with a negative control built
 from the store with that clause's defect restored.
+
+The card's files: a path under /media/sd0 reaches the kernel's file
+functions over the FAT volume the kernel mounts while a card is seated,
+through the storage band of sixteen descriptors (a dup a second
+descriptor on one kernel handle, closed with the last), a directory
+stream over a kernel directory handle, the kernel's negative code as
+errno, the status record from the kernel's, and the mount-point list
+naming the point while the volume stands with the space from the
+kernel's cluster counts; /media is a directory of the store that lists
+sd0 while the volume stands. The test program's card ladder serves the
+kernel's family itself through the unit's hook (the emulator row has no
+socket) and reads the routing, the band, the records and the refusals,
+with three negative controls built from the unit with a defect restored
+(the code taken as errno without its sign, a close keeping its slot, a
+dup's first close closing the kernel's handle).
 
 The random entries draw cryptographic bytes through the kernel's secure
 entropy call in bounded pieces, all or nothing, with a refusal honored.
@@ -135,7 +150,7 @@ the one departure from Linux a program can see. Four negative controls are
 built from the unit: the period file answering the value written (which
 the hosted-runtime gates' suite refuses in every world, with the control's
 Cortex-M33 twin beside it), export answering 0 for a hole, unexport
-releasing nothing, and npwm as the door's count.
+releasing nothing, and npwm as the kernel function's count.
 
 The analog input device files the board package's analog input class
 reads -- /sys/bus/iio/devices with one directory iio:device<k> per
@@ -194,10 +209,10 @@ The core reads the program's thread stack size as a weak link-time symbol,
 the row's default when absent.
 
 The core's own lines and the host's go out through the kernel's
-log door at the verbose level, and the last word that ends the program
+log function at the verbose level, and the last word that ends the program
 at the silent level, so a quiet or silent image prints none of them. The
 host object states hosting-API
-generation 41, the number the kernel's header states for its hosting
+generation 42, the number the kernel's header states for its hosting
 API, which a hosted image must match.
 
 The mps2-an505 row's link objects are the an500 row's sources and
@@ -248,7 +263,7 @@ The expectation the gate's surface case reads, generated from the pack's
 archives and the runtime's headers, is the tier's text record, tied to the
 pack and to every family name the objects define.
 
-97 objects, 11 goldens and 1 record.
+101 objects, 12 goldens and 1 record.
 
 Records (repo-relative path, sha256; source and defines per object):
 
@@ -271,49 +286,49 @@ Records (repo-relative path, sha256; source and defines per object):
   `be6a816dc730b97b0defb108f03bc1df616841948bb618e2b4485b495a2e9aba`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_REALTIME_WAIT)
 - `goldens/shim/shim-sysnative.o`
-  `6a6791fa7a80ef0c0721de3b93037800e79db02b4b8fe6642ddeebc3d27ebf05`
+  `c034d28718aef9516861efa29534c839ee5ea514664ba96064d2d7a228a4b184`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500)
 - `goldens/shim/shim-sysnative-break-fdbase.o`
-  `77c6e0955edf9ab4e6d1c3184e919b1b5a5aa74cee873a86d831fcadb8725f8e`
+  `bc42a523d8acde42f2c88b541503b3f88332c26f98e0fe1b35f3128f816b11fe`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_FD_BASE)
 - `goldens/shim/shim-sysnative-break-store-bounds.o`
-  `da0faa7d319b10bfc017bf6b3347c2dc5aa86e28f31bf0915db80b2be1145d5f`
+  `9edb7ac0d42b777e6215470943b0d88c784e112e37e57a591bee5d586e34002c`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_BOUNDS)
 - `goldens/shim/shim-sysnative-break-store-lifetime.o`
-  `f6768a0f9089721869a7d9ffca9c83e2a3d301e125f796a50f858464ba38ff92`
+  `8a03aece5b808b1b00bd4587935387e6076856e4a9e43a27d4b5112dc7271522`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_LIFETIME)
 - `goldens/shim/shim-sysnative-break-store-lock.o`
-  `588ba9c66967d71d5f7a96d43860be5747005c171b0a0a143bdb331d8628c43f`
+  `b705236d1838bbe56c951bf90eae92635b7cdb46211c165fb8330d9348f9092b`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_LOCK)
 - `goldens/shim/shim-sysnative-break-store-open-order.o`
-  `78fd85b6887b21520bda9faaeb6e3379c891a57c90429f1b293ee892ac3e3ab1`
+  `2bb7a0cf7ea4cb8a2c3f9c4a2b558193cdc198eed290bfd9e641a48300118a80`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_OPEN_ORDER)
 - `goldens/shim/shim-sysnative-break-store-access.o`
-  `558da126c6ddbe0e8c325589a342b916a21d8ade8aaf011004608e2e3b6ddf0e`
+  `47618748dd1d244d5afe996d06320deb503ddf366a7482e073fd2e00f1219734`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_ACCESS)
 - `goldens/shim/shim-sysnative-break-store-flock.o`
-  `bd9f3e7d355ae99eb71f29046a9874361d0a14d75be3379c5168f246c78ac978`
+  `5c617001a730bfd5f6e66a0c41ad819499ba092016bc363ad3345769aa89de76`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_FLOCK)
 - `goldens/shim/shim-sysnative-break-store-slash.o`
-  `5c6ce75f66010fba8c7f20c1b6b492c14e845252a7cf80e674ad6c967de8a0e9`
+  `8180131efecee64a54d6a26f5cf1ef55999934d1e1ce2246c0de64dd95d7c60c`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_SLASH)
 - `goldens/shim/shim-sysnative-break-store-times.o`
-  `0e23aa5f34c46e4496aecf5048909485dbd077e584f0ffb506ee652e71784b27`
+  `a6030563a0c1b4346729caed1b8f386fd4b5e875ab328e7846ec2d3fcd39c810`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_STORE_TIMES)
 - `goldens/shim/shim-sysnative-break-entropy-refusal.o`
-  `2273449053479fd5bfe42c4a5f47f4282a11ca0152b7d13aa35ef3239cd10026`
+  `f26b07ffd2a3c507472bb1240a41b749581c4c9f9135e4d5ad4f8a1c4a731851`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_ENTROPY_REFUSAL)
 - `goldens/shim/shim-sysnative-break-calendar-clock.o`
-  `2e17b56ba314111b620042a6e2f6b58c75f4017087d9308708302c4d8e836386`
+  `1ea1f86698dd7a167ef4e47b9ae051dead434195cbd033c0d89e0fe5a4b89786`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_CALENDAR_CLOCK)
 - `goldens/shim/shim-libc-glue.o`
   `feffa0977cc6ac71e97c7b203f4c6c7640ef951ebc688c7fcefb77bbdf076f49`
   (src/shim/rhu_libc_glue.c; no extra defines)
 - `goldens/shim/shim-host.o`
-  `93dc8184a1c1c248c1c1a16106b28634f7f5b8d14fbdf2f4b07b91df77bdf2fd`
+  `67f1b9866360b4ab6c86afc54170867216693b945cfc54250111eff49960fd77`
   (src/shim/rhu_host.c; -DMGC_HOST_ROW_AN500)
 - `goldens/shim/shim-host-break-dataverify.o`
-  `00635534e9a84c805374744d1d9b7db95b623b9a7c11d26403d1daa99c46e4b1`
+  `8d396b7a08ac9922631811918296bbcc44a1735ff318a86d5cd8cd46b8962598`
   (src/shim/rhu_host.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_DATAVERIFY)
 - `goldens/shim/shim-stdio-sym.o`
   `8428ce33a5f364f458b0ccaa949e3398470a9b05500810c6a62109731033a28d`
@@ -346,13 +361,13 @@ Records (repo-relative path, sha256; source and defines per object):
   `0c4d1d32c9e3dd98667d8f1ce458d2f7a563c1c8247daa461c22bf6a4a15cc04`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
 - `goldens/shim/shim-sysnative-an505.o`
-  `be6472965f85a7bb04e0d165807c3e1da82865a1e3ae596000c8261e0cc3db04`
+  `8daeaea1310f0088574129cb09b926032eec499af6c88e537ccd384f37b28168`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
 - `goldens/shim/shim-libc-glue-an505.o`
   `45d2179c03034d89fcf2e1633e48bf21a56a5255561697ed1a1021f2e27a5618`
   (src/shim/rhu_libc_glue.c; no extra defines; the Cortex-M33 class flag set)
 - `goldens/shim/shim-host-an505.o`
-  `3935bc26e74c54a9cfb64c4070115d5b59a7c2131e51385e01bf87c9abcb68b0`
+  `c50545140e94932483f9e29bfa0d1ca9b0aed874443532d473f4cf52bfde5a2d`
   (src/shim/rhu_host.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
 - `goldens/shim/shim-stdio-sym-an505.o`
   `49a42ffaf600fe1315997337de4e9457f6454072c823f8ce3be0d7e4abfb3bb9`
@@ -361,11 +376,11 @@ Records (repo-relative path, sha256; source and defines per object):
   `afea5c2333a16c4fee200c74e492942951fba3b1f16e683056ad24e0e278815c`
   (src/shim/rhu_shim.c; -DMGC_HOST_ROW_PICO2; the Cortex-M33 class flag set)
 - `goldens/shim/shim-pal-surface.o`
-  `4ffcfe7b757028e7c13c6755cd169e34e13e65c0b9c1ca9c3707e3392f223316`
-  (src/shim/rhu_pal_surface_net11_rc2.c; -DMGC_HOST_ROW_AN500)
+  `5d9b9a95dc232203b793d5c3c2bb60612d5f192ecad46784c4c2bab204274b4e`
+  (src/shim/rhu_pal_surface_net11_rc3.c; -DMGC_HOST_ROW_AN500)
 - `goldens/shim/shim-pal-surface-an505.o`
-  `8c4b2905bdb6bfd663337c380065b565d398738dc037afafaad9f16b2e51bc61`
-  (src/shim/rhu_pal_surface_net11_rc2.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
+  `b2106ee5e0bebeb9de2684269c2ccbe4b5cd84c88d58d44d6d9dfba5226bf325`
+  (src/shim/rhu_pal_surface_net11_rc3.c; -DMGC_HOST_ROW_AN505; the Cortex-M33 class flag set)
 - `goldens/shim/shim-gpiod.o`
   `c89651bbba2231d39154f975cc984f14f3dab928ab57c8b9c72d45e69ef3470c`
   (src/shim/rhu_gpiod.c; -DMGC_HOST_ROW_AN500)
@@ -439,13 +454,13 @@ Records (repo-relative path, sha256; source and defines per object):
   `623cd413e365415086a549d7405201512f1ae6b0719b1fc94efbf00d13cb9d9e`
   (src/shim/rhu_gpiod.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_GPIOD_KIND_ORDER)
 - `goldens/shim/shim-sysnative-f769.o`
-  `2e63f64f74a63b48afd4045cfa6315b665b808d455b7a9b5ffebae3ab2b1dcd1`
+  `c33278b9a435d36397785f968eeb7b1e85612c56a20ab9f357fda64eaa6998ce`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_F769)
 - `goldens/shim/shim-sysnative-rp2350.o`
-  `f7be95beb6c89a7a27a6ee4c578081b9206f4e9c4d11755270192aceec52a8a4`
+  `6299fc43b9a8ca504d751be5f57ab355869ccc886fd38c0bdd70e065e02da2df`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_PICO2; the Cortex-M33 class flag set)
 - `goldens/shim/shim-sysnative-f769-break-frozen-backed.o`
-  `8f8b5c3d7b01cbde95ed1eb6959348d9dad547098ed81a5703f3462fcd4d0082`
+  `84ed988293d8f13f291c8e3c2b6eb3c79d9b0578f4798adc97a2855904fb75b1`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_F769 -DRHU_SHIM_BREAK_FROZEN_BACKED)
 - `goldens/shim/shimtest-frozen.o`
   `e9ad9aa79c44fd6628edb11090d22e58c56064fc92ce1d24c7b5dc431beffba7`
@@ -475,7 +490,7 @@ Records (repo-relative path, sha256; source and defines per object):
   `0205fe79b7b03b9b5b1c65409d44d3e64c75ed9a057609798bf07847ed55ad6d`
   (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_PWMFS)
 - `goldens/shim/shim-sysnative-break-identity-leak.o`
-  `e3325956d818bcc1342ebd48e53bac1e953cedb273b07fcbb0cf169b7b137c72`
+  `d47f6964196444558ff0f3fe25de55895308e6a1f780a900fee0ff90b544f132`
   (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_IDENTITY_LEAK)
 - `goldens/shim/shim-core-break-fault-unarmed.o`
   `6c5b21fac276fea93bb947a74ae95e5e4d35821584c511f0bf85df888271c71f`
@@ -543,6 +558,18 @@ Records (repo-relative path, sha256; source and defines per object):
 - `goldens/shim/shimtest-iiofs.o`
   `2bc9d0852be5106e73f6951dca3377fcccd3264bd62f1340f6e38a84453a7f9f`
   (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_IIOFS)
+- `goldens/shim/shim-sysnative-break-sdfs-sign.o`
+  `0ecd65f75abaac03899e182ee71cfb080ea60f180b4d57bbe8a2afe78b3f033a`
+  (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_SDFS_SIGN)
+- `goldens/shim/shim-sysnative-break-sdfs-close-keeps.o`
+  `d89196777d2f01bb1ad7d51ac41ab8932c4fc1af728617fb6937f72a62e6fb67`
+  (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_SDFS_CLOSE_KEEPS)
+- `goldens/shim/shim-sysnative-break-sdfs-dup-closes.o`
+  `c11ff9619f1beec6e171e64f0985aae323a441d02343aee02552fc8d412eef6e`
+  (src/shim/rhu_sysnative.c; -DMGC_HOST_ROW_AN500 -DRHU_SHIM_BREAK_SDFS_DUP_CLOSES)
+- `goldens/shim/shimtest-sdfs.o`
+  `f0a9ad05357b6226d7f605a983a055148a37daa0334f0f08645751343e40d726`
+  (src/shim/gate/rhu_shimtest.c; -DRHU_SHIMTEST_LADDER_SDFS)
 - `goldens/shim/shimtest-core.golden.txt`
   `b715243edeccbae9551e0d50e71c5bd2250e9e5730721be3fea7d6e078a8dbbb`
   (the payload stream of the shim.core image (class bytes))
@@ -576,6 +603,9 @@ Records (repo-relative path, sha256; source and defines per object):
 - `goldens/shim/shimtest-iiofs.golden.txt`
   `179324c333ddfc7ffedb8de24b7cba04fc74aee11f3190ea985419a90beadcbf`
   (the payload stream of the shim.iiofs image (class bytes))
+- `goldens/shim/shimtest-sdfs.golden.txt`
+  `228bc4287d480bdb710f81874eeccf9a3932b118af5da1a5debb59bd69cbd9a8`
+  (the payload stream of the shim.sdfs image (class bytes))
 - `goldens/shim/pal-surface.txt`
-  `7597505afa88492e01701f086e25e3583460b1ee880017397bad7e2f025321c7`
+  `9e23a90231c5da7ee1a528a482a08e1fdef65520947c95bf1e08ef817d845dfe`
   (the P/Invoke-facing surface expectation the shim.pal-surface case reads: the pin, the pack's five archives with their sha256s, one line per surface name with its family and class; GENERATED from the pack's archives and the runtime's headers at the pin, regenerated at a re-pin, never edited)

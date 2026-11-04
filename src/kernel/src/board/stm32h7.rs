@@ -106,7 +106,7 @@ pub const KHEAP_BYTES: usize = 16 * 1024;
 /// here; each end backed off by one 8-word frame).
 pub const FRAME_RANGES: [(usize, usize); 1] = [(0x2400_0000, 0x2408_0000 - 32)];
 
-/// The chip, as the SDK's facts files name it (the quiet line of the log doors).
+/// The chip, as the SDK's facts files name it (the quiet line of the log functions).
 pub const CHIP: &str = "STM32H747XI";
 
 // ------------------------------------------------------- the register map
@@ -770,7 +770,7 @@ pub fn console_putb(b: u8) {
     ring::putb(b)
 }
 
-/// The room the ring has for a writer, in bytes (the door's back-pressure
+/// The room the ring has for a writer, in bytes (the function's back-pressure
 /// reads it outside the critical section).
 pub fn console_room() -> usize {
     ring::room()

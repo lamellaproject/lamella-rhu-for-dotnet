@@ -5,7 +5,7 @@
 //! FOH pool, GC regions) through `alloc_at`; window
 //! 1 is an external RAM a board brings up and proves at boot (the
 //! Pimoroni rows' PSRAM), offered to the hosted runtime through the
-//! RAM-range doors (`ram.rs`) and drawn from by name through
+//! RAM-range functions (`ram.rs`) and drawn from by name through
 //! `alloc_from`. Each window is bump-only at this level: individual frees
 //! never exist, and **rezero** is the recycling story -- the decommit
 //! contract on a flat address space.
@@ -235,7 +235,7 @@ pub fn count() -> usize {
     with_cs(|| unsafe { arena().count })
 }
 
-/// A window's brackets and its headroom, for the RAM-range doors: `None`
+/// A window's brackets and its headroom, for the RAM-range functions: `None`
 /// past the count.
 pub fn window(index: usize) -> Option<(usize, usize, u32)> {
     with_cs(|| unsafe {
@@ -298,7 +298,7 @@ pub fn alloc_from(range: u32, bytes: u32, align: u32, site: u32) -> *mut u8 {
     // alone (bump-only: no other hand-out can reach it; the idle step never
     // enters below `clean`; a `rezero` from another thread over a span that
     // is not its own is a caller bug), so the memset needs no
-    // lock. The door returns only after the span reads zero.
+    // lock. The function returns only after the span reads zero.
     let (p, dirty) = with_cs(|| -> (*mut u8, Option<(usize, usize)>) { unsafe {
         let a = arena();
         assert!((range as usize) < a.count, "arena: range {} past the {} this image serves (caller bug)", range, a.count);

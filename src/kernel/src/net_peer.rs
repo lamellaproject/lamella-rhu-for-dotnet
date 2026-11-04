@@ -1,4 +1,4 @@
-//! The network doors' scripted peer, pure: the other end of the emulator rows' virtual
+//! The kernel's network API's scripted peer, pure: the other end of the emulator rows' virtual
 //! medium. It reads the Ethernet frames the kernel's stack transmits and
 //! answers, byte for byte from the protocols' public specifications, the
 //! exchanges a loopback cannot answer -- an ARP request for its address

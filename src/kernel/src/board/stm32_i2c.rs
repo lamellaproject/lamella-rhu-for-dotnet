@@ -180,5 +180,5 @@ pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], _hz: u32, budget_ticks: u32, deadli
 }
 
 /// The timing word for a rate at the block's kernel clock: this family's row
-/// of the bus arithmetic, asked by the bus doors through the driver.
+/// of the bus arithmetic, asked by the kernel's bus API through the driver.
 pub use crate::bus_math::i2c_timing as timing;

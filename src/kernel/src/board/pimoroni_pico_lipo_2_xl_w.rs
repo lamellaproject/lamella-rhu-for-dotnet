@@ -14,7 +14,7 @@
 pub use super::rp2350::*;
 
 pub const NAME: &str = "Pimoroni Pico LiPo 2 XL W";
-/// The chip, as the SDK's facts file names it (the quiet line of the log doors).
+/// The chip, as the SDK's facts file names it (the quiet line of the log functions).
 pub const CHIP: &str = "RP2350B";
 pub const CONSOLE: &str = "UART0 (GPIO 0 TX, GPIO 1 RX)";
 

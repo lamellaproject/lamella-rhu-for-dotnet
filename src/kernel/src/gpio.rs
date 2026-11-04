@@ -1,4 +1,4 @@
-//! The GPIO doors' bodies: a program claims a line as an input with its
+//! The kernel's GPIO API's bodies: a program claims a line as an input with its
 //! pull or as an output, releases it, writes it, reads it, arms an edge on
 //! it and takes the line's event word -- the seven verbs `api.rs` exports
 //! and `include/rhu.h` states. Beneath them: the claims table (every owner
@@ -58,7 +58,18 @@ pub struct GpioWitness {
     pub wakes_sent: u32,
     pub last_refused_line: u32,
     pub last_refused_code: i32,
+    /// The holder the newest busy refusal names (the HOLDER_* values).
+    pub last_busy_holder: u32,
 }
+
+/// The holders a busy refusal names in the witness: the board's own
+/// claim, a PWM channel or an analog channel this program holds, or the
+/// program through a kernel function this list does not name.
+pub const HOLDER_NONE: u32 = 0;
+pub const HOLDER_BOARD: u32 = 1;
+pub const HOLDER_PWM: u32 = 2;
+pub const HOLDER_ADC: u32 = 3;
+pub const HOLDER_PROGRAM: u32 = 4;
 
 #[unsafe(export_name = "__rhu_gpio_witness")]
 pub static mut WITNESS: GpioWitness = GpioWitness {
@@ -74,10 +85,11 @@ pub static mut WITNESS: GpioWitness = GpioWitness {
     wakes_sent: 0,
     last_refused_line: 0,
     last_refused_code: 0,
+    last_busy_holder: HOLDER_NONE,
 };
 
 /// The witness's fields are written through raw pointers, one field at a
-/// time, under the critical section by the doors and by the handlers; no
+/// time, under the critical section by the functions and by the handlers; no
 /// reference to the static is ever formed, so a reader's snapshot by value
 /// (the api flavor's checks; the probe over the debug port) aliases nothing.
 fn witness() -> *mut GpioWitness {
@@ -148,15 +160,61 @@ pub fn count() -> i32 {
     N as i32
 }
 
+/// Whether the kernel's GPIO API holds the line: a mode it set and has not released.
+/// The claims table's program bit alone does not say so -- the PWM and
+/// analog functions set the same bit for the lines they take.
+#[cfg(not(feature = "test-gpio-doctored-hold"))]
+fn door_holds(line: u32) -> bool {
+    MODE[line as usize].load(Ordering::Acquire) != 0
+}
+
+/// The doctored hold (the api gate's negative control, built into no board
+/// image): the program bit alone decides, so a line a PWM channel of this
+/// program holds is re-configured as if the kernel's GPIO API held it; an analog
+/// channel's line is left to the table's refusal.
+#[cfg(feature = "test-gpio-doctored-hold")]
+fn door_holds(line: u32) -> bool {
+    let held = with_cs(|| unsafe { claims::is_program(&*addr_of!(CLAIMS), line) });
+    held && !crate::adc::line_held(line)
+}
+
+/// The holder a busy refusal names in the witness: the board, a PWM
+/// channel or an analog channel of this program, else the program through
+/// a kernel function this list does not name (and nobody, were the table's two bits
+/// both clear).
+fn name_holder(line: u32) {
+    let (board, program) = with_cs(|| unsafe {
+        let c = &*addr_of!(CLAIMS);
+        (claims::is_board(c, line), claims::is_program(c, line))
+    });
+    let holder = if board {
+        HOLDER_BOARD
+    } else if crate::pwm::line_held(line) {
+        HOLDER_PWM
+    } else if crate::adc::line_held(line) {
+        HOLDER_ADC
+    } else if program {
+        HOLDER_PROGRAM
+    } else {
+        HOLDER_NONE
+    };
+    with_cs(|| unsafe { write_volatile(addr_of_mut!((*witness()).last_busy_holder), holder) });
+}
+
 /// A claim: the line inside the space and populated, the mode and pull
 /// and initial level valid, the input-only rule honoured, then the table
-/// -- or, when THIS program already holds the line, a RE-CONFIGURATION
-/// (idempotent: the library sets a pin's mode on an open pin and again to
-/// change it, and a release-then-reclaim would leave a moment with no
-/// owner). An output claim carries its initial level,
-/// written to the data register BEFORE the mode register so the pad never
-/// shows the wrong level at open. All-or-nothing: on a refusal
-/// nothing is programmed.
+/// -- or, when the kernel's GPIO API already holds the line (a mode set and not
+/// released), a re-configuration (idempotent: the library sets a pin's
+/// mode on an open pin and again to change it, and a release-then-reclaim
+/// would leave a moment with no owner). A line the program holds through
+/// another function -- a PWM channel, an analog channel -- is that function's
+/// until it releases it: the table refuses it EBUSY as it refuses a line
+/// the board holds, the holder is named in the witness and the pad stays
+/// as the holder programmed it; the other functions refuse a line the kernel's GPIO API
+/// holds the same way. An output claim carries its initial level, written
+/// to the data register BEFORE the mode register so the pad never shows
+/// the wrong level at open. All-or-nothing: on a refusal nothing is
+/// programmed.
 pub fn claim(line: u32, mode: u32, pull: u32, initial: u32) -> i32 {
     if line as usize >= N || !m::mode_valid(mode) || !m::pull_valid(pull) || initial > 1 {
         return refused(line, sched::ERR_INVAL);
@@ -167,15 +225,13 @@ pub fn claim(line: u32, mode: u32, pull: u32, initial: u32) -> i32 {
     if mode != m::MODE_INPUT && facts::input_only(line) {
         return refused(line, ERR_ACCES);
     }
-    let held = with_cs(|| unsafe { claims::is_program(&*addr_of!(CLAIMS), line) });
-    if held && crate::adc::line_held(line) {
-        // A line an analog channel of this program reads is not a GPIO line
-        // until the channel is released; the analog side refuses the reverse.
-        return refused(line, ERR_BUSY);
-    }
+    let held = door_holds(line);
     if !held {
         let r = with_cs(|| unsafe { claims::claim(&mut *addr_of_mut!(CLAIMS), line) });
         if r != 0 {
+            if r == ERR_BUSY {
+                name_holder(line);
+            }
             return refused(line, r);
         }
     } else if EDGE[line as usize].load(Ordering::Acquire) != 0 && mode != m::MODE_INPUT {

@@ -1,4 +1,4 @@
-rhu 0.2.0 -- Lamella RHU: runtime-hosting unikernel for .NET on Cortex-M
+rhu {version} -- Lamella RHU: runtime-hosting unikernel for .NET on Cortex-M
 [boot] QEMU mps2-an500 | CMSDK UART0 | flavor: boot
 [boot] VTOR=0x00000000 CPUID=0x411fc272 (Cortex-M7 r1p2)
 [boot] MPU: 16 regions, 3 programmed, first page no-access, background on

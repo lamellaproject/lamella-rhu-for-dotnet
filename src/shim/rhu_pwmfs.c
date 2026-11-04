@@ -66,8 +66,8 @@
 #include "rhu_shim.h"
 
 #include "rhu.h"
-#include "rhu_pal_io_net11_rc2.h"
-#include "rhu_pal_errno_net11_rc2.h"
+#include "rhu_pal_io_net11_rc3.h"
+#include "rhu_pal_errno_net11_rc3.h"
 
 extern int *__errno_location(void);
 void *memcpy(void *dst, const void *src, size_t n);

@@ -35,8 +35,8 @@ const GCTEST_WORK: u32 = 4;
 const LINK_TIMEOUT_S: u64 = 120;
 
 /// Frozen-input pin table: must equal goldens/payload/MANIFEST.md.
-const SHA_RTSMOKE_O: &str = "74f803d5c034ebd77edb64293f76a1ebfb5bfdb2e3abdba101958dce72e87f0e";
-const SHA_GCTEST_O: &str = "01bc57d63506d4569b30bb73e243aa065d3fe6b5f706a8dc1728d8fc7f255601";
+const SHA_RTSMOKE_O: &str = "55bedf1cf0e0d294bc460f80767a20b5f71a0d407e265580ed0f6542c660359b";
+const SHA_GCTEST_O: &str = "5d88a76ac668947e0839b43473ccd9ab9041cfddeb9cfa76782a2963cb6feb70";
 const SHA_RTSMOKE_G: &str = "230e32ad303a37564fdc2093fde03730592113aa3718f533e70adfe547c90eb5";
 const SHA_GCTEST_G: &str = "0eb3d1ba8a9f0fc4be43ee4fe5d626626147d98a9a5605da6d1c8ae2887d8b2c";
 
@@ -335,17 +335,20 @@ struct RtBoard {
     world: &'static crate::gates::rt::RtWorld,
 }
 
-const RT_BOARDS: [RtBoard; 12] = [
+const RT_BOARDS: [RtBoard; 15] = [
     RtBoard { board: "mps2-an500", target: "thumbv7em-none-eabihf", features: "qemu-exit,board-mps2-an500,payload", world: &crate::gates::rt::WORLD_M7 },
     RtBoard { board: "mps2-an505", target: "thumbv8m.main-none-eabihf", features: "qemu-exit,board-mps2-an505,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "adafruit-feather-rp2350-hstx", target: "thumbv8m.main-none-eabihf", features: "board-adafruit-feather-rp2350-hstx,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "adafruit-feather-rp2350-hstx-psram", target: "thumbv8m.main-none-eabihf", features: "board-adafruit-feather-rp2350-hstx-psram,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "adafruit-metro-rp2350", target: "thumbv8m.main-none-eabihf", features: "board-adafruit-metro-rp2350,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "adafruit-metro-rp2350-psram", target: "thumbv8m.main-none-eabihf", features: "board-adafruit-metro-rp2350-psram,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "pimoroni-pico-lipo-2", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-lipo-2,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "pimoroni-pico-lipo-2-xl-w", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-lipo-2-xl-w,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "sparkfun-iot-redboard-rp2350", target: "thumbv8m.main-none-eabihf", features: "board-sparkfun-iot-redboard-rp2350,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "pimoroni-pico-plus-2", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-plus-2,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "pimoroni-pico-plus-2-w", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-plus-2-w,payload", world: &crate::gates::rt::WORLD_M33 },
-    RtBoard { board: "rpi-pico2", target: "thumbv8m.main-none-eabihf", features: "board-rpi-pico2,payload", world: &crate::gates::rt::WORLD_M33 },
-    RtBoard { board: "rpi-pico2-w", target: "thumbv8m.main-none-eabihf", features: "board-rpi-pico2-w,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "raspberrypi-pico-2", target: "thumbv8m.main-none-eabihf", features: "board-raspberrypi-pico-2,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "raspberrypi-pico-2-w", target: "thumbv8m.main-none-eabihf", features: "board-raspberrypi-pico-2-w,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "st-nucleo-u5a5zj-q", target: "thumbv8m.main-none-eabihf", features: "board-st-nucleo-u5a5zj-q,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "st-stm32f769i-disco", target: "thumbv7em-none-eabihf", features: "board-st-stm32f769i-disco,payload", world: &crate::gates::rt::WORLD_M7 },
 ];
@@ -3295,10 +3298,10 @@ pub fn rederive(repo: &Path) -> ! {
         exit(1);
     }
     if controls_run {
-        println!("{DISPLAY_ID}: PASS (2/2 frozen objects re-derived byte-identical from src/payload at the pin; the rebuilt objects boot to the goldens; 4 controls through the real tool (three negative, one positive); the Linux environment's transcript under {OUT_REL})  {tools}");
+        println!("{DISPLAY_ID}: PASS ({}/{} cases incl. {} negative controls; the frozen objects rtsmoke.o and gctest.o re-derived byte-identical from src/payload at the pin; the rebuilt objects boot to the goldens; the controls through the real tool; the Linux environment's transcript under {OUT_REL})  {tools}", g.ctx.results.n_pass, g.ctx.results.cases(), g.ctx.results.n_neg);
     } else {
         let read_how = if objects_dir.is_some() { "read from the directory named" } else { "read where the publish wrote them" };
-        println!("{DISPLAY_ID}: PASS (2/2 frozen objects re-derived byte-identical from the objects {read_how}, published from src/payload by the documented commands; the rebuilt objects boot to the goldens; the 4 controls NOT RUN (no Linux environment for the publish); the objects under {OUT_REL})  {tools}");
+        println!("{DISPLAY_ID}: PASS ({}/{} cases incl. {} negative controls; the frozen objects rtsmoke.o and gctest.o re-derived byte-identical from the objects {read_how}, published from src/payload by the documented commands; the rebuilt objects boot to the goldens; the controls NOT RUN (no Linux environment for the publish); the objects under {OUT_REL})  {tools}", g.ctx.results.n_pass, g.ctx.results.cases(), g.ctx.results.n_neg);
     }
     exit(0);
 }

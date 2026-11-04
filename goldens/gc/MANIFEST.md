@@ -28,8 +28,8 @@ objects the Cortex-M33 with the single-precision FPv5 under the same flag
 set but the core and FPU words. No C++ standard library header is used:
 the collector is freestanding C++ over the toolchain's C headers.
 
-The objects are compiled against the .NET 11 RC2 runtime
-(v11.0.0-rc.2.26504.105): the ten runtime-to-GC interface headers vendored
+The objects are compiled against the .NET 11 RC3 runtime
+(v11.0.0-rc.3.26522.148): the ten runtime-to-GC interface headers vendored
 under src/vendor at that tag (the GC interface 5.9, the EE interface's
 major version 5, the flat surface the gate ties three ways at 53 names).
 

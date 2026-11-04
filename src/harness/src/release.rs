@@ -95,7 +95,7 @@ const TIERS: [(&str, &str); 5] = [
 /// the repository root) and some runtime archive sets (a directory per set
 /// inside, `<set>/...`, unpacked into a directory of the consumer's); a
 /// tier no archive names ships in the tree. A name may carry `{v}`, the
-/// SDK version read from the SDK project, and `{set}`, the name of the one
+/// version of record (the VERSION file at the repository root), and `{set}`, the name of the one
 /// set inside. The shape is the table's: one archive per tier and per set,
 /// two archives (the hosted-runtime tiers in one, the runtime archive sets
 /// in the other), or one archive of everything -- each a table edit, the
@@ -105,10 +105,12 @@ const ASSETS: &[(&str, &[&str], &[&str])] = &[
     ("lamella-rhu-{v}-runtime-archives.tar", &[], &["rt-m7", "rt-m33"]),
 ];
 
-/// The package project (the one every RHU package is packed from) and the
-/// property whose literal default is the version.
-const VERSION_FILE: &str = "src/sdk/Lamella.Rhu.Package/Lamella.Rhu.Package.csproj";
-const VERSION_PROPERTY: &str = "RhuSdkVersion";
+/// The gate projects pin the SDK package by version in a file that cannot
+/// read another: the line is checked against the version of record (the
+/// VERSION file at the repository root, which the banner, the pack and the
+/// archives' names read).
+const GATE_PIN_FILE: &str = "src/rt/gate/global.json";
+const GATE_PIN_KEY: &str = r#""Lamella.Sdk":"#;
 
 /// The two runtime archive sets: the world whose tier carries the set's
 /// identity file, and the class word.
@@ -131,27 +133,25 @@ fn tier_desc(tier: &str) -> &'static str {
     TIERS.iter().find(|(k, _)| *k == tier).map(|(_, d)| *d).unwrap_or("a tier")
 }
 
-/// The version: the property's literal default in the SDK project.
+/// The version of record, with the gate projects' SDK pin checked against it.
 fn version_of(tree: &dyn Tree) -> Result<String, String> {
     let text = tree
-        .read(VERSION_FILE)
+        .read(crate::version::FILE)
         .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .ok_or_else(|| format!("{VERSION_FILE} is absent: the version is read from its {VERSION_PROPERTY}"))?;
-    let open = format!("<{VERSION_PROPERTY}");
-    let close = format!("</{VERSION_PROPERTY}>");
-    for line in text.lines() {
-        if let Some(rest) = line.trim().strip_prefix(&open) {
-            if let Some(gt) = rest.find('>') {
-                if let Some(end) = rest[gt + 1..].find(&close) {
-                    let v = rest[gt + 1..gt + 1 + end].trim();
-                    if !v.is_empty() && !v.contains('$') && !v.contains(' ') {
-                        return Ok(v.to_string());
-                    }
-                }
-            }
-        }
+        .ok_or_else(|| format!("{} is absent at the repository root: the version of record is read from it", crate::version::FILE))?;
+    let version = crate::version::parse(&text)?;
+    let pins = tree
+        .read(GATE_PIN_FILE)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .ok_or_else(|| format!("{GATE_PIN_FILE} is absent: the gate projects' SDK pin is checked against {}", crate::version::FILE))?;
+    let pinned = pins
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(GATE_PIN_KEY).map(|r| r.trim().trim_matches(|c| c == '"' || c == ',').to_string()))
+        .ok_or_else(|| format!("{GATE_PIN_FILE} carries no {GATE_PIN_KEY} line: the gate projects' SDK pin is checked against {}", crate::version::FILE))?;
+    if pinned != version {
+        return Err(format!("{GATE_PIN_FILE} pins Lamella.Sdk at {pinned} where {} states {version}: the pin follows the version of record", crate::version::FILE));
     }
-    Err(format!("{VERSION_FILE} carries no literal <{VERSION_PROPERTY}>: the version is read from it"))
+    Ok(version)
 }
 
 /// The archives' names from the table and the version.
@@ -1150,9 +1150,10 @@ pub fn pack(repo: &Path, out: &str) -> ! {
 /// directions.
 pub fn fixture() -> (MapTree, MapTree, MapTree) {
     let mut t: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    t.insert(crate::version::FILE.to_string(), ("0.0.0-fixture".to_string() + "\n").into_bytes());
     t.insert(
-        VERSION_FILE.to_string(),
-        format!("<Project>\n  <PropertyGroup>\n    <{VERSION_PROPERTY} Condition=\"'$({VERSION_PROPERTY})' == ''\">0.0.0-fixture</{VERSION_PROPERTY}>\n  </PropertyGroup>\n</Project>\n").into_bytes(),
+        GATE_PIN_FILE.to_string(),
+        ["{", "  \"msbuild-sdks\": {", "    \"Lamella.Sdk\": \"0.0.0-fixture\"", "  }", "}", ""].join("\n").into_bytes(),
     );
     for tier in ["gc", "shim", "payload", "rt-m7", "rt-m33"] {
         t.insert(format!("goldens/{tier}/MANIFEST.md"), format!("# {tier} fixture manifest\n\nFixture notice, line one.\nFixture notice, line two.\n").into_bytes());

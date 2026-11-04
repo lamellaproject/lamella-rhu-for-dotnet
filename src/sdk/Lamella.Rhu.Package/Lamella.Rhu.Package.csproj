@@ -13,7 +13,7 @@
        script over the staged files. -->
   <PropertyGroup>
     <TargetFramework>net11.0</TargetFramework>
-    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">1.0.0-alpha.1</RhuSdkVersion>
+    <RhuSdkVersion Condition="'$(RhuSdkVersion)' == ''">$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../../VERSION').Trim())</RhuSdkVersion>
     <PackageId>$(RhuPackageId)</PackageId>
     <Version>$(RhuSdkVersion)</Version>
     <Authors>Lamella LLC</Authors>
@@ -28,7 +28,6 @@
     <PackageLicenseExpression Condition="'$(RhuPackageLicense)' == ''">MIT OR Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/lamellaproject/lamella-rhu-for-dotnet</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageReleaseNotes>First pre-release</PackageReleaseNotes>
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <IncludeSymbols>false</IncludeSymbols>
     <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>

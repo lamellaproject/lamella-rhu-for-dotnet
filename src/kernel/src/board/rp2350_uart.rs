@@ -1,5 +1,5 @@
-//! The RP2350's two PL011 UART blocks as the UART doors' backend
-//! (`uart.rs` owns the rings, the witness and the doors; this module owns the
+//! The RP2350's two PL011 UART blocks as the kernel's UART API's backend
+//! (`uart.rs` owns the rings, the witness and the functions; this module owns the
 //! registers, the pins and the interrupt lines). UART0 at 0x4007_0000 and
 //! UART1 at 0x4007_8000 (the reset bits 26 and 27), each on its own
 //! interrupt line (33 and 34) at the lowest priority band; the blocks'
@@ -25,7 +25,7 @@
 //! transmit pin input-enabled without pulls, the receive pin input-enabled
 //! and pulled UP before the receiver is enabled (the reset state pulls every
 //! pad down, and a pulled-down receive line reads as a permanent break). At
-//! the release the pins return to the GPIO door's released state (the
+//! the release the pins return to the kernel's GPIO API's released state (the
 //! function NULL) with the receive pull kept so the line idles high.
 
 use core::ptr::{read_volatile, write_volatile};
@@ -320,7 +320,7 @@ pub fn loopback(ix: usize, on: bool) -> bool {
     true
 }
 
-/// The two blocks' interrupt handlers: the doors' module's handler for the
+/// The two blocks' interrupt handlers: the functions' module's handler for the
 /// block (the lines are armed only while a port is held).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __rhu_rp2350_uart0_irq() {

@@ -1,11 +1,11 @@
-//! The network doors' eight checks of the api flavor, on the
+//! The kernel's network API's eight checks of the api flavor, on the
 //! emulator rows over the virtual medium and its scripted peer: the pump's
 //! statistics, the medium and the lease, the retry scenario, the resolver,
 //! a stream over the loopback, datagrams, the refusals, the event port's
 //! properties. Every marker is constant text the api gate pins; the rows'
 //! own numbers (the passes, the milliseconds) are on lines the gate does
-//! not pin. Every wait is the recipe the header states -- the door, the
-//! snapshot, the door again, the futex wait with a deadline -- because this
+//! not pin. Every wait is the recipe the header states -- the function, the
+//! snapshot, the function again, the futex wait with a deadline -- because this
 //! thread is more urgent than the network thread and a spin would starve it.
 
 use core::ptr::{addr_of, read_volatile};
@@ -270,7 +270,7 @@ fn check_net_resolve() {
 
 /// A stream over the loopback: the connect edge, the risen bits, the
 /// accept with the peer's address, a small then a multi-segment byte-exact
-/// echo through the peek and the available door, the half-close, the closes.
+/// echo through the peek and the available function, the half-close, the closes.
 fn check_net_stream() {
     kprintln!("[api] net-stream: a listener and a client over the loopback -- the connect edge, the risen bits, the accept, 26 then 3000 bytes echoed byte-exact, the peek, the half-close, the closes");
     let l = api::rhu_net_socket(net::FAMILY_IPV4, net::TYPE_STREAM, 0);
@@ -387,7 +387,7 @@ fn check_net_stream() {
 }
 
 /// Datagrams over the loopback: two bound sockets, a datagram with its
-/// address record round-tripped, the peek and the available door, an
+/// address record round-tripped, the peek and the available function, an
 /// oversize datagram, the default peer, an unbound sender's own port.
 fn check_net_datagram() {
     kprintln!("[api] net-datagram: two bound datagram sockets over the loopback -- a datagram with its address round-tripped, the peek and the available door, an oversize datagram refused, the default peer, an unbound sender's own port");
@@ -541,7 +541,7 @@ extern "C" fn port_waiter(_: usize) {
     WOKEN.store(if r == 0 { 1 } else { 2 }, Ordering::Release);
 }
 
-/// The event port's properties: the bump door moves the global word by one
+/// The event port's properties: the bump function moves the global word by one
 /// and wakes a parked waiter; an idle connected stream makes no bump (no
 /// storm: a waiter on the global word sleeps to its deadline).
 fn check_net_port() {
@@ -565,7 +565,7 @@ fn check_net_port() {
     let r = api::rhu_futex_wait(gw, snap, deadline_in(window_ms));
     let moved = unsafe { read_volatile(gw) }.wrapping_sub(snap);
     assert!(r == sched::ERR_TIMEDOUT && moved == 0, "net-port: the global word moved {} times in {} ms with no socket changing; a wake without a mask change is a storm (the wait answered {})", moved, window_ms, r);
-    // The bump door: the word by one, a parked waiter woken.
+    // The bump function: the word by one, a parked waiter woken.
     SNAP.store(unsafe { read_volatile(gw) }, Ordering::Release);
     WOKEN.store(0, Ordering::Release);
     let _ = sched::spawn("port-wait", port_waiter, 0, 5, 2048);

@@ -1,5 +1,5 @@
 //! The RHU hosting API -- the C-ABI waistline between the kernel and
-//! hosted payloads. One hundred and eleven functions, `rhu_`-prefixed, mirrored
+//! hosted payloads. One hundred and thirty-two functions, `rhu_`-prefixed, mirrored
 //! exactly by `include/rhu.h` (contract generation `ABI`, at the end
 //! of this file); the shim backend is the intended consumer. One rule
 //! binds this surface: no second blocking primitive ever joins it, and
@@ -9,7 +9,7 @@
 use core::ffi::{c_char, c_void};
 
 use crate::registry::ModuleDesc;
-use crate::{adc, arena, blk, bus, calendar, console, entropy, gpio, kheap, net, pwm, ram, registry, sched, semihost, uart};
+use crate::{adc, arena, blk, bus, calendar, console, entropy, fs, fsmount, gpio, kheap, net, pwm, ram, registry, sched, semihost, uart};
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.rhu_api")]
@@ -123,7 +123,7 @@ pub extern "C" fn rhu_thread_spawn(
     let prio = prio.clamp(HOSTED_PRIO_LO, HOSTED_PRIO_HI) as u8;
     // The name is COPIED into the control block at birth (at most
     // NAME_BYTES - 1 kept, cut at a character boundary), so the caller's
-    // buffer may go away once this door returns; only the bytes the copy
+    // buffer may go away once this function returns; only the bytes the copy
     // can keep are read (a wild pointer faults loud within them). NULL
     // reads as "hosted"; a byte sequence that is not UTF-8 falls back to
     // it rather than lying in the debug contract; a character the limit
@@ -284,9 +284,9 @@ pub extern "C" fn rhu_module_roots(handle: i32, out: *mut ModuleDesc) -> i32 {
     }
 }
 
-// ---------------- the hosting doors: console / exit / entropy ----------------
+// ---------------- the hosting functions: console / exit / entropy ----------------
 
-/// The console write door's bound: one write is at most this many bytes
+/// The console write function's bound: one write is at most this many bytes
 /// (`RHU_CONSOLE_MAX_WRITE` in the header states it to the consumer); a
 /// larger request is refused, and a larger buffer is written in bounded
 /// pieces by the caller. Half the console ring, so a bounded write always
@@ -318,7 +318,7 @@ pub extern "C" fn rhu_console_read(buf: *mut u8, n: u32) -> i32 {
     console::door_read(unsafe { core::slice::from_raw_parts_mut(buf, n as usize) }) as i32
 }
 
-/// The log doors (the console's two streams; include/rhu.h states the
+/// The log functions (the console's two streams; include/rhu.h states the
 /// contract): the image's output level, 1 silent | 2 quiet | 3 verbose, so
 /// a hosting layer skips formatting a line it would drop; and a line of
 /// the kernel's diagnostic stream written at a level -- printed when the
@@ -380,7 +380,7 @@ pub extern "C" fn rhu_entropy_is_hardware() -> i32 {
     entropy::is_hardware()
 }
 
-/// The cryptographic door: bytes from a hardware noise source whose
+/// The random-bytes function: bytes from a hardware noise source whose
 /// health flags read clean at this draw, or an honest refusal (the
 /// header states the codes); the build opt-in serves the software
 /// stream here on the emulator rows' gate images. One call is bounded
@@ -397,7 +397,7 @@ pub extern "C" fn rhu_entropy_secure(buf: *mut u8, n: u32) -> i32 {
     entropy::fill_secure(unsafe { core::slice::from_raw_parts_mut(buf, n as usize) })
 }
 
-// ---------------- the calendar doors ----------------
+// ---------------- the calendar functions ----------------
 
 /// The calendar now -- the base plus the boot clock's elapsed, in
 /// 100-nanosecond ticks since 0001-01-01T00:00:00Z -- and the source
@@ -428,7 +428,7 @@ pub extern "C" fn rhu_calendar_set(ticks: u64, source: i32) -> i32 {
     calendar::set(ticks, source)
 }
 
-/// The GPIO doors (the seven verbs the
+/// The kernel's GPIO API (the seven verbs the
 /// header states): the line space, a claim (an input with its pull, or an
 /// output at its initial level; a claim on a line this program already
 /// holds re-configures it), its release, a write on a claimed output, a
@@ -478,10 +478,10 @@ pub extern "C" fn rhu_gpio_event_word(line: u32) -> *const u32 {
     gpio::event_word(line)
 }
 
-/// The bus doors (the eight verbs the
+/// The kernel's bus API (the eight verbs the
 /// header states): for each family the bus count, the enumeration (the
 /// number of the index-th bus: the chip's own block number, the name every
-/// other door takes), a claim for the program's whole run, and a transfer
+/// other function takes), a claim for the program's whole run, and a transfer
 /// -- one combined I2C transaction over message records, one full-duplex
 /// SPI exchange under the device's own select, mode and rate with the
 /// achieved rate answered. The codes are the header's; a refusal moves no
@@ -534,7 +534,7 @@ pub extern "C" fn rhu_spi_transfer(bus_index: u32, select: u32, mode: u32, hz: u
     bus::spi_transfer(bus_index, select, mode, hz, tx, rx, len)
 }
 
-/// The PWM doors (the eight verbs the
+/// The kernel's PWM API (the eight verbs the
 /// header states): the count of lines a timer can drive, the enumeration
 /// (the index-th line's number), a claim of the line and its timer channel
 /// for the program's run answering a handle, the period and the duty set
@@ -590,7 +590,7 @@ pub extern "C" fn rhu_pwm_info(h: i32, timer: *mut u32, channel: *mut u32, clock
     pwm::info(h, timer, channel, clock_hz)
 }
 
-/// The ADC doors (the six verbs the
+/// The kernel's ADC API (the six verbs the
 /// header states): the count of channels across the converter blocks, the
 /// enumeration (the index-th channel's block, number, line and width), a
 /// claim of the channel and its line answering a handle, one conversion
@@ -632,7 +632,7 @@ pub extern "C" fn rhu_adc_release(h: i32) -> i32 {
     adc::release(h)
 }
 
-/// The UART doors (the twelve verbs the header states): the count of
+/// The kernel's UART API (the twelve verbs the header states): the count of
 /// UART rows, the enumeration (the index-th row's block, lines and clock), a
 /// claim of a block for the program's run answering a handle (the console's
 /// block and a held block refused), the line discipline live with the
@@ -712,7 +712,7 @@ pub extern "C" fn rhu_uart_info(h: i32, block: *mut u32, tx_line: *mut u32, rx_l
     uart::info(h, block, tx_line, rx_line, clock_hz)
 }
 
-// ---------------- the fault funnel's arming door ----------------
+// ---------------- the fault funnel's arming function ----------------
 
 /// Arm the delivery of the fault kinds named by bits (bit 0 = a null data
 /// access): sticky for the process's life; 0, or RHU_EINVAL for an unknown
@@ -724,7 +724,7 @@ pub extern "C" fn rhu_fault_register(kinds: u32) -> i32 {
     sched::fault_register(kinds)
 }
 
-/// The RAM-range doors (the three verbs the header
+/// The RAM-range functions (the three verbs the header
 /// states): the count of ranges this image serves, the index-th range's
 /// record (the physical range as the board's facts state it, the arena
 /// window inside it the runtime may be handed, that window's headroom, the
@@ -749,7 +749,7 @@ pub extern "C" fn rhu_arena_alloc_from(range: u32, bytes: u32, align: u32, site:
     arena::alloc_from(range, bytes, align, site)
 }
 
-/// The block-device doors (the five verbs the header
+/// The block-device functions (the five verbs the header
 /// states): the count of block devices this image
 /// serves, the index-th device's record read at the call, whole-block reads
 /// and writes by block number, the sync. The codes are the header's; a
@@ -784,14 +784,148 @@ pub extern "C" fn rhu_blk_sync(dev: u32) -> i32 {
     blk::sync(dev)
 }
 
-/// The network doors (the twenty-six verbs the header states, the
+/// The kernel's file API (the twenty-one verbs the header states): the mount
+/// table of the card socket's volume at its mount point, read at the call;
+/// the files and directories a program opens by absolute path, their
+/// handles small numbers of two tables; the reads, writes and positional
+/// reads and writes, the seek, the truncate, the sync, the status by handle
+/// or by path, the unlink, the directory verbs, the listing one entry per
+/// call, the volume's counts. The codes are the header's; a refusal moves no
+/// byte; no function runs under the critical section.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_mount_count() -> i32 {
+    fsmount::mount_count()
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_mount(index: u32, out: *mut fs::MountDesc) -> i32 {
+    fsmount::mount_desc(index, out)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_open(path: *const c_char, flags: u32) -> i32 {
+    fsmount::open(path as *const u8, flags)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_close(h: i32) -> i32 {
+    fsmount::close(h)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_read(h: i32, buf: *mut c_void, n: u32) -> i32 {
+    fsmount::read(h, buf as *mut u8, n)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_write(h: i32, buf: *const c_void, n: u32) -> i32 {
+    fsmount::write(h, buf as *const u8, n)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_pread(h: i32, buf: *mut c_void, n: u32, offset: i64) -> i32 {
+    fsmount::pread(h, buf as *mut u8, n, offset)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_pwrite(h: i32, buf: *const c_void, n: u32, offset: i64) -> i32 {
+    fsmount::pwrite(h, buf as *const u8, n, offset)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_seek(h: i32, offset: i64, whence: u32, pos: *mut i64) -> i32 {
+    fsmount::seek(h, offset, whence, pos)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_truncate(h: i32, len: i64) -> i32 {
+    fsmount::truncate(h, len)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_sync(h: i32) -> i32 {
+    fsmount::sync(h)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_fstat(h: i32, out: *mut fs::StatDesc) -> i32 {
+    fsmount::fstat(h, out)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_stat(path: *const c_char, out: *mut fs::StatDesc) -> i32 {
+    fsmount::stat(path as *const u8, out)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_unlink(path: *const c_char) -> i32 {
+    fsmount::unlink(path as *const u8)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_mkdir(path: *const c_char) -> i32 {
+    fsmount::mkdir(path as *const u8)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_rmdir(path: *const c_char) -> i32 {
+    fsmount::rmdir(path as *const u8)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_rename(old_path: *const c_char, new_path: *const c_char) -> i32 {
+    fsmount::rename(old_path as *const u8, new_path as *const u8)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_opendir(path: *const c_char) -> i32 {
+    fsmount::opendir(path as *const u8)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_readdir(h: i32, out: *mut fs::Dirent) -> i32 {
+    fsmount::readdir(h, out)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_closedir(h: i32) -> i32 {
+    fsmount::closedir(h)
+}
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.rhu_api")]
+pub extern "C" fn rhu_fs_statfs(path: *const c_char, out: *mut fs::StatfsDesc) -> i32 {
+    fsmount::statfs(path as *const u8, out)
+}
+
+/// The kernel's network API (the twenty-six verbs the header states, the
 /// `rhu_net_` family with the Linux socket verbs): the media and the address
 /// (the count, a medium's facts and word, the configuration, the lease, the
 /// row's limits), name resolution (a request with a handle, never a wait),
 /// and the sockets (open, bind, listen, accept, connect, send, receive, the
 /// queued count, shutdown, close, the readiness mask with its risen bits, the
 /// pending error, the event words, the self-wake, the names, the options).
-/// No door blocks; the codes are the header's; a refusal moves no byte.
+/// No function blocks; the codes are the header's; a refusal moves no byte.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.rhu_api")]
 pub extern "C" fn rhu_net_count() -> i32 {
@@ -954,7 +1088,7 @@ pub extern "C" fn rhu_net_option(h: i32, option: u32, set: u32, value: i32) -> i
 /// generation it was built against in `rhu_payload_abi`, and the
 /// payload flavor refuses a mismatch before that entry runs
 /// (payload.rs).
-pub const ABI: u32 = 41;
+pub const ABI: u32 = 42;
 /// The window's floor: `RHU_ABI_COMPAT` in `include/rhu.h`, the two
 /// moving together or not at all. A payload built against any
 /// generation from this one through `ABI` runs; only a breaking change

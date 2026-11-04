@@ -33,9 +33,9 @@ build with the debug type overridden, and a project with its system-module
 property renamed. A compiler that refuses the programs' system module is
 the leg's failure; a passing build whose bytes differ reads as moved.
 
-Compiler: the .NET SDK 11.0.100-rc.2.26504.105 (the pin in
+Compiler: the .NET SDK 11.0.100-rc.3.26522.148 (the pin in
 src/payload/global.json) with its ahead-of-time compiler
-Microsoft.DotNet.ILCompiler 11.0.0-rc.2.26504.105, the SDK's implicit
+Microsoft.DotNet.ILCompiler 11.0.0-rc.3.26522.148, the SDK's implicit
 reference; each object's producer string names that compiler build. Each
 program is published for linux-arm with PublishAot, NoStdLib,
 IlcSystemModule naming the program itself (the minimal runtime compiles
@@ -59,8 +59,8 @@ covers them.
 
 | file | sha256 | bytes | class |
 |---|---|---|---|
-| `rtsmoke.o` | `74f803d5c034ebd77edb64293f76a1ebfb5bfdb2e3abdba101958dce72e87f0e` | 35,360 | frozen ILC object, RHU-built from `src/payload/rtsmoke` at the pin |
-| `gctest.o` | `01bc57d63506d4569b30bb73e243aa065d3fe6b5f706a8dc1728d8fc7f255601` | 33,781 | frozen ILC object, RHU-built from `src/payload/gctest` at the pin |
+| `rtsmoke.o` | `55bedf1cf0e0d294bc460f80767a20b5f71a0d407e265580ed0f6542c660359b` | 35,360 | frozen ILC object, RHU-built from `src/payload/rtsmoke` at the pin |
+| `gctest.o` | `5d88a76ac668947e0839b43473ccd9ab9041cfddeb9cfa76782a2963cb6feb70` | 33,781 | frozen ILC object, RHU-built from `src/payload/gctest` at the pin |
 | `rtsmoke-mps2.golden.txt` | `230e32ad303a37564fdc2093fde03730592113aa3718f533e70adfe547c90eb5` | 306 | golden, DETERMINISTIC (byte class): payload stream byte-identical after LF normalization both sides |
 | `gctest-mps2.golden.txt` | `0eb3d1ba8a9f0fc4be43ee4fe5d626626147d98a9a5605da6d1c8ae2887d8b2c` | 621 | golden, STATISTICAL (pins class): pin the five `PASS <name>` markers (`list-survives`, `boxes-survive`, `explicit-collect`, `post-churn-alloc`, `did-collect`) + `ALL GOOD` + final `collections=N free=M` with **M exact = 89016** and **N >= 10**; mid-run `free=` riders are conservative-retention layout noise, REPORT-ONLY |
 

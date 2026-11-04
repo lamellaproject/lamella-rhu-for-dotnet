@@ -1,4 +1,4 @@
-//! The entropy doors and their policy. Two doors: `rhu_entropy` is the
+//! The entropy functions and their policy. Two functions: `rhu_entropy` is the
 //! software stream -- one SplitMix64 stream, well mixed and entirely
 //! predictable from its seed -- for everything that does not need
 //! secrecy, seeded at its first draw from the board's hardware source
@@ -9,9 +9,9 @@
 //! source that failed its check (retired for the boot's life from that
 //! moment: the answer to "is there a hardware source" goes back to no
 //! and no more bytes are served), or a source whose bytes were not ready
-//! within the door's bound. A build option, named on the command line
+//! within the function's bound. A build option, named on the command line
 //! and implied by no board, lets an image -- the emulator rows' gate
-//! images -- accept the software stream for the cryptographic door; the
+//! images -- accept the software stream for the random-bytes function; the
 //! boot banner says so on every image that carries it, and the hardware
 //! query still answers no.
 
@@ -138,7 +138,7 @@ fn refuse(code: i32) -> i32 {
 }
 
 /// One hardware draw into the bounce buffer, the witness updated; the
-/// board's driver holds the section per block. Returns the door's answer.
+/// board's driver holds the section per block. Returns the function's answer.
 fn draw_hardware(n: usize) -> i32 {
     let mut counters = board::DrawCounters { errors: 0, resets: 0 };
     let bounce = unsafe { core::slice::from_raw_parts_mut(addr_of_mut!(BOUNCE) as *mut u8, n) };
@@ -175,7 +175,7 @@ fn draw_hardware(n: usize) -> i32 {
     })
 }
 
-/// The cryptographic door's body: under the build option the software
+/// The random-bytes function's body: under the build option the software
 /// stream; otherwise the hardware source through the bounce buffer,
 /// copied out only when whole. One draw at a time: a second caller while
 /// a draw is in flight is answered "try again" and counted.
@@ -247,7 +247,7 @@ fn next_u64() -> u64 {
 }
 
 /// Fill the whole buffer from the software stream -- all-or-nothing by
-/// construction (the argument refusals live at the door).
+/// construction (the argument refusals live at the function).
 pub fn fill(buf: &mut [u8]) {
     for chunk in buf.chunks_mut(8) {
         let v = next_u64().to_le_bytes();

@@ -1,11 +1,11 @@
-//! The PWM doors' bodies: a program claims a line a timer can drive, sets
+//! The kernel's PWM API's bodies: a program claims a line a timer can drive, sets
 //! its period and duty in nanoseconds, reads the period the timer runs,
 //! drives or parks the output, releases it and asks its timer-and-channel
 //! numbering -- the eight verbs `api.rs` exports and `include/rhu.h`
 //! states. A row's PWM-capable lines are a TABLE in its facts
-//! (`board::facts::PWM_LINES` over `PWM_TIMERS`): the count door says how
-//! many, the line door the index-th line's number, so a program enumerates
-//! without guessing. Beneath the doors: the claims table (a claim takes
+//! (`board::facts::PWM_LINES` over `PWM_TIMERS`): the count function says how
+//! many, the line function the index-th line's number, so a program enumerates
+//! without guessing. Beneath the functions: the claims table (a claim takes
 //! the line AND the timer channel, so no program can take either away),
 //! the pure arithmetic (`pwm_math`: the quantization of a period to the
 //! timer's prescaler and period registers, the achieved period back from
@@ -146,6 +146,12 @@ mod served {
         } else {
             Some(h as usize)
         }
+    }
+
+    /// Whether a channel this program holds drives the line (the GPIO
+    /// API names the holder of a line it is refused).
+    pub fn line_held(line: u32) -> bool {
+        m::line_index(facts::PWM_LINES, line).is_some_and(|ix| CLAIMED[ix].load(Ordering::Acquire) != 0)
     }
 
     /// A claim: the line inside the table, then the line AND the timer
@@ -321,8 +327,13 @@ mod served {
 }
 
 #[cfg(rhu_pwm_adc_rows)]
-pub use served::{claim, enable, info, period, release, set};
+pub use served::{claim, enable, info, line_held, period, release, set};
 
+
+#[cfg(not(rhu_pwm_adc_rows))]
+pub fn line_held(_line: u32) -> bool {
+    false
+}
 
 #[cfg(not(rhu_pwm_adc_rows))]
 pub fn claim(line: u32) -> i32 {

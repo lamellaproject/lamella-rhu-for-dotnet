@@ -163,8 +163,8 @@ pub(crate) const WORLD_M33: RtWorld = RtWorld {
     tier: "goldens/rt-m33",
     program_tier: "goldens/rt-m7",
     pin: SHA_FROZEN_MANIFEST_M33,
-    archive_set: "net11-rc2-rhu-cortex-m33-sgc-enabled",
-    set_file: "archives-net11-rc2-rhu-cortex-m33-sgc-enabled.txt",
+    archive_set: "net11-rc3-rhu-cortex-m33-sgc-enabled",
+    set_file: "archives-net11-rc3-rhu-cortex-m33-sgc-enabled.txt",
     donor: "attr-donor-v8m.bin",
     cpu_arch: "ARM v8-M Mainline",
     thumb_isa: "Permitted",
@@ -247,17 +247,17 @@ fn resolve_kit_dir(repo: &Path, w: &RtWorld) -> Option<String> {
 
 /// goldens/rt-m7/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest.
-pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "7c133332cd22c00c4f35a160f64db0a0daebe9141e816b7957e341783a7481cf";
+pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "26af45129561e224edae764e9c974a02b930ed5c36791c714232d3f7b8c92f1a";
 
 /// goldens/rt-m33/MANIFEST.md's own sha256: the Cortex-M33 world's pin,
 /// beside its manifest the way the Cortex-M7 world's is; a re-freeze of
 /// that tier moves this line and nothing of the other world's.
-pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "3b9e56a1251d987ff4adea3cd92903d013e9f36dacc7beedfd6b13c68fa3fb94";
+pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "bc558252e4d6d3b9a2331ad70716ca1f8b09e2cfb227fdcf3ed979d10f88f40d";
 
 /// The archive set the frozen merge consumed. The manifest's `archives:`
 /// line and the frozen set file must both name it; a merge recorded under
 /// another set is refused before its bytes are trusted.
-const ARCHIVE_SET: &str = "net11-rc2-rhu-cortex-m7-sgc-enabled";
+const ARCHIVE_SET: &str = "net11-rc3-rhu-cortex-m7-sgc-enabled";
 
 /// The frozen tier: the file names under goldens/rt-m7/ and what each is.
 const FROZEN_FILES: [(&str, &str); 16] = [
@@ -266,7 +266,7 @@ const FROZEN_FILES: [(&str, &str); 16] = [
     ("rthello-merged.o", "the merged object: the program object, the surgery object and the runtime archives, the descriptor rooted, attributes neutralized"),
     ("attr-donor-v7em.bin", "the build-attributes blob the merges apply (a donor compiled at the image ABI)"),
     ("control-attr-a-profile.bin", "the archives' own merged attributes (application profile), the negative control's input"),
-    ("archives-net11-rc2-rhu-cortex-m7-sgc-enabled.txt", "the archive set's identity: what built it, each archive by size and sha256, the set's demand and surface shas"),
+    ("archives-net11-rc3-rhu-cortex-m7-sgc-enabled.txt", "the archive set's identity: what built it, each archive by size and sha256, the set's demand and surface shas"),
     ("rthello-merged.undef.txt", "the merged object's undefined names, sorted: the demand surface pinned exactly"),
     ("rt-libc.o", "the C and math libraries' closure merged into one relocatable, attributes neutralized"),
     ("rt-libc.members.txt", "the closure's member list by archive and name, with the kit's two libraries by size and sha256"),
@@ -283,7 +283,7 @@ const SURGERY: &str = "startup-cookie-copied.o";
 pub(crate) const MERGED: &str = "rthello-merged.o";
 const DONOR: &str = "attr-donor-v7em.bin";
 const CONTROL_ATTRS: &str = "control-attr-a-profile.bin";
-const SET_FILE: &str = "archives-net11-rc2-rhu-cortex-m7-sgc-enabled.txt";
+const SET_FILE: &str = "archives-net11-rc3-rhu-cortex-m7-sgc-enabled.txt";
 pub(crate) const UNDEF_FILE: &str = "rthello-merged.undef.txt";
 const LIBC: &str = "rt-libc.o";
 const LIBC_MEMBERS: &str = "rt-libc.members.txt";
@@ -526,7 +526,7 @@ const PENDING: [&str; 0] = [];
 /// runtime's own thread spawned at its 16 KB ask, the threading section's
 /// worker and the activation section's worker at the row's default),
 /// every section's verdict line, the summary last.
-const SUITE_MARKERS_M7: [&str; 80] = [
+const SUITE_MARKERS_M7: [&str; 81] = [
     ENTRY_MARKER,
     "[shim] sigaction(11): handler recorded; the kernel's null-fault delivery is armed",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
@@ -612,9 +612,10 @@ const SUITE_MARKERS_M7: [&str; 80] = [
     "[shim] gpiod: line 1 claim refused (EBUSY: the board or another claim holds it)",
     "[shim] /sys/class/pwm/pwmchip0/export: line 0 exported (timer 1 channel 0, the timer's clock 1000000 Hz)",
     "PASS rt-adc (the standard analog controller over the IIO files: 819 at 12 bits on line 0; the voltage members not supported; a held line refused on both controllers; a held line or channel refuses the other; the disposal gives back; converter 1 by file)",
+    "PASS rt-crypto (two draws of 32 secure random bytes served, not all zero and differing; a hash call throws CryptographicException on each call)",
     "RTSUITE: ALL GOOD",
 ];
-const SUITE_MARKERS_M33: [&str; 80] = [
+const SUITE_MARKERS_M33: [&str; 81] = [
     ENTRY_MARKER,
     "[shim] sigaction(11): handler recorded; the kernel's null-fault delivery is armed",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
@@ -701,6 +702,7 @@ const SUITE_MARKERS_M33: [&str; 80] = [
     "[shim] gpiod: line 1 claim refused (EBUSY: the board or another claim holds it)",
     "[shim] /sys/class/pwm/pwmchip0/export: line 0 exported (timer 1 channel 0, the timer's clock 1000000 Hz)",
     "PASS rt-adc (the standard analog controller over the IIO files: 819 at 12 bits on line 0; the voltage members not supported; a held line refused on both controllers; a held line or channel refuses the other; the disposal gives back; converter 1 by file)",
+    "PASS rt-crypto (two draws of 32 secure random bytes served, not all zero and differing; a hash call throws CryptographicException on each call)",
     "RTSUITE: ALL GOOD",
 ];
 const SUITE_ALL_GOOD: &str = "RTSUITE: ALL GOOD";
@@ -748,7 +750,7 @@ const F769_GC_OBJECTS: [&str; 3] = ["goldens/gc/skel-row.o", "goldens/gc/heap-ro
 /// The section classes the suite's frozen merged object carries at the
 /// merge (the maps' brackets read them exactly).
 // The suite's brackets as the tier's freeze measured them in both worlds (re-stamped at each re-freeze).
-const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 1252290, unbox: 2038, hydrated: 328344, tdata: 152, init_array: 24, modules: 4 };
+const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 1260118, unbox: 2038, hydrated: 330704, tdata: 152, init_array: 24, modules: 4 };
 fn internal_cases(w: &RtWorld) -> [String; 2] {
     [
         format!("rt.rederive-selector-control -- link-tier; runs under 'rhu-gate {} rederive' when the archive set is resolved: the same merge with the standalone-GC-disabled selector must not tie the frozen object", w.gate),
@@ -2686,7 +2688,7 @@ impl Rt {
     /// The GPIO section's controls: the version control substitutes the
     /// class's variant of the shim's GPIO API object (its version string an
     /// API generation below the bias flags) in every world; the latch control
-    /// links the suite against the row's kernel built with the doors'
+    /// links the suite against the row's kernel built with the GPIO API's
     /// doctored latch (the virtual loop fires twice per change), in every
     /// world.
     fn control_suite_gpio(&mut self, ld: &ToolCmd, qemu: &Path) {
@@ -2735,7 +2737,7 @@ impl Rt {
     /// class's variant of the shim's bus device unit whose functionality
     /// answer names no combined transfer, so the driver takes its
     /// file-transfer path, which is not presented; the doctored control
-    /// links the suite against the row's kernel built with the bus doors'
+    /// links the suite against the row's kernel built with the bus API's
     /// doctored models (a data byte not acknowledged, a clock that never
     /// completes, the pumps' bound removed). Both in every world.
     fn control_suite_bus(&mut self, ld: &ToolCmd, qemu: &Path) {
@@ -3881,6 +3883,20 @@ const XIP_ROW: &str = "st-stm32f769i-disco";
 const XIP_TARGET: &str = "thumbv7em-none-eabihf";
 const XIP_FEATURES: &str = "board-st-stm32f769i-disco,payload";
 const XIP_DIR: &str = "src/kernel/target/sdk-parity-external-flash";
+/// The Raspberry Pi Pico 2 row for the Debug configuration's cases: the
+/// smallest RAM of the table's rows (520 KB, no external RAM), where an
+/// image compiled without the code optimization leaves no arena window at
+/// the row's floor; its payload kernel is built once under DEBUG_DIR, shared
+/// by both worlds, and packed beside the leg's own kernel, so the leg
+/// publishes the row in the Debug configuration (the SDK compiles every
+/// configuration with the optimization on and keeps the debug information)
+/// and once more with the optimization forced off, the control the link
+/// refuses. The floor is read from the row's map in the tree.
+const DEBUG_ROW: &str = "raspberrypi-pico-2";
+const DEBUG_TARGET: &str = "thumbv8m.main-none-eabihf";
+const DEBUG_FEATURES: &str = "board-raspberrypi-pico-2,payload";
+const DEBUG_DIR: &str = "src/kernel/target/sdk-parity-debug";
+const DEBUG_MAP: &str = "src/kernel/payload-raspberrypi-pico-2.x";
 /// The analog voltage switch the SDK sets per program: the four members of
 /// the standard analog classes whose reference turns it on, and the quantity
 /// type the standard API's ReadVoltage returns, whose symbol names witness
@@ -4193,6 +4209,27 @@ fn xip_symbols(dump: &[u8]) -> Result<XipSyms, String> {
         v[i] = word_sym_value(dump, s).ok_or_else(|| format!("the image does not define {s}"))?;
     }
     Ok(XipSyms { lo: v[0], hi: v[1], code_lo: v[2], code_hi: v[3], unbox_hi: v[4], exidx_start: v[5], exidx_end: v[6], stext: v[7], etext: v[8] })
+}
+
+/// The arena floor a payload map states (RHU_ARENA_MIN = <n>[K|M];), in
+/// bytes, read from the map in the tree; a map without the line is named,
+/// never a silent zero.
+fn arena_floor(repo: &Path, map_rel: &str) -> Result<u64, String> {
+    let text = std::fs::read_to_string(repo.join(map_rel.replace('/', std::path::MAIN_SEPARATOR_STR))).map_err(|e| format!("cannot read {map_rel}: {e}"))?;
+    for l in text.lines() {
+        if let Some(rest) = l.trim().strip_prefix("RHU_ARENA_MIN = ") {
+            let v = rest.trim_end_matches(';').trim();
+            let (digits, scale) = match v.strip_suffix('M') {
+                Some(d) => (d, 1u64 << 20),
+                None => match v.strip_suffix('K') {
+                    Some(d) => (d, 1u64 << 10),
+                    None => (v, 1u64),
+                },
+            };
+            return digits.parse::<u64>().map(|n| n * scale).map_err(|_| format!("{map_rel}: RHU_ARENA_MIN '{v}' is not a number"));
+        }
+    }
+    Err(format!("{map_rel} states no RHU_ARENA_MIN line"))
 }
 
 /// One section's type, address and size from a section table in GNU readelf's
@@ -5398,12 +5435,14 @@ fn hex_after(text: &str, key: &str) -> Option<String> {
     }
 }
 
-/// The board class's five lines as the row's facts file predicts them, in order (the pin's PWM numbers third).
+/// The board class's six lines as the row's facts file predicts them, in order (the pin's PWM numbers third, the serial
+/// ports fifth: the uart rows with the row's default channel words, which the gate's program leaves unset).
 fn board_class_markers(repo: &Path, board: &str) -> Result<Vec<String>, String> {
     let f = read_facts_file(&repo.join("src").join("sdk").join("Lamella.Rhu.Sdk").join("boards").join(format!("{board}.json")))?;
     let list = |v: Vec<u64>| if v.is_empty() { "none".to_string() } else { v.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ") };
     let i2c: Vec<u64> = f.i2c.iter().map(|b| b.0).collect();
     let spi: Vec<u64> = f.spi.iter().map(|b| b.0).collect();
+    let uart: Vec<u64> = f.uart.iter().map(|u| u.0).collect();
     let who = format!("{} {} ({})", f.maker, f.product, f.name);
     let label0 = match f.labels.as_str() {
         "gp" => "GP0".to_string(),
@@ -5417,11 +5456,32 @@ fn board_class_markers(repo: &Path, board: &str) -> Result<Vec<String>, String> 
     } else {
         format!("TBHELLO: NotSupportedException: {who} has no I2C bus 0; its buses: {}", list(i2c.clone()))
     };
+    let mut ports = String::from("TBHELLO: serial ports:");
+    if f.uart.is_empty() {
+        ports.push_str(" none");
+    }
+    for (i, (block, tx, rx)) in f.uart.iter().enumerate() {
+        ports.push_str(if i == 0 { " " } else { ", " });
+        ports.push_str(&format!("/dev/ttyS{block} (UART{block}"));
+        match (tx, rx) {
+            (Some(t), Some(r)) => ports.push_str(&format!(", TX pin {t}, RX pin {r}")),
+            _ => ports.push_str(", no lines"),
+        }
+        let word = format!("uart{block}");
+        if f.channels.1 == word {
+            ports.push_str(", the console");
+        }
+        if f.channels.0 == word {
+            ports.push_str(", the log");
+        }
+        ports.push(')');
+    }
     Ok(vec![
-        format!("TBHELLO: {who}, {} at {} Hz, {} pins, I2C {}, SPI {}", f.chip, f.clock_hz, f.pins, list(i2c), list(spi)),
+        format!("TBHELLO: {who}, {} at {} Hz, {} pins, I2C {}, SPI {}, UART {}", f.chip, f.clock_hz, f.pins, list(i2c), list(spi), list(uart)),
         format!("TBHELLO: pins {}; pin 0: labels {label0}", f.pins),
         format!("TBHELLO: pin 0: PWM {}", if f.pwm_lines.contains(&0) { format!("chip {}, channel 0", f.pwm_chip) } else { "none".to_string() }),
         third,
+        ports,
         "TBHELLO: end".to_string(),
     ])
 }
@@ -5636,6 +5696,30 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         ram_init_kernels.push(format!("{XIP_ROW}={root}/{lib_rel}"));
     }
 
+    // The Debug configuration's row: the Raspberry Pi Pico 2's payload
+    // kernel built once under a directory both worlds share and packed
+    // beside the leg's own kernel, so the leg publishes the row in the
+    // Debug configuration and with the optimization forced off.
+    {
+        let dir = repo.join(DEBUG_DIR.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let _ = std::fs::create_dir_all(&dir);
+        let log = rt.out.join("sdk-parity-debug-staticlib-build.log");
+        println!("== build kernel staticlib {DEBUG_ROW} (--lib --target {DEBUG_TARGET} --no-default-features --features {DEBUG_FEATURES}) ==");
+        match cargo_build_kernel_at(repo, &dir, &["--lib", "--target", DEBUG_TARGET, "--no-default-features", "--features", DEBUG_FEATURES], &log) {
+            Ok(true) => {}
+            Ok(false) => {
+                echo_file(&log, "");
+                rt.fail(case, &format!("the {DEBUG_ROW} row's kernel staticlib build error"));
+            }
+            Err(e) => rt.fail(case, &e),
+        }
+        let lib_rel = format!("{DEBUG_DIR}/{DEBUG_TARGET}/release/librhu_kernel.a");
+        if !repo.join(lib_rel.replace('/', std::path::MAIN_SEPARATOR_STR)).is_file() {
+            rt.fail(case, &format!("no staticlib at {lib_rel} after the build"));
+        }
+        ram_init_kernels.push(format!("{DEBUG_ROW}={root}/{lib_rel}"));
+    }
+
     // The publish-side script: the pack, the publish through the SDK, the
     // wrapper's assertions, the preprocessed project and the controls.
     let out_rel = format!("src/kernel/target/{}/sdk-parity", w.out_dir);
@@ -5810,7 +5894,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         ("tool", "tool-byte", "RHU4012", &["does not tie its record: bin/llvm-objcopy (the tools package)"], "one byte of the object copier changed"),
         ("posture", "posture", "RHU3004", &["InvariantGlobalization"], "the fixed posture moved"),
         ("pack-root", "pack-root", "RHU3009", &["NetCoreTargetingPackRoot"], "the reference assemblies' pack root moved back to the .NET SDK's own folder"),
-        ("tools-host", "tools-host", "RHU4001", &["no tools package for macOS on Intel"], "the host named as macOS on Intel processors (osx-x64), for which the release has no tools package: the targets' one sentence, before anything is compiled"),
+        ("tools-host", "tools-host", "RHU4001", &["no tools package for the host osx-x64"], "a host runtime identifier this release packs no tools for (osx-x64 given): the targets' one sentence naming the identifier found and the identifiers served, before anything is compiled"),
         ("stack-clamp", "stack-clamp", "RHU2021", &["above the row's clamp"], "a thread stack above the row's clamp"),
         ("stack-min", "stack-min", "RHU2020", &["below the kernel's minimum"], "a thread stack below the kernel's minimum"),
         ("stack-nan", "stack-nan", "RHU2019", &["not a whole number"], "a thread stack that is not a whole number"),
@@ -5839,9 +5923,10 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         ("contract-mismatch", "contract-mismatch", "RHU4002", &["is not this build package's"], "the shell's contract number set to 2 by a global property against the build package's 1: the two sides' numbers differ, refused before anything is compiled"),
         ("stamped-version-doctored", "stamped-version", "RHU4014", &["not at this build package's version 9.9.9-doctored", doctored_board.as_str()], "the version stamp in the build package's properties in the cache doctored to another string: the shell's resolved packages are not at it, refused by name before any root is read"),
         ("rid-other", "rid-other", "RHU3002", &["RuntimeIdentifier 'linux-arm64' is not linux-arm"], "RuntimeIdentifier given as a global property with another value than the posture's (amendment 3: the posture's own value passes), refused by name without a restore"),
-        ("roots-board", "roots-board", "RHU4005", &["is Lamella.Rhu.Board.rpi-pico2, not Lamella.Rhu.Board."], "the stub shell's board item in the cache doctored to another board's package id: the shell's board and the project's differ, refused before any root is read"),
+        ("roots-board", "roots-board", "RHU4005", &["is Lamella.Rhu.Board.raspberrypi-pico-2, not Lamella.Rhu.Board."], "the stub shell's board item in the cache doctored to another board's package id: the shell's board and the project's differ, refused before any root is read"),
         ("roots-runtime", "roots-runtime", "RHU4007", &["not Lamella.Rhu.Runtime."], "the stub shell's runtime item in the cache doctored to another class's package id: the shell's class and the board's differ, refused before any root is read"),
-        ("boardless-publish", "boardless-publish", "RHU1001", &["LamellaTargetBoard is not set"], "a publish with no board named, after the boardless build of the same copy: refused by name at the first step, the assembly from the build untouched, no image"),
+        ("debug-unoptimized", "debug-unoptimized", "RHU5001", &["arena window under this board", "the image's data leaves this board less than the arena window its map guarantees"], "the board class's program published for the Raspberry Pi Pico 2 row in the Debug configuration with the code optimization forced off by a global property (Optimize=false): the unoptimized image leaves the row no arena window at its floor, refused at the link by name with the linker's words and the remedy"),
+        ("boardless-publish", "boardless-publish", "RHU1001", &["LamellaTargetBoard is not set"],"a publish with no board named, after the boardless build of the same copy: refused by name at the first step, the assembly from the build untouched, no image"),
     ];
     for &(name, broke, code, needles, what) in table {
         let case = format!("rt.sdk-parity-control-{name}");
@@ -6203,10 +6288,10 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     // 9. The board class: the gate's second program, tbhello, published
     // through the SDK with its reference to Lamella.Hardware -- the SDK
     // generated the row's facts into it (a new program, tied to no record) --
-    // and its image booted on the emulator: the class's five lines in the
+    // and its image booted on the emulator: the class's six lines in the
     // order the facts file predicts, the kernel's return line, exit 0.
     let case = "rt.sdk-parity-board-class";
-    println!("== case {case}: the board class's program published through the SDK with the row's facts generated into it, its image booted on the emulator -- the class's five lines in order, exit 0 ==");
+    println!("== case {case}: the board class's program published through the SDK with the row's facts generated into it, its image booted on the emulator -- the class's six lines in order, exit 0 ==");
     let Some(line) = control_line(&controls, "board-class") else {
         rt.fail(case, "the publish-side script left no summary line for the board class's publish");
     };
@@ -7160,7 +7245,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "positive", "", &format!("{{\"rows\":{}}}", control_field(line, "rows")));
     println!("  PASS");
     let case = "rt.sdk-parity-control-first-list-no-tools";
-    println!("== case {case}: the same from a feed of the case's own that holds the SDK package alone, over the same fallback folder (no Lamella package in it) -- the restore refuses by NuGet's own sentence naming the tools package, one restore and no second, nothing listed; a refusal naming the SDK package instead is a broken feed, not a pass ==");
+    println!("== case {case}: the same from a feed of the case's own that holds the SDK package alone and names no public source (the released packages on nuget.org answer the id at another version), over the same fallback folder (no Lamella package in it) -- the restore refuses by NuGet's own sentence naming the tools package, one restore and no second, nothing listed; a refusal naming the SDK package instead is a broken feed, not a pass ==");
     let Some(line) = control_line(&controls, "first-list-no-tools") else {
         rt.fail_control(case, "tools-package-absent", "the publish-side script left no summary line for the no-tools control");
     };
@@ -7428,6 +7513,40 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "negative", "path-map", "");
     println!("  PASS");
 
+    // 14. The Debug configuration: a plain dotnet run builds Debug, whose
+    // .NET default turns the code optimization off, and the compiler pack
+    // then hands the native compiler no optimization switch; the SDK's props
+    // turn it on for every configuration and keep the debug information, so
+    // the board class's program links on the Raspberry Pi Pico 2 row, where
+    // the unoptimized image leaves no arena window at the row's floor (the
+    // control above). The image's window is read against the floor the
+    // row's map states in the tree.
+    let case = "rt.sdk-parity-debug-optimized";
+    println!("== case {case}: the board class's program published for {DEBUG_ROW} in the Debug configuration -- the compiler's response file carrying the optimization words (-O, --Os) and the debug word (-g) once each, the image linked, its arena window at or above the row's floor ==");
+    let Some(line) = control_line(&controls, "debug-optimized") else {
+        rt.fail(case, "the publish-side script left no summary line for the Debug publish");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "opt-O") != "1" || control_field(line, "opt-Os") != "1" || control_field(line, "opt-g") != "1" {
+        rt.fail(case, &format!("the Debug publish did not run as registered (rc 0, the image present, -O, --Os and -g in the response file once each): {line}"));
+    }
+    let floor = match arena_floor(repo, DEBUG_MAP) {
+        Ok(v) => v,
+        Err(e) => rt.fail(case, &e),
+    };
+    let debug_elf = out.join("control-debug-optimized").join("tbhello.elf");
+    let debug_elf_arg = debug_elf.to_string_lossy().into_owned();
+    let dump = rt.tool_text(&nm_tool, case, &[&debug_elf_arg], "sdk-parity-debug-optimized.nm.txt");
+    let (lo, hi) = match (word_sym_value(dump.as_bytes(), "__rhu_arena_lo"), word_sym_value(dump.as_bytes(), "__rhu_arena_hi")) {
+        (Some(lo), Some(hi)) => (lo, hi),
+        _ => rt.fail(case, "the Debug image does not define __rhu_arena_lo and __rhu_arena_hi"),
+    };
+    if hi <= lo || hi - lo < floor {
+        rt.fail(case, &format!("the Debug image's arena window [{lo:#x}, {hi:#x}) is {} B, under the row's floor {floor} B", hi.saturating_sub(lo)));
+    }
+    println!("  -O, --Os and -g in the response file once each; the image's arena window [{lo:#x}, {hi:#x}) = {} B at or above the row's floor {floor} B (the map {DEBUG_MAP})", hi - lo);
+    rt.pass(case, "positive", "", &format!("{{\"window\":{},\"floor\":{floor},\"board\":\"{DEBUG_ROW}\"}}", hi - lo));
+    println!("  PASS");
+
     rt.results.emit_summary(w.sdk_gate, "pass", 0);
     if !validate_results(repo, rt.results.path()) {
         println!("{}: FAIL -- results file failed schema validation", w.sdk_display);
@@ -7438,7 +7557,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     let negative = rt.results.n_neg as usize;
     let positive = rt.results.n_pass as usize - negative;
     let ties = 5 + modes_offered + 5 + 1 + 2 + 3;
-    println!("{}: PASS ({positive} positive cases -- {ties} ties byte for byte, the fifth the same project at another directory under the SDK's path map the {modes_offered} after it the objects published for the external-RAM row in each offered init mode, {modes_withheld} withheld, two the objects published with the managed memory's home internal on this leg's row and the {RAM_INIT_ROW} row, three the objects published for the {XIP_ROW} row with the program's home internal, named and external, five the publishes with the output level or a channel named and the last the image's manifest against the expectation composed from its own facts; the board table's stack facts, the boards' facts files and the table's init-mode kernels tied to the tree; the stack knob's image booted with the row's default moved; a real git checkout at another path tying the record; the board class's program booted with the row's facts generated into it; the gate's program booted with the compiler's reflection data stripped; the init mode's kernel picked by the property on the {RAM_INIT_ROW} row and witnessed in the image's rodata, the named default the same image as none; the managed memory's home picked by the property on this leg's row and the {RAM_INIT_ROW} row and witnessed in the images' window symbols against the rows' facts, this leg's row booted under either map for the hosting layer's posture line, the named default the same image as none; the program's home picked by the property on the {XIP_ROW} row and witnessed in the image's window brackets and section table with no undefined name, the named default the same image as none; the analog voltage switch set per program by the SDK's scan, true on the {RAM_INIT_ROW} row and on the {XIP_ROW} row under the external home with the library's quantity type in the image, false on this leg's row (booted to the program's lines), under the {XIP_ROW} row's default home, for the board class's program and for a project's own false; the board table's external-flash map and its fit column tied to the facts files and the maps; the kernel's output level and the two streams' channels read from the images as the three absolute symbols with the board line's words, the board table's channel facts tied to the boards' facts files; the run verb's device list as .NET renders it and its two commands through dotnet run with the stand-in tool and emulator, the program's code returned unchanged, and the first list of a fresh project whole in the one command that restores it; the run's publish skipped under the no-build option and run again on a moved word, a publish with no C compiler to be found, and a class library built through the SDK and refused at publish; the image's manifest with the execution model native and the stand-in's acceptance of a field it does not know; the line tables of the image read whole with no host separator and the separator task rewriting nothing on a second run; the host inputs as the shell resolves them and the line-endings task's rewrite -- + {negative} negative controls through the real tool; the Linux environment's transcript under {out_rel})  [{} | {}]", w.sdk_display, facts.version, ld.version);
+    println!("{}: PASS ({positive} positive cases -- {ties} ties byte for byte, the fifth the same project at another directory under the SDK's path map the {modes_offered} after it the objects published for the external-RAM row in each offered init mode, {modes_withheld} withheld, two the objects published with the managed memory's home internal on this leg's row and the {RAM_INIT_ROW} row, three the objects published for the {XIP_ROW} row with the program's home internal, named and external, five the publishes with the output level or a channel named and the last the image's manifest against the expectation composed from its own facts; the board table's stack facts, the boards' facts files and the table's init-mode kernels tied to the tree; the stack knob's image booted with the row's default moved; a real git checkout at another path tying the record; the board class's program booted with the row's facts generated into it; the gate's program booted with the compiler's reflection data stripped; the init mode's kernel picked by the property on the {RAM_INIT_ROW} row and witnessed in the image's rodata, the named default the same image as none; the managed memory's home picked by the property on this leg's row and the {RAM_INIT_ROW} row and witnessed in the images' window symbols against the rows' facts, this leg's row booted under either map for the hosting layer's posture line, the named default the same image as none; the program's home picked by the property on the {XIP_ROW} row and witnessed in the image's window brackets and section table with no undefined name, the named default the same image as none; the analog voltage switch set per program by the SDK's scan, true on the {RAM_INIT_ROW} row and on the {XIP_ROW} row under the external home with the library's quantity type in the image, false on this leg's row (booted to the program's lines), under the {XIP_ROW} row's default home, for the board class's program and for a project's own false; the board table's external-flash map and its fit column tied to the facts files and the maps; the kernel's output level and the two streams' channels read from the images as the three absolute symbols with the board line's words, the board table's channel facts tied to the boards' facts files; the run verb's device list as .NET renders it and its two commands through dotnet run with the stand-in tool and emulator, the program's code returned unchanged, and the first list of a fresh project whole in the one command that restores it; the run's publish skipped under the no-build option and run again on a moved word, a publish with no C compiler to be found, and a class library built through the SDK and refused at publish; the image's manifest with the execution model native and the stand-in's acceptance of a field it does not know; the line tables of the image read whole with no host separator and the separator task rewriting nothing on a second run; the host inputs as the shell resolves them and the line-endings task's rewrite; the Debug configuration's image for the {DEBUG_ROW} row linked with the code optimization on and its arena window at the row's floor -- + {negative} negative controls through the real tool; the Linux environment's transcript under {out_rel})  [{} | {}]", w.sdk_display, facts.version, ld.version);
     exit(0);
 }
 

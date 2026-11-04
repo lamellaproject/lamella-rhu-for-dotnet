@@ -11,6 +11,7 @@ It returns the board's name, chip, clock, and pins using the labels printed on t
 Each pin that can carry PWM includes its two PWM numbers, the `PwmChip` and `PwmChannelNumber` properties of `BoardPin`: the two values `PwmChannel.Create` takes.
 On this system the chip is 0 and the channel number is the pin's own number.
 It also returns the buses and the rates the image supports.
+Its `SerialPorts` list names each UART block with the device file a `SerialPort` opens, its pins, and whether the image's console or log uses it.
 `CreatePwmChannel(0, pin)` opens the standard PWM channel on a pin with that function, in the standard board class's form (the chip, then the channel), and `CreateAnalogController(0)` returns the standard analog controller over the chip's converter.
 See [Build a .NET program](GETTING-STARTED.md#build-a-net-program) for where the package `Lamella.Hardware` and the SDK come from.
 
@@ -92,6 +93,21 @@ On the Pico boards UART0 is on GP0 and GP1 by default, and UART1 has no default 
 The hosted-runtime suite's serial section tests the emulator's second UART.
 The verification chain echoes the bytes the section sends and the section reads them back.
 
+## Read and write files on the microSD card
+
+On a board with a microSD socket, the kernel mounts a FAT32 card at `/media/sd0` while the socket's card-detect switch sees a card,
+unmounts it when the card leaves, and mounts a card again when one returns.
+A program reads and writes the card through the standard file classes of `System.IO`:
+`File.WriteAllText("/media/sd0/notes.txt", text)` and `File.ReadAllText`, `StreamWriter` and `StreamReader`, `FileStream`, `FileInfo`,
+`Directory.GetFiles` and `Directory.CreateDirectory`, `File.Delete` and `Directory.Delete` run unchanged.
+`new DriveInfo("/media/sd0")` reports the volume: `DriveFormat` reads `vfat` and `DriveType` reads `Removable`, `TotalSize` and `AvailableFreeSpace` come from the volume's cluster counts,
+and `DriveInfo.GetDrives()` lists the mount point while a card is seated.
+A path under `/media/sd0` reaches the card; a path under another name below `/media` is refused with `DirectoryNotFoundException`.
+The hosting layer routes the paths under the mount point to the kernel's file functions over the kernel's FAT layer;
+a program holds at most sixteen files and four directory listings open at once.
+
+The hosted-runtime suite's card section tests the routing on the emulator over a scripted kernel (the emulator rows have no socket) and includes three deliberately modified test controls.
+
 ## Read an analog input
 
 An analog input is read through the standard analog classes of `System.Device.Analog`, over the board package (`Lamella.Hardware`).
@@ -101,7 +117,7 @@ and its `OpenPin(<pin>)` opens the input on a pin, numbered by its GPIO line: `O
 `ReadRaw()` is one conversion, a count within `AdcResolutionBits`; disposing the pin releases the channel.
 
 The pin's `ReadVoltage()`, `MinVoltage` and `MaxVoltage` compute where the runtime host configuration option `Lamella.Hardware.AnalogVoltage.IsSupported` is true,
-which the SDK sets per program: true on a board whose flash holds the library the standard classes express a voltage in (the Pimoroni Pico Plus 2 boards and the Pico LiPo 2, the Pico LiPo 2 XL W; the STM32F769I-DISCO when the project property `RhuProgramMemory=external` places the program in its external flash)
+which the SDK sets per program: true on a board whose flash holds the library the standard classes express a voltage in (the Pimoroni Pico Plus 2 boards, the Pico LiPo 2, the Pico LiPo 2 XL W, the SparkFun IoT RedBoard RP2350 and the two Adafruit Metro RP2350 boards; the STM32F769I-DISCO when the project property `RhuProgramMemory=external` places the program in its external flash)
 when the program's own code names one of the voltage members (docs/BUILDING.md).
 There the controller's `VoltageReference` is set for you to the board's reference (3.3 V), a program may set another before it opens a pin, and the publish reports one trim-analysis warning from that library, expected.
 Where the option is false, the three members are not supported: each throws `NotSupportedException` naming the board, the image carries no code of the library, and a program reads counts with `ReadRaw`; a project may set the option itself.
@@ -122,7 +138,8 @@ A conversion the converter does not complete within its budget, or flags in erro
 `DateTime.UtcNow` and file times count from the .NET epoch until a board clock, debug channel, or application sets the base.
 A native timed wait against the real-time clock follows the calendar, including later changes to that base.
 
-Secure random bytes (`RandomNumberGenerator`) come from a hardware source; where the image has none, the call is refused and the boot banner says so.
+Secure random bytes (`RandomNumberGenerator`) are served from a hardware source through the kernel's secure entropy call, all or nothing per request; where the image has no source, the request throws `CryptographicException` and the boot banner says so.
+A hash or cipher call (`SHA256.HashData`, `Aes`) throws `CryptographicException` on each call.
 Emulator images use a software stream selected by the build option `entropy-accept-software`, which their boot banner names.
 The hosting-api gate tests entropy behavior.
 The shim gate tests calendar behavior, timed waits, and the secure random API.

@@ -8,12 +8,12 @@ re-recorded hashes.
 `src/vendor/**` is `-text` in `.gitattributes`, so these files stay byte-exact
 in the working tree and the hashes below hold on any platform.
 
-## src/vendor/ports/ (13 files) -- vendored 2026-10-16
+## src/vendor/ports/ (13 files) -- vendored 2026-11-02
 
 - **Source:** the public `dotnet/dotnet` repository (the VMR, the source the
   official .NET runtime pack names) at commit
-  **`820230c386db5b0106c5430b3e5aee92a7826bf5`**, tag
-  **`v11.0.0-rc.2.26504.105`**, its `src/runtime` tree -- the .NET runtime
+  **`5254d8bcf59917edc1e1abc33bdf2442b77b1c70`**, tag
+  **`v11.0.0-rc.3.26522.148`**, its `src/runtime` tree -- the .NET runtime
   version RHU builds against. The `dotnet/runtime` tag of the same name
   (commit `474ed963699fc29809015392738a15231aaae2de`) is the label the VMR's
   source manifest gives for its runtime copy; these thirteen files are
@@ -22,7 +22,7 @@ in the working tree and the hashes below hold on any platform.
   commit: bytes taken from the committed blobs (never from a checkout, whose
   line ends a git checkout setting may convert), the hash computed at copy time
   and re-verified against the working-tree file. Equivalent fetch:
-  `https://raw.githubusercontent.com/dotnet/dotnet/820230c386db5b0106c5430b3e5aee92a7826bf5/src/runtime/src/native/<file>`.
+  `https://raw.githubusercontent.com/dotnet/dotnet/5254d8bcf59917edc1e1abc33bdf2442b77b1c70/src/runtime/src/native/<file>`.
 - **What it is:** the native half of the standard serial port class
   (`System.IO.Ports.SerialPort`): the termios layer (`pal_termios.c`, the
   signal, speed, reset, discard, drain and break entry points), the device
@@ -73,12 +73,12 @@ in the working tree and the hashes below hold on any platform.
 - **Modifications: none.** These files are byte-identical to upstream; the
   RHU repository's `shim` quality gate re-verifies the hashes above.
 
-## src/vendor/gcinterface/ (7 files) + src/vendor/gcenv/ (3 files) -- vendored 2026-10-16
+## src/vendor/gcinterface/ (7 files) + src/vendor/gcenv/ (3 files) -- vendored 2026-11-02
 
 - **Source:** the public `dotnet/dotnet` repository (the VMR, the source the
   official .NET runtime pack names) at commit
-  **`820230c386db5b0106c5430b3e5aee92a7826bf5`**, tag
-  **`v11.0.0-rc.2.26504.105`**, its `src/runtime` tree -- the .NET runtime
+  **`5254d8bcf59917edc1e1abc33bdf2442b77b1c70`**, tag
+  **`v11.0.0-rc.3.26522.148`**, its `src/runtime` tree -- the .NET runtime
   version RHU builds against. The `dotnet/runtime` tag of the same name
   (commit `474ed963699fc29809015392738a15231aaae2de`) is the label the VMR's
   source manifest gives for its runtime copy; these ten files are
@@ -86,7 +86,7 @@ in the working tree and the hashes below hold on any platform.
 - **Method:** copied with sha256 verification from a read-only clone of that
   tag: bytes taken from the committed blobs, the hash computed at copy time and
   re-verified against the working-tree file. Equivalent fetch:
-  `https://raw.githubusercontent.com/dotnet/dotnet/820230c386db5b0106c5430b3e5aee92a7826bf5/src/runtime/src/coreclr/gc/<file>`
+  `https://raw.githubusercontent.com/dotnet/dotnet/5254d8bcf59917edc1e1abc33bdf2442b77b1c70/src/runtime/src/coreclr/gc/<file>`
   (the gcenv files live under `src/coreclr/gc/env/`).
 - **What it is:** the runtime-to-GC interface contract -- `IGCHeap`,
   `IGCHandleManager`, `IGCToCLR`, `GC_VersionInfo`, `GcDacVars`, the flat

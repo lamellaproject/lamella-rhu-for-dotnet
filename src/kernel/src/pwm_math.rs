@@ -1,4 +1,4 @@
-//! The PWM doors' pure arithmetic and facts shapes: the timer and line
+//! The kernel's PWM API's pure arithmetic and facts shapes: the timer and line
 //! descriptors a board's facts state, the quantization of a period in
 //! nanoseconds to a prescaler and a period register on a timer's clock, the
 //! achieved period back from them, the duty's compare value, the
@@ -7,7 +7,7 @@
 #![allow(dead_code)] // a row without a PWM line, and the host tier, compile the module unused in part
 
 /// A timer as a board's facts state it: its NUMBER (the chip's own: TIM1 is
-/// timer 1, a slice its index; the number the info door answers and the
+/// timer 1, a slice its index; the number the info function answers and the
 /// device files present), its input clock in Hz at this posture, how many
 /// output channels it has, and the reach of its prescaler and period
 /// registers as VALUES (a 16-bit register holds the value minus one, so
@@ -25,7 +25,7 @@ pub struct PwmTimer {
 /// A line a timer can drive: the GPIO line, its timer (the timer table's
 /// index), the channel on that timer (0-based) and the alternate function
 /// the pad runs at (0 on a row whose models have no pins). The table
-/// position is the enumeration index the count door and the line door walk,
+/// position is the enumeration index the count function and the line function walk,
 /// and the handle a claim answers.
 #[derive(Clone, Copy, Debug)]
 pub struct PwmLine {

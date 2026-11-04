@@ -4,14 +4,14 @@
 //! scripted peer (`net_peer`), which answers the exchanges a loopback
 //! cannot (ARP for its address, DHCP, DNS, ICMP echo, a reset for its one
 //! TCP port) with real checksums; a frame the peer does not answer is
-//! handed back to the stack as received -- the loopback the socket doors
+//! handed back to the stack as received -- the loopback the socket functions
 //! are proven over (one interface, a listening socket and a connecting
 //! socket on the same address serve both ends of one connection). The
 //! receive ring is sized from the gate's largest exchange; a reply or a
 //! looped frame that finds no slot is DROPPED AND COUNTED, and the api
 //! flavor's checks assert that count zero. The medium claims no line and
 //! raises no interrupt: its wake word is the network module's, bumped by the
-//! doors that queue work.
+//! functions that queue work.
 
 use core::sync::atomic::AtomicU32;
 

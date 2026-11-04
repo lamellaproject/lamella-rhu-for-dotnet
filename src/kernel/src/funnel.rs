@@ -255,7 +255,7 @@ fn access_word(class: u8) -> &'static str {
 
 /// The runtime declined a delivered fault (its handler handed the context
 /// back with the pc unchanged): the belt under hosting's death rule, run
-/// from the resume door. One line names the access, then the program ends
+/// from the resume function. One line names the access, then the program ends
 /// through the terminal exit -- never a second delivery of the same fault.
 pub fn fault_declined(tid: i32, name: &str, access: u8, addr: u32, pc: u32) -> ! {
     if TERMINAL_DEPTH.fetch_add(1, Ordering::SeqCst) > 0 {

@@ -1,7 +1,7 @@
 //! The claims table: every owner of a pin or an interrupt bit registers
 //! here, so two owners of one line are refused loudly -- the board's own
 //! claims at boot (the console's pins, the debug pins, a wireless hook's
-//! lines) and a program's claims through the GPIO doors. One bitmap per
+//! lines) and a program's claims through the kernel's GPIO API. One bitmap per
 //! bank of thirty-two lines for each side; the interrupt slots a program's
 //! armed edge holds where a family multiplexes them (one slot per line
 //! number on the ST families, the same number on every port); and the
@@ -14,7 +14,7 @@
 //! reads it.
 //!
 //! Pure: no board dependency, host-tested. The callers hold the kernel
-//! critical section around every call that writes (the doors are called
+//! critical section around every call that writes (the kernel functions are called
 //! from hosted threads and the handlers run in the board band); this
 //! module does no masking of its own.
 
@@ -167,7 +167,7 @@ pub fn claim_board(c: &mut Claims, line: u32) -> i32 {
 /// A board claim given back at runtime (a UART port's two lines at its
 /// release): the bit cleared when the board holds the line, a release
 /// counted; nothing when it does not (idempotent, never a refusal).
-#[cfg_attr(not(rhu_uart_rows), allow(dead_code))] // the UART doors' release on the rows with a UART table
+#[cfg_attr(not(rhu_uart_rows), allow(dead_code))] // the kernel's UART API's release on the rows with a UART table
 pub fn release_board(c: &mut Claims, line: u32) {
     if line >= c.line_count {
         return;
@@ -180,7 +180,7 @@ pub fn release_board(c: &mut Claims, line: u32) {
 }
 
 /// A program's release: refused `REFUSED_INVAL` when the program does not
-/// hold the line (a board claim is never released through a door).
+/// hold the line (a board claim is never released through a kernel function).
 pub fn release(c: &mut Claims, line: u32) -> i32 {
     if line >= c.line_count {
         return refuse(c, line, REFUSED_INVAL);
@@ -202,7 +202,6 @@ pub fn is_program(c: &Claims, line: u32) -> bool {
     c.program[bank] & mask != 0
 }
 
-#[allow(dead_code)] // read by the host tier's tests
 pub fn is_board(c: &Claims, line: u32) -> bool {
     if line >= c.line_count {
         return false;

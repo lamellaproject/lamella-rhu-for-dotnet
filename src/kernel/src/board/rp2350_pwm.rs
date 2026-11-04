@@ -1,4 +1,4 @@
-//! The RP2350's PWM backend: the block's slices behind the doors, in the
+//! The RP2350's PWM backend: the block's slices behind the functions, in the
 //! shape of the emulator rows' virtual timers. A slice (the RP2350
 //! datasheet, chapter 12.5) is a 16-bit counter that runs from 0 to TOP and
 //! wraps, compared against one 16-bit value per output; it advances every
@@ -13,7 +13,7 @@
 //! take effect at the wrap (12.5.2.3), so a compare change on a running
 //! slice is written live, and a period change stops the slice, writes it
 //! whole and restarts it from 0 (a slice's other output is never held on a
-//! different period: the doors refuse that first). A line reaches its
+//! different period: the functions refuse that first). A line reaches its
 //! slice output through the pad's function 4 (Table 645); while the line is
 //! parked its output is overridden to the polarity's idle level through
 //! the control register's OUTOVER field (Table 651), so an unset or stopped
@@ -291,7 +291,7 @@ pub fn park(index: usize) {
 
 /// The period the slice runs as its registers state it: DIV.INT times
 /// TOP + 1 ticks of the system clock, in nanoseconds (the api flavor's tie
-/// of the door's answer to the block).
+/// of the function's answer to the block).
 #[allow(dead_code)]
 pub fn probe_period_ns(timer: usize) -> u64 {
     let (d, top) = unsafe {

@@ -34,7 +34,8 @@
 #define RHU_SHIM_FD_SOCKET_LO 32  /* reserved: 32 .. 47 */
 #define RHU_SHIM_FD_DEVICE_LO 64  /* the bus device nodes: 64 .. 79 */
 #define RHU_SHIM_FD_DEVICE_COUNT 16
-#define RHU_SHIM_FD_STORAGE_LO 80 /* reserved: 80 .. 95 */
+#define RHU_SHIM_FD_STORAGE_LO 80 /* the card's files: 80 .. 95 */
+#define RHU_SHIM_FD_STORAGE_COUNT 16
 #define RHU_SHIM_FD_SYSFS_LO 96   /* the PWM device files under /sys: 96 .. 127 */
 #define RHU_SHIM_FD_SYSFS_COUNT 32
 #define RHU_SHIM_FD_IIO_LO 128    /* the analog input device files under /sys/bus/iio: 128 .. 143 */
@@ -50,7 +51,7 @@
 
 /* The bus device unit (rhu_busdev.c): the two device-node families a
  * program's I2C and SPI drivers open, presented over the kernel's bus
- * doors. The core's open hands it a path that starts with /dev/i2c- or
+ * API. The core's open hands it a path that starts with /dev/i2c- or
  * /dev/spidev; the core's ioctl and close hand it every descriptor of the
  * device band. Each answers as the C library's call would: the result, or
  * -1 with errno set. */
@@ -101,14 +102,14 @@ int32_t rhu_iiofs_fcntl_setfd(intptr_t fd, int32_t flags);
 intptr_t rhu_iiofs_dup(intptr_t fd);
 
 /* The serial device files (rhu_ttydev.c): /dev/ttyS<n> and the alias
- * /dev/ttyAMA<n> over the kernel's UART doors, the Linux termios shape the
+ * /dev/ttyAMA<n> over the kernel's UART API, the Linux termios shape the
  * standard serial port class's native layer (compiled unchanged from the
  * vendored sources) drives through the C library. The core's open hands it
  * a path it owns; the core's ioctl and close and the glue's read and write
  * hand it every descriptor of the tty band. Each answers as the C library's
  * call would: the result, or -1 with errno set. The layer's other C-library
  * names (poll, fcntl, shutdown, the termios family, the error string) are
- * defined in the unit itself. The file system's two doors: whether a name
+ * defined in the unit itself. Its two file-system functions: whether a name
  * the unit owns is a port of this board, and the index-th row's leaf name
  * for a listing of /dev (the alias is never listed). */
 int rhu_ttydev_owns_path(const char *path);

@@ -74,6 +74,12 @@ impl Results {
         &self.path
     }
 
+    /// The cases tallied so far: every verdict, pass, fail or skip (the
+    /// count a gate's verdict line prints).
+    pub fn cases(&self) -> u32 {
+        self.n_pass + self.n_fail + self.n_skip
+    }
+
     /// Append one pre-rendered JSON line.
     pub fn emit(&self, line: &str) {
         if let Ok(mut f) = OpenOptions::new().append(true).open(&self.path) {
@@ -101,7 +107,7 @@ impl Results {
             "{{\"schema\":1,\"type\":\"summary\",\"gate\":\"{}\",\"verdict\":\"{}\",\"cases\":{},\"pass\":{},\"fail\":{},\"skip\":{},\"neg_controls\":{},\"exit\":{}}}",
             gate,
             verdict,
-            self.n_pass + self.n_fail + self.n_skip,
+            self.cases(),
             self.n_pass,
             self.n_fail,
             self.n_skip,

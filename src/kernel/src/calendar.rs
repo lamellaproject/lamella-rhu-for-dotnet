@@ -139,7 +139,7 @@ pub fn init_at_boot() {
 /// The push mailbox consumed if its sequence number is new: at boot the
 /// base is the ticks themselves; later the boot clock's elapsed is taken
 /// off. Called from the tick handler (no section needed there: the
-/// doors' writes hold the kernel critical section, which masks the tick).
+/// functions' writes hold the kernel critical section, which masks the tick).
 fn consume_push(at_boot: bool) {
     unsafe {
         let p = &*addr_of!(PUSH);
@@ -168,13 +168,13 @@ pub fn tick_poll() {
     consume_push(false);
 }
 
-/// The read door: the calendar now and the source that set it.
+/// The read function: the calendar now and the source that set it.
 pub fn get() -> (u64, i32) {
     let (base, source) = with_cs(read_base);
     (base.saturating_add(elapsed_ticks()), source as i32)
 }
 
-/// The explicit set door: the base moved so the calendar reads the
+/// The explicit set function: the base moved so the calendar reads the
 /// given instant now, the source recorded, the real-time clock written
 /// where the part has one. Refuses a source the hosted side may not
 /// claim and an instant past the maximum.

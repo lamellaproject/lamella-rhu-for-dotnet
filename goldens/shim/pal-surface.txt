@@ -6,19 +6,19 @@
 # the pack's export tables. The case shim.pal-surface checks that the shim's defined
 # family names equal this set and that this pin is the SDK's; the rederive leg's
 # survey control reads the archives named here again.
-pin: 11.0.0-rc.2.26504.105
-tag: v11.0.0-rc.2.26504.105
-commit: 820230c386db5b0106c5430b3e5aee92a7826bf5
+pin: 11.0.0-rc.3.26522.148
+tag: v11.0.0-rc.3.26522.148
+commit: 5254d8bcf59917edc1e1abc33bdf2442b77b1c70
 archive: libSystem.Native.a 76a3249dc2bcf249385923781fb599e5a8a68049c7c1c4ed778352c8a161b845 277
 archive: libSystem.Globalization.Native.a bc01835038c74d55d4855560af2644bb53ecc26fe59281a4761692a0c1ebe61a 37
 archive: libSystem.IO.Compression.Native.a 6e50d00b17641a2803ec9a92806e1eab74471b8f1d3598858670fca9bfffe9f2 10
 archive: libSystem.Net.Security.Native.a ab42a11318d231dbb8459233e0dc21af1b821fdc9a88b52eebf51b1e8b462b21 21
-archive: libSystem.Security.Cryptography.Native.OpenSsl.a 15b7ec5b710489edfa87b5ec704f3ebd0f4756c1dbb2f85adcd82057ea553e6c 415
+archive: libSystem.Security.Cryptography.Native.OpenSsl.a 744500df0e0f9b3b629419be12eb27cabb1ada60550928e313127b6936c49f2f 415
 family: SystemNative_ 277 defined 104 served 73 refused 100
 family: GlobalizationNative_ 37 defined 0 served 0 refused 37
 family: CompressionNative_ 10 defined 0 served 0 refused 10
 family: NetSecurityNative_ 21 defined 0 served 0 refused 21
-family: CryptoNative_ 415 defined 0 served 0 refused 415
+family: CryptoNative_ 415 defined 0 served 3 refused 412
 outside: libSystem.Native.a InitializeSignalHandlingCore InstallTTOUHandlerForConsole MapHardwareType ReinitializeTerminal TryConvertSignalCodeToPosixSignal UninitializeTerminal UninstallTTOUHandlerForConsole
 outside: libSystem.Globalization.Native.a (114 library-internal names)
 outside: libSystem.IO.Compression.Native.a CompressionResolveDllImport
@@ -432,8 +432,8 @@ CryptoNative_EncodeX509SubjectPublicKeyInfo CryptoNative_ refused
 CryptoNative_EnsureLibSslInitialized CryptoNative_ refused
 CryptoNative_EnsureOpenSslInitialized CryptoNative_ refused
 CryptoNative_ErrClearError CryptoNative_ refused
-CryptoNative_ErrErrorStringN CryptoNative_ refused
-CryptoNative_ErrGetExceptionError CryptoNative_ refused
+CryptoNative_ErrErrorStringN CryptoNative_ served
+CryptoNative_ErrGetExceptionError CryptoNative_ served
 CryptoNative_ErrPeekError CryptoNative_ refused
 CryptoNative_ErrPeekLastError CryptoNative_ refused
 CryptoNative_ErrReasonErrorString CryptoNative_ refused
@@ -568,7 +568,7 @@ CryptoNative_GetOpenSslCipherSuiteName CryptoNative_ refused
 CryptoNative_GetPkcs7Certificates CryptoNative_ refused
 CryptoNative_GetPkcs7DerSize CryptoNative_ refused
 CryptoNative_GetPkcs8PrivateKeySize CryptoNative_ refused
-CryptoNative_GetRandomBytes CryptoNative_ refused
+CryptoNative_GetRandomBytes CryptoNative_ served
 CryptoNative_GetSubjectPublicKeyInfoSize CryptoNative_ refused
 CryptoNative_GetX509CrlNextUpdate CryptoNative_ refused
 CryptoNative_GetX509DerSize CryptoNative_ refused

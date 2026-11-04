@@ -2,7 +2,7 @@
 //! the effective pins of a UART block from the row's pre-defined pair,
 //! the chip's legal pin sets and the project's two link-time words, as a
 //! pure function the host tier exercises with the RP2350 rows' tables. The
-//! doors' module (`uart.rs`) calls it at every claim and for the
+//! functions' module (`uart.rs`) calls it at every claim and for the
 //! enumeration, and the console's wire resolution reaches it through the
 //! same call, so what the host gate proves is what every image runs.
 //!

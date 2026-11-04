@@ -1,10 +1,10 @@
-//! The network doors' bodies: a program's sockets over the
+//! The kernel's network API's bodies: a program's sockets over the
 //! kernel's own TCP/IP stack (smoltcp 0.14.0, vendored under
 //! src/vendor/crates) on the medium the board has -- the twenty-six verbs
 //! `api.rs` exports and `include/rhu.h` states, the `rhu_net_` family with
 //! the Linux socket verbs. The address
 //! record is sized for both families; the resolver answers address records
-//! with the slot's lifetime stated; the option door reads back its form.
+//! with the slot's lifetime stated; the option function reads back its form.
 //!
 //! THE TENANCY is one futex word for the whole network state, taken by
 //! compare-and-swap and slept on when held, NEVER the kernel critical
@@ -12,7 +12,7 @@
 //! kernel band. THE MASKING CONSEQUENCE: this module adds NO system-wide masking, NO
 //! new critical section and NO handler; the zero-latency band is never
 //! masked by anything here; the only sections are the witness counters'
-//! single-word updates, the few instructions every door family takes.
+//! single-word updates, the few instructions every function family takes.
 
 #![cfg_attr(not(rhu_net_rows), allow(dead_code))] // a row without a medium compiles the records and the refusing half alone
 
@@ -33,7 +33,7 @@ pub const ERR_AFNOSUPPORT: i32 = -97;
 pub const ERR_ADDRINUSE: i32 = -98;
 pub const ERR_NETDOWN: i32 = -100;
 pub const ERR_NETUNREACH: i32 = -101;
-#[allow(dead_code)] // the header's set; no path answers it (an abort is the close door's own act)
+#[allow(dead_code)] // the header's set; no path answers it (an abort is the close function's own act)
 pub const ERR_CONNABORTED: i32 = -103;
 pub const ERR_CONNRESET: i32 = -104;
 pub const ERR_ISCONN: i32 = -106;
@@ -221,10 +221,10 @@ fn aligned<T>(p: *const T) -> bool {
 
 /// The one word for all sockets (the event port's word) and the medium's
 /// word, readable on every row (the storage exists where no medium does:
-/// a hosting layer's recipe may snapshot them before the count door).
+/// a hosting layer's recipe may snapshot them before the count function).
 static GLOBAL: AtomicU32 = AtomicU32::new(0);
 static MEDIUM_WORD: AtomicU32 = AtomicU32::new(0);
-/// The word the network thread sleeps on: a door that queued work bumps
+/// The word the network thread sleeps on: a kernel function that queued work bumps
 /// it; a medium's interrupt handler bumps it (the virtual medium has none).
 pub static WAKE: AtomicU32 = AtomicU32::new(0);
 
@@ -241,7 +241,7 @@ pub fn events_bump() {
     sched::futex_wake(GLOBAL.as_ptr(), u32::MAX);
 }
 
-// ---------------- the rows with a medium: the doors over the stack ----------------
+// ---------------- the rows with a medium: the functions over the stack ----------------
 
 #[cfg(rhu_net_rows)]
 mod served {
@@ -405,12 +405,12 @@ mod served {
     static mut STACK: Option<Stack> = None;
     /// The medium's wake word as the seam names it (the virtual medium's is
     /// this module's own `WAKE`; a wired medium's handler bumps its own),
-    /// cached at init for the thread's sleep and the doors' kick.
+    /// cached at init for the thread's sleep and the functions' kick.
     static WAKE_WORD: core::sync::atomic::AtomicPtr<AtomicU32> = core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
     /// The tenancy word (0 free, 1 held), a futex word.
     static TENANCY: AtomicU32 = AtomicU32::new(0);
     /// The api flavor's diagnostic of the tenancy: its holder (1 the network
-    /// thread, 2 a door) and the network thread's phase (0 asleep, 1 the
+    /// thread, 2 a kernel function) and the network thread's phase (0 asleep, 1 the
     /// medium's service, 2 the stack's poll, 3 the judge), so a wait that
     /// never ends names them instead of hanging silently.
     #[cfg(feature = "api-smoke")]
@@ -454,7 +454,7 @@ mod served {
         unsafe { (*addr_of_mut!(STACK)).as_mut().expect("the network stack before its init") }
     }
 
-    /// A door's body under the tenancy.
+    /// A kernel function's body under the tenancy.
     fn with_stack<R>(f: impl FnOnce(&mut Stack) -> R) -> R {
         take();
         #[cfg(feature = "api-smoke")]
@@ -469,7 +469,7 @@ mod served {
         if p.is_null() { &WAKE } else { unsafe { &*p } }
     }
 
-    /// The network thread asked to poll now (a door queued work): the
+    /// The network thread asked to poll now (a kernel function queued work): the
     /// medium's wake word bumped and the thread woken.
     fn kick() {
         let w = wake_word();
@@ -523,7 +523,7 @@ mod served {
     // ---------------- init and the thread ----------------
 
     /// The stack built over the row's medium: the interface at the medium's
-    /// hardware address, seeded from the entropy door; the socket set with
+    /// hardware address, seeded from the entropy function; the socket set with
     /// the stream and datagram sockets over the pool's buffers, the resolver
     /// over its slots and the DHCP client armed (the discover retried after
     /// one second, not the stack's ten: a switch port forwards a board's
@@ -1572,7 +1572,7 @@ mod served {
                     }
                     let s = st.sockets.get_mut::<udp::Socket>(st.udp[slot.sock]);
                     let got = if peek { s.peek_slice(data).map(|(k, m)| (k, *m)) } else { s.recv_slice(data) };
-                    // The level answered by the readiness door is the judge's, refreshed at the thread's pass; a
+                    // The level answered by the readiness function is the judge's, refreshed at the thread's pass; a
                     // read that empties the queue (a truncated one dequeues too) lowers READABLE here, so a caller
                     // more urgent than the thread reads the socket's state at the call, never the pass before.
                     if !peek && !s.can_recv() {
@@ -1915,7 +1915,7 @@ pub use served::{
     POOL_BYTES, STREAMS,
 };
 
-// ---------------- the rows without a medium: the count 0, every other door ENODEV ----------------
+// ---------------- the rows without a medium: the count 0, every other function ENODEV ----------------
 
 #[cfg(not(rhu_net_rows))]
 pub fn count() -> i32 {

@@ -48,8 +48,8 @@ smoltcp = { version = "=0.14.0", optional = true, default-features = false, feat
 
 [features]
 default = ["qemu-exit", "board-mps2-an500"]
-# The network doors over the vendored stack, OFF by default on every row:
-# the stack and its arithmetic (net_math.rs), the doors, the virtual medium
+# The kernel's network API over the vendored stack, OFF by default on every row:
+# the stack and its arithmetic (net_math.rs), the functions, the virtual medium
 # and the api checks.
 net = ["dep:smoltcp"]
 # Exactly one board feature must be selected (src/board/mod.rs enforces).
@@ -78,6 +78,21 @@ board-adafruit-feather-rp2350-hstx-psram = ["fpemul", "dep:lamella-psram-qspi", 
 # The PSRAM Feather's clock posture 2: the same crystal posture on that
 # board; requires board-adafruit-feather-rp2350-hstx-psram.
 adafruit-feather-rp2350-hstx-psram-xtal12 = []
+# Adafruit Metro RP2350 (RP2350B; the same chip module as the Pico 2; 16 MB
+# of QSPI flash; no PSRAM part on this variant of the board): the same
+# build shape as the Pico 2's.
+board-adafruit-metro-rp2350 = ["fpemul"]
+# Metro RP2350 clock posture 2: the same crystal posture on that board;
+# requires board-adafruit-metro-rp2350.
+adafruit-metro-rp2350-xtal12 = []
+# Adafruit Metro RP2350 with PSRAM (the Metro with its 8 MB PSRAM part
+# fitted behind the flash interface's second chip select on GPIO 47,
+# brought up by the PSRAM crate at the PLL posture): the Pico LiPo 2's
+# build shape.
+board-adafruit-metro-rp2350-psram = ["fpemul", "dep:lamella-psram-qspi", "lamella-psram-qspi/rp2350-qmi"]
+# The PSRAM Metro's clock posture 2: the same crystal posture on that
+# board; requires board-adafruit-metro-rp2350-psram.
+adafruit-metro-rp2350-psram-xtal12 = []
 # Pimoroni Pico LiPo 2 (RP2350B; the same chip module as the Pico 2; no
 # wireless module; 16 MB of QSPI flash; 8 MB of PSRAM behind the flash
 # interface's second chip select on GPIO 47, brought up by the PSRAM crate
@@ -111,20 +126,29 @@ pimoroni-pico-plus-2-w-xtal12 = []
 # Raspberry Pi Pico 2 (RP2350A, Cortex-M33 silicon, execute-in-place from
 # the QSPI flash at 0x10000000): build with --no-default-features (no
 # semihosting exits on hardware) and --target thumbv8m.main-none-eabihf.
-board-rpi-pico2 = ["fpemul"]
+board-raspberrypi-pico-2 = ["fpemul"]
 # Pico 2 clock posture 2: the 12 MHz crystal alone, the PLL off (the
 # bring-up posture). A gated posture -- own feature, own image names, no
-# clock line in the banner; requires board-rpi-pico2 (src/board/mod.rs
+# clock line in the banner; requires board-raspberrypi-pico-2 (src/board/mod.rs
 # refuses otherwise). Without it the board runs the chip's rated 150 MHz
 # system PLL, which the boot banner reads back.
-rpi-pico2-xtal12 = []
+raspberrypi-pico-2-xtal12 = []
 # Raspberry Pi Pico 2 W (the Pico 2 with a wireless module fitted, whose
 # lines are the wifi driver's; the same chip and flash): the same build
 # shape as the Pico 2's.
-board-rpi-pico2-w = ["fpemul"]
+board-raspberrypi-pico-2-w = ["fpemul"]
 # Pico 2 W clock posture 2: the same crystal posture on that board;
-# requires board-rpi-pico2-w.
-rpi-pico2-w-xtal12 = []
+# requires board-raspberrypi-pico-2-w.
+raspberrypi-pico-2-w-xtal12 = []
+# SparkFun IoT RedBoard RP2350 (RP2350B; the same chip module as the Pico 2;
+# 16 MB of QSPI flash; 8 MB of PSRAM behind the flash interface's second
+# chip select on GPIO 47, brought up by the PSRAM crate at the PLL posture;
+# a wireless module whose lines are the wifi driver's): the Pico LiPo 2's
+# build shape.
+board-sparkfun-iot-redboard-rp2350 = ["fpemul", "dep:lamella-psram-qspi", "lamella-psram-qspi/rp2350-qmi"]
+# IoT RedBoard RP2350 clock posture 2: the same crystal posture on that
+# board; requires board-sparkfun-iot-redboard-rp2350.
+sparkfun-iot-redboard-rp2350-xtal12 = []
 # NUCLEO-L4R5ZI (STM32L4R5ZI, Cortex-M4 silicon with a single-precision
 # FPU, flash-boot at 0x08000000;
 # hosting the kernel alone): build with --no-default-features (no
@@ -231,7 +255,7 @@ arduino-portenta-machine-control-hsi64 = []
 # without a debugger attached, BKPT #0xAB escalates to HardFault on real
 # silicon, so non-QEMU builds disable this and every exit becomes a park.
 qemu-exit = []
-# The entropy opt-in: the cryptographic door serves the software stream on
+# The entropy opt-in: the random-bytes function serves the software stream on
 # an image that names this feature (the emulator rows' gate images, where
 # no hardware noise source exists); the boot banner says so. Off by default,
 # implied by no board feature, never named on a silicon image by the build
@@ -261,7 +285,7 @@ test-stackovfl = ["stack-watermark"]
 # named reader reads a word through address 4. The flavor alone expects the
 # designed death (nothing armed); its cases, each a feature beside it:
 # `test-nullpage-deliver` registers a test activation handler, arms the null
-# kind through the door and expects the read and a write delivered and
+# kind through the arming function and expects the read and a write delivered and
 # landed; `test-nullpage-cs` reads inside the kernel's critical section and
 # expects the forced HardFault's naming; `test-nullpage-fetch` jumps to
 # address 0 with the delivery armed and expects the terminal fetch line (an
@@ -308,12 +332,12 @@ test-fpemul-doctored = []
 # the api flavor's fp-cost check: a measurement image for a board flight, never a
 # chain row.
 fp-cost = []
-# The GPIO doors' two doctored controls (the device seam), built into no board image:
+# The kernel's GPIO API's two doctored controls (the device seam), built into no board image:
 # on the emulator rows the virtual loopback latch fires the input's event twice
 # per change; on a board the family handler's pending-mask clear is removed.
 test-gpio-doctored-latch = []
 test-gpio-doctored-mask = []
-# The bus doors' doctored control (the emulator rows only), never a shipped
+# The kernel's bus API's doctored control (the emulator rows only), never a shipped
 # image: the sensor model refuses the second data byte of a write, the I2C
 # block model never completes a non-last message, and the drivers' pumps
 # run unbounded so the receive queue's honest overflow loses bytes.
@@ -328,10 +352,21 @@ test-bus-rp2350 = []
 # image: the virtual backend makes one event of its own beside the tenth
 # counted edge, which the check's total must refuse.
 test-gpio-doctored-edge = []
+# The kernel's GPIO API's hold control (the emulator rows only), never a shipped
+# image: the kernel's GPIO API reads "held by this program" from the claims table's
+# program bit alone, so a line a PWM channel of the same program holds is
+# re-configured as if the kernel's GPIO API held it, which the hold check must refuse.
+test-gpio-doctored-hold = []
 # The set-context check's doctored control (the api flavor, never a shipped
 # image): the landing pad stores its witness before its thread id and sleeps
 # between the two, so the check must refuse at its off-thread assert.
 test-susp-doctored-order = []
+# The activation delivery's doctored control (the api flavor, never a shipped
+# image): the interrupted wait's exit tell is neither saved at the delivery
+# nor restored at the resume, so a handler's own sleep clears the broken
+# wait's result (0, as if woken) and its own timed wait consumes the latch
+# (RHU_EINTR for a deadline), which the wait-across check must refuse.
+test-act-doctored-restore = []
 # The exit word's doctored control (the api flavor, never a shipped image): the
 # store into the console mirror's header swaps the word's halves, so the api
 # flavor's read-back disagrees with the contract's numbers and the check dies.
@@ -351,7 +386,7 @@ test-stack-watermark-doctored = []
 # HardFault the funnel names from handler mode, and the watermark line reads
 # the handler stack's deepest use.
 test-fault-in-handler = ["stack-watermark"]
-# The PWM and ADC doors' doctored controls (the emulator rows only), never a
+# The PWM and ADC functions' doctored controls (the emulator rows only), never a
 # shipped image: the virtual timer reads its own period one prescaler step
 # long; the virtual loop channel answers the previous conversion's sample.
 test-pwm-doctored = []
@@ -365,9 +400,9 @@ test-adc-doctored = []
 # undefined result as a sample, which that check must refuse.
 test-adc-flagged = []
 test-adc-flagged-doctored = []
-# The RAM-range doors' doctored control (the api flavor, never a shipped
-# image): the count door answers one range more than the board's facts
-# state and the range door fills a record for it, which the api flavor's
+# The RAM-range functions' doctored control (the api flavor, never a shipped
+# image): the count function answers one range more than the board's facts
+# state and the range function fills a record for it, which the api flavor's
 # ram-range check must refuse against the facts.
 test-ram-doctored = []
 # The PSRAM proof's doctored control (the two Pimoroni rows, a board
@@ -424,8 +459,8 @@ test-icache = []
 # The hosted program's run timed by the core's cycle counter (the STM32F769
 # row; a board flight's measurement posture, never a shipped image): the
 # cycles from the payload's entry to its return and, of those, the cycles the
-# console's write doors spend (their waits for the wire's room included) with
-# the doors' write count, printed once after the return line, so the program's
+# console's write functions spend (their waits for the wire's room included) with
+# the functions' write count, printed once after the return line, so the program's
 # own compute under the internal map and under the window compares with the
 # console's wire out of the figure. Refused without the board.
 test-payload-cycles = []
@@ -433,6 +468,10 @@ test-payload-cycles = []
 # image: the host capacity bit cleared in ACMD41's argument, so a high-capacity
 # card is refused at the CSD's capacity class or never leaves busy.
 test-sd-doctored = []
+# The flight flavor of a socket row's api image: the SD and FAT checks alone
+# after the boot, so the transcript fits the console mirror a bench rig reads
+# over the debug probe; requires api-smoke and a row with a microSD socket.
+test-sd-flight = []
 # The STM32H7 rows' three compile-time refusals (negative build cases checked on
 # the development machine; never a shipped image). `test-h7-supply-doctored` forces the
 # Portentas' supply wiring onto the GIGA row, whose facts say the switching
@@ -488,13 +527,13 @@ test-rezero-doctored = []
 # -- the Pico rows' shape (the memory console takes no pin) -- so the
 # check's board-line assertion is skipped and its witness bound must hold at a
 # floor of 0 EBUSY, the pwm-claim check's the same, the image whole to its exit
-# door.
+# function.
 test-no-board-claims = []
 # The GPIO acceptance run's image on the boards with a button row (a test image, not a product image):
 # the LED row blinked for the eye, then a bounded wait for a press that lights it.
 test-gpio-button = []
 # The UART acceptance run's images on the Pico rows (test images, not product images): UART0
-# claimed through the doors at 115200 8N1 and 256 bytes written and read back byte for byte --
+# claimed through the kernel's UART API at 115200 8N1 and 256 bytes written and read back byte for byte --
 # `test-uart-loopback` over the block's own loopback bit, `test-uart-jumper` over a wire from
 # GP0 to GP1; one of the two beside `api-smoke`. `test-uart-port1` moves either flight to the
 # row's port 1 on its default pair (UART1 on GP8 and GP9: the Click shield's second socket).

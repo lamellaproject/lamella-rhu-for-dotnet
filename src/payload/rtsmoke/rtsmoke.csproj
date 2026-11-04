@@ -17,6 +17,8 @@
     <PublishAot>true</PublishAot>
     <RuntimeIdentifier>linux-arm</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
+    <!-- Only the frameworks this project references have their runtime packs restored: a self-contained publish otherwise downloads the ASP.NET Core runtime pack, which no program here uses. -->
+    <DisableTransitiveFrameworkReferenceDownloads>true</DisableTransitiveFrameworkReferenceDownloads>
     <IlcSystemModule>rtsmoke</IlcSystemModule>
     <OptimizationPreference>Size</OptimizationPreference>
     <IlcDehydrate>false</IlcDehydrate>

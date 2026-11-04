@@ -133,7 +133,7 @@ fn cc_flags(class: Class) -> &'static [&'static str] {
 
 /// goldens/shim/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest.
-const SHA_FROZEN_MANIFEST: &str = "320e308d956f51d37bbec0e6c4ee3057134772168032d28ad07048c01302fe44";
+const SHA_FROZEN_MANIFEST: &str = "fb44374bb9565f1e396eb73b12a042bed253183d521cabc63966ce1c08ba41d9";
 
 /// The frozen-object plan of record: file name under goldens/shim/,
 /// source TU, extra defines beyond the class's flag set, and the class
@@ -142,7 +142,7 @@ const SHA_FROZEN_MANIFEST: &str = "320e308d956f51d37bbec0e6c4ee3057134772168032d
 /// name both directions; 'rhu-gate shim rederive' recompiles every row
 /// under its class's flag set and byte-asserts the output against the
 /// frozen bytes.
-const FROZEN_PLAN: [(&str, &str, &[&str], Class); 97] = [
+const FROZEN_PLAN: [(&str, &str, &[&str], Class); 101] = [
     ("shim-core.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
     ("shim-core-break-sipid.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SIPID"], Class::CortexM7),
     ("shim-core-break-ctxpc.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_CTXPC"], Class::CortexM7),
@@ -179,15 +179,15 @@ const FROZEN_PLAN: [(&str, &str, &[&str], Class); 97] = [
     ("shim-host-an505.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
     ("shim-stdio-sym-an505.o", "src/shim/rhu_stdio_sym.c", &[], Class::CortexM33),
     ("shim-core-rp2350.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_PICO2"], Class::CortexM33),
-    ("shim-pal-surface.o", "src/shim/rhu_pal_surface_net11_rc2.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
-    ("shim-pal-surface-an505.o", "src/shim/rhu_pal_surface_net11_rc2.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
+    ("shim-pal-surface.o", "src/shim/rhu_pal_surface_net11_rc3.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
+    ("shim-pal-surface-an505.o", "src/shim/rhu_pal_surface_net11_rc3.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
     ("shim-gpiod.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
     ("shim-gpiod-an505.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
     ("shim-gpiod-break-version.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_VERSION"], Class::CortexM7),
     ("shim-gpiod-break-version-an505.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN505", "-DRHU_SHIM_BREAK_GPIOD_VERSION"], Class::CortexM33),
     // The bus device unit: the two device-node families the .NET I2C and
     // SPI drivers open (/dev/i2c-<bus> and /dev/spidev<bus>.<select>),
-    // presented over the kernel's six bus doors in a unit of its own (no
+    // presented over the kernel's six bus functions in a unit of its own (no
     // row field consumed: the STM32F769 rider links the an500 object), its
     // Cortex-M33 twin, and the negative control whose functionality answer
     // names no combined transfer (the driver then takes its file-transfer
@@ -270,6 +270,10 @@ const FROZEN_PLAN: [(&str, &str, &[&str], Class); 97] = [
     ("shim-iiofs-break-scale-bits.o", "src/shim/rhu_iiofs.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_IIOFS_SCALE_BITS"], Class::CortexM7),
     ("shim-iiofs-break-open-unjudged.o", "src/shim/rhu_iiofs.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_IIOFS_OPEN_UNJUDGED"], Class::CortexM7),
     ("shimtest-iiofs.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_IIOFS"], Class::CortexM7),
+    ("shim-sysnative-break-sdfs-sign.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SDFS_SIGN"], Class::CortexM7),
+    ("shim-sysnative-break-sdfs-close-keeps.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SDFS_CLOSE_KEEPS"], Class::CortexM7),
+    ("shim-sysnative-break-sdfs-dup-closes.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SDFS_DUP_CLOSES"], Class::CortexM7),
+    ("shimtest-sdfs.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SDFS"], Class::CortexM7),
 ];
 
 /// The tier's text records beside the objects and goldens: the surface
@@ -280,7 +284,7 @@ const FROZEN_RECORDS: [&str; 1] = ["pal-surface.txt"];
 
 /// The frozen goldens: the payload stream of each positive image, class
 /// bytes. Recorded in the manifest beside the objects.
-const GOLDENS: [&str; 11] = [
+const GOLDENS: [&str; 12] = [
     "shimtest-core.golden.txt",
     "shimtest-fdmap.golden.txt",
     "shimtest-activation.golden.txt",
@@ -292,16 +296,17 @@ const GOLDENS: [&str; 11] = [
     "shimtest-pwmfs.golden.txt",
     "shimtest-ttydev.golden.txt",
     "shimtest-iiofs.golden.txt",
+    "shimtest-sdfs.golden.txt",
 ];
 
 /// The core object's EXACT import closure: the kernel verbs it consumes
-/// (the activation pair, the module-find door, the fault door, the RAM-range doors and the named-range allocation
+/// (the activation pair, the module-find function, the fault function, the RAM-range functions and the named-range allocation
 /// the managed heap's window is read and served by), the two arena-window link symbols, the in-image
 /// header the address answer reads, the compiler builtins (the zero-fill
 /// helper the compiler of record emits among them) and the 64-bit
 /// division helper (the loader-seam hooks are weak references, not
 /// imports, and stay outside the pin).
-/// The log-door stage: rhu_log_write in place of rhu_console_write -- the layer's lines go through the kernel's log door.
+/// The kernel-log stage: rhu_log_write in place of rhu_console_write -- the layer's lines go through the kernel's log function.
 const IMPORTS_CORE: [&str; 47] = [
     "__aeabi_ldivmod",
     "__aeabi_memclr4",
@@ -356,7 +361,7 @@ const IMPORTS_CORE: [&str; 47] = [
 /// allocator, the core's errno, environment table, diagnostics, formatter
 /// core, library-load path, thread and mmap paths, the mutex recipe, the
 /// string functions, the division helpers.
-const IMPORTS_SYSNATIVE: [&str; 74] = [
+const IMPORTS_SYSNATIVE: [&str; 95] = [
     "__aeabi_ldivmod",
     "__aeabi_uldivmod",
     "__errno_location",
@@ -383,6 +388,27 @@ const IMPORTS_SYSNATIVE: [&str; 74] = [
     "rhu_entropy_secure",
     "rhu_futex_wait",
     "rhu_futex_wake",
+    "rhu_fs_close",
+    "rhu_fs_closedir",
+    "rhu_fs_fstat",
+    "rhu_fs_mkdir",
+    "rhu_fs_mount",
+    "rhu_fs_mount_count",
+    "rhu_fs_open",
+    "rhu_fs_opendir",
+    "rhu_fs_pread",
+    "rhu_fs_pwrite",
+    "rhu_fs_read",
+    "rhu_fs_readdir",
+    "rhu_fs_rename",
+    "rhu_fs_rmdir",
+    "rhu_fs_seek",
+    "rhu_fs_stat",
+    "rhu_fs_statfs",
+    "rhu_fs_sync",
+    "rhu_fs_truncate",
+    "rhu_fs_unlink",
+    "rhu_fs_write",
     "rhu_iiofs_access",
     "rhu_iiofs_close",
     "rhu_iiofs_dup",
@@ -464,7 +490,7 @@ const IMPORTS_GPIOD: [&str; 19] = [
     "strlen",
 ];
 
-/// The bus device unit's EXACT import closure: the four bus doors it calls
+/// The bus device unit's EXACT import closure: the kernel's four bus functions it calls
 /// (the claim and the transfer of each family; the node's number passes
 /// through as the bus number), the clock, the core's errno, diagnostics
 /// and mutex pair, and the C library's three (every record a request names
@@ -487,7 +513,7 @@ const IMPORTS_BUSDEV: [&str; 14] = [
 ];
 
 /// The glue object's EXACT import closure: the kernel heap and console
-/// doors, the exit door, the core's errno and diagnostics, the builtins.
+/// functions, the exit function, the core's errno and diagnostics, the builtins.
 const IMPORTS_GLUE: [&str; 19] = [
     "__errno_location",
     "memcpy",
@@ -511,7 +537,7 @@ const IMPORTS_GLUE: [&str; 19] = [
 ];
 
 /// The PWM device-file unit's EXACT import closure: the kernel's eight
-/// PWM doors, the shim's diagnostics and mutex pair (the unit's one lock over
+/// PWM functions, the shim's diagnostics and mutex pair (the unit's one lock over
 /// its table and descriptors), the C library's copy, fill and string
 /// functions, the core's errno and the compiler's 64-bit division helper (the
 /// decimal texts of the period and the duty).
@@ -537,7 +563,7 @@ const IMPORTS_PWMFS: [&str; 18] = [
 ];
 
 /// The analog input device-file unit's EXACT import closure: the kernel's six
-/// ADC doors, the shim's diagnostics and mutex pair (the unit's one lock over
+/// ADC functions, the shim's diagnostics and mutex pair (the unit's one lock over
 /// its table and descriptors), the C library's copy, fill and string
 /// functions, the core's errno and the compiler's 64-bit division helper (the
 /// scale's text).
@@ -561,7 +587,7 @@ const IMPORTS_IIOFS: [&str; 16] = [
 ];
 
 /// The serial device-file unit's EXACT import closure: the kernel's twelve
-/// UART doors, its clock, sleep and futex wait, the shim's diagnostics and
+/// UART functions, its clock, sleep and futex wait, the shim's diagnostics and
 /// mutex pair, the C library's copy, fill and string functions, the core's
 /// errno and the builtins (the aligned copy and the 64-bit division helper).
 const IMPORTS_TTYDEV: [&str; 24] = [
@@ -623,8 +649,8 @@ const IMPORTS_PORTS: [&str; 20] = [
 /// the module-list initializer, the managed entry and the eight
 /// class-library exports by the bootstrapper's names, the map's and the
 /// linker's brackets it reads, the in-image header, the kernel's console,
-/// exit and arena doors, the shim's initialization and stream bridge.
-/// The log-door stage: rhu_log_write in place of rhu_console_write -- the layer's lines go through the kernel's log door.
+/// exit and arena functions, the shim's initialization and stream bridge.
+/// The kernel-log stage: rhu_log_write in place of rhu_console_write -- the layer's lines go through the kernel's log function.
 const IMPORTS_HOST: [&str; 36] = [
     "AppendExceptionStackFrame",
     "GetRuntimeException",
@@ -729,6 +755,7 @@ const PINNED_CORE_LINES: [&str; 12] = [
 
 const CORE_ALL_GOOD: &str = "SHIMTEST: ALL GOOD (glibc personality + PAL on the kernel API)";
 const FDMAP_ALL_GOOD: &str = "SHIMTEST-FDMAP: ALL GOOD (explicit descriptor bands; the console never answers for a file)";
+const SDFS_ALL_GOOD: &str = "SHIMTEST-SDFS: ALL GOOD (the card's files from a native caller's side over a scripted kernel)";
 const BUSDEV_ALL_GOOD: &str = "SHIMTEST-BUSDEV: ALL GOOD (the bus device nodes from a native caller's side)";
 const GPIOD_ALL_GOOD: &str = "SHIMTEST-GPIOD: ALL GOOD (the GPIO library surface from a native caller's side)";
 const FROZEN_ALL_GOOD: &str = "SHIMTEST-FROZEN: ALL GOOD (the frozen object heap on a small board's pool)";
@@ -901,7 +928,7 @@ const PENDING: [&str; 0] = [];
 /// no instruction outside the Cortex-M7 decoder's reach, so one decoder
 /// censuses the whole tier. A moved count means the source, a flag or the
 /// compiler changed.
-const FP_CENSUS: [(&str, u32); 97] = [
+const FP_CENSUS: [(&str, u32); 101] = [
     ("shim-core.o", 0),
     ("shim-core-break-sipid.o", 0),
     ("shim-core-break-ctxpc.o", 0),
@@ -999,6 +1026,10 @@ const FP_CENSUS: [(&str, u32); 97] = [
     ("shim-iiofs-break-scale-bits.o", 0),
     ("shim-iiofs-break-open-unjudged.o", 0),
     ("shimtest-iiofs.o", 0),
+    ("shim-sysnative-break-sdfs-sign.o", 1),
+    ("shim-sysnative-break-sdfs-close-keeps.o", 1),
+    ("shim-sysnative-break-sdfs-dup-closes.o", 1),
+    ("shimtest-sdfs.o", 0),
 ];
 
 /// Count the floating-point instructions in a decoded listing: every line whose
@@ -1323,8 +1354,8 @@ fn read_sdk_runtime_pin(repo: &Path) -> Result<String, String> {
 
 /// The tag the generated surface header states in its provenance comment.
 fn read_surface_header_tag(repo: &Path) -> Result<String, String> {
-    let p = repo.join("src").join("shim").join("rhu_pal_surface_net11_rc2.h");
-    let text = std::fs::read_to_string(&p).map_err(|e| format!("src/shim/rhu_pal_surface_net11_rc2.h unreadable: {e}"))?;
+    let p = repo.join("src").join("shim").join("rhu_pal_surface_net11_rc3.h");
+    let text = std::fs::read_to_string(&p).map_err(|e| format!("src/shim/rhu_pal_surface_net11_rc3.h unreadable: {e}"))?;
     let Some(i) = text.find("at tag ") else {
         return Err("the surface header states no tag".to_string());
     };
@@ -2007,7 +2038,7 @@ impl Shim {
         let pwmfs = self.pin_closure(facts, "shim.core", "shim-pwmfs.o", &IMPORTS_PWMFS);
         println!("   shim-pwmfs.o: import closure pinned exactly ({} names: the eight PWM doors, the diagnostics and the mutex pair, the C library's copy, fill and string functions, the core's errno and the 64-bit division helper)", IMPORTS_PWMFS.len());
         let pwmfs_an505 = self.pin_closure(facts, "shim.core", "shim-pwmfs-an505.o", &IMPORTS_PWMFS);
-        // A control's closure is the unit's minus the door its knob removes:
+        // A control's closure is the unit's minus the kernel function its knob removes:
         // the period-asked controls never read the period the timer runs, the unexport-keeps control
         // never releases; the export-unjudged and npwm-count controls carry the unit's closure whole.
         for (knob, dropped) in [
@@ -2031,7 +2062,7 @@ impl Shim {
         let iiofs = self.pin_closure(facts, "shim.core", "shim-iiofs.o", &IMPORTS_IIOFS);
         println!("   shim-iiofs.o: import closure pinned exactly ({} names: the six ADC doors, the diagnostics and the mutex pair, the C library's copy, fill and string functions, the core's errno and the 64-bit division helper)", IMPORTS_IIOFS.len());
         let iiofs_an505 = self.pin_closure(facts, "shim.core", "shim-iiofs-an505.o", &IMPORTS_IIOFS);
-        // A control's closure is the unit's minus the door its knob removes: the close-keeps control never
+        // A control's closure is the unit's minus the kernel function its knob removes: the close-keeps control never
         // releases; the read-stale, scale-bits and open-unjudged controls carry the unit's closure whole.
         for (knob, dropped) in [
             ("read-stale", None),
@@ -2055,7 +2086,7 @@ impl Shim {
         let ttydev = self.pin_closure(facts, "shim.core", "shim-ttydev.o", &IMPORTS_TTYDEV);
         println!("   shim-ttydev.o: import closure pinned exactly ({} names: the twelve UART doors, the clock, the sleep and the futex wait, the diagnostics and the mutex pair, the C library's copy, fill and string functions, the core's errno, the builtins)", IMPORTS_TTYDEV.len());
         let ttydev_an505 = self.pin_closure(facts, "shim.core", "shim-ttydev-an505.o", &IMPORTS_TTYDEV);
-        // A control's closure is the unit's minus the door its knob removes: the close-keeps control never
+        // A control's closure is the unit's minus the kernel function its knob removes: the close-keeps control never
         // releases the port; the eof, pollerr and image controls carry the unit's closure whole.
         for (knob, dropped) in [
             ("eof", None),
@@ -2090,8 +2121,12 @@ impl Shim {
             self.fail("shim.core", "shim-ports-native-an505.o's closure differs from shim-ports-native.o's: the class moved an import");
         }
         self.pin_closure(facts, "shim.core", "shim-sysnative-break-identity-leak.o", &IMPORTS_SYSNATIVE);
+        for knob in ["sign", "close-keeps", "dup-closes"] {
+            self.pin_closure(facts, "shim.core", &format!("shim-sysnative-break-sdfs-{knob}.o"), &IMPORTS_SYSNATIVE);
+        }
+        println!("   the card's three control objects: pinned against the system-call unit's closure (the kernel's file family among its imports)");
         // The core's two fault controls and their Cortex-M33 twins -- the
-        // unarmed controls never call the arming door, so their closure is the core's minus
+        // unarmed controls never call the arming function, so their closure is the core's minus
         // rhu_fault_register; the address controls carry the core's whole.
         let core_minus_arming: Vec<&str> = IMPORTS_CORE.iter().copied().filter(|n| *n != "rhu_fault_register").collect();
         for (knob, want) in [
@@ -2190,7 +2225,7 @@ impl Shim {
         self.emit_pass("shim.core-break-canary", 134, "negative", broke, &sha_c, &rel_c, None);
         println!("== case shim.core-break-canary: PASS (exit 134; the allocator died loud on the corrupted header) ==");
 
-        // The doors' two controls: the PAL object built with one answer's
+        // The two controls of the kernel's API: the PAL object built with one answer's
         // defect restored, linked under the core tenant, refused by the
         // tenant's own check on the wire.
         println!("== case shim.core-break-entropy-refusal (negative control) ==");
@@ -2274,6 +2309,45 @@ impl Shim {
             let (sha_s, rel_s) = self.link_image(ld, case, &[world[0], obj_rel.as_str(), world[2], world[3], world[4], world[5], world[6], "goldens/shim/shimtest-fdmap.o"], &image);
             let (raw_s, code_s) = self.run_qemu(qemu, case, &rel_s, None);
             self.assert_control(case, &raw_s, code_s, 1, broke, &sha_s, &rel_s, GOLDENS[1], expect, FDMAP_ALL_GOOD);
+            self.emit_pass(case, 1, "negative", broke, &sha_s, &rel_s, None);
+            println!("== case {case}: PASS (exit 1; the ladder refused the restored defect at its own check) ==");
+        }
+    }
+
+    /// The card's files from a native caller's side over a scripted kernel:
+    /// the store's world under the sdfs ladder's tenant (which serves the
+    /// kernel's file family itself through the system-call unit's weak hook,
+    /// since the emulator row has no card socket), then one negative control
+    /// per restored defect of the routing, the unit's control object linked in
+    /// the unit's place under the same tenant, refused by the ladder's own
+    /// check at a line of its own.
+    fn run_sdfs(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
+        println!("== case shim.sdfs ==");
+        let tenant = parse_undefined(&self.nm_dump(facts, "shim.sdfs", "goldens/shim/shimtest-sdfs.o", true));
+        if let Some(hit) = forbidden_import(&tenant) {
+            self.fail("shim.sdfs", &format!("the tenant imports forbidden family symbol '{hit}'"));
+        }
+        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o", "goldens/shim/shim-busdev.o", "goldens/shim/shim-pwmfs.o", "goldens/shim/shim-ttydev.o", "goldens/shim/shim-iiofs.o"];
+        let objs = [world[0], world[1], world[2], world[3], world[4], world[5], world[6], "goldens/shim/shimtest-sdfs.o"];
+        self.sweep_strong(facts, "shim.sdfs", &objs);
+        let (sha, rel) = self.link_image(ld, "shim.sdfs", &objs, "shim-sdfs");
+        self.artifact_contract(facts, "shim.sdfs", &rel, &["SystemNative_GetErrNo", "__errno_location", "rhu_sdfs_kernel_hook", "rhu_fs_open"], NO_TEMPLATE);
+        let (raw, code) = self.run_qemu(qemu, "shim.sdfs", &rel, None);
+        self.assert_positive("shim.sdfs", &raw, code, &sha, &rel, GOLDENS[11], &[PINNED_CORE_LINES[0]], SDFS_ALL_GOOD);
+        self.emit_pass("shim.sdfs", 0, "positive", "", &sha, &rel, Some(GOLDENS[11]));
+        println!("== case shim.sdfs: PASS (exit 0; the payload stream equals its golden; the verdict line last) ==");
+        const SDFS_CONTROLS: [(&str, &str, &str, &str); 3] = [
+            ("shim.sdfs-break-sign", "shim-sysnative-break-sdfs-sign.o", "the kernel's code taken as errno without its sign (RHU_SHIM_BREAK_SDFS_SIGN)", "FAIL shim-sdfs-absent"),
+            ("shim.sdfs-break-close-keeps", "shim-sysnative-break-sdfs-close-keeps.o", "a close leaving its band slot in use (RHU_SHIM_BREAK_SDFS_CLOSE_KEEPS)", "FAIL shim-sdfs-roundtrip"),
+            ("shim.sdfs-break-dup-closes", "shim-sysnative-break-sdfs-dup-closes.o", "the first close of a dup'd pair closing the kernel's handle (RHU_SHIM_BREAK_SDFS_DUP_CLOSES)", "FAIL shim-sdfs-dup"),
+        ];
+        for (case, obj, broke, expect) in SDFS_CONTROLS {
+            println!("== case {case} (negative control) ==");
+            let obj_rel = format!("goldens/shim/{obj}");
+            let image = case.replace('.', "-");
+            let (sha_s, rel_s) = self.link_image(ld, case, &[world[0], obj_rel.as_str(), world[2], world[3], world[4], world[5], world[6], "goldens/shim/shimtest-sdfs.o"], &image);
+            let (raw_s, code_s) = self.run_qemu(qemu, case, &rel_s, None);
+            self.assert_control(case, &raw_s, code_s, 1, broke, &sha_s, &rel_s, GOLDENS[11], expect, SDFS_ALL_GOOD);
             self.emit_pass(case, 1, "negative", broke, &sha_s, &rel_s, None);
             println!("== case {case}: PASS (exit 1; the ladder refused the restored defect at its own check) ==");
         }
@@ -2993,7 +3067,7 @@ impl Shim {
         let probe_rel = "src/kernel/target/shim-gate/obj/foreign-errno-probe.c";
         write_fixture(
             &self.repo.join(probe_rel.replace('/', std::path::MAIN_SEPARATOR_STR)),
-            b"#include <errno.h>\n#include \"rhu_pal_errno_net11_rc2.h\"\nint rhu_probe_value = RHU_GERR_ETIMEDOUT;\n",
+            b"#include <errno.h>\n#include \"rhu_pal_errno_net11_rc3.h\"\nint rhu_probe_value = RHU_GERR_ETIMEDOUT;\n",
         );
         let out_rel = "src/kernel/target/shim-gate/obj/foreign-errno-probe.o";
         let stdout_p = self.out.join("foreign-errno-probe.cc.stdout");
@@ -3047,7 +3121,7 @@ impl Shim {
             Err(e) => self.fail(CASE, &e),
         };
         let stripped = self.out.join("obj").join("stripped");
-        for (src, frozen, tag) in [("src/shim/rhu_host.c", "shim-host.o", "host"), ("src/shim/rhu_pal_surface_net11_rc2.c", "shim-pal-surface.o", "pal-surface")] {
+        for (src, frozen, tag) in [("src/shim/rhu_host.c", "shim-host.o", "host"), ("src/shim/rhu_pal_surface_net11_rc3.c", "shim-pal-surface.o", "pal-surface")] {
             let out_rel = format!("src/kernel/target/shim-gate/obj/{tag}-f769-control.o");
             let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
             let _ = std::fs::remove_file(&out_abs);
@@ -3118,7 +3192,7 @@ impl Shim {
             ("src/shim/rhu_shim.c", "shim-core.o", "core"),
             ("src/shim/rhu_sysnative.c", "shim-sysnative.o", "sysnative"),
             ("src/shim/rhu_host.c", "shim-host.o", "host"),
-            ("src/shim/rhu_pal_surface_net11_rc2.c", "shim-pal-surface.o", "pal-surface"),
+            ("src/shim/rhu_pal_surface_net11_rc3.c", "shim-pal-surface.o", "pal-surface"),
         ] {
             let out_rel = format!("src/kernel/target/shim-gate/obj/{tag}-an505-row-control.o");
             let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -3362,7 +3436,7 @@ impl Shim {
         if std::fs::create_dir_all(&dir).is_err() {
             self.fail(CASE, "cannot create the control's directory");
         }
-        let doctored = dir.join("rhu_rt_entry_net11_rc2.h");
+        let doctored = dir.join("rhu_rt_entry_net11_rc3.h");
         let _ = std::fs::remove_file(&doctored);
         let host = match std::fs::read(self.repo.join("src").join("shim").join("rhu_host.c")) {
             Ok(b) => b,
@@ -3385,7 +3459,7 @@ impl Shim {
         }
         println!("   (a) the host's copy compiles against the genuine generated header and ties the frozen host object apart from the producer stamp ({})", &got[..16]);
 
-        let genuine = std::fs::read_to_string(self.repo.join("src").join("shim").join("rhu_rt_entry_net11_rc2.h")).unwrap_or_default();
+        let genuine = std::fs::read_to_string(self.repo.join("src").join("shim").join("rhu_rt_entry_net11_rc3.h")).unwrap_or_default();
         if !genuine.contains(RT_ENTRY_DOCTOR_FROM) {
             self.fail(CASE, "the doctored copy cannot be made: the unhandled-exception slot is not where the control expects it");
         }
@@ -3469,6 +3543,7 @@ pub fn run(repo: &Path) -> ! {
     shim.build_staticlib();
     shim.run_core(&facts, &ld, &qemu);
     shim.run_fdmap(&facts, &ld, &qemu);
+    shim.run_sdfs(&facts, &ld, &qemu);
     shim.run_activation(&facts, &ld, &qemu);
     shim.run_tls(&facts, &ld, &qemu);
     shim.run_host(&facts, &ld, &qemu);
@@ -3488,7 +3563,10 @@ pub fn run(repo: &Path) -> ! {
         exit(1);
     }
     println!(
-        "{DISPLAY}: PASS (61/61 cases incl. 46 negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        "{DISPLAY}: PASS ({}/{} cases incl. {} negative controls; {} pending unarmed; {} internal on the rederive leg)  [{} | {} | {}]",
+        shim.results.n_pass,
+        shim.results.cases(),
+        shim.results.n_neg,
         PENDING.len(),
         INTERNAL_CASES.len(),
         qemu_v,
@@ -3935,8 +4013,8 @@ pub fn selfcheck(repo: &Path) -> ! {
     foreign.push("SystemNative_NotInThePack".to_string());
     sc.probe("surface-tie-foreign", "a defined family name the pack's tables do not export", surface_fault(&foreign, &names).is_none());
     sc.accept_probe("surface-pin-genuine", "the expectation's pin as the SDK's, the header's tag as v + the pin", surface_pin_fault(&pin, &pin, &format!("v{pin}")).is_none());
-    sc.probe("surface-pin-moved", "the SDK re-pinned to another version", surface_pin_fault(&pin, "11.0.0-rc.2.00000.0", &format!("v{pin}")).is_none());
-    sc.probe("surface-header-tag-apart", "a surface header generated at another tag", surface_pin_fault(&pin, &pin, "v11.0.0-rc.2.00000.0").is_none());
+    sc.probe("surface-pin-moved", "the SDK re-pinned to another version", surface_pin_fault(&pin, "11.0.0-rc.3.00000.0", &format!("v{pin}")).is_none());
+    sc.probe("surface-header-tag-apart", "a surface header generated at another tag", surface_pin_fault(&pin, &pin, "v11.0.0-rc.3.00000.0").is_none());
     let doctored_text = surface_text.replacen("\npin: ", "\npin-was: ", 1);
     sc.probe("surface-expectation-doctored", "an expectation file whose pin line is renamed", parse_surface_expectation(&doctored_text).is_ok());
     // The external-definition reader: the external text definition kept,

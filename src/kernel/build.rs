@@ -28,6 +28,12 @@ fn main() {
         "link-adafruit-feather-rp2350-hstx.x"
     } else if cfg!(feature = "board-adafruit-feather-rp2350-hstx-psram") {
         "link-adafruit-feather-rp2350-hstx-psram.x"
+    } else if cfg!(feature = "board-adafruit-metro-rp2350") {
+        "link-adafruit-metro-rp2350.x"
+    } else if cfg!(feature = "board-adafruit-metro-rp2350-psram") {
+        "link-adafruit-metro-rp2350-psram.x"
+    } else if cfg!(feature = "board-sparkfun-iot-redboard-rp2350") {
+        "link-sparkfun-iot-redboard-rp2350.x"
     } else if cfg!(feature = "board-pimoroni-pico-lipo-2-xl-w") {
         "link-pimoroni-pico-lipo-2-xl-w.x"
     } else if cfg!(feature = "board-pimoroni-pico-lipo-2") {
@@ -36,10 +42,10 @@ fn main() {
         "link-pimoroni-pico-plus-2.x"
     } else if cfg!(feature = "board-pimoroni-pico-plus-2-w") {
         "link-pimoroni-pico-plus-2-w.x"
-    } else if cfg!(feature = "board-rpi-pico2") {
-        "link-rpi-pico2.x"
-    } else if cfg!(feature = "board-rpi-pico2-w") {
-        "link-rpi-pico2-w.x"
+    } else if cfg!(feature = "board-raspberrypi-pico-2") {
+        "link-raspberrypi-pico-2.x"
+    } else if cfg!(feature = "board-raspberrypi-pico-2-w") {
+        "link-raspberrypi-pico-2-w.x"
     } else if cfg!(feature = "board-st-nucleo-l4r5zi") {
         "link-st-nucleo-l4r5zi.x"
     } else if cfg!(feature = "board-st-nucleo-u5a5zj-q") {
@@ -66,7 +72,7 @@ fn main() {
     // The console's rows. The ST rows' wire is the probe's
     // port driven the ring way (the wire ring); the emulator rows' default
     // wire is the polled CMSDK UART0; a UART wire of the Pico and emulator
-    // rows is a port of the UART doors' module.
+    // rows is a port of the kernel's UART API's module.
     println!("cargo:rustc-check-cfg=cfg(rhu_console_probe)");
     println!("cargo:rustc-check-cfg=cfg(rhu_uart_rows)");
     // A row with a network medium under the `net` feature -- the
@@ -79,16 +85,19 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(rhu_uart_cmsdk)");
     // The rows with a UART table: the Pico rows over the PL011
     // backend, the emulator rows over the CMSDK backend; the ST rows carry
-    // none, so the UART doors answer RHU_ENODEV there.
+    // none, so the kernel's UART API answers RHU_ENODEV there.
     if cfg!(any(
         feature = "board-adafruit-feather-rp2350-hstx",
         feature = "board-adafruit-feather-rp2350-hstx-psram",
+        feature = "board-adafruit-metro-rp2350",
+        feature = "board-adafruit-metro-rp2350-psram",
         feature = "board-pimoroni-pico-lipo-2",
         feature = "board-pimoroni-pico-lipo-2-xl-w",
+        feature = "board-sparkfun-iot-redboard-rp2350",
         feature = "board-pimoroni-pico-plus-2",
         feature = "board-pimoroni-pico-plus-2-w",
-        feature = "board-rpi-pico2",
-        feature = "board-rpi-pico2-w"
+        feature = "board-raspberrypi-pico-2",
+        feature = "board-raspberrypi-pico-2-w"
     )) {
         println!("cargo:rustc-cfg=rhu_uart_rows");
         println!("cargo:rustc-cfg=rhu_uart_pl011");
@@ -216,17 +225,20 @@ fn main() {
     if cfg!(any(
         feature = "adafruit-feather-rp2350-hstx-xtal12",
         feature = "adafruit-feather-rp2350-hstx-psram-xtal12",
+        feature = "adafruit-metro-rp2350-xtal12",
+        feature = "adafruit-metro-rp2350-psram-xtal12",
         feature = "pimoroni-pico-lipo-2-xtal12",
         feature = "pimoroni-pico-lipo-2-xl-w-xtal12",
+        feature = "sparkfun-iot-redboard-rp2350-xtal12",
         feature = "pimoroni-pico-plus-2-xtal12",
         feature = "pimoroni-pico-plus-2-w-xtal12",
-        feature = "rpi-pico2-xtal12",
-        feature = "rpi-pico2-w-xtal12"
+        feature = "raspberrypi-pico-2-xtal12",
+        feature = "raspberrypi-pico-2-w-xtal12"
     )) {
         println!("cargo:rustc-cfg=rp2350_xtal");
     }
-    // The rows with a PSRAM part (the two Pimoroni Pico Plus 2 rows, the Pico
-    // LiPo 2 and the Feather RP2350 with PSRAM) carry 8 MB of PSRAM behind the flash
+    // The rows with a PSRAM part (the two Pimoroni Pico Plus 2 rows, the two Pico
+    // LiPo 2 rows, the IoT RedBoard RP2350, the Feather RP2350 with PSRAM and the Metro RP2350 with PSRAM) carry 8 MB of PSRAM behind the flash
     // interface's second chip select. The window is brought up at the PLL
     // posture alone: at the 12 MHz crystal posture the part's chip-select
     // limit cannot be bounded with a cache line in flight (the PSRAM
@@ -238,14 +250,18 @@ fn main() {
             feature = "board-pimoroni-pico-plus-2-w",
             feature = "board-pimoroni-pico-lipo-2",
             feature = "board-pimoroni-pico-lipo-2-xl-w",
-            feature = "board-adafruit-feather-rp2350-hstx-psram"
+            feature = "board-sparkfun-iot-redboard-rp2350",
+            feature = "board-adafruit-feather-rp2350-hstx-psram",
+            feature = "board-adafruit-metro-rp2350-psram"
         ),
         not(any(
             feature = "pimoroni-pico-plus-2-xtal12",
             feature = "pimoroni-pico-plus-2-w-xtal12",
             feature = "pimoroni-pico-lipo-2-xtal12",
             feature = "pimoroni-pico-lipo-2-xl-w-xtal12",
-            feature = "adafruit-feather-rp2350-hstx-psram-xtal12"
+            feature = "sparkfun-iot-redboard-rp2350-xtal12",
+            feature = "adafruit-feather-rp2350-hstx-psram-xtal12",
+            feature = "adafruit-metro-rp2350-psram-xtal12"
         ))
     ));
     println!("cargo:rustc-check-cfg=cfg(rhu_psram_window)");
@@ -281,24 +297,41 @@ fn main() {
         println!("cargo:rustc-cfg=rhu_mps2_window");
     }
     // One cfg for every row with an external RAM range, whatever brings it
-    // up: the arena's second window, the RAM-range doors' count, the
+    // up: the arena's second window, the RAM-range functions' count, the
     // rehydrated-data region's zeroing and the api flavor's cases read it;
     // the bring-up sites keep their rows' cfgs.
     println!("cargo:rustc-check-cfg=cfg(rhu_extram_window)");
     if psram_window || sdram_window || mps2_window {
         println!("cargo:rustc-cfg=rhu_extram_window");
     }
-    // The STM32F769 row's microSD socket on the chip's SDMMC2 controller --
-    // the host, the card layer and the boot banner's sd line compile where
-    // the socket is (both postures); every other row serves no block device
-    // and the emulator images carry none of it. The doctored control (the
-    // host capacity bit cleared in ACMD41's argument) exists only there.
+    // The STM32F769 row's microSD socket on the chip's SDMMC2 controller, the
+    // two Adafruit Metro RP2350 rows' socket on the chip's first SPI block
+    // and the SparkFun IoT RedBoard RP2350 row's on its second -- the host,
+    // the card layer and the boot banner's sd line compile
+    // where a socket is (both postures); every other row serves no block
+    // device and the emulator images carry none of it. The doctored control
+    // (the host capacity bit cleared in ACMD41's argument) exists only on the
+    // STM32F769 row.
     println!("cargo:rustc-check-cfg=cfg(rhu_sd_socket)");
-    if cfg!(feature = "board-st-stm32f769i-disco") {
+    if cfg!(any(feature = "board-st-stm32f769i-disco", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-sparkfun-iot-redboard-rp2350")) {
         println!("cargo:rustc-cfg=rhu_sd_socket");
+    }
+    // The file family's table (fs.rs) compiles where the FAT layer does: the
+    // socket rows' images but the STM32F769 row's doctored control; every
+    // other image carries the family's records and codes and the functions'
+    // no-socket shape alone.
+    println!("cargo:rustc-check-cfg=cfg(rhu_fs_none)");
+    if !cfg!(any(feature = "board-st-stm32f769i-disco", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-sparkfun-iot-redboard-rp2350")) || cfg!(feature = "test-sd-doctored") {
+        println!("cargo:rustc-cfg=rhu_fs_none");
     }
     if cfg!(feature = "test-sd-doctored") && !cfg!(feature = "board-st-stm32f769i-disco") {
         panic!("test-sd-doctored is the control of the STM32F769 row's card socket (the host capacity bit cleared in ACMD41's argument): select board-st-stm32f769i-disco beside it");
+    }
+    // The flight flavor of a socket row's api image (the SD and FAT family
+    // alone after the boot): the api flavor and a socket row beside it, never
+    // alone.
+    if cfg!(feature = "test-sd-flight") && !(cfg!(feature = "api-smoke") && cfg!(any(feature = "board-st-stm32f769i-disco", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-sparkfun-iot-redboard-rp2350"))) {
+        panic!("test-sd-flight is the flight flavor of a socket row's api image (the SD and FAT checks alone): select api-smoke and a row with a microSD socket beside it");
     }
     // The external RAM's init mode. A lazy feature compiles to its cfg
     // only where the image has an external window to be lazy about (the
@@ -423,12 +456,15 @@ fn main() {
     if cfg!(any(
         feature = "board-adafruit-feather-rp2350-hstx",
         feature = "board-adafruit-feather-rp2350-hstx-psram",
+        feature = "board-adafruit-metro-rp2350",
+        feature = "board-adafruit-metro-rp2350-psram",
         feature = "board-pimoroni-pico-lipo-2",
         feature = "board-pimoroni-pico-lipo-2-xl-w",
+        feature = "board-sparkfun-iot-redboard-rp2350",
         feature = "board-pimoroni-pico-plus-2",
         feature = "board-pimoroni-pico-plus-2-w",
-        feature = "board-rpi-pico2",
-        feature = "board-rpi-pico2-w"
+        feature = "board-raspberrypi-pico-2",
+        feature = "board-raspberrypi-pico-2-w"
     )) {
         println!("cargo:rustc-cfg=rhu_bus_rows");
         println!("cargo:rustc-cfg=rhu_bus_rp2350");
@@ -436,8 +472,8 @@ fn main() {
     if cfg!(all(feature = "board-mps2-an505", feature = "test-bus-rp2350")) {
         println!("cargo:rustc-cfg=rhu_bus_rp2350");
     }
-    // The rows whose facts carry a PWM or an ADC table compile the doors'
-    // served halves; the rest compile the count and enumeration doors alone
+    // The rows whose facts carry a PWM or an ADC table compile the functions'
+    // served halves; the rest compile the count and enumeration functions alone
     // and refuse the others. The emulator rows carry the virtual models, and
     // the api flavor's model-backed checks run there alone; the RP2350 rows
     // serve the chip's slices and converter.
@@ -450,13 +486,30 @@ fn main() {
     if cfg!(any(
         feature = "board-adafruit-feather-rp2350-hstx",
         feature = "board-adafruit-feather-rp2350-hstx-psram",
+        feature = "board-adafruit-metro-rp2350",
+        feature = "board-adafruit-metro-rp2350-psram",
         feature = "board-pimoroni-pico-lipo-2",
         feature = "board-pimoroni-pico-lipo-2-xl-w",
+        feature = "board-sparkfun-iot-redboard-rp2350",
         feature = "board-pimoroni-pico-plus-2",
         feature = "board-pimoroni-pico-plus-2-w",
-        feature = "board-rpi-pico2",
-        feature = "board-rpi-pico2-w"
+        feature = "board-raspberrypi-pico-2",
+        feature = "board-raspberrypi-pico-2-w"
     )) {
         println!("cargo:rustc-cfg=rhu_pwm_adc_rows");
     }
+
+    // The version of record: the one line of the VERSION file at the
+    // repository root, handed to the crate as a build-time constant (the
+    // banner prints it as a compile-time literal: flash alone, no RAM). A
+    // file absent, empty, of more than one line or not ASCII refuses the
+    // build; the build reruns when the file moves.
+    let version_file = concat!(env!("CARGO_MANIFEST_DIR"), "/../../VERSION");
+    println!("cargo:rerun-if-changed={version_file}");
+    let version = std::fs::read_to_string(version_file).unwrap_or_else(|e| panic!("VERSION at the repository root: {e}"));
+    let version = version.trim_end_matches(['\n', '\r']);
+    if version.is_empty() || !version.is_ascii() || version.chars().any(char::is_whitespace) {
+        panic!("VERSION at the repository root must hold one ASCII line without spaces (read {version:?})");
+    }
+    println!("cargo:rustc-env=RHU_VERSION={version}");
 }

@@ -22,7 +22,7 @@ unsafe fn call(op: u32, param: u32) -> u32 { unsafe {
     ret
 }}
 
-/// The program's end (the two exit doors and the fault funnel): the
+/// The program's end (the two exit functions and the fault funnel): the
 /// census line, the handler stack's watermark line where the image measures
 /// it, the exit code and the end magic stored into the mirror's
 /// header, the held wires drained, then the semihosting exit
@@ -33,7 +33,7 @@ pub fn end(state: u32, code: i32) -> ! {
     crate::sched::tick_witness_print();
     crate::stack_watermark::report();
     ring::end_mark(state, code);
-    // A UART wire the console holds through the UART doors' module drains
+    // A UART wire the console holds through the kernel's UART API's module drains
     // through its interrupt; the exit waits for its ring and transmitter so
     // the transcript is on the wire whole before the machine stops.
     crate::uart::drain_held();

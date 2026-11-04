@@ -297,7 +297,7 @@ fn gave_up(d: &I2cBus, hz: u32, msgs: &[I2cMsg], issued: u32, out: &mut Outcome)
     reset_out(d, hz, message, byte, out)
 }
 
-/// One combined transaction. `hz` is the claimed rate (the bus doors store
+/// One combined transaction. `hz` is the claimed rate (the kernel's bus API stores
 /// it as the mode; the driver stores nothing); `budget_ticks` one step's
 /// wire-wait budget; `deadline_ns` the caller's bound on the whole
 /// transaction.

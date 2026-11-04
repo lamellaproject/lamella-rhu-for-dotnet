@@ -1,5 +1,5 @@
-//! The emulator rows' CMSDK APB UARTs as the UART doors' backend (`uart.rs`
-//! owns the rings, the witness and the doors). Both
+//! The emulator rows' CMSDK APB UARTs as the kernel's UART API's backend (`uart.rs`
+//! owns the rings, the witness and the functions). Both
 //! rows carry the block twice: UART0 (the consoles' default wire, driven
 //! polled by the board module -- this backend never touches a block the
 //! console holds that way) and UART1, the program's port by default, on
@@ -163,7 +163,7 @@ pub fn rx_flush(ix: usize) {
     }
 }
 
-/// No break control on this part (the door refuses before it reaches here).
+/// No break control on this part (the function refuses before it reaches here).
 pub fn set_break(_ix: usize, _on: bool) {}
 
 /// The status bits read and written back to clear; a receive overrun
@@ -182,7 +182,7 @@ pub fn loopback(_ix: usize, _on: bool) -> bool {
     false
 }
 
-/// The four handlers (a line per direction per block), each the doors'
+/// The four handlers (a line per direction per block), each the functions'
 /// module's handler for its block.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __rhu_cmsdk_uart0_rx_irq() {

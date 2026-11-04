@@ -37,11 +37,17 @@ pub mod facts;
 #[cfg(feature = "board-adafruit-feather-rp2350-hstx-psram")]
 #[path = "facts/adafruit_feather_rp2350_hstx_psram.rs"]
 pub mod facts;
+#[cfg(any(feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram"))]
+#[path = "facts/adafruit_metro_rp2350.rs"]
+pub mod facts;
 #[cfg(feature = "board-pimoroni-pico-lipo-2")]
 #[path = "facts/pimoroni_pico_lipo_2.rs"]
 pub mod facts;
 #[cfg(feature = "board-pimoroni-pico-lipo-2-xl-w")]
 #[path = "facts/pimoroni_pico_lipo_2_xl_w.rs"]
+pub mod facts;
+#[cfg(feature = "board-sparkfun-iot-redboard-rp2350")]
+#[path = "facts/sparkfun_iot_redboard_rp2350.rs"]
 pub mod facts;
 #[cfg(feature = "board-pimoroni-pico-plus-2")]
 #[path = "facts/pimoroni_pico_plus_2.rs"]
@@ -49,11 +55,11 @@ pub mod facts;
 #[cfg(feature = "board-pimoroni-pico-plus-2-w")]
 #[path = "facts/pimoroni_pico_plus_2_w.rs"]
 pub mod facts;
-#[cfg(feature = "board-rpi-pico2")]
-#[path = "facts/rpi_pico2.rs"]
+#[cfg(feature = "board-raspberrypi-pico-2")]
+#[path = "facts/raspberrypi_pico_2.rs"]
 pub mod facts;
-#[cfg(feature = "board-rpi-pico2-w")]
-#[path = "facts/rpi_pico2_w.rs"]
+#[cfg(feature = "board-raspberrypi-pico-2-w")]
+#[path = "facts/raspberrypi_pico_2_w.rs"]
 pub mod facts;
 #[cfg(feature = "board-st-nucleo-l4r5zi")]
 #[path = "facts/st_nucleo_l4r5zi.rs"]
@@ -83,21 +89,21 @@ pub mod facts;
 #[path = "facts/arduino_portenta_machine_control.rs"]
 pub mod facts;
 
-/// The GPIO family driver behind the doors (`crate::board::gpio_backend`):
+/// The GPIO family driver behind the kernel's GPIO API (`crate::board::gpio_backend`):
 /// the virtual backend on the emulator rows, ST's block with its family's
 /// interrupt arm on the ST boards, the RP2350's half on the Picos.
 #[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
 pub mod virt_gpio;
 #[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
 pub use virt_gpio as gpio_backend;
-#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2", feature = "board-raspberrypi-pico-2-w"))]
 pub use rp2350::gpio_backend;
 #[cfg(any(feature = "board-st-nucleo-l4r5zi", feature = "board-st-nucleo-u5a5zj-q", feature = "board-st-stm32f746g-disco", feature = "board-st-stm32f769i-disco", feature = "board-arduino-giga-r1-wifi", feature = "board-arduino-portenta-h7", feature = "board-arduino-portenta-h7-lite", feature = "board-arduino-portenta-h7-lite-connected", feature = "board-arduino-portenta-machine-control"))]
 pub mod stm32_gpio;
 #[cfg(any(feature = "board-st-nucleo-l4r5zi", feature = "board-st-nucleo-u5a5zj-q", feature = "board-st-stm32f746g-disco", feature = "board-st-stm32f769i-disco", feature = "board-arduino-giga-r1-wifi", feature = "board-arduino-portenta-h7", feature = "board-arduino-portenta-h7-lite", feature = "board-arduino-portenta-h7-lite-connected", feature = "board-arduino-portenta-machine-control"))]
 pub use stm32_gpio as gpio_backend;
 
-/// The bus doors' backends (`crate::board::bus_backend`: the register seam
+/// The kernel's bus API's backends (`crate::board::bus_backend`: the register seam
 /// and the pad seam; `i2c_driver` and `spi_driver`: the family drivers over
 /// it): on the two emulator rows the register-level models of the ST blocks
 /// with the drivers of the blocks each row models -- the STM32F7's I2C and
@@ -123,25 +129,25 @@ pub use virt_pwm as pwm_backend;
 pub mod virt_adc;
 #[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
 pub use virt_adc as adc_backend;
-#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2", feature = "board-raspberrypi-pico-2-w"))]
 pub mod rp2350_map;
-#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2", feature = "board-raspberrypi-pico-2-w"))]
 pub mod rp2350_pwm;
-#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2", feature = "board-raspberrypi-pico-2-w"))]
 pub use rp2350_pwm as pwm_backend;
-#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2", feature = "board-raspberrypi-pico-2-w"))]
 pub mod rp2350_adc;
-#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2", feature = "board-raspberrypi-pico-2-w"))]
 pub use rp2350_adc as adc_backend;
-// The UART doors' backend: the PL011 blocks on the Pico rows, the
+// The kernel's UART API's backend: the PL011 blocks on the Pico rows, the
 // CMSDK UARTs on the emulator rows; the ST rows carry no UART table.
 #[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
 pub mod cmsdk_uart;
 #[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
 pub use cmsdk_uart as uart_backend;
-#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2", feature = "board-raspberrypi-pico-2-w"))]
 pub mod rp2350_uart;
-#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2", feature = "board-raspberrypi-pico-2-w"))]
 pub use rp2350_uart as uart_backend;
 // The Portenta rows' power-management chip reading flavor
 // runs the same drivers over the silicon backend; the H7's GPIO ports share
@@ -177,7 +183,7 @@ pub use mps2_an505::*;
 
 // The RP2350 boards share one chip module; each board file states its
 // own facts and re-exports the rest from it.
-#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2", feature = "board-raspberrypi-pico-2-w"))]
 mod rp2350;
 
 #[cfg(feature = "board-adafruit-feather-rp2350-hstx")]
@@ -190,6 +196,16 @@ mod adafruit_feather_rp2350_hstx_psram;
 #[cfg(feature = "board-adafruit-feather-rp2350-hstx-psram")]
 pub use adafruit_feather_rp2350_hstx_psram::*;
 
+#[cfg(feature = "board-adafruit-metro-rp2350")]
+mod adafruit_metro_rp2350;
+#[cfg(feature = "board-adafruit-metro-rp2350")]
+pub use adafruit_metro_rp2350::*;
+
+#[cfg(feature = "board-adafruit-metro-rp2350-psram")]
+mod adafruit_metro_rp2350_psram;
+#[cfg(feature = "board-adafruit-metro-rp2350-psram")]
+pub use adafruit_metro_rp2350_psram::*;
+
 #[cfg(feature = "board-pimoroni-pico-lipo-2")]
 mod pimoroni_pico_lipo_2;
 #[cfg(feature = "board-pimoroni-pico-lipo-2")]
@@ -198,6 +214,10 @@ pub use pimoroni_pico_lipo_2::*;
 mod pimoroni_pico_lipo_2_xl_w;
 #[cfg(feature = "board-pimoroni-pico-lipo-2-xl-w")]
 pub use pimoroni_pico_lipo_2_xl_w::*;
+#[cfg(feature = "board-sparkfun-iot-redboard-rp2350")]
+mod sparkfun_iot_redboard_rp2350;
+#[cfg(feature = "board-sparkfun-iot-redboard-rp2350")]
+pub use sparkfun_iot_redboard_rp2350::*;
 
 #[cfg(feature = "board-pimoroni-pico-plus-2")]
 mod pimoroni_pico_plus_2;
@@ -209,15 +229,15 @@ mod pimoroni_pico_plus_2_w;
 #[cfg(feature = "board-pimoroni-pico-plus-2-w")]
 pub use pimoroni_pico_plus_2_w::*;
 
-#[cfg(feature = "board-rpi-pico2")]
-mod rpi_pico2;
-#[cfg(feature = "board-rpi-pico2")]
-pub use rpi_pico2::*;
+#[cfg(feature = "board-raspberrypi-pico-2")]
+mod raspberrypi_pico_2;
+#[cfg(feature = "board-raspberrypi-pico-2")]
+pub use raspberrypi_pico_2::*;
 
-#[cfg(feature = "board-rpi-pico2-w")]
-mod rpi_pico2_w;
-#[cfg(feature = "board-rpi-pico2-w")]
-pub use rpi_pico2_w::*;
+#[cfg(feature = "board-raspberrypi-pico-2-w")]
+mod raspberrypi_pico_2_w;
+#[cfg(feature = "board-raspberrypi-pico-2-w")]
+pub use raspberrypi_pico_2_w::*;
 
 // The STM32L4+ boards share one family module; each board file states its
 // own facts and re-exports the rest from it.
@@ -246,8 +266,35 @@ pub mod stm32f7_sdram;
 #[cfg(rhu_qspi_window)]
 pub mod stm32f7_qspi;
 /// The STM32F769's microSD socket on the chip's SDMMC2 controller.
-#[cfg(rhu_sd_socket)]
+#[cfg(feature = "board-st-stm32f769i-disco")]
 pub mod stm32f7_sdmmc;
+/// The socket row's card host under one name for the block layer
+/// (`crate::board::sd`): the host type and its constructor, the yield
+/// switch, the ticks, the witness words, the yields, the detect line's
+/// level, the data rate and the bus's name -- the STM32F769's SDMMC2 host
+/// here, the Metro rows' SPI-mode host below.
+#[cfg(feature = "board-st-stm32f769i-disco")]
+pub mod sd {
+    pub use super::stm32f7_sdmmc::{cycles as ticks, last_flags as last_words, Sdmmc2Host as Host, CARD_HZ_TRANSFER as DATA_HZ};
+    pub const BUS_NAME: &str = "SDMMC2";
+    /// The host's ticks run at the boot banner (the core's cycle counter, armed there).
+    #[cfg(feature = "api-smoke")]
+    pub const TICKS_AT_BOOT: bool = true;
+    pub const fn new() -> Host {
+        Host::new()
+    }
+    pub fn set_yielding(h: &mut Host, on: bool) {
+        h.yielding = on;
+    }
+    #[cfg(feature = "api-smoke")]
+    pub fn yields() -> u32 {
+        super::stm32f7_sdmmc::YIELDS.load(core::sync::atomic::Ordering::Relaxed)
+    }
+    /// The card-detect line's level as the pad reads it.
+    pub fn detect_level() -> bool {
+        super::gpio_backend::read(super::facts::SD_DETECT_LINE)
+    }
+}
 
 #[cfg(feature = "board-st-stm32f746g-disco")]
 mod st_stm32f746g_disco;
@@ -301,7 +348,7 @@ const _: () = assert!(FPU_DP != cfg!(feature = "fpemul"), "the board's FPU_DP an
 
 /// The interrupt lines a board claims with its own handlers (the line and
 /// the handler), folded into the vector table by the boot module. The two
-/// emulator rows claim their CMSDK UARTs' lines (the UART doors' backend);
+/// emulator rows claim their CMSDK UARTs' lines (the kernel's UART API's backend);
 /// every silicon board states its own list.
 #[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
 pub use cmsdk_uart::BOARD_IRQS;
@@ -316,12 +363,15 @@ const SELECTED_BOARDS: usize = cfg!(feature = "board-mps2-an500") as usize
     + cfg!(feature = "board-mps2-an505") as usize
     + cfg!(feature = "board-adafruit-feather-rp2350-hstx") as usize
     + cfg!(feature = "board-adafruit-feather-rp2350-hstx-psram") as usize
+    + cfg!(feature = "board-adafruit-metro-rp2350") as usize
+    + cfg!(feature = "board-adafruit-metro-rp2350-psram") as usize
     + cfg!(feature = "board-pimoroni-pico-lipo-2") as usize
     + cfg!(feature = "board-pimoroni-pico-lipo-2-xl-w") as usize
+    + cfg!(feature = "board-sparkfun-iot-redboard-rp2350") as usize
     + cfg!(feature = "board-pimoroni-pico-plus-2") as usize
     + cfg!(feature = "board-pimoroni-pico-plus-2-w") as usize
-    + cfg!(feature = "board-rpi-pico2") as usize
-    + cfg!(feature = "board-rpi-pico2-w") as usize
+    + cfg!(feature = "board-raspberrypi-pico-2") as usize
+    + cfg!(feature = "board-raspberrypi-pico-2-w") as usize
     + cfg!(feature = "board-st-nucleo-l4r5zi") as usize
     + cfg!(feature = "board-st-nucleo-u5a5zj-q") as usize
     + cfg!(feature = "board-st-stm32f746g-disco") as usize
@@ -338,11 +388,17 @@ compile_error!("adafruit-feather-rp2350-hstx-xtal12 is a posture of board-adafru
 
 #[cfg(all(feature = "adafruit-feather-rp2350-hstx-psram-xtal12", not(feature = "board-adafruit-feather-rp2350-hstx-psram")))]
 compile_error!("adafruit-feather-rp2350-hstx-psram-xtal12 is a posture of board-adafruit-feather-rp2350-hstx-psram -- select that board");
+#[cfg(all(feature = "adafruit-metro-rp2350-xtal12", not(feature = "board-adafruit-metro-rp2350")))]
+compile_error!("adafruit-metro-rp2350-xtal12 is a posture of board-adafruit-metro-rp2350 -- select that board");
+#[cfg(all(feature = "adafruit-metro-rp2350-psram-xtal12", not(feature = "board-adafruit-metro-rp2350-psram")))]
+compile_error!("adafruit-metro-rp2350-psram-xtal12 is a posture of board-adafruit-metro-rp2350-psram -- select that board");
 
 #[cfg(all(feature = "pimoroni-pico-lipo-2-xtal12", not(feature = "board-pimoroni-pico-lipo-2")))]
 compile_error!("pimoroni-pico-lipo-2-xtal12 is a posture of board-pimoroni-pico-lipo-2 -- select that board");
 #[cfg(all(feature = "pimoroni-pico-lipo-2-xl-w-xtal12", not(feature = "board-pimoroni-pico-lipo-2-xl-w")))]
 compile_error!("pimoroni-pico-lipo-2-xl-w-xtal12 is a posture of board-pimoroni-pico-lipo-2-xl-w -- select that board");
+#[cfg(all(feature = "sparkfun-iot-redboard-rp2350-xtal12", not(feature = "board-sparkfun-iot-redboard-rp2350")))]
+compile_error!("sparkfun-iot-redboard-rp2350-xtal12 is a posture of board-sparkfun-iot-redboard-rp2350 -- select that board");
 
 #[cfg(all(feature = "pimoroni-pico-plus-2-xtal12", not(feature = "board-pimoroni-pico-plus-2")))]
 compile_error!("pimoroni-pico-plus-2-xtal12 is a posture of board-pimoroni-pico-plus-2 -- select that board");
@@ -350,11 +406,11 @@ compile_error!("pimoroni-pico-plus-2-xtal12 is a posture of board-pimoroni-pico-
 #[cfg(all(feature = "pimoroni-pico-plus-2-w-xtal12", not(feature = "board-pimoroni-pico-plus-2-w")))]
 compile_error!("pimoroni-pico-plus-2-w-xtal12 is a posture of board-pimoroni-pico-plus-2-w -- select that board");
 
-#[cfg(all(feature = "rpi-pico2-xtal12", not(feature = "board-rpi-pico2")))]
-compile_error!("rpi-pico2-xtal12 is a posture of board-rpi-pico2 -- select that board");
+#[cfg(all(feature = "raspberrypi-pico-2-xtal12", not(feature = "board-raspberrypi-pico-2")))]
+compile_error!("raspberrypi-pico-2-xtal12 is a posture of board-raspberrypi-pico-2 -- select that board");
 
-#[cfg(all(feature = "rpi-pico2-w-xtal12", not(feature = "board-rpi-pico2-w")))]
-compile_error!("rpi-pico2-w-xtal12 is a posture of board-rpi-pico2-w -- select that board");
+#[cfg(all(feature = "raspberrypi-pico-2-w-xtal12", not(feature = "board-raspberrypi-pico-2-w")))]
+compile_error!("raspberrypi-pico-2-w-xtal12 is a posture of board-raspberrypi-pico-2-w -- select that board");
 
 #[cfg(all(feature = "st-nucleo-l4r5zi-pll120", not(feature = "board-st-nucleo-l4r5zi")))]
 compile_error!("st-nucleo-l4r5zi-pll120 is a posture of board-st-nucleo-l4r5zi -- select that board");
@@ -444,7 +500,7 @@ impl EntropyPosture {
 
 /// What a hardware draw can refuse: no source serves; the block's own
 /// health check failed at this draw; the bytes were not ready within the
-/// door's bound.
+/// function's bound.
 #[allow(dead_code)] // constructed by the silicon rows' drivers
 pub enum EntropyErr {
     NoSource,
@@ -548,13 +604,13 @@ pub fn arena_window1() -> (usize, usize) {
 /// The rows that carry a wireless module: its interrupt line is registered
 /// as a tenant of the GPIO bank's handler, so the wifi test program can
 /// wait on the module's wake word.
-#[cfg(all(feature = "unhosted-main", any(feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2-w")))]
+#[cfg(all(feature = "unhosted-main", any(feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2-w")))]
 pub fn unhosted_tenant_init() -> i32 {
     rp2350::wireless_tenant::init()
 }
 
 /// Every other row: nothing to register.
-#[cfg(all(feature = "unhosted-main", not(any(feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2-w"))))]
+#[cfg(all(feature = "unhosted-main", not(any(feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2-w"))))]
 pub fn unhosted_tenant_init() -> i32 {
     0
 }
@@ -567,9 +623,9 @@ pub fn unhosted_tenant_init() -> i32 {
 /// emulator row carries register-level models of the two blocks
 /// (`virt_bus_rp2350`) in place of the ST blocks' models, so the same
 /// drivers are gated on QEMU; the feature names that row alone.
-#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2", feature = "board-raspberrypi-pico-2-w"))]
 pub mod rp2350_bus;
-#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-rpi-pico2", feature = "board-rpi-pico2-w"))]
+#[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2", feature = "board-raspberrypi-pico-2-w"))]
 pub use rp2350_bus as bus_backend;
 #[cfg(all(feature = "board-mps2-an505", feature = "test-bus-rp2350"))]
 pub mod virt_bus_rp2350;
@@ -583,6 +639,18 @@ pub use rp2350_i2c as i2c_driver;
 pub mod rp2350_spi;
 #[cfg(rhu_bus_rp2350)]
 pub use rp2350_spi as spi_driver;
+/// The RP2350 boards' microSD socket on an SPI block of the chip (the two
+/// Adafruit Metro RP2350 boards' on the first, the SparkFun IoT RedBoard
+/// RP2350's on the second): the SPI-mode card host's wire, and the host
+/// under the block layer's one name.
+#[cfg(all(rhu_sd_socket, any(feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-sparkfun-iot-redboard-rp2350")))]
+pub mod rp2350_sdspi;
+#[cfg(all(rhu_sd_socket, any(feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-sparkfun-iot-redboard-rp2350")))]
+pub mod sd {
+    pub use super::rp2350_sdspi::{detect_level, last_words, new, set_yielding, ticks, Host, BUS_NAME, DATA_HZ};
+    #[cfg(feature = "api-smoke")]
+    pub use super::rp2350_sdspi::{yields, TICKS_AT_BOOT};
+}
 #[cfg(all(feature = "test-bus-rp2350", not(feature = "board-mps2-an505")))]
 compile_error!("feature `test-bus-rp2350` requires `board-mps2-an505`: the RP2350's bus models stand in on the Cortex-M33 emulator row alone");
 
