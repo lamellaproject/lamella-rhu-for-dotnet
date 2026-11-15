@@ -23,8 +23,16 @@
 
 use crate::board::bus_backend as hw;
 use crate::bus::{i2c_recover, wait_until, Fault, Outcome, Recovery};
-use crate::bus_math::{I2cBus, I2cMsg, MSG_READ};
+use crate::bus_math::{self as m, I2cBus, I2cMsg, MSG_READ};
 use crate::sched;
+
+/// The row's fact for fast mode plus, which its facts state beside its bus
+/// table. The power-management chip's reading flavor lends this driver to a
+/// bus that it reads at standard mode alone: it states none.
+#[cfg(not(feature = "test-h7-pmic-read"))]
+use crate::board::facts::I2C_FAST_PLUS as FAST_PLUS;
+#[cfg(feature = "test-h7-pmic-read")]
+const FAST_PLUS: Option<m::I2cFastPlus> = None;
 
 const CR1: usize = 0x00;
 const CR2: usize = 0x04;
@@ -35,6 +43,10 @@ const RXDR: usize = 0x24;
 const TXDR: usize = 0x28;
 
 const CR1_PE: u32 = 1 << 0;
+/// The drive of fast mode plus on the block's two pads, on a chip whose
+/// control register 1 carries the bit (RM0456 65.9.1); a row's fact for the
+/// mode says whether it does.
+const CR1_FMP: u32 = 1 << 24;
 const CR2_RD_WRN: u32 = 1 << 10;
 const CR2_START: u32 = 1 << 13;
 const CR2_STOP: u32 = 1 << 14;
@@ -52,22 +64,37 @@ const ISR_FAULTS: u32 = ISR_NACKF | ISR_BERR | ISR_ARLO;
 /// A wait spins for two byte times at 100 kHz before its first yield.
 const SPIN_NS: u64 = 2 * 9 * 10_000;
 
-/// The bus taken: the block's clock enabled and its kernel clock selected,
-/// the bus recovered through the pads while they are still plain lines (a
-/// device left mid-read holds the data line low: up to nine clocks free it,
-/// then a stop), the pads handed to the block, the block enabled at the
-/// timing word. Returns whether a recovery happened.
-pub fn claim(d: &I2cBus, timing: u32) -> bool {
+/// The bus taken at a rate: the block's clock enabled and its kernel clock
+/// selected for the rate (`i2c_setup`), the bus recovered through the pads
+/// while they are still plain lines (a device left mid-read holds the data
+/// line low: up to nine clocks free it, then a stop), the pads handed to the
+/// block, the block enabled at the rate's timing word. Returns whether a
+/// recovery happened. A rate with no setup programs nothing: the bus API
+/// judges a rate by `timing` before it claims.
+pub fn claim(d: &I2cBus, hz: u32) -> bool {
+    let Some(s) = m::i2c_setup(d.mux_value, d.kernel_hz, FAST_PLUS, hz) else {
+        return false;
+    };
     hw::rmw(d.enable_reg, 0, 1 << d.enable_bit);
-    hw::rmw(d.mux_reg, 0b11 << d.mux_shift, d.mux_value << d.mux_shift);
+    hw::rmw(d.mux_reg, 0b11 << d.mux_shift, s.mux_value << d.mux_shift);
     let recovered = i2c_recover(d, false) != Recovery::None;
     for p in d.pads {
         hw::pad_take(p);
     }
     disable(d);
-    hw::wr(d.base + TIMINGR, timing);
-    hw::wr(d.base + CR1, CR1_PE);
+    hw::wr(d.base + TIMINGR, s.timing);
+    hw::wr(d.base + CR1, enable_word(s.drive));
     recovered
+}
+
+/// Control register 1 as the claim leaves it: the enable, and with it the
+/// drive bit of fast mode plus where the rate's setup asks for it.
+fn enable_word(drive: bool) -> u32 {
+    if drive {
+        CR1_PE | CR1_FMP
+    } else {
+        CR1_PE
+    }
 }
 
 /// The block disabled the way the manuals spell it: the enable written 0 and
@@ -85,9 +112,9 @@ fn disable(d: &I2cBus) {
 /// The block reset after a wait passed its budget: a stop asserted, the
 /// flags cleared, the enable bit dropped (the state machine's reset; the
 /// block is off its lines while it is 0), the bus recovered through the pads
-/// as plain lines, the pads handed back, the enable raised. Returns what the
-/// recovery found.
-fn reset(d: &I2cBus) -> Recovery {
+/// as plain lines, the pads handed back, the enable raised as the claim at
+/// the rate `hz` raised it. Returns what the recovery found.
+fn reset(d: &I2cBus, hz: u32) -> Recovery {
     hw::wr(d.base + CR2, CR2_STOP);
     hw::wr(d.base + ICR, ICR_ALL);
     disable(d);
@@ -95,7 +122,8 @@ fn reset(d: &I2cBus) -> Recovery {
     for p in d.pads {
         hw::pad_take(p);
     }
-    hw::wr(d.base + CR1, CR1_PE);
+    let drive = matches!(m::i2c_setup(d.mux_value, d.kernel_hz, FAST_PLUS, hz), Some(s) if s.drive);
+    hw::wr(d.base + CR1, enable_word(drive));
     recovery
 }
 
@@ -120,11 +148,11 @@ fn fault(d: &I2cBus, isr: u32, budget: u32, deadline_ns: u64, i: u32, done: u32,
     sched::ERR_IO
 }
 
-/// One combined transaction. `_hz` is the claimed rate, which this family
-/// takes and ignores (its one rate is its timing word); `budget_ticks` each
+/// One combined transaction. `hz` is the claimed rate, which the claim
+/// programmed and a reset of the block programs again; `budget_ticks` each
 /// wire wait's budget; `deadline_ns` the caller's bound on the whole
 /// transaction.
-pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], _hz: u32, budget_ticks: u32, deadline_ns: u64, out: &mut Outcome) -> i32 {
+pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], hz: u32, budget_ticks: u32, deadline_ns: u64, out: &mut Outcome) -> i32 {
     let base = d.base;
     let n = msgs.len();
     for (i, msg) in msgs.iter().enumerate() {
@@ -143,7 +171,7 @@ pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], _hz: u32, budget_ticks: u32, deadli
         while done < len {
             let want = if read { ISR_RXNE } else { ISR_TXIS };
             if !wait_until(budget_ticks, deadline_ns, SPIN_NS, || hw::rd(base + ISR) & (want | ISR_FAULTS) != 0) {
-                out.recovery = reset(d);
+                out.recovery = reset(d, hz);
                 out.message = i as u32;
                 out.byte = done;
                 out.kind = Fault::Budget;
@@ -162,7 +190,7 @@ pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], _hz: u32, budget_ticks: u32, deadli
         }
         let end = if last { ISR_STOPF } else { ISR_TC };
         if !wait_until(budget_ticks, deadline_ns, SPIN_NS, || hw::rd(base + ISR) & (end | ISR_FAULTS) != 0) {
-            out.recovery = reset(d);
+            out.recovery = reset(d, hz);
             out.message = i as u32;
             out.byte = done;
             out.kind = Fault::Budget;
@@ -179,6 +207,9 @@ pub fn transfer(d: &I2cBus, msgs: &[I2cMsg], _hz: u32, budget_ticks: u32, deadli
     0
 }
 
-/// The timing word for a rate at the block's kernel clock: this family's row
-/// of the bus arithmetic, asked by the kernel's bus API through the driver.
-pub use crate::bus_math::i2c_timing as timing;
+/// The rate's judgement for the kernel's bus API: the rate itself where the
+/// row serves it (the claim programs from the rate: `i2c_setup` holds the
+/// kernel clock and the timing word of each), None for a rate not served.
+pub fn timing(kernel_hz: u32, hz: u32) -> Option<u32> {
+    m::i2c_setup(0, kernel_hz, FAST_PLUS, hz).map(|_| hz)
+}

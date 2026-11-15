@@ -1,0 +1,8 @@
+shimtest-socklisten: a listening socket over a scripted kernel, from a native caller's side
+PASS shim-sock-listen-bind (the kernel given the address and the port of the caller's Linux record, the port in the host's order; the bound port read back through the local name; a record of another family EAFNOSUPPORT; a short record EFAULT)
+PASS shim-sock-listen-in-use (a second socket's bind to the port in use EADDRINUSE)
+PASS shim-sock-listen-listen (the backlog handed to the kernel and the socket then read as listening; an unbound socket EINVAL)
+PASS shim-sock-listen-none-ready (with no connection completed a non-blocking accept answers EAGAIN and no descriptor; a blocking accept answers EAGAIN at the receive timeout and not before)
+PASS shim-sock-listen-accept (a completed connection accepted at a new descriptor of the band with the peer's address in a Linux IPv4 record of 16 bytes; the new socket a blocking stream whose peer name is that address; a blocking accept answers a connection that completes during its wait)
+PASS shim-sock-listen-close (the listener and the two accepted sockets each closed through the kernel once)
+SHIMTEST-SOCKLISTEN: ALL GOOD (a listening socket over a scripted kernel, from a native caller's side)

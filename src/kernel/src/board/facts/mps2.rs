@@ -13,10 +13,11 @@ use crate::bus_math;
 use crate::claims;
 
 /// The line space: the highest line plus one.
+#[cfg(not(feature = "test-pwm-high-line"))]
 pub const LINE_COUNT: usize = 6;
 #[cfg(not(feature = "test-no-board-claims"))]
 pub const BOARD_CLAIMS: &[u16] = &[4];
-#[cfg(not(feature = "test-no-board-claims"))]
+#[cfg(not(any(feature = "test-no-board-claims", feature = "test-pwm-high-line")))]
 pub const BANNER: &str = "6 virtual lines (5 populated), 1 claimed by the board (the virtual console)";
 /// The api flavor's control `test-no-board-claims` (never a shipped image):
 /// the Pico rows' shape on this row -- no line claimed by the board (as
@@ -56,6 +57,7 @@ pub const fn input_only(line: u32) -> bool {
     line == 1
 }
 
+#[cfg(not(feature = "test-pwm-high-line"))]
 pub const fn populated(line: u32) -> bool {
     line != 5
 }
@@ -96,6 +98,13 @@ pub const I2C_BUSES: &[bus_math::I2cBus] = &[bus_math::I2cBus {
     kernel_hz: 16_000_000,
     pads: &[],
 }];
+/// Each twin's fact for fast mode plus: its bus's own kernel clock, and the
+/// drive bit of control register 1 on the Cortex-M33 twin alone -- the
+/// register file that twin models carries the bit.
+#[cfg(feature = "board-mps2-an500")]
+pub const I2C_FAST_PLUS: Option<bus_math::I2cFastPlus> = Some(bus_math::I2cFastPlus { mux_value: I2C_BUSES[0].mux_value, kernel_hz: I2C_BUSES[0].kernel_hz, drive: false });
+#[cfg(all(feature = "board-mps2-an505", not(feature = "test-bus-rp2350")))]
+pub const I2C_FAST_PLUS: Option<bus_math::I2cFastPlus> = Some(bus_math::I2cFastPlus { mux_value: I2C_BUSES[0].mux_value, kernel_hz: I2C_BUSES[0].kernel_hz, drive: true });
 #[cfg(feature = "board-mps2-an500")]
 pub const SPI_BUSES: &[bus_math::SpiBus] = &[bus_math::SpiBus {
     number: 2,
@@ -150,6 +159,7 @@ pub const PWM_TIMERS: &[crate::pwm_math::PwmTimer] = &[
     crate::pwm_math::PwmTimer { number: 1, clock_hz: 1_000_000, channels: 2, prescaler_max: 65536, period_max: 65536 },
     crate::pwm_math::PwmTimer { number: 2, clock_hz: 1_000_000, channels: 2, prescaler_max: 65536, period_max: 65536 },
 ];
+#[cfg(not(feature = "test-pwm-high-line"))]
 pub const PWM_LINES: &[crate::pwm_math::PwmLine] = &[
     crate::pwm_math::PwmLine { line: 0, timer: 0, channel: 0, alternate: 0 },
     crate::pwm_math::PwmLine { line: 2, timer: 0, channel: 1, alternate: 0 },
@@ -230,3 +240,27 @@ pub const UART_NAMES: &[&str] = &[];
 pub const UART_PAIRS: &[crate::console::UartPairs] = &[];
 /// No both-held banner line on this row.
 pub const BANNER_UART_BOTH: &str = "";
+
+/// The facts under the test word `test-pwm-high-line` (never a shipped
+/// image), each in place of the statement of the same name above: a line
+/// space of 176 lines (inside the claims table's reach, `claims::MAX_LINES`)
+/// whose one more populated line, 118, is a fourth PWM line on the second
+/// virtual timer's second channel. Lines 5 to 117 and 119 to 175 are
+/// unpopulated.
+#[cfg(feature = "test-pwm-high-line")]
+pub const LINE_COUNT: usize = 176;
+#[cfg(feature = "test-pwm-high-line")]
+pub const BANNER: &str = "176 virtual lines (6 populated), 1 claimed by the board (the virtual console)";
+#[cfg(feature = "test-pwm-high-line")]
+pub const fn populated(line: u32) -> bool {
+    line < 5 || line == 118
+}
+#[cfg(feature = "test-pwm-high-line")]
+pub const PWM_LINES: &[crate::pwm_math::PwmLine] = &[
+    crate::pwm_math::PwmLine { line: 0, timer: 0, channel: 0, alternate: 0 },
+    crate::pwm_math::PwmLine { line: 2, timer: 0, channel: 1, alternate: 0 },
+    crate::pwm_math::PwmLine { line: 3, timer: 1, channel: 0, alternate: 0 },
+    crate::pwm_math::PwmLine { line: 118, timer: 1, channel: 1, alternate: 0 },
+];
+#[cfg(all(feature = "test-pwm-high-line", feature = "test-no-board-claims"))]
+compile_error!("test-pwm-high-line beside test-no-board-claims: each states the emulator rows' banner, select one of the two");

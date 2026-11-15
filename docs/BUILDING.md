@@ -87,11 +87,40 @@ by exact version. This checkout builds the kernel; the gates build the hosted
 programs. RHU's board table has a row for each emulator machine and each
 supported board.
 
-The SDK compiles every configuration with the code optimization on and keeps
-the configuration's debug information, so the Debug configuration a plain
-`dotnet run` builds links an optimized image too; a build that sets `Optimize`
-to false by a global property gets the unoptimized code, which the smallest
-boards' arena floors refuse at the link, naming the remedy.
+The Debug configuration, which a plain `dotnet run` builds, leaves the
+program's own code unoptimized and compiles everything else with the code
+optimization on, on every board. The program's own code is the project's
+assembly and the class libraries it references by project, directly or
+through another project; the framework, every package and an assembly
+referenced as a compiled file are compiled optimized. In the image's debug
+information every statement of the program's own code that does something
+has a row of its own, every local has one location for the whole of its
+method, and every method is a function of its own, never inlined: two methods
+of one body are two functions, and only instantiations of one generic method
+may share one. The image's record says how it was compiled, in two keys: a
+Debug image has `program_codegen` `unoptimized` and `codegen_profile`
+`optimized`.
+
+Four things differ from an image compiled without the optimization as a
+whole. A line that holds only the brace of a block inside a method carries
+no code, so a breakpoint set on it has no place of its own; a method's
+closing brace keeps its code. A static field's initializer the compiler evaluates at build time
+cannot be stepped through: that code ran when the image was built. Stepping
+into a package's or the framework's code is not served. And a method the
+program itself marks `AggressiveOptimization` stays optimized.
+
+`Optimize` speaks for the program's own code alone, in any configuration:
+`-p:Optimize=true` compiles the program's own code optimized in a Debug build
+too (both keys `optimized`, as a Release image has them), and
+`-p:Optimize=false` leaves it unoptimized in a Release build
+(`program_codegen` `unoptimized`, `codegen_profile` `optimized`). A build with
+nothing changed does not run the native compiler again.
+
+A class library referenced by project is compiled under the SDK's path map,
+as the program is: the image names its sources under `/rhu/src/` and carries
+no path of the build machine. This has two costs: a referenced project's own
+`PathMap` is replaced under an RHU program's build, and no byte-for-byte tie
+across hosts is claimed for a program with a class library.
 
 The standard `System.Device.Gpio` package runs unchanged. Its Linux driver
 binds the libgpiod v1 API, which the hosting layer presents over the
@@ -118,6 +147,28 @@ is below the kernel's minimum, is above the row's clamp, or leaves fewer
 than three such stacks in the pool beside the idle thread's is refused
 before anything is compiled.
 
+The thread pool is bounded by the same pool. The build states the most
+workers the board holds beside the kernel's own threads and the runtime's
+service threads, in a line of its own with the arithmetic, and the runtime
+is told that number. A program's `ThreadPool.SetMaxThreads` with another
+number returns false; work items beyond the bound wait in the queue and all
+run. .NET's own project property `ThreadPoolMaxThreads` above the board's
+most, and `ThreadPoolMinThreads` above the bound, are refused before
+anything is compiled.
+
+The class library guards work that may nest deeply with the runtime's stack
+helper: a record's `ToString()`, compiled expression trees, the
+dependency-injection container, the non-backtracking regular expressions,
+a task's continuation asked to run synchronously and a wait for a task on a
+pool thread all ask it first. The helper says no while 6144 bytes of the
+thread's stack are left,
+so guarded code may use 10240 bytes of a 16384-byte stack and 2048 bytes of
+a thread started at 8192, and what it throws then is
+`InsufficientExecutionStackException`, which a program can catch. Code that
+asks no helper finds the stack's end as a stack overflow, which ends the
+image: formatting a double takes about 7680 bytes, and JSON nested 64 deep
+needs a thread started with a larger stack (`new Thread(body, 24576)`).
+
 An idle thread-pool worker gives its stack back to the pool after 100 ms
 (the runtime's own default keeps it for 20 s). The SDK property
 `RhuThreadPoolThreadTimeoutMs` (milliseconds, or `-1` for never) moves that
@@ -126,6 +177,9 @@ environment before a program's runtimeconfig switch, so the property is the
 way to set it; a value that is not a whole number of milliseconds or `-1`, a
 zero, or a value above the 32-bit range is refused before anything is
 compiled.
+
+Named mutexes are supported, and how many a program can hold open at once
+varies by board, according to the board's memory configuration.
 
 On a board with external RAM (the PSRAM of the Pimoroni Pico Plus 2, Pico
 Plus 2 W, Pico LiPo 2 and Pico LiPo 2 XL W, of the Adafruit Feather RP2350 with PSRAM, of the Adafruit Metro RP2350 with PSRAM and of the SparkFun IoT RedBoard RP2350, the
@@ -147,20 +201,53 @@ the thread stacks and the runtime's own small allocations) or `internal`
 build links the image under the board's payload map for `external` and
 under the board's second map for `internal`, and refuses `internal` on a
 board without external RAM and a value outside the two. The kernel is the same under either map: the
-hosting layer finds the heap's home by the map.
+hosting layer finds the heap's home by the map. The one exception is a
+board whose packages carry two kernels (`RhuNetwork` below): there
+`internal` also takes the kernel without the network.
 
 On the STM32F769I-DISCO, whose 64 MB quad-SPI flash the kernel maps at
 boot, the SDK property `RhuProgramMemory` says where a program's managed
-code and read-only data live: `internal` (the default: in the chip's 2 MB
-flash) or `external` (in the quad-SPI flash, executed in place, the managed
-code's unwind tables with them). The build renames those sections of the
-compiled object before the merge with the runtime archives, links the image
-under the board's external-flash map, and refuses `external` on a board
-without such a flash, a value outside the two, and `external` together with `RhuManagedMemory=internal`
-(the external-flash map keeps the heap in the SDRAM). The image is then two
-halves in one file, the chip's and the window's, written together; the
-`lamella` tool of this release writes the chip's flash alone, so such an
-image is written with a debugger that programs the board's quad-SPI flash.
+code and read-only data live: `external` (in the quad-SPI flash, executed
+in place, the managed code's unwind tables with them) or `internal` (in the
+chip's 2 MB flash). A project that names neither has the board's default
+home, which is `external` on this board, and `internal` wherever
+`RhuManagedMemory` is `internal`. For `external` the build renames those
+sections of the compiled object before the merge with the runtime archives
+and links the image under the board's external-flash map; it refuses
+`external` on a board without such a flash, a value outside the two, and
+`external` together with `RhuManagedMemory=internal` (the external-flash
+map keeps the heap in the SDRAM). The image is then two halves in one file,
+the chip's and the window's, written together: the `lamella` tool, from its
+version 0.4.0, writes both as a matched set through the board's own ST-LINK
+and reads both back.
+
+On the same board the SDK property `RhuNetwork` says whether the image
+links the kernel with the board's network: `on` or `off`. The board's
+packages carry two sets of kernels, one built with the network and one
+without it. A project that names nothing gets the kernel with the network,
+and the kernel without it where `RhuManagedMemory` is `internal`, because
+the network's buffers and the managed heap do not both fit the chip's own
+RAM; the build says in a line of its own when a program is built without
+networking. `off` takes the kernel without the network under every map and
+gives the program the memory the network holds. The build refuses a value
+outside the two, `on` together with `RhuManagedMemory=internal`, and either
+value on a board with one kernel, before anything is compiled; an image
+whose data leaves the chip's own RAM too little beside the network is
+refused at the link, in words that name the property.
+
+The Pimoroni Pico Plus 2 W and the Pico LiPo 2 XL W carry two sets of
+kernels in the same way, and `RhuNetwork` rules there as above; their
+network is the board's wifi radio. The radio runs firmware
+of its own, in a place of its own in the board's flash. The board's package
+carries it as one file with its record and its license, and the build names
+that file in a line of its own (`the board's flash region for a deploy`). A
+deploy writes it: `lamella flash <image> --region <the file>` writes the
+image and, where the board's flash does not hold the firmware yet, the
+firmware; a later deploy finds it in place and writes none of it. A program
+built with the default log level prints nothing about the radio on its
+console: the tool's lines say what the deploy did with the firmware, and
+the kernel's wifi lines appear when the project sets `RhuLogLevel` to
+`verbose` (below).
 
 The standard analog classes' voltage members (`ReadVoltage`, `MinVoltage`,
 `MaxVoltage` and the controller's `VoltageReference`) compute where the
@@ -168,7 +255,8 @@ runtime host configuration option `Lamella.Hardware.AnalogVoltage.IsSupported`
 is true. The SDK sets it per program: true when the board holds the library
 the classes express a voltage in (the two Pimoroni Pico Plus 2 boards and
 the Pico LiPo 2, the Pico LiPo 2 XL W, the two Adafruit Metro RP2350 boards and the SparkFun IoT RedBoard RP2350; the
-STM32F769I-DISCO under `RhuProgramMemory=external`) and the program's own
+STM32F769I-DISCO while the program lies in its external flash, the default
+there) and the program's own
 code, or a project it references, names one of the four members. Everywhere
 else the SDK sets the option false: the members throw `NotSupportedException` and the
 image carries no code of the library. A project may set the option itself;

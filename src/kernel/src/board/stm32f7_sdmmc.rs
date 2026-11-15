@@ -224,6 +224,10 @@ const COMMAND_BUDGET_US: u32 = 4_000;
 const BUSY_BUDGET_US: u32 = 2_000_000;
 /// Every budget stays under what the counter's wrap allows (19.8 s at 216 MHz).
 const BUDGET_CAP_US: u32 = 10_000_000;
+/// The detect line is read no sooner than this behind its pull-up: the
+/// millisecond the bring-up keeps between the pull and the line's reading,
+/// at which the reading stood on the board with the socket empty.
+const DETECT_SETTLE_US: Micros = 1_000;
 /// The pads' output speed: very high (OSPEEDR 11), the setting the
 /// datasheet characterizes the interface at.
 const SPEED_VERY_HIGH: u32 = 0b11;
@@ -275,11 +279,24 @@ pub struct Sdmmc2Host {
     /// does; the boot banner's identification runs before it and spins.
     pub yielding: bool,
     rate: Rate,
+    /// Whether the detect line has its mode and its pull (`detect_arm`).
+    detect_ready: bool,
 }
 
 impl Sdmmc2Host {
     pub const fn new() -> Self {
-        Sdmmc2Host { yielding: false, rate: Rate::Identification }
+        Sdmmc2Host { yielding: false, rate: Rate::Identification, detect_ready: false }
+    }
+
+    /// The detect line made readable, once: the cycle counter the pause
+    /// counts by, the pad an input under the chip's pull-up, and the settle
+    /// before the first reading.
+    #[inline(never)]
+    fn detect_arm(&mut self) {
+        arm_cycle_counter();
+        pins::configure(facts::SD_DETECT_LINE, g::MODE_INPUT, g::PULL_UP, false);
+        self.pause(DETECT_SETTLE_US);
+        self.detect_ready = true;
     }
 
     /// A bounded poll: the condition read until it holds, spinning for the
@@ -511,7 +528,12 @@ impl SdHost for Sdmmc2Host {
     }
 
     /// The detect line: the socket's switch pulls it low with a card seated.
+    /// The block layer reads the socket before it attaches the host, so the
+    /// line's first reading gives the pad its mode and its pull.
     fn card_present(&mut self) -> Option<bool> {
+        if !self.detect_ready {
+            self.detect_arm();
+        }
         Some(!pins::read(facts::SD_DETECT_LINE))
     }
 

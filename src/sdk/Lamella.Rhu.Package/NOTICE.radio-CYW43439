@@ -1,0 +1,4 @@
+
+This package also contains the firmware for the CYW43439 radio
+(regions/radio-firmware.bin). The license for that firmware is in
+regions/LICENSE.RP.

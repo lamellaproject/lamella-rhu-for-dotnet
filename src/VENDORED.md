@@ -8,21 +8,21 @@ re-recorded hashes.
 `src/vendor/**` is `-text` in `.gitattributes`, so these files stay byte-exact
 in the working tree and the hashes below hold on any platform.
 
-## src/vendor/ports/ (13 files) -- vendored 2026-11-02
+## src/vendor/ports/ (13 files) -- vendored 2026-11-12
 
 - **Source:** the public `dotnet/dotnet` repository (the VMR, the source the
   official .NET runtime pack names) at commit
-  **`5254d8bcf59917edc1e1abc33bdf2442b77b1c70`**, tag
-  **`v11.0.0-rc.3.26522.148`**, its `src/runtime` tree -- the .NET runtime
+  **`297acf930fb0f5c07fd4e51d78e521b4ad2e5d1f`**, tag
+  **`v11.0.0`**, its `src/runtime` tree -- the .NET runtime
   version RHU builds against. The `dotnet/runtime` tag of the same name
-  (commit `474ed963699fc29809015392738a15231aaae2de`) is the label the VMR's
+  (commit `deae2e32bf0e018e09d64597b7c59b62b73bb3ce`) is the label the VMR's
   source manifest gives for its runtime copy; these thirteen files are
   byte-identical in both.
 - **Method:** copied with sha256 verification from a read-only clone at that
   commit: bytes taken from the committed blobs (never from a checkout, whose
   line ends a git checkout setting may convert), the hash computed at copy time
   and re-verified against the working-tree file. Equivalent fetch:
-  `https://raw.githubusercontent.com/dotnet/dotnet/5254d8bcf59917edc1e1abc33bdf2442b77b1c70/src/runtime/src/native/<file>`.
+  `https://raw.githubusercontent.com/dotnet/dotnet/297acf930fb0f5c07fd4e51d78e521b4ad2e5d1f/src/runtime/src/native/<file>`.
 - **What it is:** the native half of the standard serial port class
   (`System.IO.Ports.SerialPort`): the termios layer (`pal_termios.c`, the
   signal, speed, reset, discard, drain and break entry points), the device
@@ -73,20 +73,20 @@ in the working tree and the hashes below hold on any platform.
 - **Modifications: none.** These files are byte-identical to upstream; the
   RHU repository's `shim` quality gate re-verifies the hashes above.
 
-## src/vendor/gcinterface/ (7 files) + src/vendor/gcenv/ (3 files) -- vendored 2026-11-02
+## src/vendor/gcinterface/ (7 files) + src/vendor/gcenv/ (3 files) -- vendored 2026-11-12
 
 - **Source:** the public `dotnet/dotnet` repository (the VMR, the source the
   official .NET runtime pack names) at commit
-  **`5254d8bcf59917edc1e1abc33bdf2442b77b1c70`**, tag
-  **`v11.0.0-rc.3.26522.148`**, its `src/runtime` tree -- the .NET runtime
+  **`297acf930fb0f5c07fd4e51d78e521b4ad2e5d1f`**, tag
+  **`v11.0.0`**, its `src/runtime` tree -- the .NET runtime
   version RHU builds against. The `dotnet/runtime` tag of the same name
-  (commit `474ed963699fc29809015392738a15231aaae2de`) is the label the VMR's
+  (commit `deae2e32bf0e018e09d64597b7c59b62b73bb3ce`) is the label the VMR's
   source manifest gives for its runtime copy; these ten files are
   byte-identical in both.
 - **Method:** copied with sha256 verification from a read-only clone of that
   tag: bytes taken from the committed blobs, the hash computed at copy time and
   re-verified against the working-tree file. Equivalent fetch:
-  `https://raw.githubusercontent.com/dotnet/dotnet/5254d8bcf59917edc1e1abc33bdf2442b77b1c70/src/runtime/src/coreclr/gc/<file>`
+  `https://raw.githubusercontent.com/dotnet/dotnet/297acf930fb0f5c07fd4e51d78e521b4ad2e5d1f/src/runtime/src/coreclr/gc/<file>`
   (the gcenv files live under `src/coreclr/gc/env/`).
 - **What it is:** the runtime-to-GC interface contract -- `IGCHeap`,
   `IGCHandleManager`, `IGCToCLR`, `GC_VersionInfo`, `GcDacVars`, the flat
@@ -165,7 +165,9 @@ in the working tree and the hashes below hold on any platform.
   `.cargo/config.toml`), so a build is the tree's bytes alone.
 - **Features taken (smoltcp):** `medium-ethernet`, `proto-ipv4`, `socket-tcp`,
   `socket-udp`, `socket-dhcpv4`, `socket-dns`; `default-features = false`
-  (no `std`, no `alloc`, no logging). The optional dependencies those
+  (no `std`, no `alloc`, no logging). The kernel's line also takes
+  `dns-max-result-count-2`, a size setting and no code: the stack's resolver
+  keeps two address records of an answer where its default keeps one. The optional dependencies those
   features leave off (`defmt`, `libc`, `log`; heapless's optional set) are
   not vendored.
 - **Layout:** `src/vendor/crates/<name>-<version>/`, each crate as released

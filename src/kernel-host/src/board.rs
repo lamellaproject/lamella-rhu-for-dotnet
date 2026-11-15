@@ -17,3 +17,9 @@ pub fn arena_window() -> (usize, usize) {
     let lo = core::ptr::addr_of!(WINDOW) as usize;
     (lo, lo + WINDOW_BYTES)
 }
+
+/// The medium seam, compiled from the kernel's own file: the contract the
+/// wireless medium's pure half implements and the adapter that presents a
+/// medium to the stack.
+#[path = "../../kernel/src/board/net_medium.rs"]
+pub mod net_medium;

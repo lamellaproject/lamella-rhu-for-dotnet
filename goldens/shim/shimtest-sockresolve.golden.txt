@@ -1,0 +1,8 @@
+shimtest-sockresolve: name resolution over a scripted kernel, from a native caller's side
+PASS shim-sock-resolve-name (a name the server answers: the query filed with the name's bytes, the caller asleep until the answer, then an entry with the name asked as its canonical name, no aliases and the two IPv4 addresses as the kernel wrote them; the entry's two allocations freed)
+PASS shim-sock-resolve-own-name (the board's own name in either letter case files no query: the address of the medium's lease, and 127.0.0.1 with no lease and with no medium)
+PASS shim-sock-resolve-localhost (localhost in either letter case answers 127.0.0.1 and files no query)
+PASS shim-sock-resolve-failures (a name the server does not have and a name the resolver does not take answer EAI_NONAME; no name server and the stack's budget passed EAI_AGAIN; the IPv6 family and a family outside the three EAI_FAMILY with no query; a null name or entry EAI_BADARG; each leaves the entry empty)
+PASS shim-sock-resolve-no-slot (with no slot free the filing is tried again when the one word moves and then succeeds; with none freed it answers EAI_AGAIN at its bound and not before, after one more filing)
+PASS shim-sock-resolve-slots (every slot the kernel handed out was released by one final read: after the answer, after each failure, after the wait for a slot)
+SHIMTEST-SOCKRESOLVE: ALL GOOD (name resolution over a scripted kernel, from a native caller's side)

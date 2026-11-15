@@ -28,10 +28,19 @@
 #ifndef RHU_SHIM_FD_FILE_LO
 #define RHU_SHIM_FD_FILE_LO 3
 #endif
-#define RHU_SHIM_FD_FILE_COUNT 13 /* 3 .. 15 */
+#define RHU_SHIM_FD_FILE_RUN 13   /* the file band's first range: 3 .. 15 */
+#define RHU_SHIM_FD_FILE2_LO 48   /* the file band's second range: 48 .. 63 */
+#define RHU_SHIM_FD_FILE2_RUN 16
+/* The file band's descriptors, both ranges together: 29. */
+#define RHU_SHIM_FD_FILE_COUNT (RHU_SHIM_FD_FILE_RUN + RHU_SHIM_FD_FILE2_RUN)
+/* Whether a number lies in the file band, in either of its two ranges. */
+#define RHU_SHIM_FD_IN_FILE_BAND(fd) \
+    (((fd) >= RHU_SHIM_FD_FILE_LO && (fd) < RHU_SHIM_FD_FILE_LO + RHU_SHIM_FD_FILE_RUN) \
+     || ((fd) >= RHU_SHIM_FD_FILE2_LO && (fd) < RHU_SHIM_FD_FILE2_LO + RHU_SHIM_FD_FILE2_RUN))
 #define RHU_SHIM_FD_TTY_LO 16     /* the serial device files: 16 .. 31 */
 #define RHU_SHIM_FD_TTY_COUNT 16
-#define RHU_SHIM_FD_SOCKET_LO 32  /* reserved: 32 .. 47 */
+#define RHU_SHIM_FD_SOCKET_LO 32  /* the sockets: 32 .. 47 */
+#define RHU_SHIM_FD_SOCKET_COUNT 16
 #define RHU_SHIM_FD_DEVICE_LO 64  /* the bus device nodes: 64 .. 79 */
 #define RHU_SHIM_FD_DEVICE_COUNT 16
 #define RHU_SHIM_FD_STORAGE_LO 80 /* the card's files: 80 .. 95 */
@@ -114,7 +123,7 @@ intptr_t rhu_iiofs_dup(intptr_t fd);
  * for a listing of /dev (the alias is never listed). */
 int rhu_ttydev_owns_path(const char *path);
 int rhu_ttydev_exists(const char *path);
-int rhu_ttydev_name(uint32_t index, char *buf, size_t cap);
+int rhu_ttydev_name(const char *dir, uint32_t index, char *buf, size_t cap);
 int rhu_ttydev_open(const char *path, int flags);
 int rhu_ttydev_close(int fd);
 int rhu_ttydev_ioctl(int fd, unsigned long request, void *arg);
@@ -202,5 +211,15 @@ static inline void rhu_shim_unix_split(int64_t ticks, int64_t *sec, int32_t *nse
     *sec = s;
     *nsec = (int32_t)(rem * 100);
 }
+
+/* The debug events word. A debugger asks the image for events by writing
+ * one word of the image's RAM, __lamella_debug_events: the magic in its
+ * high sixteen bits and, in its low sixteen, one bit for each event it
+ * asks for. Bit n asks for the event whose instruction is BKPT with the
+ * immediate RHU_DEBUG_EVENT_BKPT_BASE + n. The word is zero from the reset
+ * until a debugger writes it; the image reads it and never writes it. */
+#define RHU_DEBUG_EVENTS_MAGIC 0x4442
+#define RHU_DEBUG_EVENT_BKPT_BASE 0x60
+#define RHU_DEBUG_EVENT_UNHANDLED 0 /* an exception that no handler takes */
 
 #endif /* RHU_SHIM_H */

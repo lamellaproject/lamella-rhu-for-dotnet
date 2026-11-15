@@ -14,7 +14,7 @@ use super::ring;
 #[cfg(not(stm32f7_pll216))]
 pub const SYSCLK_HZ: u32 = 16_000_000;
 #[cfg(not(stm32f7_pll216))]
-const PCLK2_HZ: u32 = SYSCLK_HZ;
+pub const PCLK2_HZ: u32 = SYSCLK_HZ;
 /// The APB1 bus clock: the clock of the blocks that have no selection of
 /// their own (the family's SPI2 among them); a board's bus facts read it.
 #[cfg(not(stm32f7_pll216))]
@@ -30,7 +30,7 @@ pub const PCLK1_HZ: u32 = SYSCLK_HZ;
 #[cfg(stm32f7_pll216)]
 pub const SYSCLK_HZ: u32 = 216_000_000;
 #[cfg(stm32f7_pll216)]
-const PCLK2_HZ: u32 = SYSCLK_HZ / 2;
+pub const PCLK2_HZ: u32 = SYSCLK_HZ / 2;
 #[cfg(stm32f7_pll216)]
 #[allow(dead_code)] // read by the facts of a board that states such a bus
 pub const PCLK1_HZ: u32 = SYSCLK_HZ / 4;
@@ -173,9 +173,9 @@ const NVIC_IPR: *mut u8 = 0xE000_E400 as *mut u8;
 const USART1_IRQ_PRIO: u8 = 0xE0;
 
 /// The interrupt lines a board of this family claims with its own
-/// handlers, folded into the vector table by the boot module: USART1's
-/// line, the console ring's transmit drain.
-pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[(USART1_IRQ, __rhu_stm32f7_usart1_irq)];
+/// handlers, folded into the vector table by the boot module: USART1's line
+/// (the console ring's transmit drain) and, on a row with it, the Ethernet controller's.
+pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[(USART1_IRQ, __rhu_stm32f7_usart1_irq), #[cfg(rhu_net_wired)] (super::stm32f7_eth::IRQ, super::stm32f7_eth::__rhu_stm32f7_eth_irq), #[cfg(rhu_uart_st)] super::stm32_usart::IRQS[0]];
 /// The family GPIO driver's external-interrupt lines (the F7 arm).
 pub use super::stm32_gpio::IRQS as GPIO_IRQS;
 
@@ -359,7 +359,7 @@ unsafe fn console_hw_init() {
 /// write is not, and a counter a debugger once enabled survives every system
 /// reset -- then the counter enable; the counter is read until it advances,
 /// at most 64 reads, else the boot dies loud here instead of pausing forever.
-pub fn arm_cycle_counter() {
+#[cfg(feature = "board-st-stm32f769i-disco")] pub fn arm_cycle_counter() {
     const DEMCR: *mut u32 = 0xE000_EDFC as *mut u32;
     const DEMCR_TRCENA: u32 = 1 << 24;
     const DWT_CTRL: *mut u32 = 0xE000_1000 as *mut u32;

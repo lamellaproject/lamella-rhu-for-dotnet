@@ -23,9 +23,9 @@ pub const UART0_TX: u32 = 0;
 pub const UART0_RX: u32 = 1;
 /// No line is claimed by the board by default -- the memory console takes
 /// no pin; a UART the kernel holds as its wire claims its two lines at init.
-pub const BOARD_CLAIMS: &[u16] = &[];
+pub const BOARD_CLAIMS: &[u16] = if cfg!(rhu_net_wireless) { &[WIRELESS_POWER_LINE as u16, WIRELESS_DATA_LINE as u16, WIRELESS_SELECT_LINE as u16, WIRELESS_CLOCK_LINE as u16] } else { &[] };
 pub const BOARD_CLAIM_BITS: [u32; claims::BANKS] = claims::fold_board(BOARD_CLAIMS);
-pub const BANNER: &str = "48 lines, 0 claimed by the board";
+pub const BANNER: &str = if cfg!(rhu_net_wireless) { "48 lines, 4 claimed by the board (the wireless module on GPIO 23, 24, 25 and 29)" } else { "48 lines, 0 claimed by the board" };
 
 /// The wireless module's four lines through the SIO, as the Pico 2 W's rows
 /// state them: its power enable (`WL_ON`, high to power), its data line
@@ -35,8 +35,8 @@ pub const BANNER: &str = "48 lines, 0 claimed by the board";
 /// (PIM726)", 26/09/2024, sheet 1 of 3): the nets run between the RP2350B's
 /// GPIO23, GPIO24, GPIO25 and GPIO29 (package pins 23, 25, 26 and 37) and
 /// the RM2 module's B5 `WLON`, A5 `DI` (also B3 `IRQ`), B2 `CS` and A3
-/// `SCLK`. The wifi driver claims them at its own open and ties its facts
-/// to these; the board claims none of them.
+/// `SCLK`. A kernel built with the radio claims them for the board and ties
+/// the radio's own facts to these; any other kernel claims none of them.
 #[allow(dead_code)] // the wifi driver's facts tie to these rows
 pub const WIRELESS_POWER_LINE: u32 = 23;
 #[allow(dead_code)] // the wifi driver's facts tie to these rows
@@ -239,7 +239,7 @@ pub const CHANNELS: crate::console::ChannelFacts = crate::console::ChannelFacts 
 pub const UART_ROWS: &[crate::console::UartRow] = &[crate::console::UartRow { block: 0, tx: 0, rx: 1 }, crate::console::UartRow { block: 1, tx: crate::console::NO_PIN, rx: crate::console::NO_PIN }];
 /// The gpio banner's line when the kernel holds a UART of this row as its
 /// console wire, by block (empty on a row with no UART row).
-pub const BANNER_UART: &[&str] = &["48 lines, 2 claimed by the board (the console UART0 on GPIO 0/1)", "48 lines, 2 claimed by the board (the console UART1 on the project's pins)"];
+pub const BANNER_UART: &[&str] = if cfg!(rhu_net_wireless) { &["48 lines, 6 claimed by the board (the console UART0 on GPIO 0/1, the wireless module on GPIO 23, 24, 25 and 29)", "48 lines, 6 claimed by the board (the console UART1 on the project's pins, the wireless module on GPIO 23, 24, 25 and 29)"] } else { &["48 lines, 2 claimed by the board (the console UART0 on GPIO 0/1)", "48 lines, 2 claimed by the board (the console UART1 on the project's pins)"] };
 /// The UART rows' names for the boot banner's console clause, by block.
 #[allow(dead_code)] // the Pico rows' banner clause reads it
 pub const UART_NAMES: &[&str] = &["UART0 (GPIO 0 TX, GPIO 1 RX)", "UART1 (no default pins; the project's pin words name a legal pair)"];
@@ -253,4 +253,20 @@ pub const UART_PAIRS: &[crate::console::UartPairs] = &[
     crate::console::UartPairs { block: 1, tx: &[4, 8, 20, 24, 36, 40], rx: &[5, 9, 21, 25, 37, 41] },
 ];
 /// The gpio banner's line when the kernel holds BOTH UART rows as wires.
-pub const BANNER_UART_BOTH: &str = "48 lines, 4 claimed by the board (the console UART0 on GPIO 0/1, UART1 on the project's pins)";
+pub const BANNER_UART_BOTH: &str = if cfg!(rhu_net_wireless) { "48 lines, 8 claimed by the board (the console UART0 on GPIO 0/1, UART1 on the project's pins, the wireless module on GPIO 23, 24, 25 and 29)" } else { "48 lines, 4 claimed by the board (the console UART0 on GPIO 0/1, UART1 on the project's pins)" };
+
+/// The radio's corner of the flash, as the lamella tool's row of this board
+/// states it: the memory, the offset of the corner's first byte in it, the
+/// room for the radio's firmware behind its directory, and the erase unit.
+/// The two units after the room end the device and hold the network a
+/// developer stores on the board. The flash tool writes the corner; the
+/// kernel reads it in place and never writes or erases it, and the row's
+/// maps keep every image and the app slot below it.
+#[allow(dead_code)] // a kernel built with the radio reads the rows
+pub const RADIO_CORNER_MEMORY: &str = "flash";
+#[allow(dead_code)] // a kernel built with the radio reads the rows
+pub const RADIO_CORNER_OFFSET: usize = 0xFC0000;
+#[allow(dead_code)] // a kernel built with the radio reads the rows
+pub const RADIO_CORNER_BYTES: usize = 253952;
+#[allow(dead_code)] // a kernel built with the radio reads the rows
+pub const RADIO_CORNER_UNIT: usize = 4096;

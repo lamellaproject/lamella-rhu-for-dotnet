@@ -1,0 +1,8 @@
+shimtest-sockpoll: Poll over the socket band over a scripted kernel, from a native caller's side
+PASS shim-sock-poll-level (a socket's level as poll events: nothing for a quiet socket, POLLIN and POLLOUT with bytes queued and transmit room; a second poll of the standing level answers the same events)
+PASS shim-sock-poll-events (only the events asked are answered; the peer's close adds POLLHUP and a handshake that did not succeed POLLERR and POLLHUP, asked or not; a handshake in flight answers no event)
+PASS shim-sock-poll-timeout (a quiet socket polled with a bound answers none at the bound and not before; a poll with no bound ends at the bytes' arrival, the caller asleep until then)
+PASS shim-sock-poll-file-and-socket (one call over a file of the store and a socket: the file answers at once and the socket its level; the console's input and a quiet socket wait together to the bound)
+PASS shim-sock-poll-invalid (a descriptor of the band that is not open answers POLLNVAL and counts as triggered, with or without a bound)
+PASS shim-sock-poll-close (the sockets closed through the kernel once each)
+SHIMTEST-SOCKPOLL: ALL GOOD (Poll over the socket band over a scripted kernel, from a native caller's side)

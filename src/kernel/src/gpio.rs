@@ -137,7 +137,7 @@ pub fn init() {
             }
         }
         write_volatile(addr_of_mut!((*witness()).lines), N as u32);
-    });
+    }); #[cfg(rhu_io2_supply)] crate::board::stm32u5_supply::boot();
 }
 
 /// The banner's text after "[boot] gpio: ", constant per image (the row's

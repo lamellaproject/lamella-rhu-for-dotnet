@@ -8,7 +8,7 @@
 #ifndef RHU_PORTS_ERRNO_H
 #define RHU_PORTS_ERRNO_H
 
-#include "rhu_pal_errno_net11_rc3.h"
+#include "rhu_pal_errno_net11.h"
 
 extern int *__errno_location(void);
 #define errno (*__errno_location())

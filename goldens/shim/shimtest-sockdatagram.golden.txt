@@ -1,0 +1,9 @@
+shimtest-sockdatagram: a datagram socket over a scripted kernel, from a native caller's side
+PASS shim-sock-datagram-create (an IPv4 datagram socket, its type and protocol read back)
+PASS shim-sock-datagram-family (with both datagram sockets of the kernel's pool held, an IPv6 datagram socket is refused with the family's code, EAFNOSUPPORT, and a third IPv4 one with the pool's, EMFILE; the kernel was asked both times and the band kept no descriptor)
+PASS shim-sock-datagram-send-to (a datagram handed to the kernel whole with the destination of the caller's record; with no destination and no default peer ENOTCONN; a message that carries control data ENOTSUP)
+PASS shim-sock-datagram-receive-from (a datagram received whole with the sender's address in the caller's record, its length 16, no control data and no flag; the next datagram's length counted as available; none queued EAGAIN on a non-blocking socket)
+PASS shim-sock-datagram-default-peer (a connect sets the default peer and answers at once; a send with no destination goes to it and a receive reads from it)
+PASS shim-sock-datagram-oversize (a datagram larger than the socket's buffer EMSGSIZE on a send; a datagram larger than the caller's buffer EMSGSIZE on a receive, nothing counted)
+PASS shim-sock-datagram-gather (three buffers leave as one datagram in one send, their bytes in order; one datagram received across three buffers in order; a blocking receive answers a datagram that arrives during its wait)
+SHIMTEST-SOCKDATAGRAM: ALL GOOD (a datagram socket over a scripted kernel, from a native caller's side)

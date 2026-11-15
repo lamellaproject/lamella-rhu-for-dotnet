@@ -318,7 +318,7 @@ pub extern "C" fn kmain() -> ! {
     sched::init();
     let main_slot = sched::spawn("kmain", kthread_main, 0, 3, board::KMAIN_STACK_BYTES);
     // The network thread: one notch more urgent than the hosted flat
-    // level, 8 KB of the pool; it runs only once the scheduler starts.
+    // level, 8 KB the pool's array carries above the row's pool; it runs only once the scheduler starts.
     #[cfg(rhu_net_rows)]
     net::start();
     // The mount thread on a socket row: the card's detect line followed, the
@@ -354,7 +354,7 @@ extern "C" fn kthread_main(_: usize) {
     #[cfg(all(feature = "api-smoke", any(feature = "test-uart-loopback", feature = "test-uart-jumper")))]
     api_smoke::uart_flight();
     #[cfg(all(feature = "api-smoke", not(any(feature = "test-gpio-button", feature = "test-uart-loopback", feature = "test-uart-jumper"))))]
-    api_smoke::run();
+    api_flavor_run();
 
     // The payload flavor hands this thread to the hosted image and
     // never returns; the machine exits with the payload's own verdict.
@@ -705,7 +705,7 @@ __rhu_fp_clobber:
 // ---------------- hosting-API smoke (feature api-smoke) ----------------
 
 #[cfg(feature = "api-smoke")]
-#[cfg_attr(any(feature = "test-gpio-button", feature = "test-uart-loopback", feature = "test-uart-jumper", feature = "test-sd-flight"), allow(dead_code))]
+#[cfg_attr(any(feature = "test-gpio-button", feature = "test-uart-loopback", feature = "test-uart-jumper", feature = "test-sd-flight", feature = "test-net-flight", feature = "test-pwm-flight", feature = "test-adc-flight", feature = "test-uart-flight", feature = "test-pool-fit"), allow(dead_code))]
 mod api_smoke {
     use core::ffi::{c_char, c_void};
     use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
@@ -719,8 +719,8 @@ mod api_smoke {
     use crate::{fat, fsmount, sdcard, sdhost};
     use crate::fs;
 
-    /// The kernel's network API's eight checks, on the rows with a medium.
-    #[cfg(rhu_net_rows)]
+    /// The kernel's network API's eight checks, on the virtual medium's rows.
+    #[cfg(rhu_net_virtual)]
     mod net_checks;
 
     fn busy_wait_ms(ms: u32) {
@@ -872,7 +872,7 @@ mod api_smoke {
         check_uart_loopback();
         check_uart_status_and_flush();
         check_uart_timeout();
-        #[cfg(rhu_net_rows)]
+        #[cfg(rhu_net_virtual)]
         net_checks::run();
         check_entropy();
         check_entropy_secure();
@@ -893,8 +893,8 @@ mod api_smoke {
         check_bus_doctored();
         #[cfg(all(rhu_bus_rows, not(rhu_bus_models)))]
         check_bus_pads();
-        #[cfg(rhu_pwm_adc_rows)]
-        check_pwm_claim();
+        #[cfg(all(rhu_pwm_adc_rows, not(feature = "test-pwm-high-line")))]
+        check_pwm_claim(); #[cfg(feature = "test-pwm-high-line")] crate::pwm_high::check();
         #[cfg(rhu_pwm_adc_rows)]
         check_adc_claim();
         #[cfg(rhu_pwm_adc_rows)]
@@ -903,8 +903,8 @@ mod api_smoke {
         check_gpio_hold();
         #[cfg(all(rhu_pwm_adc_models, feature = "test-adc-flagged"))]
         check_adc_flagged();
-        #[cfg(not(rhu_pwm_adc_rows))]
-        check_pwm_adc_none();
+        #[cfg(not(any(rhu_pwm_adc_rows, rhu_pwm_st)))]
+        check_pwm_adc_none(); #[cfg(rhu_pwm_st)] crate::pwm_st::check();
         check_fp_double();
         check_fp_band();
         #[cfg(feature = "fpemul")]
@@ -3624,10 +3624,10 @@ mod api_smoke {
         assert!(api::rhu_i2c_transfer(n, early.as_ptr(), 2, u64::MAX) == sched::ERR_INVAL, "bus-i2c: a transfer before the claim not refused EINVAL");
         assert!(api::rhu_i2c_claim(n, 100_000) == 0, "bus-i2c: the claim refused");
         assert!(api::rhu_i2c_claim(n, 100_000) == 0, "bus-i2c: the second claim did not answer 0");
-        #[cfg(feature = "test-bus-rp2350")]
+        // A claimed bus refuses another rate that its row serves as busy:
         assert!(api::rhu_i2c_claim(n, 400_000) == gpio::ERR_BUSY, "bus-i2c: a second claim at another rate not refused EBUSY");
-        #[cfg(not(feature = "test-bus-rp2350"))]
-        assert!(api::rhu_i2c_claim(n, 400_000) == bus::ERR_NOTSUP, "bus-i2c: a second claim at a rate this row does not serve not refused ENOTSUP");
+        // a rate that the row does not serve is refused before the bus's state
+        // (the 50 kHz claim above), so it never reaches a claimed bus.
         let msgs = [imsg(0x76, 0, &mut reg), imsg(0x76, bus_math::MSG_READ, &mut id)];
         let r = api::rhu_i2c_transfer(n, msgs.as_ptr(), 2, u64::MAX);
         assert!(r == 0, "bus-i2c: the identity read answered {}", r);
@@ -4038,7 +4038,7 @@ mod api_smoke {
     /// quantization measured, the function's period tied to the timer's own
     /// reading of its registers (the doctored timer breaks the tie), the
     /// shared-period rule and the refusals.
-    #[cfg(rhu_pwm_adc_models)]
+    #[cfg(all(rhu_pwm_adc_models, not(feature = "test-pwm-high-line")))]
     fn check_pwm_claim() {
         kprintln!("[api] pwm-claim: the count and the lines stated; a line claimed, a period the clock divides set exact and one it does not quantized, the door's period tied to the timer's own both times, the timer's other channel refused on a different period and served on the same; a second claim, a line without a timer function, a bad polarity, a duty past the period, a zero period, a period past the range and bad handles each refused with its code; the output driven and parked, released and claimed again");
         let n = api::rhu_pwm_count();
@@ -4264,7 +4264,7 @@ mod api_smoke {
 
     /// The rows whose facts carry no PWM line and no ADC channel: the
     /// honest posture of every function.
-    #[cfg(not(rhu_pwm_adc_rows))]
+    #[cfg(not(any(rhu_pwm_adc_rows, rhu_pwm_st)))]
     fn check_pwm_adc_none() {
         kprintln!("[api] pwm-adc-none: no PWM line and no ADC channel on this row -- the counts 0, the enumeration doors EINVAL, every other door ENODEV");
         assert!(api::rhu_pwm_count() == 0 && api::rhu_adc_count() == 0, "pwm-adc-none: the counts read {} and {}", api::rhu_pwm_count(), api::rhu_adc_count());
@@ -7077,7 +7077,124 @@ mod net_math;
 
 // The kernel's network API's bodies (every row: the count 0 and RHU_ENODEV
 // where no medium is), the scripted peer behind the emulator rows' virtual
-// medium (the rows with a medium alone).
+// medium (those two rows alone).
 mod net;
-#[cfg(rhu_net_rows)]
+#[cfg(rhu_net_virtual)]
 mod net_peer;
+// The wired medium's arithmetic (the hardware address, the management
+// clock's divider, the controller's descriptor words), on the row with an
+// Ethernet controller under the `net` feature.
+#[cfg(rhu_net_wired)]
+mod eth_math;
+
+// The api flavor's run as the kernel's main thread calls it: the checks
+// whole, or on the wired row's flight image (`test-net-flight`) the network
+// flight alone. Declared at the end of this file for the reason the network
+// modules above are.
+#[cfg(all(feature = "api-smoke", not(any(feature = "test-gpio-button", feature = "test-uart-loopback", feature = "test-uart-jumper", feature = "test-net-flight", feature = "test-pwm-flight", feature = "test-adc-flight", feature = "test-uart-flight", feature = "test-pool-fit"))))]
+fn api_flavor_run() {
+    api_smoke::run()
+}
+#[cfg(all(feature = "api-smoke", feature = "test-net-flight"))]
+#[path = "api_smoke/net_flight.rs"]
+mod net_flight;
+#[cfg(all(feature = "api-smoke", feature = "test-net-flight"))]
+fn api_flavor_run() {
+    net_flight::run()
+}
+
+// The STM32U5's second I/O supply, pure: the facts' shape and the manual's
+// sequence over a register seam (no hardware access, covered by the host
+// tests). Declared at the end of this file for the reason the network
+// modules above are.
+#[cfg(rhu_io2_supply)]
+mod stm32u5_supply_math;
+// The ST timer rows' flight check (`test-pwm-flight`): the PWM check alone,
+// the flight flavor of the row's api image. Declared at the end of this
+// file for the reason the network modules above are.
+#[cfg(all(feature = "api-smoke", feature = "test-pwm-flight"))]
+#[path = "api_smoke/pwm_flight.rs"]
+mod pwm_flight;
+#[cfg(all(feature = "api-smoke", feature = "test-pwm-flight"))]
+fn api_flavor_run() {
+    pwm_flight::run()
+}
+// The ST timers' arithmetic, pure: the timer block's facts, the timers'
+// clock rule and the channel fields (no hardware access, covered by the
+// host tests). Declared at the end of this file for the reason the network
+// modules above are.
+#[cfg(rhu_pwm_st)]
+mod stm32_tim_math;
+// The ST timer rows' part of the api flavor's checks: the PWM table stated
+// and enumerated, the analog family refusing. The flight flavors run their
+// flight alone and leave it unused.
+#[cfg(all(feature = "api-smoke", rhu_pwm_st))]
+#[allow(dead_code)]
+#[path = "api_smoke/pwm_st.rs"]
+mod pwm_st;
+// The ST converters' arithmetic and register sequences, pure (no hardware
+// access, covered by the host tests). Declared at the end of this file for
+// the reason the network modules above are.
+#[cfg(rhu_adc_st)]
+mod stm32_adc_math;
+// The ST converter rows' flight check (`test-adc-flight`): the analog check
+// alone, the flight flavor of the row's api image. Declared at the end of
+// this file for the reason the network modules above are.
+#[cfg(all(feature = "api-smoke", feature = "test-adc-flight"))]
+#[path = "api_smoke/adc_flight.rs"]
+mod adc_flight;
+#[cfg(all(feature = "api-smoke", feature = "test-adc-flight"))]
+fn api_flavor_run() {
+    adc_flight::run()
+}
+// The stack pool's flight check (`test-pool-fit`): what a program can take
+// of the row's pool, read at the main thread's first line, and the six
+// stacks an awaited socket program's runtime asks -- the check alone, the
+// flight flavor of the api image. Declared at the end of this file for the
+// reason the network modules above are.
+#[cfg(all(feature = "api-smoke", feature = "test-pool-fit"))]
+#[path = "api_smoke/pool_fit.rs"]
+mod pool_fit;
+#[cfg(all(feature = "api-smoke", feature = "test-pool-fit"))]
+fn api_flavor_run() {
+    pool_fit::run()
+}
+// The ST serial blocks' arithmetic and register sequences, pure (no hardware
+// access, covered by the host tests). Declared at the end of this file for
+// the reason the network modules above are.
+#[cfg(rhu_uart_st)]
+mod stm32_usart_math;
+// The ST serial rows' flight check (`test-uart-flight`): the serial check
+// alone, the flight flavor of the row's api image. Declared at the end of
+// this file for the reason the network modules above are.
+#[cfg(all(feature = "api-smoke", feature = "test-uart-flight"))]
+#[path = "api_smoke/uart_flight.rs"]
+mod uart_flight;
+#[cfg(all(feature = "api-smoke", feature = "test-uart-flight"))]
+fn api_flavor_run() {
+    uart_flight::run()
+}
+// The radio as the network's medium (`wifi-cyw43`): the reader of the
+// network stored on the board, the radio's corner of the flash with its
+// digest, and the medium behind the seam -- each pure (no hardware access,
+// covered by the host tests); the board's half is the network module's own
+// child. Declared at the end of this file for the reason the network
+// modules above are.
+#[cfg(rhu_net_wireless)]
+mod digest;
+#[cfg(rhu_net_wireless)]
+#[allow(dead_code)]
+mod wifi_images;
+#[cfg(rhu_net_wireless)]
+#[allow(dead_code)]
+mod wifi_medium;
+#[cfg(rhu_net_wireless)]
+#[allow(dead_code)]
+mod wifi_stored;
+// The emulator rows' PWM line of a large number (`test-pwm-high-line`): the
+// api flavor's check of the line that the rows' facts state under that
+// word, run in place of the rows' pwm-claim check. Declared at the end of
+// this file for the reason the network modules above are.
+#[cfg(all(feature = "api-smoke", feature = "test-pwm-high-line"))]
+#[path = "api_smoke/pwm_high.rs"]
+mod pwm_high;

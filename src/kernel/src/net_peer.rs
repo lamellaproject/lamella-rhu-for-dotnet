@@ -4,8 +4,8 @@
 //! exchanges a loopback cannot answer -- an ARP request for its address
 //! (RFC 826), a DHCP discover and request (RFC 2131 and 2132: an offer and
 //! an acknowledgement carrying one fixed lease record), a DNS query for one
-//! of its three names or for a name it does not have (RFC 1035: an answer
-//! or a name error), an ICMP echo request (RFC 792: the reply), and a TCP
+//! of its four names or for a name it does not have (RFC 1035: an answer,
+//! with two address records for one of the names, or a name error), an ICMP echo request (RFC 792: the reply), and a TCP
 //! connection attempt to its one port (RFC 793: a reset, so a refused
 //! connect is proven on the wire). Every frame it does not answer is handed
 //! back to the stack as received (the loopback), unless it was addressed to
@@ -38,7 +38,11 @@ pub const LEASE_IP: [u8; 4] = [192, 0, 2, 2];
 pub const LEASE_MASK: [u8; 4] = [255, 255, 255, 0];
 pub const LEASE_DNS2: [u8; 4] = [192, 0, 2, 3];
 pub const LEASE_SECONDS: u32 = 3600;
+// The two addresses below are no part of the peer's own answers: the api
+// flavor's checks aim at them (and the host tier's cases at the first).
+#[cfg(any(feature = "api-smoke", test))]
 pub const UNOWNED_IP: [u8; 4] = [192, 0, 2, 9];
+#[cfg(feature = "api-smoke")]
 pub const OFF_SEGMENT_IP: [u8; 4] = [198, 51, 100, 1];
 pub const BROADCAST_IP: [u8; 4] = [255, 255, 255, 255];
 
@@ -48,6 +52,11 @@ pub const REFUSED_PORT: u16 = 7;
 /// The names the peer resolves (RFC 6761's reserved `.test`) and the one it
 /// does not have.
 pub const NAMES: [(&str, [u8; 4]); 3] = [("peer.rhu.test", PEER_IP), ("second.rhu.test", LEASE_DNS2), ("third.rhu.test", [192, 0, 2, 4])];
+/// The one name the peer answers with two address records, in this order.
+pub const PAIR_NAME: &str = "pair.rhu.test";
+pub const PAIR_IPS: [[u8; 4]; 2] = [[192, 0, 2, 5], [192, 0, 2, 6]];
+/// The name the peer has not: the checks' and the host cases' question.
+#[cfg(any(feature = "api-smoke", test))]
 pub const UNKNOWN_NAME: &str = "nowhere.rhu.test";
 pub const DNS_TTL: u32 = 300;
 
@@ -305,7 +314,8 @@ impl Peer {
         Verdict::Reply(n)
     }
 
-    /// A query for one of the peer's names: the answer with the A record;
+    /// A query for one of the peer's names: the answer with the A record
+    /// (two records, in the table's order, for the name that has two);
     /// for any other name the name error (NXDOMAIN).
     fn answer_dns(&mut self, q: &[u8], asker_mac: &[u8], asker: &[u8; 4], asker_port: u16, out: &mut [u8]) -> Verdict {
         if q.len() < 12 || q[2] & 0x80 != 0 || be16(&q[4..6]) != 1 {
@@ -340,28 +350,35 @@ impl Peer {
         }
         let qend = i + 4;
         let (qtype, qclass) = (be16(&q[i..i + 2]), be16(&q[i + 2..i + 4]));
-        let answer = if qtype == 1 && qclass == 1 { lookup(&name[..n]) } else { None };
+        let one = if qtype == 1 && qclass == 1 { lookup(&name[..n]) } else { None };
+        let records: &[[u8; 4]] = match &one {
+            Some(addr) => core::slice::from_ref(addr),
+            None if qtype == 1 && qclass == 1 && is_name(PAIR_NAME, &name[..n]) => &PAIR_IPS,
+            None => &[],
+        };
         eth_header(out, asker_mac, &PEER_MAC, ETHERTYPE_IPV4);
         let d = &mut out[ETH + IP + UDP..];
         d[0..2].copy_from_slice(&q[0..2]);
-        let flags: u16 = if answer.is_some() { 0x8180 } else { 0x8183 };
+        let flags: u16 = if records.is_empty() { 0x8183 } else { 0x8180 };
         d[2..4].copy_from_slice(&flags.to_be_bytes());
         d[4..6].copy_from_slice(&1u16.to_be_bytes());
-        d[6..8].copy_from_slice(&(answer.is_some() as u16).to_be_bytes());
+        d[6..8].copy_from_slice(&(records.len() as u16).to_be_bytes());
         d[8..12].fill(0);
         d[12..qend].copy_from_slice(&q[12..qend]);
         let mut o = qend;
-        if let Some(addr) = answer {
+        for addr in records {
             d[o..o + 2].copy_from_slice(&[0xC0, 0x0C]);
             d[o + 2..o + 4].copy_from_slice(&1u16.to_be_bytes());
             d[o + 4..o + 6].copy_from_slice(&1u16.to_be_bytes());
             d[o + 6..o + 10].copy_from_slice(&DNS_TTL.to_be_bytes());
             d[o + 10..o + 12].copy_from_slice(&4u16.to_be_bytes());
-            d[o + 12..o + 16].copy_from_slice(&addr);
+            d[o + 12..o + 16].copy_from_slice(addr);
             o += 16;
-            self.dns_answered += 1;
-        } else {
+        }
+        if records.is_empty() {
             self.dns_refused += 1;
+        } else {
+            self.dns_answered += 1;
         }
         let n = udp_and_ip(out, &PEER_IP, asker, DNS_PORT, asker_port, o);
         Verdict::Reply(n)
@@ -371,7 +388,12 @@ impl Peer {
 /// The address of a name the peer has (the labels joined by dots, as the
 /// question spells them; case-insensitive as RFC 1035 asks).
 pub fn lookup(name: &[u8]) -> Option<[u8; 4]> {
-    NAMES.iter().find(|(n, _)| n.len() == name.len() && n.bytes().zip(name.iter()).all(|(a, &b)| a.eq_ignore_ascii_case(&b))).map(|(_, a)| *a)
+    NAMES.iter().find(|(n, _)| is_name(n, name)).map(|(_, a)| *a)
+}
+
+/// Whether a question's name is `known`, letter case aside.
+fn is_name(known: &str, name: &[u8]) -> bool {
+    known.len() == name.len() && known.bytes().zip(name.iter()).all(|(a, &b)| a.eq_ignore_ascii_case(&b))
 }
 
 fn be16(b: &[u8]) -> u16 {

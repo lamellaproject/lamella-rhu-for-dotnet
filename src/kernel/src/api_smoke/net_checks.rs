@@ -1,8 +1,13 @@
-//! The kernel's network API's eight checks of the api flavor, on the
+//! The kernel's network API's nine checks of the api flavor, on the
 //! emulator rows over the virtual medium and its scripted peer: the pump's
 //! statistics, the medium and the lease, the retry scenario, the resolver,
 //! a stream over the loopback, datagrams, the refusals, the event port's
-//! properties. Every marker is constant text the api gate pins; the rows'
+//! properties, the bind to port 0; under `test-net-link-drop` another follows them, the link
+//! dropped and raised under open sockets; under `test-net-resolve-two` a
+//! name with two address records; under `test-net-listen-again` a listener
+//! whose accept finds the stream pool spent; under `test-net-listen-reset` a
+//! caller reset before the accept, and a bind while a connection is still
+//! closing. Every marker is constant text the api gate pins; the rows'
 //! own numbers (the passes, the milliseconds) are on lines the gate does
 //! not pin. Every wait is the recipe the header states -- the function, the
 //! snapshot, the function again, the futex wait with a deadline -- because this
@@ -12,6 +17,8 @@ use core::ptr::{addr_of, read_volatile};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::net_peer::{LEASE_DNS2 as DNS2, LEASE_IP as LEASE, LEASE_MASK as MASK, NAMES, OFF_SEGMENT_IP as OFF_SEGMENT, OUR_MAC, PEER_IP as PEER, REFUSED_PORT, UNKNOWN_NAME, UNOWNED_IP as UNOWNED};
+#[cfg(feature = "test-net-resolve-two")]
+use crate::net_peer::{PAIR_IPS, PAIR_NAME};
 use crate::{api, net, sched};
 
 const THIRD: [u8; 4] = NAMES[2].1;
@@ -88,6 +95,17 @@ pub fn run() {
     check_net_stream();
     check_net_datagram();
     check_net_port();
+    check_net_bind_any();
+    #[cfg(feature = "test-net-link-drop")]
+    check_net_link();
+    #[cfg(feature = "test-net-resolve-two")]
+    check_net_resolve_two();
+    #[cfg(feature = "test-net-resolve-second")]
+    check_net_resolve_second();
+    #[cfg(feature = "test-net-listen-again")]
+    check_net_listen();
+    #[cfg(feature = "test-net-listen-reset")]
+    check_net_listen_reset();
 }
 
 /// The network thread's statistics after the boot's exchange: it ran, its
@@ -455,7 +473,7 @@ fn check_net_refuse() {
     assert!(api::rhu_net_socket(net::FAMILY_IPV4, net::TYPE_STREAM, 0) == net::ERR_MFILE, "net-refuse: the fifth stream not refused EMFILE");
     assert!(api::rhu_net_bind(hs[0], &addr(LEASE, 7000)) == 0 && api::rhu_net_bind(hs[1], &addr(LEASE, 7000)) == net::ERR_ADDRINUSE, "net-refuse: a second bind not refused EADDRINUSE");
     assert!(api::rhu_net_bind(hs[0], &addr(LEASE, 7001)) == sched::ERR_INVAL, "net-refuse: a bind on a bound stream not refused EINVAL");
-    assert!(api::rhu_net_bind(hs[2], &addr(PEER, 7002)) == sched::ERR_INVAL && api::rhu_net_bind(hs[2], &addr(LEASE, 0)) == sched::ERR_INVAL, "net-refuse: a foreign address or the port 0 not refused EINVAL");
+    assert!(api::rhu_net_bind(hs[2], &addr(PEER, 7002)) == sched::ERR_INVAL, "net-refuse: a foreign address not refused EINVAL");
     let mut buf = [0u8; 8];
     assert!(api::rhu_net_recv(hs[2], buf.as_mut_ptr(), 8, 0, core::ptr::null_mut()) == net::ERR_NOTCONN && api::rhu_net_send(hs[2], buf.as_ptr(), 8, core::ptr::null()) == net::ERR_NOTCONN, "net-refuse: the unconnected stream not refused ENOTCONN");
     assert!(api::rhu_net_listen(hs[2], 1) == sched::ERR_INVAL && api::rhu_net_listen(hs[0], 0) == sched::ERR_INVAL, "net-refuse: a listen on an unbound stream or with a backlog of 0 not refused EINVAL");
@@ -529,7 +547,7 @@ fn check_net_refuse() {
         assert!(api::rhu_net_close(h) == 0, "net-refuse: a close refused");
     }
     assert!(api::rhu_net_close(d) == 0, "net-refuse: the datagram close refused");
-    kprintln!("[api] PASS net-refuse (IPv6 EAFNOSUPPORT, a bad type and protocol EPROTONOSUPPORT, the fifth stream EMFILE, a second bind EADDRINUSE, a bound, foreign or zero-port bind EINVAL, the unconnected stream ENOTCONN, a listen or accept on a datagram socket EINVAL, unsupported options ENOTSUP with the read-back form proven, bad words and three bad handles EINVAL at every door, a null and an IPv6 peer refused, the peer's reset ECONNREFUSED read once, the unowned address EHOSTUNREACH at the connect budget, a static address without a gateway with the off-segment connect ENETUNREACH and a bad mask EINVAL, the DHCP client armed again with its lease)");
+    kprintln!("[api] PASS net-refuse (IPv6 EAFNOSUPPORT, a bad type and protocol EPROTONOSUPPORT, the fifth stream EMFILE, a second bind EADDRINUSE, a bound or foreign bind EINVAL, the unconnected stream ENOTCONN, a listen or accept on a datagram socket EINVAL, unsupported options ENOTSUP with the read-back form proven, bad words and three bad handles EINVAL at every door, a null and an IPv6 peer refused, the peer's reset ECONNREFUSED read once, the unowned address EHOSTUNREACH at the connect budget, a static address without a gateway with the off-segment connect ENETUNREACH and a bad mask EINVAL, the DHCP client armed again with its lease)");
 }
 
 static WOKEN: AtomicU32 = AtomicU32::new(0);
@@ -580,4 +598,520 @@ fn check_net_port() {
     let w = witness();
     kprintln!("[api] net-port: {} mask changes and {} global bumps over the family's checks; the pump's final statistics: {} passes, the longest {} ms, the latest deadline wake {} ms late", w.mask_changes, w.global_bumps, w.pump_passes, w.pump_max_pass_ms, w.pump_max_late_ms);
     kprintln!("[api] PASS net-port (an idle connected stream moved the global word not once across two of the thread's safety deadlines (1100 ms), the waiter sleeping to its deadline; the bump door moved the word by exactly one and woke the parked waiter; the pair closed)");
+}
+
+/// The pool's stream sockets in use read `n` inside the bound: the network
+/// thread returns an ended stream's socket at its next pass.
+#[cfg(any(feature = "test-net-link-drop", feature = "test-net-listen-again", feature = "test-net-listen-reset"))]
+fn wait_pool(n: u32, ms: u32) -> bool {
+    let t0 = sched::now_ms();
+    loop {
+        if net::probe_streams_used() == n {
+            return true;
+        }
+        if sched::now_ms().wrapping_sub(t0) >= ms {
+            return false;
+        }
+        sched::sleep_ms(10);
+    }
+}
+
+/// The virtual medium's link set and the header's recipe on the medium's
+/// word: the word read, the link set, the futex wait with a 1,000 ms
+/// deadline. Answers the wait's code and whether the word moved.
+#[cfg(feature = "test-net-link-drop")]
+fn set_link_and_wait(up: bool) -> (i32, bool) {
+    let mw = api::rhu_net_medium_word(0);
+    let before = unsafe { read_volatile(mw) };
+    net::probe_set_link(up);
+    let r = api::rhu_futex_wait(mw, before, deadline_in(1000));
+    (r, unsafe { read_volatile(mw) } != before)
+}
+
+/// The link that changes (`test-net-link-drop`, the api gate's link case):
+/// the virtual medium's link dropped and raised under open sockets. The
+/// medium's word moves and wakes its waiter at every change; a connected
+/// pair reads RHU_ECONNRESET at both ends and a connecting stream
+/// RHU_ENETDOWN; the listener and the datagram socket are kept and serve
+/// after the return; the lease is asked again by DHCP at the return and a
+/// static address is left alone; a connection behind the listener that
+/// nobody accepted is dropped and its socket listens again. The doctored
+/// thread (`test-net-doctored-link`) reads no link change, and the first
+/// wait on the medium's word refuses it.
+#[cfg(feature = "test-net-link-drop")]
+fn check_net_link() {
+    kprintln!("[api] net-link: the virtual medium's link dropped and raised under open sockets -- the medium's word, a connected pair and a connecting stream ended with their codes, the listener and the datagram socket kept, the lease asked again at the return, a static address left alone, a connection nobody accepted");
+    const BOTH: i32 = (net::READABLE | net::WRITABLE | net::HANGUP | net::ERROR) as i32;
+    const FAILED: i32 = (net::WRITABLE | net::ERROR | net::HANGUP) as i32;
+    let stream = || api::rhu_net_socket(net::FAMILY_IPV4, net::TYPE_STREAM, 0);
+    let four = *b"link";
+    let mut buf = [0u8; 8];
+    // The pool whole: the earlier checks' ended streams have left the stack.
+    assert!(wait_pool(0, 2000), "net-link: {} stream sockets still in use 2000 ms after the earlier checks", net::probe_streams_used());
+    let mut lease = net::Lease { ip4: 0, mask: 0, gateway: 0, dns: [0; 2], source: 0 };
+    assert!(api::rhu_net_lease(0, &mut lease) == 0 && lease.source == net::SOURCE_DHCP && lease.ip4 == word(LEASE), "net-link: the address is not held by DHCP at the start (source {})", lease.source);
+    // The setup: a listener with one connection accepted, a client connecting to the address nobody owns, a datagram socket.
+    let l = stream();
+    let c = stream();
+    assert!(l >= 0 && c >= 0 && api::rhu_net_bind(l, &addr(LEASE, 7801)) == 0 && api::rhu_net_listen(l, 1) == 0 && api::rhu_net_connect(c, &addr(LEASE, 7801)) == net::ERR_INPROGRESS, "net-link: the pair's setup refused");
+    assert!(wait_mask(c, net::WRITABLE as i32, deadline_in(3000)) == net::WRITABLE as i32 && wait_mask(l, net::READABLE as i32, deadline_in(3000)) == net::READABLE as i32, "net-link: the pair did not connect");
+    let s = api::rhu_net_accept(l, core::ptr::null_mut());
+    assert!(s >= 0, "net-link: the accept answered {}", s);
+    let _ = wait_mask(s, net::WRITABLE as i32, deadline_in(3000));
+    let k = stream();
+    assert!(k >= 0 && api::rhu_net_connect(k, &addr(UNOWNED, 7802)) == net::ERR_INPROGRESS, "net-link: the connect to the address nobody owns did not start");
+    let d = api::rhu_net_socket(net::FAMILY_IPV4, net::TYPE_DATAGRAM, 0);
+    assert!(d >= 0 && api::rhu_net_bind(d, &addr(LEASE, 7803)) == 0, "net-link: the datagram socket's setup refused");
+    sched::sleep_ms(20); // the thread's passes after the handshakes settle
+    assert!(net::probe_streams_used() == 4, "net-link: the pool reads {} stream sockets in use after the setup where 4 were expected", net::probe_streams_used());
+    // The drop: the medium's word wakes its waiter, the info function and the witness read the link down.
+    let (r, moved) = set_link_and_wait(false);
+    assert!(r == 0 && moved, "net-link: the medium's word did not move within 1000 ms of the link's drop (the wait answered {})", r);
+    let mut info = net::MediumInfo { kind: 9, link: 9, hw: [0; 6], reserved: 0 };
+    assert!(api::rhu_net_medium(0, &mut info) == 0 && info.link == 0 && witness().link == 0, "net-link: after the drop the info function reads link {} and the witness {}", info.link, witness().link);
+    // The connected streams, both ends: the mask a peer's reset gives, and its code.
+    for (h, end) in [(c, "client"), (s, "accepted stream")] {
+        let m = wait_mask(h, net::ERROR as i32, deadline_in(1000));
+        let code = api::rhu_net_error(h);
+        assert!(m == BOTH && code == net::ERR_CONNRESET, "net-link: the {}'s mask reads {} and its code {} after the drop where 15 and ECONNRESET (-104) were expected", end, m, code);
+    }
+    // The connecting stream; then a connect that starts while the link is down.
+    let m = wait_mask(k, net::ERROR as i32, deadline_in(1000));
+    let code = api::rhu_net_error(k);
+    assert!(m == FAILED && code == net::ERR_NETDOWN, "net-link: the connecting stream's mask reads {} and its code {} after the drop where 14 and ENETDOWN (-100) were expected", m, code);
+    assert!(api::rhu_net_close(k) == 0 && wait_pool(3, 1000), "net-link: the failed stream's socket did not return to the pool ({} in use)", net::probe_streams_used());
+    let n = stream();
+    let r = if n >= 0 { api::rhu_net_connect(n, &addr(LEASE, 7801)) } else { n };
+    assert!(r == net::ERR_NETDOWN, "net-link: a connect while the link is down answered {} where ENETDOWN (-100) was expected", r);
+    // Kept: the listener and the datagram socket, nothing pending on either.
+    let (lm, le, de) = (api::rhu_net_readiness(l, 0), api::rhu_net_error(l), api::rhu_net_error(d));
+    assert!(lm == 0 && le == 0 && de == 0, "net-link: after the drop the listener's mask reads {} with the code {} and the datagram socket's code {} where all three are 0", lm, le, de);
+    // The return: the word, the link, and the lease asked again (the peer counts a new discover).
+    let discovers = net::probe_medium().1.discovers;
+    let (r, moved) = set_link_and_wait(true);
+    assert!(r == 0 && moved, "net-link: the medium's word did not move within 1000 ms of the link's return (the wait answered {})", r);
+    assert!(api::rhu_net_medium(0, &mut info) == 0 && info.link == 1 && witness().link == 1, "net-link: after the return the info function reads link {} and the witness {}", info.link, witness().link);
+    let back = wait_until(api::rhu_net_medium_word(0), deadline_in(3000), || (api::rhu_net_lease(0, &mut lease) == 0 && lease.source == net::SOURCE_DHCP && lease.ip4 == word(LEASE) && net::probe_medium().1.discovers > discovers).then_some(()));
+    assert!(back.is_some(), "net-link: the lease was not back by DHCP within 3000 ms of the return (source {}, {} discovers against {} before it)", lease.source, net::probe_medium().1.discovers, discovers);
+    // Usable after the return: the listener accepts a new client and four bytes cross; the datagram socket reads its own four bytes.
+    assert!(api::rhu_net_close(c) == 0 && api::rhu_net_close(s) == 0 && wait_pool(2, 1000), "net-link: the two ended streams' sockets did not return to the pool ({} in use)", net::probe_streams_used());
+    assert!(api::rhu_net_connect(n, &addr(LEASE, 7801)) == net::ERR_INPROGRESS, "net-link: the connect after the return did not start");
+    assert!(wait_mask(n, net::WRITABLE as i32, deadline_in(3000)) == net::WRITABLE as i32 && wait_mask(l, net::READABLE as i32, deadline_in(3000)) == net::READABLE as i32, "net-link: the pair after the return did not connect");
+    let s2 = api::rhu_net_accept(l, core::ptr::null_mut());
+    assert!(s2 >= 0, "net-link: the accept after the return answered {}", s2);
+    assert!(api::rhu_net_send(n, four.as_ptr(), 4, core::ptr::null()) == 4 && wait_mask(s2, net::READABLE as i32, deadline_in(3000)) & net::READABLE as i32 != 0, "net-link: the stream's four bytes did not arrive after the return");
+    assert!(api::rhu_net_recv(s2, buf.as_mut_ptr(), 8, 0, core::ptr::null_mut()) == 4 && buf[..4] == four, "net-link: the stream's four bytes read unequal after the return");
+    assert!(api::rhu_net_send(d, four.as_ptr(), 4, &addr(LEASE, 7803)) == 4 && wait_mask(d, net::READABLE as i32, deadline_in(3000)) & net::READABLE as i32 != 0, "net-link: the datagram did not come back to its socket after the return");
+    buf = [0; 8];
+    assert!(api::rhu_net_recv(d, buf.as_mut_ptr(), 8, 0, core::ptr::null_mut()) == 4 && buf[..4] == four, "net-link: the datagram's four bytes read unequal after the return");
+    // A static address is left alone: the drop ends the pair like any connection, and the return asks nobody for a lease.
+    let fixed = net::Lease { ip4: lease.ip4, mask: lease.mask, gateway: lease.gateway, dns: lease.dns, source: 0 };
+    assert!(api::rhu_net_configure(0, &fixed) == 0, "net-link: the static configuration refused");
+    let (changes, discovers) = (witness().lease_changes, net::probe_medium().1.discovers);
+    let (r, moved) = set_link_and_wait(false);
+    assert!(r == 0 && moved, "net-link: the medium's word did not move within 1000 ms of the second drop (the wait answered {})", r);
+    for (h, end) in [(n, "client"), (s2, "accepted stream")] {
+        let m = wait_mask(h, net::ERROR as i32, deadline_in(1000));
+        let code = api::rhu_net_error(h);
+        assert!(m == BOTH && code == net::ERR_CONNRESET, "net-link: the second pair's {} reads the mask {} and the code {} after the second drop where 15 and ECONNRESET (-104) were expected", end, m, code);
+    }
+    let (r, moved) = set_link_and_wait(true);
+    assert!(r == 0 && moved, "net-link: the medium's word did not move within 1000 ms of the second return (the wait answered {})", r);
+    sched::sleep_ms(200);
+    let (w, now) = (witness(), net::probe_medium().1.discovers);
+    assert!(
+        now == discovers && api::rhu_net_lease(0, &mut lease) == 0 && lease.source == net::SOURCE_STATIC && lease.ip4 == fixed.ip4 && lease.mask == fixed.mask && lease.gateway == fixed.gateway && lease.dns == fixed.dns && w.lease_changes == changes,
+        "net-link: under a static address the drop and the return moved the lease (source {}, {} lease changes against {}, {} discovers against {})",
+        lease.source,
+        w.lease_changes,
+        changes,
+        now,
+        discovers
+    );
+    assert!(api::rhu_net_close(n) == 0 && api::rhu_net_close(s2) == 0 && wait_pool(1, 1000), "net-link: the second pair's sockets did not return to the pool ({} in use)", net::probe_streams_used());
+    // A connection nobody accepted: the drop ends it and its socket listens again.
+    let c3 = stream();
+    assert!(c3 >= 0 && api::rhu_net_connect(c3, &addr(LEASE, 7801)) == net::ERR_INPROGRESS, "net-link: the connect that is not accepted did not start");
+    assert!(wait_mask(c3, net::WRITABLE as i32, deadline_in(3000)) == net::WRITABLE as i32 && wait_mask(l, net::READABLE as i32, deadline_in(3000)) == net::READABLE as i32, "net-link: the connection that is not accepted did not arrive at the listener");
+    sched::sleep_ms(20);
+    let (r, moved) = set_link_and_wait(false);
+    assert!(r == 0 && moved, "net-link: the medium's word did not move within 1000 ms of the third drop (the wait answered {})", r);
+    let (lm, again) = (api::rhu_net_readiness(l, 0), api::rhu_net_accept(l, core::ptr::null_mut()));
+    let m = wait_mask(c3, net::ERROR as i32, deadline_in(1000));
+    let code = api::rhu_net_error(c3);
+    assert!(lm == 0 && again == sched::ERR_AGAIN && m == BOTH && code == net::ERR_CONNRESET, "net-link: after the drop under a connection nobody accepted the listener's mask reads {} and its accept {}, the client's mask {} and its code {} where 0, EAGAIN (-11), 15 and ECONNRESET (-104) were expected", lm, again, m, code);
+    let (r, moved) = set_link_and_wait(true);
+    assert!(r == 0 && moved, "net-link: the medium's word did not move within 1000 ms of the third return (the wait answered {})", r);
+    assert!(api::rhu_net_close(c3) == 0, "net-link: the ended client's close refused");
+    let c4 = stream();
+    assert!(c4 >= 0 && api::rhu_net_connect(c4, &addr(LEASE, 7801)) == net::ERR_INPROGRESS && wait_mask(l, net::READABLE as i32, deadline_in(3000)) == net::READABLE as i32, "net-link: the listener took no connection after the drop that ended the one nobody accepted");
+    let s4 = api::rhu_net_accept(l, core::ptr::null_mut());
+    assert!(s4 >= 0, "net-link: the accept after the third return answered {}", s4);
+    assert!(api::rhu_net_close(c4) == 0 && api::rhu_net_close(s4) == 0 && api::rhu_net_close(l) == 0 && api::rhu_net_close(d) == 0 && wait_pool(0, 2000), "net-link: a close refused, or the pool not empty 2000 ms after the closes ({} in use)", net::probe_streams_used());
+    kprintln!("[api] PASS net-link (the link dropped and raised three times under open sockets: the medium's word moved and woke its waiter at every change with the info function and the witness reading the link; a connected pair read ECONNRESET at both ends and a connecting stream ENETDOWN, a connect during the drop ENETDOWN at the call; the listener and the datagram socket kept and serving after the return; the lease asked again by DHCP at the return; under a static address the lease left alone; a connection nobody accepted dropped with the listener accepting the next)");
+}
+
+/// A name with two address records (`test-net-resolve-two`, the api gate's
+/// resolver case): the scripted peer's name that has two is read back as
+/// both, in the answer's order, where the caller allows four; as the first
+/// alone where it allows one; as none where it allows none. A name with
+/// one record still answers one, and the records past the count written
+/// are not touched. The doctored resolver (`test-net-doctored-resolve`)
+/// keeps one record of an answer, and the first read refuses it.
+#[cfg(feature = "test-net-resolve-two")]
+fn check_net_resolve_two() {
+    kprintln!("[api] net-resolve-two: a name with two address records -- both read in the answer's order where four are allowed, the first where one is, none where none is; a name with one record; the records past the count untouched");
+    let (w0, pc0) = (witness(), net::probe_medium().1);
+    // One query by the header's recipe, its result read with `max`; the read releases the slot.
+    let ask = |name: &str, out: &mut [net::Addr; 4], max: u32| -> i32 {
+        *out = [none_addr(); 4];
+        let h = api::rhu_net_resolve(name.as_ptr(), name.len() as u32);
+        assert!(h >= 0, "net-resolve-two: the query for {} was refused {}", name, h);
+        let w = api::rhu_net_resolve_word(h);
+        assert!(!w.is_null(), "net-resolve-two: the word of handle {} is null", h);
+        let p = if max == 0 { core::ptr::null_mut() } else { out.as_mut_ptr() };
+        let r = wait_until(w, deadline_in(4000), || {
+            let r = api::rhu_net_resolve_result(h, p, max);
+            if r == sched::ERR_AGAIN { None } else { Some(r) }
+        });
+        assert!(r.is_some(), "net-resolve-two: no answer for {} within 4000 ms", name);
+        assert!(api::rhu_net_resolve_result(h, core::ptr::null_mut(), 0) == sched::ERR_INVAL, "net-resolve-two: the slot of {} was not released by its read", name);
+        r.unwrap_or(sched::ERR_TIMEDOUT)
+    };
+    let mut out = [none_addr(); 4];
+    let r = ask(PAIR_NAME, &mut out, 4);
+    assert!(r == 2, "net-resolve-two: the name with two address records read {} where 2 were expected", r);
+    assert!(
+        out[0].family == net::FAMILY_IPV4 && out[0].port == 0 && ip_of(&out[0]) == PAIR_IPS[0] && out[1].family == net::FAMILY_IPV4 && out[1].port == 0 && ip_of(&out[1]) == PAIR_IPS[1] && out[2].family == net::FAMILY_NONE,
+        "net-resolve-two: the two records read {:?} and {:?} with the families {} and {} and the third record's family {}",
+        ip_of(&out[0]),
+        ip_of(&out[1]),
+        out[0].family,
+        out[1].family,
+        out[2].family
+    );
+    let r = ask(PAIR_NAME, &mut out, 1);
+    assert!(r == 1 && ip_of(&out[0]) == PAIR_IPS[0] && out[1].family == net::FAMILY_NONE, "net-resolve-two: with one record allowed the name read {} {:?} and the second record's family {}", r, ip_of(&out[0]), out[1].family);
+    let r = ask(PAIR_NAME, &mut out, 0);
+    assert!(r == 0 && out[0].family == net::FAMILY_NONE, "net-resolve-two: with no record allowed the name read {} and the first record's family {}", r, out[0].family);
+    let r = ask(NAMES[0].0, &mut out, 4);
+    assert!(r == 1 && ip_of(&out[0]) == PEER && out[1].family == net::FAMILY_NONE, "net-resolve-two: the name with one record read {} {:?} and the second record's family {}", r, ip_of(&out[0]), out[1].family);
+    let (w, pc) = (witness(), net::probe_medium().1);
+    let (made, failed, answered, refused) = (w.resolves_made.wrapping_sub(w0.resolves_made), w.resolves_failed.wrapping_sub(w0.resolves_failed), pc.dns_answered.wrapping_sub(pc0.dns_answered), pc.dns_refused.wrapping_sub(pc0.dns_refused));
+    assert!(made == 4 && failed == 0 && answered == 4 && refused == 0, "net-resolve-two: the counts moved by {} made, {} failed, {} answered and {} refused where 4, 0, 4 and 0 were expected", made, failed, answered, refused);
+    kprintln!("[api] PASS net-resolve-two (a name with two address records answered both in the answer's order where four were allowed, the first alone where one was and none where none was, each read releasing its slot; a name with one record answered one; the records past the count untouched; four queries made and four answered)");
+}
+
+/// The second name server (`test-net-resolve-second`, the api gate's
+/// second resolver case). A static record names two name servers: the
+/// first is an address off the segment, so its queries leave by the
+/// gateway and nobody answers them (the scripted peer drops and counts
+/// them); the second is the peer. Two names are asked at once. The stack
+/// asks the first server for its ten seconds and then the second, so the
+/// name the peer has reads its record and the name it has not reads
+/// RHU_EHOSTUNREACH -- the second server's answer and no timeout -- each
+/// no sooner than 9500 ms and inside 15 000 ms. The DHCP client is armed
+/// again behind it. The doctored stack (`test-net-doctored-dns2`) is
+/// handed the first name server alone, and the first read refuses it.
+#[cfg(feature = "test-net-resolve-second")]
+fn check_net_resolve_second() {
+    kprintln!("[api] net-resolve-second: a record with two name servers whose first never answers -- the second asked behind the first one's ten seconds, a name it has read as its record and a name it has not as EHOSTUNREACH");
+    let mw = api::rhu_net_medium_word(0);
+    let fixed = net::Lease { ip4: word(LEASE), mask: word(MASK), gateway: word(PEER), dns: [word(OFF_SEGMENT), word(PEER)], source: 0 };
+    assert!(api::rhu_net_configure(0, &fixed) == 0, "net-resolve-second: the static record with two name servers was refused");
+    let mut lease = net::Lease { ip4: 0, mask: 0, gateway: 0, dns: [0; 2], source: 0 };
+    assert!(api::rhu_net_lease(0, &mut lease) == 0 && lease.source == net::SOURCE_STATIC && lease.dns == fixed.dns, "net-resolve-second: the static record reads source {} with the name servers {:08x} and {:08x}", lease.source, lease.dns[0], lease.dns[1]);
+    let (w0, pc0) = (witness(), net::probe_medium().1);
+    // Both queries are filed before either is read: the first server's ten seconds pass once for the two.
+    let ask = |name: &str| -> i32 {
+        let h = api::rhu_net_resolve(name.as_ptr(), name.len() as u32);
+        assert!(h >= 0, "net-resolve-second: the query for {} was refused {}", name, h);
+        h
+    };
+    let t0 = sched::now_ms();
+    let (h1, h2) = (ask(NAMES[0].0), ask(UNKNOWN_NAME));
+    // A result by the header's recipe, with its age. The wait passes the two servers' budget, so a query that fails there reads its own code.
+    let deadline_ns = deadline_in(25000);
+    let read = |h: i32, out: &mut [net::Addr; 2]| -> (i32, u32) {
+        *out = [none_addr(); 2];
+        let w = api::rhu_net_resolve_word(h);
+        assert!(!w.is_null(), "net-resolve-second: the word of handle {} is null", h);
+        let r = wait_until(w, deadline_ns, || {
+            let r = api::rhu_net_resolve_result(h, out.as_mut_ptr(), 2);
+            if r == sched::ERR_AGAIN { None } else { Some(r) }
+        });
+        (r.unwrap_or(sched::ERR_AGAIN), sched::now_ms().wrapping_sub(t0))
+    };
+    let mut out = [none_addr(); 2];
+    let (r1, dt1) = read(h1, &mut out);
+    assert!(r1 == 1, "net-resolve-second: the name that the second name server has read {} where 1 record was expected (after {} ms)", r1, dt1);
+    assert!(out[0].family == net::FAMILY_IPV4 && out[0].port == 0 && ip_of(&out[0]) == PEER && out[1].family == net::FAMILY_NONE, "net-resolve-second: the record read {:?} with the family {} and the second record's family {}", ip_of(&out[0]), out[0].family, out[1].family);
+    assert!((9500..15000).contains(&dt1), "net-resolve-second: the record came after {} ms where the second name server is asked behind the first one's 10000 ms (9500 to 15000 ms)", dt1);
+    let (r2, dt2) = read(h2, &mut out);
+    assert!(r2 == net::ERR_HOSTUNREACH, "net-resolve-second: the name that the second name server has not read {} where EHOSTUNREACH was expected (after {} ms)", r2, dt2);
+    assert!((9500..15000).contains(&dt2), "net-resolve-second: the name error came after {} ms where the second name server is asked behind the first one's 10000 ms (9500 to 15000 ms)", dt2);
+    let (w, pc) = (witness(), net::probe_medium().1);
+    let (made, failed, answered, refused, dropped) = (w.resolves_made.wrapping_sub(w0.resolves_made), w.resolves_failed.wrapping_sub(w0.resolves_failed), pc.dns_answered.wrapping_sub(pc0.dns_answered), pc.dns_refused.wrapping_sub(pc0.dns_refused), pc.dropped.wrapping_sub(pc0.dropped));
+    assert!(made == 2 && failed == 1 && answered == 1 && refused == 1 && dropped >= 2, "net-resolve-second: the counts moved by {} made, {} failed, {} answered, {} refused and {} dropped by the peer where 2, 1, 1, 1 and at least 2 were expected", made, failed, answered, refused, dropped);
+    kprintln!("[api] net-resolve-second: the record after {} ms and the name error after {} ms; {} queries for the first name server dropped by the peer", dt1, dt2, dropped);
+    // The DHCP client armed again, the lease with its two name servers back.
+    assert!(api::rhu_net_configure(0, core::ptr::null()) == 0, "net-resolve-second: the DHCP client not armed again");
+    let got = wait_until(mw, deadline_in(4000), || {
+        let r = api::rhu_net_lease(0, &mut lease);
+        if r == 0 && lease.source == net::SOURCE_DHCP { Some(()) } else { None }
+    });
+    assert!(got.is_some() && lease.dns == [word(PEER), word(DNS2)], "net-resolve-second: no lease by DHCP with its two name servers within 4 s of arming the client again (source {})", lease.source);
+    kprintln!("[api] PASS net-resolve-second (under a static record whose first name server never answers the second was asked behind the first one's ten seconds: a name it has answered with its record and a name it has not EHOSTUNREACH, each read between 9500 and 15000 ms; two queries made and one failed, the first name server's queries dropped by the peer; the DHCP client armed again with its lease)");
+}
+
+/// A listener's sockets read `n` inside the bound: the network thread
+/// arms one for a listener left with none on the pass that frees a stream.
+#[cfg(feature = "test-net-listen-again")]
+fn wait_listening(l: i32, n: u32, ms: u32) -> bool {
+    let t0 = sched::now_ms();
+    loop {
+        if net::probe_listening(l) == n {
+            return true;
+        }
+        if sched::now_ms().wrapping_sub(t0) >= ms {
+            return false;
+        }
+        sched::sleep_ms(10);
+    }
+}
+
+/// The listener that listens again (`test-net-listen-again`, the api
+/// gate's listener case). The pool is four stream sockets and every caller
+/// is the row's own socket over the loopback, so the caller that cannot be
+/// served is made before the pool is spent. An accept that finds the pool
+/// spent leaves the listener with no socket; a caller meanwhile is refused
+/// with a reset; the pass that returns a stream to the pool gives it to
+/// the listener, and the next caller is accepted. The doctored thread
+/// (`test-net-doctored-listen`) gives the listener no socket, and the wait
+/// for the listener's socket refuses it.
+#[cfg(feature = "test-net-listen-again")]
+fn check_net_listen() {
+    kprintln!("[api] net-listen: a listener whose accept finds the stream pool spent -- left with no socket, a caller refused with a reset meanwhile, listening again on the pass that returns a stream to the pool, the next caller accepted");
+    const FAILED: i32 = (net::WRITABLE | net::ERROR | net::HANGUP) as i32;
+    const PORT: u16 = 7811;
+    let stream = || api::rhu_net_socket(net::FAMILY_IPV4, net::TYPE_STREAM, 0);
+    let letters = b"abcdefghijklmnopqrstuvwxyz";
+    let four = *b"back";
+    let mut buf = [0u8; 32];
+    // 1. The pool whole; a listener with a backlog of one.
+    assert!(wait_pool(0, 2000), "net-listen: {} stream sockets still in use 2000 ms after the earlier checks", net::probe_streams_used());
+    let w0 = witness();
+    let l = stream();
+    assert!(l >= 0 && api::rhu_net_bind(l, &addr(LEASE, PORT)) == 0 && api::rhu_net_listen(l, 1) == 0, "net-listen: the listener's setup refused");
+    assert!(net::probe_listening(l) == 1, "net-listen: the new listener has {} sockets listening where 1 was expected", net::probe_listening(l));
+    // 2. Three more streams: the pool spent.
+    let (c1, x, c3) = (stream(), stream(), stream());
+    let fifth = stream();
+    assert!(c1 >= 0 && x >= 0 && c3 >= 0 && fifth == net::ERR_MFILE && net::probe_streams_used() == 4, "net-listen: the pool's setup read the handles {} {} {}, a fifth socket {} and {} streams in use where EMFILE (-24) and 4 were expected", c1, x, c3, fifth, net::probe_streams_used());
+    // 3. The first caller.
+    assert!(api::rhu_net_connect(c1, &addr(LEASE, PORT)) == net::ERR_INPROGRESS, "net-listen: the first caller's connect did not start");
+    assert!(wait_mask(c1, net::WRITABLE as i32, deadline_in(3000)) == net::WRITABLE as i32 && wait_mask(l, net::READABLE as i32, deadline_in(3000)) == net::READABLE as i32, "net-listen: the first caller did not connect");
+    // 4. The accept finds the pool spent: the listener is left with no socket, and says nothing of it.
+    let mut peer = none_addr();
+    let (mut cl, mut cp) = (none_addr(), none_addr());
+    let s1 = api::rhu_net_accept(l, &mut peer);
+    assert!(s1 >= 0 && api::rhu_net_name(c1, &mut cl, &mut cp) == 0 && ip_of(&peer) == LEASE && peer.port == cl.port, "net-listen: the first accept answered {} with the peer's port {} against the caller's own {}", s1, peer.port, cl.port);
+    let _ = wait_mask(s1, net::WRITABLE as i32, deadline_in(3000)); // the thread's pass after the accept
+    let (n, lm, again, le) = (net::probe_listening(l), api::rhu_net_readiness(l, 0), api::rhu_net_accept(l, core::ptr::null_mut()), api::rhu_net_error(l));
+    assert!(n == 0 && lm == 0 && again == sched::ERR_AGAIN && le == 0, "net-listen: after the accept that found the pool spent the listener has {} sockets, the mask {}, its accept {} and its code {} where 0, 0, EAGAIN (-11) and 0 were expected", n, lm, again, le);
+    // 5. The caller that cannot be served: refused with a reset, well inside the connect budget.
+    let t0 = sched::now_ms();
+    assert!(api::rhu_net_connect(c3, &addr(LEASE, PORT)) == net::ERR_INPROGRESS, "net-listen: the second caller's connect did not start");
+    let m = wait_mask(c3, net::ERROR as i32, deadline_in(1000));
+    let (code, dt) = (api::rhu_net_error(c3), sched::now_ms().wrapping_sub(t0));
+    assert!(m == FAILED && code == net::ERR_CONNREFUSED && dt < 1000, "net-listen: the caller while the listener had no socket read the mask {} and the code {} after {} ms where 14 and ECONNREFUSED (-111) inside 1000 ms were expected", m, code, dt);
+    let (n, lm, le) = (net::probe_listening(l), api::rhu_net_readiness(l, 0), api::rhu_net_error(l));
+    assert!(n == 0 && lm == 0 && le == 0, "net-listen: after the refused caller the listener has {} sockets, the mask {} and the code {} where all three are 0", n, lm, le);
+    // 6. A stream returns to the pool: the listener listens again, on the pass that freed it.
+    assert!(api::rhu_net_close(x) == 0, "net-listen: the idle stream's close refused");
+    assert!(wait_listening(l, 1, 1000), "net-listen: the listener did not listen again within 1000 ms of a stream's return to the pool ({} sockets listening)", net::probe_listening(l));
+    let (used, sixth) = (net::probe_streams_used(), stream());
+    assert!(used == 4 && sixth == net::ERR_MFILE, "net-listen: after the listener took the returned stream the pool reads {} in use and a new socket {} where 4 and EMFILE (-24) were expected", used, sixth);
+    // 7. The refused caller closed: its socket is free for the next caller.
+    assert!(api::rhu_net_close(c3) == 0 && wait_pool(3, 1000), "net-listen: the refused caller's socket did not return to the pool ({} in use)", net::probe_streams_used());
+    // 8. The next caller is served.
+    let c4 = stream();
+    assert!(c4 >= 0 && api::rhu_net_connect(c4, &addr(LEASE, PORT)) == net::ERR_INPROGRESS, "net-listen: the next caller's connect did not start ({})", c4);
+    let m = wait_mask(c4, net::WRITABLE as i32, deadline_in(3000));
+    assert!(m == net::WRITABLE as i32 && api::rhu_net_error(c4) == 0 && wait_mask(l, net::READABLE as i32, deadline_in(3000)) == net::READABLE as i32, "net-listen: the next caller did not connect to the listener that listened again (its mask {})", m);
+    let s4 = api::rhu_net_accept(l, &mut peer);
+    assert!(s4 >= 0 && api::rhu_net_name(c4, &mut cl, &mut cp) == 0 && ip_of(&peer) == LEASE && peer.port == cl.port, "net-listen: the second accept answered {} with the peer's port {} against the caller's own {}", s4, peer.port, cl.port);
+    let _ = wait_mask(s4, net::WRITABLE as i32, deadline_in(3000));
+    assert!(net::probe_listening(l) == 0 && net::probe_streams_used() == 4, "net-listen: after the second accept the listener has {} sockets and the pool {} in use where 0 and 4 were expected", net::probe_listening(l), net::probe_streams_used());
+    // 9. Bytes both ways on the new connection.
+    assert!(api::rhu_net_send(c4, letters.as_ptr(), 26, core::ptr::null()) == 26 && wait_mask(s4, net::READABLE as i32, deadline_in(3000)) & net::READABLE as i32 != 0, "net-listen: the caller's 26 letters did not arrive");
+    assert!(api::rhu_net_recv(s4, buf.as_mut_ptr(), 32, 0, core::ptr::null_mut()) == 26 && &buf[..26] == letters, "net-listen: the caller's 26 letters read unequal");
+    assert!(api::rhu_net_send(s4, four.as_ptr(), 4, core::ptr::null()) == 4 && wait_mask(c4, net::READABLE as i32, deadline_in(3000)) & net::READABLE as i32 != 0, "net-listen: the accepted stream's four bytes did not arrive");
+    buf = [0; 32];
+    assert!(api::rhu_net_recv(c4, buf.as_mut_ptr(), 32, 0, core::ptr::null_mut()) == 4 && buf[..4] == four, "net-listen: the accepted stream's four bytes read unequal");
+    // 10. That connection closed: the listener listens again a second time.
+    assert!(api::rhu_net_close(c4) == 0 && api::rhu_net_close(s4) == 0, "net-listen: a close of the second connection refused");
+    assert!(wait_listening(l, 1, 2000) && wait_pool(3, 2000), "net-listen: 2000 ms after the second connection's closes the listener has {} sockets and the pool {} in use where 1 and 3 were expected", net::probe_listening(l), net::probe_streams_used());
+    // 11. The rest closed: the pool whole.
+    assert!(api::rhu_net_close(c1) == 0 && api::rhu_net_close(s1) == 0 && api::rhu_net_close(l) == 0 && wait_pool(0, 2000), "net-listen: a close refused, or the pool not empty 2000 ms after the closes ({} in use)", net::probe_streams_used());
+    let w = witness();
+    let (accepts, connects) = (w.accepts.wrapping_sub(w0.accepts), w.connects.wrapping_sub(w0.connects));
+    assert!(accepts == 2 && connects == 2, "net-listen: the witness counts {} accepts and {} connects in this check where 2 and 2 were expected", accepts, connects);
+    kprintln!("[api] PASS net-listen (the accept that found the stream pool spent left the listener with no socket, its mask clear and no error on it; a caller meanwhile was refused with a reset, ECONNREFUSED pending inside one second; the listener listened again on the pass that returned a stream to the pool, the pool still spent; the next caller was accepted with its address and its bytes crossed both ways; the listener was left with no socket a second time and listened again; the pool whole at the end)");
+}
+
+/// A listener's sockets that listen read `n` inside the bound.
+#[cfg(feature = "test-net-listen-reset")]
+fn wait_backlog_listening(l: i32, n: u32, ms: u32) -> bool {
+    let t0 = sched::now_ms();
+    loop {
+        if net::probe_backlog_listening(l) == n {
+            return true;
+        }
+        if sched::now_ms().wrapping_sub(t0) >= ms {
+            return false;
+        }
+        sched::sleep_ms(10);
+    }
+}
+
+/// The reset before the accept (`test-net-listen-reset`, the api gate's
+/// reset case). A caller connects to a listener with a backlog of one and
+/// is reset before an accept takes it: the stack closes the listener's
+/// socket, the network thread's next pass makes it listen again in its
+/// place, and the next caller is accepted. Then the bind while a
+/// connection is still closing: the accepted handle is closed while its
+/// caller keeps its own end, the listener is closed, and a new socket
+/// binds the same port and listens while the pool still counts the closing
+/// socket; a caller is accepted on it. The doctored thread
+/// (`test-net-doctored-listen`) puts no socket back, and the wait for the
+/// listener's socket refuses it.
+#[cfg(feature = "test-net-listen-reset")]
+fn check_net_listen_reset() {
+    kprintln!("[api] net-listen-reset: a caller reset before the accept -- the listener's socket that the stack closed listens again on the network thread's next pass and the next caller is accepted; then a bind to the port of a connection that is still closing");
+    const PORT: u16 = 7812;
+    let stream = || api::rhu_net_socket(net::FAMILY_IPV4, net::TYPE_STREAM, 0);
+    let letters = b"abcdefghijklmnopqrstuvwxyz";
+    let four = *b"back";
+    let mut buf = [0u8; 32];
+    // 1. The pool whole; a listener with a backlog of one.
+    assert!(wait_pool(0, 2000), "net-listen-reset: {} stream sockets still in use 2000 ms after the earlier checks", net::probe_streams_used());
+    let w0 = witness();
+    let l = stream();
+    assert!(l >= 0 && api::rhu_net_bind(l, &addr(LEASE, PORT)) == 0 && api::rhu_net_listen(l, 1) == 0, "net-listen-reset: the listener's setup refused");
+    assert!(net::probe_backlog_listening(l) == 1, "net-listen-reset: the new listener has {} sockets listening where 1 was expected", net::probe_backlog_listening(l));
+    // 2. A caller connects, and nobody accepts it.
+    let c1 = stream();
+    assert!(c1 >= 0 && api::rhu_net_connect(c1, &addr(LEASE, PORT)) == net::ERR_INPROGRESS, "net-listen-reset: the first caller's connect did not start ({})", c1);
+    assert!(wait_mask(c1, net::WRITABLE as i32, deadline_in(3000)) == net::WRITABLE as i32 && wait_mask(l, net::READABLE as i32, deadline_in(3000)) == net::READABLE as i32, "net-listen-reset: the first caller did not connect");
+    assert!(net::probe_backlog_listening(l) == 0, "net-listen-reset: with its one connection waiting the listener has {} sockets listening where 0 was expected", net::probe_backlog_listening(l));
+    // 3. The caller is reset before the accept: the listener's socket listens again, on the pass that read the reset.
+    net::probe_reset(c1);
+    assert!(wait_backlog_listening(l, 1, 1000), "net-listen-reset: the listener's socket did not listen again within 1000 ms of its caller's reset ({} sockets listening)", net::probe_backlog_listening(l));
+    let (lm, again, le) = (api::rhu_net_readiness(l, 0), api::rhu_net_accept(l, core::ptr::null_mut()), api::rhu_net_error(l));
+    assert!(lm == 0 && again == sched::ERR_AGAIN && le == 0, "net-listen-reset: behind the reset the listener reads the mask {}, its accept {} and its code {} where 0, EAGAIN (-11) and 0 were expected", lm, again, le);
+    // 4. The reset caller's handle closed: the pool holds the listener's socket alone.
+    assert!(api::rhu_net_close(c1) == 0 && wait_pool(1, 1000), "net-listen-reset: the reset caller's socket did not return to the pool ({} in use)", net::probe_streams_used());
+    // 5. The next caller is accepted, and its bytes arrive.
+    let c2 = stream();
+    assert!(c2 >= 0 && api::rhu_net_connect(c2, &addr(LEASE, PORT)) == net::ERR_INPROGRESS, "net-listen-reset: the next caller's connect did not start ({})", c2);
+    let m = wait_mask(c2, net::WRITABLE as i32, deadline_in(3000));
+    assert!(m == net::WRITABLE as i32 && api::rhu_net_error(c2) == 0 && wait_mask(l, net::READABLE as i32, deadline_in(3000)) == net::READABLE as i32, "net-listen-reset: the next caller did not connect to the listener whose socket listened again (its mask {})", m);
+    let mut peer = none_addr();
+    let (mut cl, mut cp) = (none_addr(), none_addr());
+    let s2 = api::rhu_net_accept(l, &mut peer);
+    assert!(s2 >= 0 && api::rhu_net_name(c2, &mut cl, &mut cp) == 0 && ip_of(&peer) == LEASE && peer.port == cl.port, "net-listen-reset: the accept answered {} with the peer's port {} against the caller's own {}", s2, peer.port, cl.port);
+    assert!(api::rhu_net_send(c2, letters.as_ptr(), 26, core::ptr::null()) == 26 && wait_mask(s2, net::READABLE as i32, deadline_in(3000)) & net::READABLE as i32 != 0, "net-listen-reset: the caller's 26 letters did not arrive");
+    assert!(api::rhu_net_recv(s2, buf.as_mut_ptr(), 32, 0, core::ptr::null_mut()) == 26 && &buf[..26] == letters, "net-listen-reset: the caller's 26 letters read unequal");
+    // 6. The accepted handle closed while its caller keeps its own end: that connection stays in its close, its socket counted.
+    assert!(api::rhu_net_close(s2) == 0, "net-listen-reset: the accepted handle's close refused");
+    sched::sleep_ms(200);
+    assert!(net::probe_streams_used() == 3, "net-listen-reset: 200 ms behind the accepted handle's close the pool reads {} in use where 3 were expected (the listener's socket, the caller's and the closing one)", net::probe_streams_used());
+    // 7. The listener closed: the caller's socket and the closing one remain.
+    assert!(api::rhu_net_close(l) == 0 && wait_pool(2, 1000), "net-listen-reset: the listener's close refused, or its socket did not return to the pool ({} in use)", net::probe_streams_used());
+    // 8. A new socket binds the same port and listens while the old connection is still closing.
+    let l2 = stream();
+    let (b, li, used) = (api::rhu_net_bind(l2, &addr(LEASE, PORT)), api::rhu_net_listen(l2, 1), net::probe_streams_used());
+    assert!(l2 >= 0 && b == 0 && li == 0 && used == 3 && net::probe_backlog_listening(l2) == 1, "net-listen-reset: the bind to the port of a connection that is still closing answered {} and its listen {} with {} streams in use where 0, 0 and 3 were expected", b, li, used);
+    // 9. A caller is accepted on the new listener, and bytes come back to it.
+    let c3 = stream();
+    assert!(c3 >= 0 && api::rhu_net_connect(c3, &addr(LEASE, PORT)) == net::ERR_INPROGRESS, "net-listen-reset: the new listener's caller did not start its connect ({})", c3);
+    let m = wait_mask(c3, net::WRITABLE as i32, deadline_in(3000));
+    assert!(m == net::WRITABLE as i32 && api::rhu_net_error(c3) == 0 && wait_mask(l2, net::READABLE as i32, deadline_in(3000)) == net::READABLE as i32, "net-listen-reset: the caller did not connect to the new listener (its mask {})", m);
+    let s3 = api::rhu_net_accept(l2, &mut peer);
+    assert!(s3 >= 0 && api::rhu_net_name(c3, &mut cl, &mut cp) == 0 && ip_of(&peer) == LEASE && peer.port == cl.port, "net-listen-reset: the new listener's accept answered {} with the peer's port {} against the caller's own {}", s3, peer.port, cl.port);
+    assert!(api::rhu_net_send(s3, four.as_ptr(), 4, core::ptr::null()) == 4 && wait_mask(c3, net::READABLE as i32, deadline_in(3000)) & net::READABLE as i32 != 0, "net-listen-reset: the accepted stream's four bytes did not arrive");
+    buf = [0; 32];
+    assert!(api::rhu_net_recv(c3, buf.as_mut_ptr(), 32, 0, core::ptr::null_mut()) == 4 && buf[..4] == four, "net-listen-reset: the accepted stream's four bytes read unequal");
+    // 10. Everything closed, the old caller first: the old connection ends its close and the pool is whole.
+    assert!(api::rhu_net_close(c2) == 0 && api::rhu_net_close(c3) == 0 && api::rhu_net_close(s3) == 0 && api::rhu_net_close(l2) == 0 && wait_pool(0, 2000), "net-listen-reset: a close refused, or the pool not empty 2000 ms after the closes ({} in use)", net::probe_streams_used());
+    let w = witness();
+    let (accepts, connects) = (w.accepts.wrapping_sub(w0.accepts), w.connects.wrapping_sub(w0.connects));
+    assert!(accepts == 2 && connects == 3, "net-listen-reset: the witness counts {} accepts and {} connects in this check where 2 and 3 were expected", accepts, connects);
+    kprintln!("[api] PASS net-listen-reset (a caller reset before the accept left the listener's one socket closed by the stack; within one second it listened again in its place, the listener's mask clear, its accept EAGAIN and no error on it; the next caller was accepted and its 26 letters arrived; then, the accepted handle closed while its caller kept its own end, the listener closed and a new socket bound the same port and listened while the pool still counted the closing socket; a caller was accepted on it and four bytes came back; the pool whole at the end, 2 accepts and 3 connects on the witness)");
+}
+
+/// A bind to port 0 asks for any free port of the kind: the row gives one
+/// from 49152 up by the allocator of an unbound connect or sender, the name
+/// function reads it back, a listener bound so listens and accepts, and the
+/// refusals stand (a second bind, a foreign address, which spends no port).
+/// The control (`test-net-doctored-bind`) gives the port and records the
+/// caller's 0, and the first name read refuses it.
+fn check_net_bind_any() {
+    kprintln!("[api] net-bind-any: a bind to port 0 over the loopback -- a stream and its client each given a port from 49152 up and read back, the refusals, the listener's accept, two datagram sockets given two ports");
+    let settled = wait_until(api::rhu_net_events_word(), deadline_in(3000), || if net::probe_streams_used() == 0 { Some(()) } else { None });
+    assert!(settled.is_some(), "net-bind-any: {} stream sockets still tied 3 s after their closes", net::probe_streams_used());
+    let port_of = |h: i32| {
+        let mut local = none_addr();
+        assert!(api::rhu_net_name(h, &mut local, core::ptr::null_mut()) == 0, "net-bind-any: the name of handle {} refused", h);
+        local.port
+    };
+    let l = api::rhu_net_socket(net::FAMILY_IPV4, net::TYPE_STREAM, 0);
+    let c = api::rhu_net_socket(net::FAMILY_IPV4, net::TYPE_STREAM, 0);
+    assert!(l >= 0 && c >= 0 && l != c, "net-bind-any: the stream sockets read {} and {}", l, c);
+    assert!(api::rhu_net_bind(l, &addr(LEASE, 0)) == 0, "net-bind-any: a stream's bind to port 0 refused");
+    let p1 = port_of(l);
+    assert!((49152..=65535).contains(&p1), "net-bind-any: the stream bound to port 0 reads its port as {} where a port from 49152 up was expected", p1);
+    assert!(api::rhu_net_bind(l, &addr(LEASE, 0)) == sched::ERR_INVAL && api::rhu_net_bind(l, &addr(LEASE, 7100)) == sched::ERR_INVAL && port_of(l) == p1, "net-bind-any: a second bind of the bound stream not refused EINVAL, or its port moved");
+    assert!(api::rhu_net_bind(c, &addr(PEER, 0)) == sched::ERR_INVAL, "net-bind-any: a foreign address with port 0 not refused EINVAL");
+    assert!(api::rhu_net_bind(c, &addr(LEASE, 0)) == 0, "net-bind-any: the client's bind to port 0 refused");
+    let p2 = port_of(c);
+    let next = if p1 == 65535 { 49152 } else { p1 + 1 };
+    assert!(p2 == next, "net-bind-any: the client's port reads {} where {} was expected, the port after the listener's {} (the refused bind spent a port, or the allocator is another)", p2, next, p1);
+    assert!(api::rhu_net_listen(l, 1) == 0, "net-bind-any: the listen on the given port refused");
+    let r = api::rhu_net_connect(c, &addr(LEASE, p1 as u16));
+    assert!(r == net::ERR_INPROGRESS, "net-bind-any: the connect answered {} where EINPROGRESS was expected", r);
+    let m = wait_mask(c, net::WRITABLE as i32, deadline_in(3000));
+    assert!(m == net::WRITABLE as i32, "net-bind-any: the client's mask at establishment reads {}", m);
+    let m = wait_mask(l, net::READABLE as i32, deadline_in(3000));
+    assert!(m == net::READABLE as i32, "net-bind-any: the listener's mask reads {}", m);
+    let mut peer = none_addr();
+    let s = api::rhu_net_accept(l, &mut peer);
+    assert!(s >= 0 && ip_of(&peer) == LEASE && peer.port == p2 && port_of(l) == p1, "net-bind-any: the accept answered {} with the peer's port {} (the client's given port {}) and the listener's port {} (given {})", s, peer.port, p2, port_of(l), p1);
+    let x = [0x5Au8];
+    assert!(api::rhu_net_send(c, x.as_ptr(), 1, core::ptr::null()) == 1, "net-bind-any: the byte's send refused");
+    let m = wait_mask(s, net::READABLE as i32, deadline_in(3000));
+    let mut got = [0u8; 4];
+    assert!(m & net::READABLE as i32 != 0 && api::rhu_net_recv(s, got.as_mut_ptr(), 4, 0, core::ptr::null_mut()) == 1 && got[0] == 0x5A, "net-bind-any: the byte did not cross (the server's mask {})", m);
+    // Two datagram sockets, the pool of record.
+    let a = api::rhu_net_socket(net::FAMILY_IPV4, net::TYPE_DATAGRAM, 0);
+    let b = api::rhu_net_socket(net::FAMILY_IPV4, net::TYPE_DATAGRAM, 0);
+    assert!(a >= 0 && b >= 0, "net-bind-any: the datagram sockets read {} and {}", a, b);
+    assert!(api::rhu_net_bind(a, &addr([0, 0, 0, 0], 0)) == 0 && api::rhu_net_bind(b, &addr(LEASE, 0)) == 0, "net-bind-any: a datagram socket's bind to port 0 refused");
+    let (pa, pb) = (port_of(a), port_of(b));
+    assert!((49152..=65535).contains(&pa) && (49152..=65535).contains(&pb) && pa != pb, "net-bind-any: the datagram sockets' ports read {} and {}", pa, pb);
+    assert!(api::rhu_net_bind(a, &addr(LEASE, 0)) == sched::ERR_INVAL && port_of(a) == pa, "net-bind-any: a second bind of the bound datagram socket not refused EINVAL, or its port moved");
+    assert!(api::rhu_net_readiness(a, 0) == net::WRITABLE as i32 || wait_mask(a, net::WRITABLE as i32, deadline_in(1000)) == net::WRITABLE as i32, "net-bind-any: a bound datagram socket not writable");
+    let msg = [7u8; 8];
+    assert!(api::rhu_net_send(a, msg.as_ptr(), 8, &addr(LEASE, pb as u16)) == 8, "net-bind-any: the datagram's send refused");
+    let m = wait_mask(b, net::READABLE as i32, deadline_in(3000));
+    let mut from = none_addr();
+    let mut buf = [0u8; 16];
+    assert!(m & net::READABLE as i32 != 0 && api::rhu_net_recv(b, buf.as_mut_ptr(), 16, 0, &mut from) == 8 && buf[..8] == msg && ip_of(&from) == LEASE && from.port == pa, "net-bind-any: the datagram with the sender's given port did not arrive (the receiver's mask {}, the sender's port read {} where {} was given)", m, from.port, pa);
+    for h in [s, c, l, a, b] {
+        assert!(api::rhu_net_close(h) == 0, "net-bind-any: a close refused");
+    }
+    let settled = wait_until(api::rhu_net_events_word(), deadline_in(3000), || if net::probe_streams_used() == 0 { Some(()) } else { None });
+    assert!(settled.is_some(), "net-bind-any: {} stream sockets still tied 3 s after the closes", net::probe_streams_used());
+    kprintln!("[api] PASS net-bind-any (a stream bound to port 0 given a port from 49152 up, its name reading it back and a second bind EINVAL; a foreign address with port 0 EINVAL with no port spent, the client's bind to port 0 given the very next port; the listener on its given port accepting the client from the client's given port, a byte across; two datagram sockets bound to port 0 given two ports from 49152 up, a second bind EINVAL, a datagram across carrying the sender's given port; the five closes and the stream pool whole)");
 }

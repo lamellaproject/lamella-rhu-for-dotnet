@@ -133,8 +133,8 @@ and `RHU_RT_ARCHIVES_M33` or by the pointer files `rtarchives-m7.local` and
     mkdir -p /path/to/archives
     tar -xf lamella-rhu-<version>-runtime-archives.tar -C /path/to/archives
     (cd /path/to/archives && sha256sum -c MANIFEST.txt)
-    export RHU_RT_ARCHIVES_M7=/path/to/archives/net11-rc3-rhu-cortex-m7-sgc-enabled
-    export RHU_RT_ARCHIVES_M33=/path/to/archives/net11-rc3-rhu-cortex-m33-sgc-enabled
+    export RHU_RT_ARCHIVES_M7=/path/to/archives/net11.0.0-rhu-cortex-m7-sgc-enabled
+    export RHU_RT_ARCHIVES_M33=/path/to/archives/net11.0.0-rhu-cortex-m33-sgc-enabled
 
 The goldens archive leaves its `MANIFEST.txt` at the repository root, where
 git ignores it. With the tiers in place the chain runs every gate, and the
@@ -266,7 +266,17 @@ the object, the surgery object, the merged object and the image byte for
 byte, ties the board table's stack facts to the tree, boots the image a
 program's stack knob produces, and exercises the SDK's refusals through
 the real tool, among them a publish from a git checkout at another path,
-which must tie the frozen object.
+which must tie the frozen object. The leg also publishes the other programs
+under `src/rt/gate` for its emulator row and boots them: the network suite,
+the thread pool's bound, the runtime's stack helper, and the programs a
+debugger reads. Each has its control; the stack helper's is the same
+program linked once more with the hosting layer's unit that reports a
+thread's true stack bounds, which the program must refuse by its own lines.
+One program runs under the emulator's debug port, where the leg reads the
+event an unhandled exception raises; the same reading is a command of the
+harness, `rhu-gate rt debug-event <machine> <image> <out-dir>`, and
+`rhu-gate rt debug-event doctor <image> <out-image>` writes the doctored
+copy its control must refuse.
 The SDK's link runs the tools package for the host the .NET SDK reports;
 the packages are packed for `win-x64`, `win-arm64`, `osx-arm64`, `linux-x64`
 and `linux-arm64` from the LLVM release's own binaries and the Lamella
@@ -281,7 +291,7 @@ identity: its object differs in the sixteen bytes of the assembly's module
 version id alone.
 
 Lamella RHU builds the runtime archives itself from the dotnet/runtime
-source at its pinned tag (.NET 11 RC3), with clang 22.1.8,
+source at its pinned tag (.NET 11.0.0), with clang 22.1.8,
 through the runtime repository's own build entry in a cross environment
 whose target sysroot is Ubuntu 22.04's armhf packages:
 

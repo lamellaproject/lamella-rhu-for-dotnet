@@ -201,5 +201,14 @@
       "uart0",
       "uart1"
     ]
+  },
+  "net": {
+    "medium": "wireless",
+    "streams": 4,
+    "datagrams": 2,
+    "streamRx": 4096,
+    "streamTx": 2048,
+    "datagramBuf": 1536,
+    "resolveSlots": 4
   }
 }

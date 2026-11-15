@@ -1150,3 +1150,39 @@ pub mod wireless_tenant {
         r
     }
 }
+
+/// THE RADIO'S TENANCY on the bank's one interrupt line, for the kernel's
+/// own wireless medium (the claims table's tenant interface). The wireless
+/// module's data line is also its interrupt line. The line's level-high
+/// enable bit is registered here with the network thread's wake word, once,
+/// when the medium is made and before any thread runs, and the vector line
+/// is enabled then; nothing fires until the medium's row arms the bit. The
+/// family handler masks the bit before it wakes the word (a level is not
+/// latched), and the row arms it again at the end of the thread's next
+/// pass. What is masked: one enable bit of one line at the IO bank, by the
+/// handler and by the row; nothing at the controller's global level. On an
+/// image that also carries the unhosted wifi test program, that program's
+/// own claim of the same bit comes later in the boot, and the table
+/// refuses it.
+#[cfg(rhu_net_wireless)]
+pub mod radio_tenant {
+    use core::ptr::addr_of_mut;
+    use core::sync::atomic::AtomicU32;
+
+    use super::gpio_backend::{inte, nvic_enable_once};
+    use crate::board::facts::WIRELESS_DATA_LINE;
+    use crate::critical::with_cs;
+    use crate::gpio_math as m;
+    use crate::{claims, gpio};
+
+    /// The tenancy registered and the vector line enabled; the table's code
+    /// (0 taken; the busy code when the bit is held or the table is full).
+    pub fn init(wake: &'static AtomicU32) -> i32 {
+        let (k, s) = m::rp_word(WIRELESS_DATA_LINE);
+        let r = with_cs(|| unsafe { claims::tenant_add(&mut *addr_of_mut!(gpio::CLAIMS), inte(k) as u32, s + m::RP_LEVEL_HIGH, wake.as_ptr() as u32) });
+        if r == 0 {
+            nvic_enable_once();
+        }
+        r
+    }
+}

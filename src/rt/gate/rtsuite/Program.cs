@@ -1087,6 +1087,17 @@ internal static class Program
         // the rows' order.
         string[] names = SerialPort.GetPortNames();
         Check(names.Length == 2 && names[0] == "/dev/ttyS0" && names[1] == "/dev/ttyS1", section, "the port names: " + string.Join(",", names));
+        // The board class and the enumeration name one set of ports: every
+        // device file of TargetBoard.SerialPorts that a program may open
+        // (a port the image uses for neither its console nor its log) is
+        // a name the enumeration returns.
+        foreach (UartInfo uart in new TargetBoard().SerialPorts)
+        {
+            if (!uart.IsConsole && !uart.IsLog)
+            {
+                Check(Array.IndexOf(names, uart.PortName) >= 0, section, "the board class's port " + uart.PortName + " is not a name of the enumeration: " + string.Join(",", names));
+            }
+        }
         using (SerialPort port = new SerialPort(SerialPortName, 115200, Parity.None, 8, StopBits.One))
         {
             port.Open();
@@ -1399,6 +1410,254 @@ internal static class Program
         }
     }
 
+    // A named mutex, as .NET answers on this target (the class library serves a name through files under the
+    // temporary folder and an advisory lock on one of them). TEN STEPS, each a method of its own. THE TIMING RULE:
+    // every hand-over between two threads is an event the step sets itself, and a wait is 0 or endless -- but for
+    // one wait of 50 ms against a held mutex, which can only answer false however late a busy host makes it. No
+    // verdict here depends on how fast the host runs; a step that could not go on would stop, and the gate's own
+    // bound on the run reports that.
+    private const string NamedMutexName = "rhu-suite-mutex";
+
+    private static bool TakenByAnotherThread(Mutex m, int milliseconds)
+    {
+        bool taken = false;
+        Thread t = new Thread(delegate ()
+        {
+            taken = m.WaitOne(milliseconds);
+            if (taken)
+            {
+                m.ReleaseMutex();
+            }
+        });
+        t.Start();
+        t.Join();
+        return taken;
+    }
+
+    // one: a name that is not there is created new, and is gone with its last handle
+    private static void NamedMutex1Create(string section)
+    {
+        using (Mutex first = new Mutex(false, NamedMutexName, out bool createdNew))
+        {
+            Check(createdNew, section, "a first mutex of a name was not created new");
+            Check(first.WaitOne(0), section, "a new mutex was not taken at a wait of 0");
+            first.ReleaseMutex();
+        }
+        Check(!Mutex.TryOpenExisting(NamedMutexName, out Mutex? gone) && gone == null, section, "a name was still found after its last handle was disposed");
+    }
+
+    // two: the same name again while a handle stands is not new, and is the same mutex
+    private static void NamedMutex2Again(string section)
+    {
+        using Mutex first = new Mutex(false, NamedMutexName, out bool createdNew);
+        using Mutex second = new Mutex(false, NamedMutexName, out bool secondNew);
+        Check(createdNew && !secondNew, section, "a second mutex of a name that stands was created new");
+        Check(first.WaitOne(0), section, "the mutex was not taken through its first handle");
+        Check(!TakenByAnotherThread(second, 0), section, "a mutex held through one handle was taken through a second handle of its name");
+        Check(!TakenByAnotherThread(second, 50), section, "a held mutex was taken at a wait of 50 ms");
+        first.ReleaseMutex();
+        Check(TakenByAnotherThread(second, 0), section, "a released mutex was not taken through the second handle of its name");
+    }
+
+    // three: opened by its name, it is the same mutex
+    private static void NamedMutex3Open(string section)
+    {
+        using Mutex first = new Mutex(false, NamedMutexName, out bool createdNew);
+        using Mutex opened = Mutex.OpenExisting(NamedMutexName);
+        bool found = Mutex.TryOpenExisting(NamedMutexName, out Mutex? tried);
+        Check(createdNew && found && tried != null, section, "a name that stands was not found");
+        Check(first.WaitOne(0), section, "the mutex was not taken through its first handle");
+        Check(!TakenByAnotherThread(opened, 0), section, "a mutex held through one handle was taken through a handle opened by its name");
+        Check(tried == null || !TakenByAnotherThread(tried, 0), section, "a mutex held through one handle was taken through a handle found by its name");
+        first.ReleaseMutex();
+        Check(TakenByAnotherThread(opened, 0), section, "a released mutex was not taken through the handle opened by its name");
+        tried?.Dispose();
+    }
+
+    // four: a name that is not there is .NET's own exception, and false for the form that tries
+    private static void NamedMutex4Absent(string section)
+    {
+        bool refused = false;
+        try
+        {
+            using Mutex none = Mutex.OpenExisting("rhu-suite-absent");
+        }
+        catch (WaitHandleCannotBeOpenedException)
+        {
+            refused = true;
+        }
+        Check(refused, section, "opening a name that is not there did not throw WaitHandleCannotBeOpenedException");
+        Check(!Mutex.TryOpenExisting("rhu-suite-absent", out Mutex? ghost) && ghost == null, section, "a name that is not there was found");
+    }
+
+    // five: a second thread cannot take the mutex while the first holds it, waits without end, and has it after the release
+    private static void NamedMutex5TwoThreads(string section)
+    {
+        using Mutex first = new Mutex(false, NamedMutexName, out bool createdNew);
+        using Mutex second = Mutex.OpenExisting(NamedMutexName);
+        using ManualResetEventSlim waiting = new ManualResetEventSlim(false);
+        using ManualResetEventSlim holding = new ManualResetEventSlim(false);
+        using ManualResetEventSlim looked = new ManualResetEventSlim(false);
+        bool refusedWhileHeld = false;
+        Check(createdNew && first.WaitOne(0), section, "the mutex was not taken by the first thread");
+        Thread waiter = new Thread(delegate ()
+        {
+            refusedWhileHeld = !second.WaitOne(0);
+            waiting.Set();
+            second.WaitOne();
+            holding.Set();
+            looked.Wait();
+            second.ReleaseMutex();
+        });
+        waiter.Start();
+        waiting.Wait();
+        Check(refusedWhileHeld, section, "the second thread took the mutex while the first held it");
+        first.ReleaseMutex();
+        holding.Wait();
+        Check(!first.WaitOne(0), section, "the first thread took the mutex while the second held it");
+        looked.Set();
+        waiter.Join();
+        Check(first.WaitOne(0), section, "the mutex was not free after the second thread released it");
+        first.ReleaseMutex();
+    }
+
+    // six: an owner thread that ends without a release leaves the mutex to the next waiter, who is told
+    private static void NamedMutex6Abandoned(string section)
+    {
+        using Mutex first = new Mutex(false, NamedMutexName, out bool createdNew);
+        using Mutex second = Mutex.OpenExisting(NamedMutexName);
+        bool owned = false;
+        Thread quitter = new Thread(delegate ()
+        {
+            owned = second.WaitOne(0);
+        });
+        quitter.Start();
+        quitter.Join();
+        Check(createdNew && owned, section, "the thread that is to end did not take the mutex");
+        bool told = false;
+        try
+        {
+            first.WaitOne();
+        }
+        catch (AbandonedMutexException)
+        {
+            told = true;
+        }
+        Check(told, section, "a wait after the owner thread ended without a release did not throw AbandonedMutexException");
+        Check(!TakenByAnotherThread(second, 0), section, "the waiter that was told does not own the mutex");
+        first.ReleaseMutex();
+        Check(TakenByAnotherThread(second, 0), section, "the mutex was not free after the waiter's release");
+    }
+
+    // seven: a hundred rounds on one name, more than every bound of the store: each is created new and leaves nothing
+    private static void NamedMutex7Rounds(string section)
+    {
+        int notNew = 0;
+        int notTaken = 0;
+        for (int i = 0; i < 100; i++)
+        {
+            using Mutex m = new Mutex(false, NamedMutexName, out bool createdNew);
+            if (!createdNew)
+            {
+                notNew++;
+            }
+            if (m.WaitOne(0))
+            {
+                m.ReleaseMutex();
+            }
+            else
+            {
+                notTaken++;
+            }
+        }
+        Check(notNew == 0 && notTaken == 0, section, "of a hundred rounds on one name " + notNew + " were not created new and " + notTaken + " were not taken");
+    }
+
+    // eight: the temporary folder full -- .NET's exception for a full device, never a fault; and the name is made
+    // once there is room. The folder is filled with empty files, so the refusal is the first one the creation of a
+    // name can meet (no file can be made), which leaves nothing half made.
+    private static void NamedMutex8Bound(string section)
+    {
+        string folder = Path.GetTempPath();
+        List<string> made = new List<string>();
+        bool full = false;
+        for (int i = 0; i < 64 && !full; i++)
+        {
+            string path = Path.Combine(folder, "rhu-suite-fill-" + i);
+            try
+            {
+                File.Create(path).Dispose();
+                made.Add(path);
+            }
+            catch (IOException)
+            {
+                full = true;
+            }
+        }
+        Check(full, section, "the temporary folder took 64 files without .NET's exception for a full device");
+        bool refused = false;
+        try
+        {
+            using Mutex none = new Mutex(false, "rhu-suite-bound", out bool _);
+        }
+        catch (IOException)
+        {
+            refused = true;
+        }
+        Check(refused, section, "a named mutex on a full temporary folder did not throw IOException");
+        foreach (string path in made)
+        {
+            File.Delete(path);
+        }
+        using Mutex m = new Mutex(false, "rhu-suite-bound", out bool createdNew);
+        Check(createdNew && m.WaitOne(0), section, "the name refused on a full folder was not created new and taken once there was room");
+        m.ReleaseMutex();
+    }
+
+    // nine: the two prefixes -- Local is the plain name, Global is another mutex
+    private static void NamedMutex9Prefixes(string section)
+    {
+        using Mutex local = new Mutex(false, "Local\\rhu-suite-prefix", out bool localNew);
+        using Mutex plain = new Mutex(false, "rhu-suite-prefix", out bool plainNew);
+        using Mutex global = new Mutex(false, "Global\\rhu-suite-prefix", out bool globalNew);
+        Check(localNew && !plainNew, section, "a name with the Local prefix and the plain name are not one mutex");
+        Check(globalNew, section, "a name with the Global prefix is not a mutex of its own");
+        Check(local.WaitOne(0), section, "the mutex was not taken through the Local name");
+        Check(!TakenByAnotherThread(plain, 0), section, "a mutex held through the Local name was taken through the plain name");
+        Check(TakenByAnotherThread(global, 0), section, "the mutex of the Global name was held by the Local name's owner");
+        local.ReleaseMutex();
+    }
+
+    // ten: a mutex with no name beside them, as it was
+    private static void NamedMutex10Unnamed(string section)
+    {
+        using Mutex m = new Mutex(false);
+        Check(m.WaitOne(0), section, "a mutex with no name was not taken");
+        Check(!TakenByAnotherThread(m, 0), section, "a held mutex with no name was taken by another thread");
+        m.ReleaseMutex();
+        Check(TakenByAnotherThread(m, 0), section, "a released mutex with no name was not taken by another thread");
+    }
+
+    private static void Section21NamedMutex()
+    {
+        const string section = "rt-named-mutex";
+        int before = s_failures;
+        NamedMutex1Create(section);
+        NamedMutex2Again(section);
+        NamedMutex3Open(section);
+        NamedMutex4Absent(section);
+        NamedMutex5TwoThreads(section);
+        NamedMutex6Abandoned(section);
+        NamedMutex7Rounds(section);
+        NamedMutex8Bound(section);
+        NamedMutex9Prefixes(section);
+        NamedMutex10Unnamed(section);
+        if (s_failures == before)
+        {
+            Pass(section, "(a name is created once, found while a handle stands and gone with the last; two handles of a name are one mutex; a name that is not there is WaitHandleCannotBeOpenedException; a second thread has the mutex after the release; an owner thread that ended leaves it to the next waiter with AbandonedMutexException; a hundred rounds on one name are each created new; a full temporary folder is IOException and the name is made once there is room; Local is the plain name and Global another)");
+        }
+    }
+
     private static int Main()
     {
         Console.WriteLine("RTSUITE: start");
@@ -1422,6 +1681,7 @@ internal static class Program
         Guarded("rt-serial", Section18Serial);
         Guarded("rt-adc", Section19Adc);
         Guarded("rt-crypto", Section20Crypto);
+        Guarded("rt-named-mutex", Section21NamedMutex);
         if (s_failures != 0)
         {
             Console.WriteLine("RTSUITE: FAIL (" + s_failures + " checks)");

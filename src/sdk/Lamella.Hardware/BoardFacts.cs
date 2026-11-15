@@ -18,8 +18,8 @@ internal sealed record BoardFacts(
     int ClockFrequency,
     string Posture,
     IReadOnlyList<BoardPin> Pins,
-    IReadOnlyList<I2cBusInfo> I2cBuses,
-    IReadOnlyList<SpiBusInfo> SpiBuses,
+    IReadOnlyList<BoardI2cBus> I2cBuses,
+    IReadOnlyList<BoardSpiBus> SpiBuses,
     IReadOnlyList<UartInfo> SerialPorts,
     int AnalogResolutionBits,
     int AnalogReferenceMillivolts);

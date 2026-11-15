@@ -60,7 +60,8 @@ MEMORY
 }
 
 /* GC-substrate floor: the arena window this board GUARANTEES after
- * statics + .kstacks + the console mirror + the boot-stack reserve
+ * statics + .kstacks + the console mirror + the Ethernet rings + the
+ * boot-stack reserve
  * (link-enforced by the window asserts at the bottom of this map).
  * PAYLOAD-map value under the external posture (the managed heap, the
  * collector's mark bitmap and its mark stack in the SDRAM's window 1):
@@ -380,20 +381,36 @@ SECTIONS
     __rhu_console_log_end = .;
   } > DATA
 
+  /* The Ethernet controller's rings (the net feature): the descriptors
+   * and the frame buffers its DMA reads and writes. NOLOAD, zeroed by
+   * the driver at its bring-up; empty in an image without the feature.
+   * It lies above the stack pool, so above the core's own 128 K at the
+   * region's start, which the DMA does not reach (the assertion
+   * below). */
+  .rhu_net_rings (NOLOAD) : ALIGN(8)
+  {
+    KEEP(*(.rhu_net_rings));
+    . = ALIGN(8);
+    __rhu_net_rings_end = .;
+  } > DATA
+
   /DISCARD/ : { *(.comment) *(.note*) }
 }
 
 /* The arena window: link-defined slack between the end of the console
- * mirror and the boot/handler-stack reserve at the top of DATA.
+ * mirror (the Ethernet rings after it) and the boot/handler-stack
+ * reserve at the top of DATA.
  * Kernel-owned NOLOAD space outside every section; arena::init()
  * establishes the zero-birth invariant over it at boot. (Top level: the
  * linker rejects a bare ASSERT between output sections and reports the
  * error one command late.) */
 RHU_BOOT_STACK_RESERVE = 16K;
-__rhu_arena_lo = ALIGN(__rhu_console_log_end, 8);
+__rhu_arena_lo = ALIGN(__rhu_net_rings_end, 8);
 __rhu_arena_hi = __stack_start - RHU_BOOT_STACK_RESERVE;
 ASSERT(__rhu_arena_hi >= __rhu_arena_lo,
   "static RAM + .kstacks + the console mirror overflow into the boot-stack reserve (arena window negative)");
+ASSERT(SIZEOF(.rhu_net_rings) == 0 || ADDR(.rhu_net_rings) >= 0x20020000,
+  "the Ethernet rings lie in the core's own RAM, below 0x20020000, where the controller's DMA does not reach");
 ASSERT(__rhu_arena_hi - __rhu_arena_lo >= RHU_ARENA_MIN,
   "arena window under this board's GC-substrate floor (RHU_ARENA_MIN)");
 
@@ -466,8 +483,8 @@ ASSERT(LENGTH(QSPI) >= 64 + RHU_RT_XIP_BYTES,
 RHU_KERNEL_RAM_RESERVE = 16K;
 ASSERT(LENGTH(CODE) >= RHU_RT_CODE_BYTES + RHU_RT_COPY_BYTES + RHU_KERNEL_CODE_RESERVE,
   "CODE region under the hosted runtime's code class and copied data beside the kernel's code reserve");
-ASSERT(LENGTH(DATA) >= RHU_RT_COPY_BYTES + RHU_RT_ZERO_BYTES + SIZEOF(.kstacks) + SIZEOF(.rhu_console_log) + RHU_BOOT_STACK_RESERVE + RHU_ARENA_MIN + RHU_KERNEL_RAM_RESERVE,
-  "DATA region under the hosted runtime's data beside the thread stacks, the console mirror, the boot-stack reserve, the arena floor and the kernel's RAM reserve");
+ASSERT(LENGTH(DATA) >= RHU_RT_COPY_BYTES + RHU_RT_ZERO_BYTES + SIZEOF(.kstacks) + SIZEOF(.rhu_console_log) + SIZEOF(.rhu_net_rings) + RHU_BOOT_STACK_RESERVE + RHU_ARENA_MIN + RHU_KERNEL_RAM_RESERVE,
+  "DATA region under the hosted runtime's data beside the thread stacks, the console mirror, the Ethernet rings, the boot-stack reserve, the arena floor and the kernel's RAM reserve");
 
 /* The GOT rides the boot's single copy: at .data's load/run offset. */
 ASSERT(LOADADDR(.got) - ADDR(.got) == LOADADDR(.data) - ADDR(.data),

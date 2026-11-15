@@ -1,0 +1,10 @@
+shimtest-sockrefusals: the refused names of the socket surface, each read for the value its caller expects
+PASS shim-sock-refusals-socket (the out-of-band mark, the wait over lists and the file send: ENOTSUP)
+PASS shim-sock-refusals-data (the error queue ENOTSUP; no dual-mode packet information)
+PASS shim-sock-refusals-option (the options by the platform's numbers and the four multicast options: ENOTSUP; no interface index for a name)
+PASS shim-sock-refusals-netinfo (the gateway reader -1 with ENOTSUP; the change listener and its reader: ENOTSUP)
+PASS shim-sock-refusals-statistics (the eleven statistics readers: -1 with ENOTSUP)
+PASS shim-sock-refusals-wasi (the two WASI names: ENOTSUP)
+PASS shim-sock-refusals-resolve (the reverse lookup of an address: EAI_NONAME)
+PASS shim-sock-refusals-no-unit (in this image, which links no socket unit, descriptors 32, 40 and 47 are each a bad descriptor to Close, Read, Write, FStat and the three descriptor-flag verbs, and descriptors 32 and 47 polled alone and beside a file of the store answer POLLNVAL at once, with and without a bound)
+SHIMTEST-SOCKREFUSALS: ALL GOOD (the refused names of the socket surface, each read for the value its caller expects)

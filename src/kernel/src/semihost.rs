@@ -27,7 +27,7 @@ unsafe fn call(op: u32, param: u32) -> u32 { unsafe {
 /// it, the exit code and the end magic stored into the mirror's
 /// header, the held wires drained, then the semihosting exit
 /// (the emulator rows) or the park (silicon).
-pub fn end(state: u32, code: i32) -> ! {
+pub fn end(state: u32, code: i32) -> ! { #[cfg(rhu_net_wireless)] crate::net::wireless_end();
     // The census line every gated transcript ends with: the lost-tick
     // witness's counts (or why there are none), on every exit path.
     crate::sched::tick_witness_print();
@@ -46,7 +46,7 @@ pub fn end(state: u32, code: i32) -> ! {
 /// code whole, the held wires drained, then the exit or the park. No path
 /// prints a line for the end, so every recorded transcript ends with the
 /// census line.
-pub fn exit(code: u32) -> ! {
+pub fn exit(code: u32) -> ! { #[cfg(rhu_net_wireless)] crate::net::wireless_end();
     crate::sched::tick_witness_print();
     crate::stack_watermark::report();
     ring::end_mark(exit_word::STATE_RETURNED, code as i32);

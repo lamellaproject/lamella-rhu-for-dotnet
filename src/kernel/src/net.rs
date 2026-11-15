@@ -255,24 +255,45 @@ mod served {
 
     use crate::board::facts;
     use crate::board::net_medium::{Adapter, Link, Medium};
-    use crate::board::virt_net::{VirtNet, VirtWitness};
-    use crate::net_peer;
+    #[cfg(rhu_net_virtual)]
+    use crate::board::virt_net::VirtNet;
+    #[cfg(all(rhu_net_virtual, feature = "api-smoke"))]
+    use crate::board::virt_net::VirtWitness;
 
-    /// The row's pool (the emulator rows'
-    /// row): the stream sockets and their buffer pair, the datagram sockets
+    /// The row's pool: the stream sockets and their buffer pair (the
+    /// wired row's receive buffer twice the emulator rows'), the datagram sockets
     /// and theirs, the resolver's slots, the handle table. The doctored
     /// budget (the api gate's control) makes a stream buffer a megabyte, so
     /// the pool exceeds the row's window and the assertion below refuses the build.
     pub const STREAMS: usize = 4;
     pub const DATAGRAMS: usize = 2;
     #[cfg(not(feature = "test-net-doctored-budget"))]
-    pub const STREAM_RX: usize = 2048;
+    pub const STREAM_RX: usize = if cfg!(any(rhu_net_wired, rhu_net_wireless)) { 4096 } else { 2048 };
     #[cfg(feature = "test-net-doctored-budget")]
     pub const STREAM_RX: usize = 1 << 20;
     pub const STREAM_TX: usize = 2048;
     pub const DGRAM_BUF: usize = 1536;
     pub const DGRAM_PACKETS: usize = 4;
     pub const RESOLVE_SLOTS: usize = 4;
+    /// The address records the row keeps of one answer, in the answer's
+    /// order: a name with more answers its first two. The stack is built
+    /// to keep as many (`dns-max-result-count-2` on its dependency line;
+    /// its own default of one dropped the second record without a word).
+    const RESOLVE_RECORDS: usize = 2;
+    const _: () = assert!(smoltcp::config::DNS_MAX_RESULT_COUNT >= RESOLVE_RECORDS, "the stack keeps fewer address records of an answer than the resolver's slot holds");
+    /// The records read from the stack's answer: the slot's width, or one
+    /// under the api gate's control (the defect as it was).
+    const RESOLVE_KEPT: usize = if cfg!(feature = "test-net-doctored-resolve") { 1 } else { RESOLVE_RECORDS };
+    /// The name servers the row keeps of a lease or a static record, in
+    /// the record's order. The stack is built to ask as many
+    /// (`dns-max-server-count-2` on its dependency line; its own default
+    /// is one, and its `update_servers` cuts a longer list to its count
+    /// without a word).
+    const NAME_SERVERS: usize = 2;
+    const _: () = assert!(smoltcp::config::DNS_MAX_SERVER_COUNT >= NAME_SERVERS, "the stack asks fewer name servers than a lease record carries");
+    /// The name servers handed to the stack: the record's, or the first
+    /// alone under the api gate's control.
+    const NAME_SERVERS_ASKED: usize = if cfg!(feature = "test-net-doctored-dns2") { 1 } else { NAME_SERVERS };
     pub const HANDLES: usize = 8;
     const SOCKETS: usize = STREAMS + DATAGRAMS + 2; // the DHCP client and the resolver
     /// The connect budget: a stream still in its handshake after it is
@@ -284,17 +305,21 @@ mod served {
     pub const SAFETY_MS: u32 = 500;
     /// The keep-alive interval the option sets (a row fact).
     pub const KEEPALIVE_MS: u64 = 7500;
-    /// A resolution the stack gave up on at its own retry budget (10 s) is
-    /// a timeout; one refused earlier is the server's name error.
+    /// A resolution the stack gave up on at its own retry budget is a
+    /// timeout; one refused earlier is a server's name error. The budget
+    /// is the stack's 10 s for each name server it asks (`RETRANSMIT_TIMEOUT`
+    /// in its resolver): the first server's is read at 9000 ms, and each
+    /// further server adds its 10 000 ms.
     const RESOLVE_TIMEOUT_MS: u32 = 9000;
+    const RESOLVE_SERVER_MS: u32 = 10_000;
     /// The network thread's priority (one notch more urgent than the hosted
     /// flat level, `api::HOSTED_PRIO_FLAT` 0x80) and its stack.
     pub const THREAD_PRIO: u8 = 0x7F;
     pub const THREAD_STACK: usize = 8192;
     const EPHEMERAL_FIRST: u16 = 49152;
     const NONE: usize = usize::MAX;
-    pub const KIND: u32 = KIND_VIRTUAL;
-    pub const KIND_WORD: &str = "virtual";
+    pub const KIND: u32 = if cfg!(rhu_net_wired) { KIND_WIRED } else if cfg!(rhu_net_wireless) { KIND_WIRELESS } else { KIND_VIRTUAL };
+    pub const KIND_WORD: &str = if cfg!(rhu_net_wired) { "wired" } else if cfg!(rhu_net_wireless) { "wireless" } else { "virtual" };
 
     #[repr(C)]
     struct Buffers {
@@ -376,16 +401,18 @@ mod served {
         qh: Option<dns::QueryHandle>,
         code: i32,
         n: u32,
-        addrs: [[u8; 4]; 2],
+        addrs: [[u8; 4]; RESOLVE_RECORDS],
         started_ms: u32,
     }
 
-    const EMPTY_RESOLVE: Resolve = Resolve { used: false, done: false, qh: None, code: 0, n: 0, addrs: [[0; 4]; 2], started_ms: 0 };
+    const EMPTY_RESOLVE: Resolve = Resolve { used: false, done: false, qh: None, code: 0, n: 0, addrs: [[0; 4]; RESOLVE_RECORDS], started_ms: 0 };
 
     struct Stack {
         iface: Interface,
         sockets: SocketSet<'static>,
-        medium: VirtNet,
+        medium: RowMedium,
+        /// The link as the network thread last acted on it.
+        link_up: bool,
         tcp: [SocketHandle; STREAMS],
         tcp_used: [bool; STREAMS],
         udp: [SocketHandle; DATAGRAMS],
@@ -400,6 +427,34 @@ mod served {
         slots: [Slot; HANDLES],
         resolve: [Resolve; RESOLVE_SLOTS],
         ephemeral: u16,
+    }
+
+    /// The row's medium behind the seam: the emulator rows' virtual medium
+    /// over its scripted peer, the STM32F769 row's Ethernet controller.
+    #[cfg(rhu_net_virtual)]
+    type RowMedium = VirtNet;
+    #[cfg(rhu_net_wired)]
+    type RowMedium = crate::board::stm32f7_eth::Eth;
+
+    #[cfg(rhu_net_virtual)]
+    fn row_medium() -> RowMedium {
+        VirtNet::new(&WAKE, cfg!(feature = "test-net-doctored-arp"))
+    }
+    #[cfg(rhu_net_wired)]
+    fn row_medium() -> RowMedium {
+        crate::board::stm32f7_eth::Eth::bring_up()
+    }
+
+    /// Whether the medium holds frames the stack committed and its service
+    /// has yet to move (the virtual medium's staging ring); a wired
+    /// medium's frame is on its way at the commit.
+    #[cfg(rhu_net_virtual)]
+    fn staged(medium: &RowMedium) -> bool {
+        medium.has_staged()
+    }
+    #[cfg(rhu_net_wired)]
+    fn staged(_medium: &RowMedium) -> bool {
+        false
     }
 
     static mut STACK: Option<Stack> = None;
@@ -462,7 +517,7 @@ mod served {
         let r = f(stack());
         give();
         r
-    }
+    } #[cfg(rhu_net_wireless)] pub(super) fn with_medium<R>(f: impl FnOnce(&mut RowMedium) -> R) -> R { with_stack(|st| f(&mut st.medium)) }
 
     fn wake_word() -> &'static AtomicU32 {
         let p = WAKE_WORD.load(Ordering::Acquire);
@@ -531,9 +586,9 @@ mod served {
     pub fn init() {
         let mut seed = [0u8; 8];
         crate::entropy::fill(&mut seed);
-        let mut cfg = Config::new(HardwareAddress::Ethernet(EthernetAddress(net_peer::OUR_MAC)));
+        let mut medium = row_medium();
+        let mut cfg = Config::new(HardwareAddress::Ethernet(EthernetAddress(medium.hardware_address().unwrap_or([0; 6]))));
         cfg.random_seed = u64::from_le_bytes(seed);
-        let mut medium = VirtNet::new(&WAKE, cfg!(feature = "test-net-doctored-arp"));
         let iface = {
             let mut dev = Adapter { medium: &mut medium };
             Interface::new(cfg, &mut dev, Instant::from_millis(0))
@@ -568,6 +623,7 @@ mod served {
                 iface,
                 sockets,
                 medium,
+                link_up: link == Link::Up,
                 tcp: tcp_h,
                 tcp_used: [false; STREAMS],
                 udp: udp_h,
@@ -691,22 +747,25 @@ mod served {
         }
     }
 
-    /// One pass under the tenancy: the medium serviced and the stack polled
-    /// until nothing moves, the lease events, the resolver's answers, every
+    /// One pass under the tenancy: the medium serviced, the link read, the
+    /// stack polled until nothing moves, the lease events, the resolver's answers, every
     /// handle's readiness. Answers the handles whose words moved, the delay
     /// to the next pass and the resolutions that completed.
     fn pass(st: &mut Stack, now_ms: u32) -> (u32, u32, u32) {
         let now = now_instant();
-        for _ in 0..16 {
+        for round in 0..16 {
             #[cfg(feature = "api-smoke")]
             DIAG_PHASE.store(1, Ordering::Relaxed);
             st.medium.service(now_ms);
+            if round == 0 {
+                link_events(st);
+            }
             #[cfg(feature = "api-smoke")]
             DIAG_PHASE.store(2, Ordering::Relaxed);
             let Stack { iface, sockets, medium, .. } = st;
             let mut dev = Adapter { medium };
             let _ = iface.poll(now, &mut dev, sockets);
-            if !st.medium.has_staged() {
+            if !staged(&st.medium) {
                 break;
             }
         }
@@ -716,6 +775,7 @@ mod served {
         DIAG_PHASE.store(3, Ordering::Relaxed);
         let changed = judge(st, now_ms);
         free_closed(st);
+        relisten(st);
         #[cfg(feature = "api-smoke")]
         DIAG_PHASE.store(0, Ordering::Relaxed);
         let mut delay = SAFETY_MS;
@@ -727,8 +787,77 @@ mod served {
                 let left = CONNECT_BUDGET_MS.saturating_sub(now_ms.wrapping_sub(s.started_ms));
                 delay = delay.min(left.max(1));
             }
-        }
+        } #[cfg(rhu_net_wireless)] wireless_pass_end(&mut st.medium, now_ms, &mut delay);
         (changed, delay.max(1), resolved)
+    }
+
+    /// The link read once a pass, after the medium's first service. A
+    /// change moves the witness's link and the medium's word and wakes the
+    /// word's waiters. A link that went down ends every open connection at
+    /// once: a connected stream reads RHU_ECONNRESET, a connecting one
+    /// RHU_ENETDOWN, a connection behind a listener that nobody accepted is
+    /// dropped and its socket listens again, a closed handle's socket still
+    /// in its closing handshake returns to the pool; listeners and datagram
+    /// sockets stay. Each connection ends through the abort that drops its
+    /// tuple: a link that is down carries no reset, and one left pending
+    /// would be sent after the return to a peer the row may never reach
+    /// again. A link that came up starts the DHCP client over, where the
+    /// address is not static.
+    fn link_events(st: &mut Stack) {
+        let up = st.medium.link() == Link::Up;
+        if up == st.link_up || cfg!(feature = "test-net-doctored-link") {
+            return;
+        }
+        st.link_up = up;
+        with_cs(|| unsafe { write_volatile(addr_of_mut!((*witness()).link), up as u32) });
+        if up { #[cfg(rhu_net_wireless)] wireless_rise(&mut st.iface, &st.medium);
+            if let Some(dh) = st.dhcp {
+                st.sockets.get_mut::<dhcpv4::Socket>(dh).reset();
+            }
+        } else {
+            let Stack { sockets, slots, tcp, tcp_used, .. } = st;
+            let mut owned = [false; STREAMS];
+            for slot in slots.iter_mut() {
+                match slot.kind {
+                    STREAM if slot.sock != NONE => {
+                        owned[slot.sock] = true;
+                        let s = sockets.get_mut::<tcp::Socket>(tcp[slot.sock]);
+                        if slot.connecting {
+                            abort_unsynchronized(s);
+                            slot.connecting = false;
+                            slot.failed = true;
+                            slot.pending = ERR_NETDOWN;
+                        } else if slot.was_connected && s.is_open() {
+                            abort_unsynchronized(s);
+                            if slot.pending == 0 {
+                                slot.pending = ERR_CONNRESET;
+                            }
+                        }
+                    }
+                    LISTENER => {
+                        for &i in slot.backlog[..slot.backlog_n].iter() {
+                            owned[i] = true;
+                            let s = sockets.get_mut::<tcp::Socket>(tcp[i]);
+                            if s.state() != tcp::State::Listen {
+                                s.abort();
+                                let _ = s.listen(slot.local_port);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for i in 0..STREAMS {
+                if tcp_used[i] && !owned[i] {
+                    let s = sockets.get_mut::<tcp::Socket>(tcp[i]);
+                    if s.is_open() {
+                        abort_unsynchronized(s);
+                    }
+                }
+            }
+        }
+        MEDIUM_WORD.fetch_add(1, Ordering::AcqRel);
+        sched::futex_wake(MEDIUM_WORD.as_ptr(), u32::MAX);
     }
 
     /// The DHCP client's events: the lease recorded, the address, the route
@@ -774,13 +903,13 @@ mod served {
                 st.iface.routes_mut().remove_default_ipv4_route();
             }
         }
-        let mut servers: [IpAddress; 2] = [IpAddress::Ipv4(Ipv4Address::UNSPECIFIED); 2];
+        let mut servers: [IpAddress; NAME_SERVERS] = [IpAddress::Ipv4(Ipv4Address::UNSPECIFIED); NAME_SERVERS];
         let mut n = 0;
         for s in dns.iter().flatten() {
             servers[n] = IpAddress::Ipv4(*s);
             n += 1;
         }
-        st.sockets.get_mut::<dns::Socket>(st.dns).update_servers(&servers[..n]);
+        st.sockets.get_mut::<dns::Socket>(st.dns).update_servers(&servers[..n.min(NAME_SERVERS_ASKED)]);
         st.our_ip = ip;
         st.prefix = prefix;
         st.gateway = gw;
@@ -809,6 +938,9 @@ mod served {
     /// in the kernel's slot, its word bumped (the wake after the tenancy).
     fn resolver_answers(st: &mut Stack, now_ms: u32) -> u32 {
         let mut done = 0u32;
+        // The budget of the name servers the stack was handed: a failure at that age is the stack's timeout, one before it a server's name error.
+        let asked = st.dns_servers.iter().flatten().count().clamp(1, NAME_SERVERS_ASKED) as u32;
+        let budget_ms = RESOLVE_TIMEOUT_MS + (asked - 1) * RESOLVE_SERVER_MS;
         let d = st.sockets.get_mut::<dns::Socket>(st.dns);
         for (i, r) in st.resolve.iter_mut().enumerate() {
             if !r.used || r.done {
@@ -819,7 +951,7 @@ mod served {
                 Err(dns::GetQueryResultError::Pending) => {}
                 Ok(addrs) => {
                     r.n = 0;
-                    for a in addrs.iter().take(2) {
+                    for a in addrs.iter().take(RESOLVE_KEPT) {
                         let IpAddress::Ipv4(v4) = a;
                         r.addrs[r.n as usize] = v4.octets();
                         r.n += 1;
@@ -829,7 +961,7 @@ mod served {
                     r.qh = None;
                 }
                 Err(dns::GetQueryResultError::Failed) => {
-                    r.code = if now_ms.wrapping_sub(r.started_ms) >= RESOLVE_TIMEOUT_MS { sched::ERR_TIMEDOUT } else { ERR_HOSTUNREACH };
+                    r.code = if now_ms.wrapping_sub(r.started_ms) >= budget_ms { sched::ERR_TIMEDOUT } else { ERR_HOSTUNREACH };
                     r.done = true;
                     r.qh = None;
                     with_cs(|| unsafe { bump(addr_of_mut!((*witness()).resolves_failed), 1) });
@@ -977,6 +1109,47 @@ mod served {
         }
     }
 
+    /// A listener left with no socket listens again. An accept that finds
+    /// the pool spent takes the listener's socket and can arm none in its
+    /// place; such a listener is given one here, on the pass that returns a
+    /// stream socket to the pool, before a `socket` call can take it --
+    /// one socket a listener, in handle order. A listener that still has
+    /// a socket is not topped up: its depth is kept by its own accepts.
+    /// While a listener has no socket, a caller's SYN meets none and the
+    /// stack answers it with a reset: that caller reads its connect
+    /// refused, as on a port nobody listens on, and nothing is queued for
+    /// it. A listener's socket that the stack closed -- its caller reset
+    /// the connection before an accept took it -- listens again in its
+    /// place: an accept takes a connection alone, so nothing else would
+    /// look at that socket again. The api gate's control
+    /// (`test-net-doctored-listen`) gives no socket and puts none back:
+    /// the defect as it was.
+    fn relisten(st: &mut Stack) {
+        if cfg!(feature = "test-net-doctored-listen") {
+            return;
+        }
+        for i in 0..HANDLES {
+            if st.slots[i].kind != LISTENER {
+                continue;
+            }
+            for k in 0..st.slots[i].backlog_n {
+                let s = st.sockets.get_mut::<tcp::Socket>(st.tcp[st.slots[i].backlog[k]]);
+                if s.state() == tcp::State::Closed {
+                    let _ = s.listen(st.slots[i].local_port);
+                }
+            }
+            if st.slots[i].backlog_n != 0 {
+                continue;
+            }
+            let Some(j) = free_stream(st) else { return };
+            if st.sockets.get_mut::<tcp::Socket>(st.tcp[j]).listen(st.slots[i].local_port).is_ok() {
+                st.tcp_used[j] = true;
+                st.slots[i].backlog[0] = j;
+                st.slots[i].backlog_n = 1;
+            }
+        }
+    }
+
     // ---------------- the media and the address ----------------
 
     pub fn count() -> i32 {
@@ -1095,7 +1268,7 @@ mod served {
             let d = sockets.get_mut::<dns::Socket>(*dns);
             match d.start_query(iface.context(), s, DnsQueryType::A) {
                 Ok(qh) => {
-                    st.resolve[i] = Resolve { used: true, done: false, qh: Some(qh), code: 0, n: 0, addrs: [[0; 4]; 2], started_ms: sched::now_ms() };
+                    st.resolve[i] = Resolve { used: true, done: false, qh: Some(qh), code: 0, n: 0, addrs: [[0; 4]; RESOLVE_RECORDS], started_ms: sched::now_ms() };
                     Ok(i as i32)
                 }
                 Err(dns::StartQueryError::NoFreeSlot) => Err(sched::ERR_AGAIN),
@@ -1112,7 +1285,8 @@ mod served {
         }
     }
 
-    /// The answer as address records (the port 0): the count written;
+    /// The answer as address records (the port 0), the answer's first two at
+    /// most and never more than `max`: the count written;
     /// RHU_EAGAIN while pending; RHU_EHOSTUNREACH for a name the server has
     /// not; RHU_ETIMEDOUT at the stack's budget. Any final answer releases the slot.
     pub fn resolve_result(h: i32, out: *mut Addr, max: u32) -> i32 {
@@ -1251,34 +1425,34 @@ mod served {
         let r = with_stack(|st| {
             let Some(i) = slot_of(st, h) else { return sched::ERR_INVAL };
             let slot = st.slots[i];
-            if slot.bound || port == 0 {
+            if slot.bound {
                 return sched::ERR_INVAL;
             }
             if !ip.is_unspecified() && Some(ip) != st.our_ip {
                 return sched::ERR_INVAL;
             }
-            match slot.kind {
+            let chosen = match slot.kind {
                 STREAM => {
                     if slot.connecting || slot.was_connected {
                         return sched::ERR_INVAL;
                     }
-                    if port_taken(st, port, false, i, slot.reuse) {
-                        return ERR_ADDRINUSE;
-                    }
+                    let p = if port == 0 { next_ephemeral(st, false) } else { port }; // a port of 0 asks for any free port of the kind: the allocator of an unbound connect
+                    if port_taken(st, p, false, i, slot.reuse) { return ERR_ADDRINUSE; }
+                    p
                 }
                 DATAGRAM => {
-                    if port_taken(st, port, true, i, slot.reuse) {
-                        return ERR_ADDRINUSE;
-                    }
+                    let p = if port == 0 { next_ephemeral(st, true) } else { port }; // and of an unbound sender
+                    if port_taken(st, p, true, i, slot.reuse) { return ERR_ADDRINUSE; }
                     let s = st.sockets.get_mut::<udp::Socket>(st.udp[slot.sock]);
-                    if s.bind(port).is_err() {
+                    if s.bind(p).is_err() {
                         return sched::ERR_INVAL;
                     }
+                    p
                 }
                 _ => return sched::ERR_INVAL,
-            }
+            };
             st.slots[i].bound = true;
-            st.slots[i].local_port = port;
+            st.slots[i].local_port = if cfg!(feature = "test-net-doctored-bind") { port } else { chosen }; // the api gate's control records the caller's 0, the defect the bind check must refuse
             0
         });
         if r != 0 { refused(h, r) } else { 0 }
@@ -1323,7 +1497,9 @@ mod served {
     }
 
     /// The first completed connection behind a listener moved to a new
-    /// handle, a fresh socket armed in its place where the pool has one.
+    /// handle, a fresh socket armed in its place where the pool has one
+    /// (where it has none, the network thread arms one for a listener left
+    /// with no socket as soon as a stream returns to the pool: `relisten`).
     pub fn accept(h: i32, peer: *mut Addr) -> i32 {
         if !peer.is_null() && !aligned(peer) {
             return refused(h, sched::ERR_INVAL);
@@ -1754,8 +1930,8 @@ mod served {
                 STREAM => {
                     let s = st.sockets.get::<tcp::Socket>(st.tcp[slot.sock]);
                     let l = match s.local_endpoint() {
-                        Some(IpEndpoint { addr: IpAddress::Ipv4(a), port }) => (a, port),
-                        None => (if slot.bound { our } else { Ipv4Address::UNSPECIFIED }, slot.local_port),
+                        Some(IpEndpoint { addr: IpAddress::Ipv4(a), port }) if slot.connecting || slot.was_connected => (a, port), // the stack's endpoint is this handle's own only once it connects: a pooled socket keeps its last connection's until then
+                        _ => (if slot.bound { our } else { Ipv4Address::UNSPECIFIED }, slot.local_port),
                     };
                     let p = if slot.was_connected { s.remote_endpoint().map(|e| match e.addr { IpAddress::Ipv4(a) => (a, e.port) }).or(slot.peer) } else { None };
                     (l, p)
@@ -1826,6 +2002,7 @@ mod served {
     // ---------------- the probes the api flavor's checks read ----------------
 
     /// The virtual medium's counters and the scripted peer's, copied under the tenancy.
+    #[cfg(all(rhu_net_virtual, feature = "api-smoke"))]
     pub fn probe_medium() -> (VirtWitness, PeerCounts) {
         with_stack(|st| {
             let p = st.medium.peer();
@@ -1854,22 +2031,72 @@ mod served {
     /// pair tied until the stack removes it).
     /// The interface's view for a check's record: its first IPv4 address and prefix (zeros without one), the
     /// stack's own poll delay in ms at the call (u32::MAX for none), whether a frame is staged.
+    #[cfg(all(rhu_net_virtual, feature = "api-smoke"))]
     pub fn probe_iface() -> ([u8; 4], u8, u32, bool) {
         with_stack(|st| {
             let (a, p) = st.iface.ip_addrs().first().map(|c| match c { IpCidr::Ipv4(c) => (c.address().octets(), c.prefix_len()) }).unwrap_or(([0; 4], 0));
             let now = now_instant();
             let Stack { iface, sockets, medium, .. } = st;
             let d = iface.poll_delay(now, sockets).map(|d| d.total_millis().min(u32::MAX as u64) as u32).unwrap_or(u32::MAX);
-            (a, p, d, medium.has_staged())
+            (a, p, d, staged(medium))
         })
     }
 
+    #[cfg(all(rhu_net_virtual, feature = "api-smoke"))]
     pub fn probe_streams_used() -> u32 {
         with_stack(|st| st.tcp_used.iter().filter(|u| **u).count() as u32)
+    }
+
+    /// The sockets a listener has listening or holding a connection nobody
+    /// accepted yet (0 for any other handle), read by the api flavor's
+    /// listener check.
+    #[cfg(all(rhu_net_virtual, feature = "test-net-listen-again"))]
+    pub fn probe_listening(h: i32) -> u32 {
+        with_stack(|st| match slot_of(st, h) {
+            Some(i) if st.slots[i].kind == LISTENER => st.slots[i].backlog_n as u32,
+            _ => 0,
+        })
+    }
+
+    /// How many of a listener's sockets listen (0 for any other handle),
+    /// read by the api flavor's reset check.
+    #[cfg(all(rhu_net_virtual, feature = "test-net-listen-reset"))]
+    pub fn probe_backlog_listening(h: i32) -> u32 {
+        with_stack(|st| match slot_of(st, h) {
+            Some(i) if st.slots[i].kind == LISTENER => {
+                let l = &st.slots[i];
+                l.backlog[..l.backlog_n].iter().filter(|j| st.sockets.get::<tcp::Socket>(st.tcp[**j]).state() == tcp::State::Listen).count() as u32
+            }
+            _ => 0,
+        })
+    }
+
+    /// A stream's socket aborted by the api flavor's reset check: the stack
+    /// sends the connection's other end a reset, which no kernel function
+    /// asks of it, and the network thread is asked to pass.
+    #[cfg(all(rhu_net_virtual, feature = "test-net-listen-reset"))]
+    pub fn probe_reset(h: i32) {
+        with_stack(|st| {
+            if let Some(i) = slot_of(st, h) {
+                if st.slots[i].kind == STREAM && st.slots[i].sock != NONE {
+                    st.sockets.get_mut::<tcp::Socket>(st.tcp[st.slots[i].sock]).abort();
+                }
+            }
+        });
+        kick();
+    }
+
+    /// The virtual medium's link set by the api flavor's link check (the
+    /// cable pulled and put back), and the network thread asked to pass.
+    #[cfg(all(rhu_net_virtual, feature = "test-net-link-drop"))]
+    pub fn probe_set_link(up: bool) {
+        with_stack(|st| st.medium.set_link(up));
+        kick();
     }
 }
 
 /// The scripted peer's counters as the probe copies them.
+#[cfg(all(rhu_net_virtual, feature = "api-smoke"))] // the scripted peer stands behind the virtual medium alone, and the api flavor's checks alone read its counters
 #[derive(Clone, Copy)]
 pub struct PeerCounts {
     pub discovers: u32,
@@ -1887,6 +2114,7 @@ pub struct PeerCounts {
     pub dropped_head: [u8; 48],
 }
 
+#[cfg(all(rhu_net_virtual, feature = "api-smoke"))]
 impl Default for PeerCounts {
     // By hand: the standard library derives Default for arrays of 32 at most, and the head holds 48 bytes
     // (the Ethernet and IP headers with the ports after them).
@@ -1911,9 +2139,17 @@ impl Default for PeerCounts {
 
 #[cfg(rhu_net_rows)]
 pub use served::{
-    accept, available, bind, close, configure, connect, count, error, event_word, init, lease, limits, listen, medium_info, medium_word, name, option, probe_iface, probe_medium, probe_streams_used, readiness, recv, resolve, resolve_result, resolve_word, send, shutdown, socket, start, CONNECT_BUDGET_MS, SAFETY_MS, DATAGRAMS, KIND_WORD,
-    POOL_BYTES, STREAMS,
+    accept, available, bind, close, configure, connect, count, error, event_word, init, lease, limits, listen, medium_info, medium_word, name, option, readiness, recv, resolve, resolve_result, resolve_word, send, shutdown, socket, start, DATAGRAMS, KIND_WORD,
+    POOL_BYTES, STREAMS, THREAD_STACK,
 };
+#[cfg(all(rhu_net_virtual, feature = "api-smoke"))]
+pub use served::{probe_iface, probe_medium, probe_streams_used, CONNECT_BUDGET_MS, SAFETY_MS};
+#[cfg(all(rhu_net_virtual, feature = "test-net-link-drop"))]
+pub use served::probe_set_link;
+#[cfg(all(rhu_net_virtual, feature = "test-net-listen-again"))]
+pub use served::probe_listening;
+#[cfg(all(rhu_net_virtual, feature = "test-net-listen-reset"))]
+pub use served::{probe_backlog_listening, probe_reset};
 
 // ---------------- the rows without a medium: the count 0, every other function ENODEV ----------------
 
@@ -2013,3 +2249,23 @@ pub fn name(h: i32, _local: *mut Addr, _peer: *mut Addr) -> i32 {
 pub fn option(h: i32, _option: u32, _set: u32, _value: i32) -> i32 {
     refused(h, sched::ERR_NODEV)
 }
+
+// The connect budget for the wired row's flight check (`test-net-flight`), which
+// times a connect against it; declared at the end of this file so that no
+// line above moves.
+#[cfg(all(rhu_net_wired, feature = "test-net-flight"))]
+pub use served::CONNECT_BUDGET_MS;
+
+// The radio as the row's medium (`wifi-cyw43`): the board's half of the
+// wireless medium is this module's child, since it writes the witness above
+// and uses this module's wake word; declared at the end of this file so
+// that no line above moves. The network thread calls its two hooks on lines
+// every row compiles, behind the wireless rows' own configuration.
+#[cfg(rhu_net_wireless)]
+mod radio;
+#[cfg(rhu_net_wireless)]
+use radio::{pass_end as wireless_pass_end, rise as wireless_rise, row_medium, staged, RowMedium};
+// The radio at the machine's end: the machine's end calls it first, on a
+// wireless row.
+#[cfg(rhu_net_wireless)]
+pub use radio::end as wireless_end;

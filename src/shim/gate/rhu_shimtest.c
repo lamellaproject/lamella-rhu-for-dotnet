@@ -1,7 +1,7 @@
 /* The shim gate's tenant: a C program hosted exactly like a managed
  * payload (the payload board map, the kernel's managed entry sequence,
  * the machine's exit code), exercising the shim's C-runtime surface and
- * the PAL from the caller's side. Eleven ladders, one per build:
+ * the PAL from the caller's side. Twenty-three ladders, one per build:
  *
  *   RHU_SHIMTEST_LADDER_CORE        the glibc personality and the PAL's
  *                                   threading, memory, time and random verbs
@@ -14,6 +14,10 @@
  *                                   kernel's per-thread copy of module 0
  *   RHU_SHIMTEST_LADDER_PWMFS       the PWM device files (/sys/class/pwm/pwmchip0)
  *                                   from a native caller's side, over the kernel's PWM API
+ *   RHU_SHIMTEST_LADDER_PWMROWS     the PWM device files over a board row's own line
+ *                                   table, the kernel's PWM functions answered by the
+ *                                   tenant (RHU_SHIMTEST_PWMROWS_F769 or
+ *                                   RHU_SHIMTEST_PWMROWS_U5A5 names the row)
  *   RHU_SHIMTEST_LADDER_IIOFS       the analog input device files (/sys/bus/iio/devices)
  *   RHU_SHIMTEST_LADDER_SDFS        the card's files (/media/sd0) over a scripted kernel
  *                                   from a native caller's side, over the kernel's ADC API
@@ -32,6 +36,31 @@
  *   RHU_SHIMTEST_LADDER_FROZEN      the frozen object heap on a small board's
  *                                   row: a pool smaller than the runtime's
  *                                   commit, and what memory backs it
+ *   RHU_SHIMTEST_LADDER_SOCKADDR    the socket-address helpers from a native
+ *                                   caller's side: the record sizes and every
+ *                                   field of an address buffer
+ *   RHU_SHIMTEST_LADDER_SOCKERRORS  the kernel's network codes as the runtime's
+ *                                   errors
+ *   RHU_SHIMTEST_LADDER_SOCKREFUSALS  the refused names of the socket surface,
+ *                                   each read for the value its caller expects,
+ *                                   and the socket band in an image that links
+ *                                   no socket unit
+ *   RHU_SHIMTEST_LADDER_SOCKSTREAM  a stream socket over a scripted kernel:
+ *                                   connect, the data calls, the blocking
+ *                                   calls and their timeouts, close
+ *   RHU_SHIMTEST_LADDER_SOCKLISTEN  a listening socket over a scripted kernel:
+ *                                   bind, listen, accept
+ *   RHU_SHIMTEST_LADDER_SOCKDATAGRAM  a datagram socket over a scripted kernel:
+ *                                   messages to and from an address
+ *   RHU_SHIMTEST_LADDER_SOCKOPTIONS  the socket options over a scripted kernel
+ *   RHU_SHIMTEST_LADDER_SOCKPOLL    Poll over the socket band and a file, over
+ *                                   a scripted kernel
+ *   RHU_SHIMTEST_LADDER_SOCKPORT    the socket event port over a scripted
+ *                                   kernel: the level once, the risen bits, a
+ *                                   registration and a close under a waiter
+ *   RHU_SHIMTEST_LADDER_SOCKRESOLVE  name resolution over a scripted kernel
+ *   RHU_SHIMTEST_LADDER_SOCKNETINFO  the network interface records over a
+ *                                   scripted kernel
  *
  * Every check prints one PASS line; the first failed check prints one
  * FAIL line and ends the run with exit 1. Workers never print, no line
@@ -59,19 +88,22 @@
 
 #include "rhu.h"
 #include "rhu_glibc_arm32.h"
-#include "rhu_pal_errno_net11_rc3.h"
-#include "rhu_pal_io_net11_rc3.h"
-#include "rhu_pal_memory_net11_rc3.h"
-#include "rhu_pal_random_net11_rc3.h"
-#include "rhu_pal_signal_net11_rc3.h"
-#include "rhu_pal_threading_net11_rc3.h"
-#include "rhu_pal_time_net11_rc3.h"
+#include "rhu_pal_errno_net11.h"
+#include "rhu_pal_io_net11.h"
+#include "rhu_pal_memory_net11.h"
+#include "rhu_pal_random_net11.h"
+#include "rhu_pal_signal_net11.h"
+#include "rhu_pal_threading_net11.h"
+#include "rhu_pal_time_net11.h"
 
 #if !defined(RHU_SHIMTEST_LADDER_CORE) && !defined(RHU_SHIMTEST_LADDER_FDMAP) \
     && !defined(RHU_SHIMTEST_LADDER_ACTIVATION) && !defined(RHU_SHIMTEST_LADDER_TLS) \
     && !defined(RHU_SHIMTEST_LADDER_HOST) && !defined(RHU_SHIMTEST_LADDER_BUSDEV) \
-    && !defined(RHU_SHIMTEST_LADDER_GPIOD) && !defined(RHU_SHIMTEST_LADDER_FROZEN) && !defined(RHU_SHIMTEST_LADDER_PWMFS) && !defined(RHU_SHIMTEST_LADDER_TTYDEV) && !defined(RHU_SHIMTEST_LADDER_IIOFS) && !defined(RHU_SHIMTEST_LADDER_SDFS)
-#error "a tenant build names its ladder (RHU_SHIMTEST_LADDER_CORE, RHU_SHIMTEST_LADDER_FDMAP, RHU_SHIMTEST_LADDER_ACTIVATION, RHU_SHIMTEST_LADDER_TLS, RHU_SHIMTEST_LADDER_HOST, RHU_SHIMTEST_LADDER_BUSDEV, RHU_SHIMTEST_LADDER_GPIOD, RHU_SHIMTEST_LADDER_PWMFS, RHU_SHIMTEST_LADDER_IIOFS, RHU_SHIMTEST_LADDER_TTYDEV, RHU_SHIMTEST_LADDER_SDFS or RHU_SHIMTEST_LADDER_FROZEN)"
+    && !defined(RHU_SHIMTEST_LADDER_GPIOD) && !defined(RHU_SHIMTEST_LADDER_FROZEN) && !defined(RHU_SHIMTEST_LADDER_PWMFS) && !defined(RHU_SHIMTEST_LADDER_PWMROWS) && !defined(RHU_SHIMTEST_LADDER_TTYDEV) && !defined(RHU_SHIMTEST_LADDER_IIOFS) && !defined(RHU_SHIMTEST_LADDER_SDFS) \
+    && !defined(RHU_SHIMTEST_LADDER_SOCKADDR) && !defined(RHU_SHIMTEST_LADDER_SOCKERRORS) && !defined(RHU_SHIMTEST_LADDER_SOCKREFUSALS) \
+    && !defined(RHU_SHIMTEST_LADDER_SOCKSTREAM) && !defined(RHU_SHIMTEST_LADDER_SOCKLISTEN) && !defined(RHU_SHIMTEST_LADDER_SOCKDATAGRAM) && !defined(RHU_SHIMTEST_LADDER_SOCKOPTIONS) \
+    && !defined(RHU_SHIMTEST_LADDER_SOCKPOLL) && !defined(RHU_SHIMTEST_LADDER_SOCKPORT) && !defined(RHU_SHIMTEST_LADDER_SOCKRESOLVE) && !defined(RHU_SHIMTEST_LADDER_SOCKNETINFO)
+#error "a tenant build names its ladder (RHU_SHIMTEST_LADDER_CORE, RHU_SHIMTEST_LADDER_FDMAP, RHU_SHIMTEST_LADDER_ACTIVATION, RHU_SHIMTEST_LADDER_TLS, RHU_SHIMTEST_LADDER_HOST, RHU_SHIMTEST_LADDER_BUSDEV, RHU_SHIMTEST_LADDER_GPIOD, RHU_SHIMTEST_LADDER_PWMFS, RHU_SHIMTEST_LADDER_PWMROWS, RHU_SHIMTEST_LADDER_IIOFS, RHU_SHIMTEST_LADDER_TTYDEV, RHU_SHIMTEST_LADDER_SDFS, RHU_SHIMTEST_LADDER_FROZEN, RHU_SHIMTEST_LADDER_SOCKADDR, RHU_SHIMTEST_LADDER_SOCKERRORS, RHU_SHIMTEST_LADDER_SOCKREFUSALS, RHU_SHIMTEST_LADDER_SOCKSTREAM, RHU_SHIMTEST_LADDER_SOCKLISTEN, RHU_SHIMTEST_LADDER_SOCKDATAGRAM, RHU_SHIMTEST_LADDER_SOCKOPTIONS, RHU_SHIMTEST_LADDER_SOCKPOLL, RHU_SHIMTEST_LADDER_SOCKPORT, RHU_SHIMTEST_LADDER_SOCKRESOLVE or RHU_SHIMTEST_LADDER_SOCKNETINFO)"
 #endif
 
 /* --- the C-runtime surface, declared as the caller sees it --- */
@@ -217,16 +249,42 @@ static int fail(const char *name, const char *detail)
  * so one run over a store reports every clause it gets wrong; in every
  * other build it is CHECK. */
 #ifdef RHU_SHIMTEST_STORE_PROBE
+/* The probe's line also carries the error number that stood when the
+ * check failed, so one run over a store shows each clause's reason. */
+int32_t SystemNative_GetErrNo(void);
+static void probe_fail(const char *name, const char *detail)
+{
+    char tail[LINE_MAX];
+    char dig[12];
+    int32_t e = SystemNative_GetErrNo();
+    uint32_t v = (uint32_t)(e < 0 ? -e : e);
+    uint32_t k = sizeof dig;
+    dig[--k] = 0;
+    do {
+        dig[--k] = (char)('0' + v % 10u);
+        v /= 10u;
+    } while (v != 0u);
+    uint32_t n = put(tail, 0u, detail);
+    n = put(tail, n, " [the error number that stood: ");
+    n = put(tail, n, dig + k);
+    n = put(tail, n, "]");
+    tail[n] = 0;
+    out_line("FAIL ", name, " ", tail);
+}
 #define SCHECK(cond, name, detail) \
     do {                           \
         if (!(cond))               \
-            (void)fail(name, detail); \
+            probe_fail(name, detail); \
     } while (0)
 #else
 #define SCHECK(cond, name, detail) CHECK(cond, name, detail)
 #endif
 
 #if defined(RHU_SHIMTEST_LADDER_CORE)
+/* The cross-process mutex's entry points, declared by the surface header
+ * as the pin exports them. */
+#include "rhu_pal_surface_net11.h"
+
 /* The thread pool's idle-worker timeout link word, read as the hosting
  * layer reads it (a weak absolute symbol: no word in this image reads
  * NULL), so the expectation for the row is computed from the same word
@@ -249,6 +307,38 @@ static const char *dec_u32(char *buf, uint32_t v)
     buf[i] = 0;
     return buf;
 }
+
+/* The thread pool's most-workers link word, read the same way: an image
+ * linked without it carries no row, and one linked with it carries the
+ * row DOTNET_ThreadPool_ForceMaxWorkerThreads=0x<the word in hexadecimal>,
+ * the form the pool reads. */
+extern const char __rhu_threadpool_max_threads[] __attribute__((weak));
+
+/* "0x" and a value in lower-case hexadecimal into the buffer given (at
+ * least eleven bytes); returns the buffer. */
+static const char *hex_u32(char *buf, uint32_t v)
+{
+    char tmp[8];
+    uint32_t n = 0;
+    do {
+        uint32_t d = v & 15u;
+        tmp[n++] = (char)(d < 10u ? '0' + d : 'a' + (d - 10u));
+        v >>= 4;
+    } while (v != 0);
+    uint32_t i = 0;
+    buf[i++] = '0';
+    buf[i++] = 'x';
+    while (n != 0)
+        buf[i++] = tmp[--n];
+    buf[i] = 0;
+    return buf;
+}
+
+/* What the hosting layer's stack-attribute call answers for a carve the
+ * kernel records as (base, bytes): the upper bound kept, the lower bound
+ * 65536 bytes less the reserve of 6144 under the base, so that the
+ * runtime's stack-depth helper stops the reserve above the true base. */
+#define STACK_TOLD_UNDER (65536u - 6144u)
 #endif
 
 #if defined(RHU_SHIMTEST_LADDER_CORE) || defined(RHU_SHIMTEST_LADDER_FROZEN)
@@ -607,6 +697,24 @@ static void *futex_waiter(void *a)
     return NULL;
 }
 
+/* The cross-process mutex's block: 64 bytes filled with a pattern, of
+ * which the family owns as many as it reports; a waiter that takes the
+ * mutex with no bound and releases it. */
+static uint64_t g_xpm_store[8];
+static volatile int g_xpm_saw;
+
+static void *xpm_waiter(void *a)
+{
+    (void)a;
+    LowLevelCrossProcessMutex *m = (LowLevelCrossProcessMutex *)g_xpm_store;
+    if (SystemNative_LowLevelCrossProcessMutex_Acquire(m, -1) == RHU_PAL_SUCCESS) {
+        g_xpm_saw = 1;
+        SystemNative_LowLevelCrossProcessMutex_Release(m);
+    }
+    __atomic_fetch_add(&g_done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
 static void *g_mon;
 static volatile int g_mon_ready;
 static volatile int g_mon_saw;
@@ -808,9 +916,15 @@ static int core_ladder(void)
         size_t bytes = 0;
         CHECK(pthread_equal(pthread_self(), pthread_self()), "shim-thread", "(self is not equal to self)");
         pthread_getattr_np(pthread_self(), &at);
-        CHECK(pthread_attr_getstack(&at, &lo, &bytes) == 0 && lo != NULL && bytes >= 8u * 1024u, "shim-thread", "(own stack bounds unavailable)");
+        /* The carve is the kernel's answer; the bounds the attribute call
+         * reports are the ones the runtime's stack-depth helper needs. */
+        uint32_t kb = 0;
+        uint32_t kl = 0;
+        CHECK(rhu_thread_stack_bounds((int32_t)pthread_self(), &kb, &kl) == 0 && kb != 0 && kl >= 8u * 1024u, "shim-thread", "(own stack carve unavailable)");
         uintptr_t sp = (uintptr_t)&at;
-        CHECK(sp > (uintptr_t)lo && sp <= (uintptr_t)lo + bytes, "shim-thread", "(the live SP is outside the reported bounds)");
+        CHECK(sp > (uintptr_t)kb && sp <= (uintptr_t)kb + kl, "shim-thread", "(the live SP is outside the kernel's carve)");
+        CHECK(pthread_attr_getstack(&at, &lo, &bytes) == 0 && (uintptr_t)lo == (uintptr_t)kb - STACK_TOLD_UNDER && (uintptr_t)lo + bytes == (uintptr_t)kb + kl, "shim-thread",
+              "(the reported bounds do not begin 59392 bytes under the kernel's base with its upper bound kept)");
         CHECK(syscall(224) == (long)pthread_self(), "shim-thread", "(gettid is not self)");
         g_done = 0;
         CHECK(spawn(&t1, sleeper, NULL, 0) == 0, "shim-thread", "(spawn refused)");
@@ -818,9 +932,17 @@ static int core_ladder(void)
         void *wlo = NULL;
         size_t wbytes = 0;
         pthread_getattr_np(t1, &wat);
-        CHECK(pthread_attr_getstack(&wat, &wlo, &wbytes) == 0 && wlo != NULL && wbytes == 16u * 1024u, "shim-thread", "(a worker's default carve is not the row default)");
+        CHECK(rhu_thread_stack_bounds((int32_t)t1, &kb, &kl) == 0 && kl == 16u * 1024u, "shim-thread", "(a worker's default carve is not the row default)");
+        CHECK(pthread_attr_getstack(&wat, &wlo, &wbytes) == 0 && (uintptr_t)wlo == (uintptr_t)kb - STACK_TOLD_UNDER && wbytes == 16u * 1024u + STACK_TOLD_UNDER, "shim-thread",
+              "(a worker's default carve is not reported 59392 bytes under its base with its upper bound kept)");
         wait_done(&g_done, 1);
-        pass("shim-thread", " (bounds contain the live SP; gettid is self; a worker's default carve is the row default)");
+        g_done = 0;
+        CHECK(spawn(&t1, sleeper, NULL, WORKER_STACK) == 0, "shim-thread", "(spawn of a small worker refused)");
+        pthread_getattr_np(t1, &wat);
+        CHECK(rhu_thread_stack_bounds((int32_t)t1, &kb, &kl) == 0 && kl == WORKER_STACK, "shim-thread", "(a small worker's carve is not the size asked)");
+        CHECK(pthread_attr_getstack(&wat, &wlo, &wbytes) == 0 && (uintptr_t)wlo == (uintptr_t)kb && wbytes == WORKER_STACK, "shim-thread", "(a carve not larger than the reserve is not reported as it is)");
+        wait_done(&g_done, 1);
+        pass("shim-thread", " (the kernel's carve contains the live SP; the reported bounds keep the carve's upper bound and begin 59392 bytes under its base, 65536 less the reserve of 6144; gettid is self; a worker's default carve is the row default and is reported the same way; a worker's carve of 2048 bytes, not larger than the reserve, is reported as it is)");
     }
 
     /* an oversized stack request is clamped and the thread still runs */
@@ -1084,6 +1206,49 @@ static int core_ladder(void)
         pass("shim-futex-pal", " (a wait blocks until its wake; a timed wait false only on timeout)");
     }
 
+    /* the cross-process mutex: the nine entry points over the block the
+     * family sizes, driven as the class library drives them */
+    {
+        uint8_t *block = (uint8_t *)g_xpm_store;
+        LowLevelCrossProcessMutex *m = (LowLevelCrossProcessMutex *)g_xpm_store;
+        uint32_t pid = 0;
+        uint64_t tid = 0;
+        memset(block, 0xA5, sizeof g_xpm_store);
+        int32_t size = SystemNative_LowLevelCrossProcessMutex_Size();
+        CHECK(size >= 17 && size <= (int32_t)sizeof g_xpm_store - 8, "shim-crossprocess-mutex", "(the reported size does not hold a lock word, a process id, a 64-bit thread id and a flag)");
+        CHECK(SystemNative_LowLevelCrossProcessMutex_Init(m) == RHU_PAL_SUCCESS && SystemNative_LowLevelCrossProcessMutex_IsAbandoned(m) == 0, "shim-crossprocess-mutex", "(a fresh block was refused or born abandoned)");
+        SystemNative_LowLevelCrossProcessMutex_SetOwnerProcessAndThreadId(m, 1u, 0x0000000100000002ull);
+        SystemNative_LowLevelCrossProcessMutex_GetOwnerProcessAndThreadId(m, &pid, &tid);
+        CHECK(pid == 1u, "shim-crossprocess-mutex", "(the owner's process id did not come back)");
+        CHECK(tid == 0x0000000100000002ull, "shim-crossprocess-mutex", "(the owner's thread id did not come back whole)");
+        SystemNative_LowLevelCrossProcessMutex_SetAbandoned(m, 1);
+        SystemNative_LowLevelCrossProcessMutex_GetOwnerProcessAndThreadId(m, &pid, &tid);
+        CHECK(SystemNative_LowLevelCrossProcessMutex_IsAbandoned(m) == 1 && pid == 1u && tid == 0x0000000100000002ull, "shim-crossprocess-mutex", "(the abandoned flag was not kept apart from the owner)");
+        SystemNative_LowLevelCrossProcessMutex_SetOwnerProcessAndThreadId(m, 0xFFFFFFFFu, 0xFFFFFFFFFFFFFFFFull);
+        SystemNative_LowLevelCrossProcessMutex_GetOwnerProcessAndThreadId(m, &pid, &tid);
+        CHECK(pid == 0xFFFFFFFFu && tid == 0xFFFFFFFFFFFFFFFFull && SystemNative_LowLevelCrossProcessMutex_IsAbandoned(m) == 1, "shim-crossprocess-mutex", "(the no-owner pair did not come back whole)");
+        SystemNative_LowLevelCrossProcessMutex_SetAbandoned(m, 0);
+        CHECK(SystemNative_LowLevelCrossProcessMutex_IsAbandoned(m) == 0, "shim-crossprocess-mutex", "(the abandoned flag was not cleared)");
+        CHECK(SystemNative_LowLevelCrossProcessMutex_Acquire(m, 0) == RHU_PAL_SUCCESS, "shim-crossprocess-mutex", "(a try on a free mutex did not take it)");
+        CHECK(SystemNative_LowLevelCrossProcessMutex_Acquire(m, 0) == RHU_PAL_EBUSY, "shim-crossprocess-mutex", "(a try on a held mutex was not EBUSY)");
+        uint64_t t0 = now_ns();
+        int32_t rc = SystemNative_LowLevelCrossProcessMutex_Acquire(m, 40);
+        CHECK(rc == RHU_PAL_ETIMEDOUT && now_ns() - t0 >= 40000000ull, "shim-crossprocess-mutex", "(a bounded wait on a held mutex did not time out at its bound)");
+        g_done = 0;
+        g_xpm_saw = 0;
+        CHECK(spawn(&t1, xpm_waiter, NULL, WORKER_STACK) == 0, "shim-crossprocess-mutex", "(spawn refused)");
+        msleep(20);
+        CHECK(g_xpm_saw == 0, "shim-crossprocess-mutex", "(a wait with no bound did not block on a held mutex)");
+        CHECK(SystemNative_LowLevelCrossProcessMutex_Release(m) == RHU_PAL_SUCCESS, "shim-crossprocess-mutex", "(the release was refused)");
+        wait_done(&g_done, 1);
+        CHECK(g_xpm_saw == 1, "shim-crossprocess-mutex", "(the waiter did not take the released mutex)");
+        CHECK(SystemNative_LowLevelCrossProcessMutex_Acquire(m, 0) == RHU_PAL_SUCCESS && SystemNative_LowLevelCrossProcessMutex_Release(m) == RHU_PAL_SUCCESS, "shim-crossprocess-mutex", "(the mutex was not free after the waiter's release)");
+        CHECK(SystemNative_LowLevelCrossProcessMutex_Destroy(m) == RHU_PAL_SUCCESS, "shim-crossprocess-mutex", "(the destroy was refused)");
+        for (uint32_t i = (uint32_t)size; i < (uint32_t)sizeof g_xpm_store; i++)
+            CHECK(block[i] == 0xA5, "shim-crossprocess-mutex", "(the family wrote past the size it reports)");
+        pass("shim-crossprocess-mutex", " (the nine entry points over the block the family sizes: a 64-bit owner thread id read back whole beside the process id; the abandoned flag kept apart; a held mutex busy for a try, timed out for a bounded wait and waited for with no bound until its release)");
+    }
+
     /* the program-header walk: the image's own module alone under this map
      * (the window entry the shim appends under the STM32F769's execute-in-place
      * map is absent here, its brackets undefined) and nothing in the quad-SPI region */
@@ -1117,6 +1282,18 @@ static int core_ladder(void)
         }
         v = getenv("DOTNET_ThreadPool_ThreadTimeoutMs");
         CHECK(v != NULL && strcmp(v, want) == 0, "shim-env", "(ThreadPool_ThreadTimeoutMs)");
+        /* The thread pool's most-workers row: absent when the image
+         * carries no link word, 0x and the word in hexadecimal when it
+         * does (the pool reads this row as hexadecimal). */
+        char most[12];
+        v = getenv("DOTNET_ThreadPool_ForceMaxWorkerThreads");
+        if (__rhu_threadpool_max_threads == NULL) {
+            CHECK(v == NULL, "shim-env", "(ThreadPool_ForceMaxWorkerThreads: a row stands with no link word)");
+            most[0] = 0;
+        } else {
+            hex_u32(most, (uint32_t)(uintptr_t)__rhu_threadpool_max_threads);
+            CHECK(v != NULL && strcmp(v, most) == 0, "shim-env", "(ThreadPool_ForceMaxWorkerThreads: the row is not the link word in hexadecimal)");
+        }
         v = getenv("HOME");
         CHECK(v != NULL && strcmp(v, "/tmp") == 0, "shim-env", "(HOME)");
         /* The hard limit is the managed heap window's free memory at
@@ -1131,6 +1308,13 @@ static int core_ladder(void)
             uint32_t n = put(note, 0u, " (the five rows; the thread pool's idle timeout ");
             n = put(note, n, want);
             n = put(note, n, how);
+            if (most[0] == 0) {
+                n = put(note, n, "; the pool's most workers: no row, no link word");
+            } else {
+                n = put(note, n, "; the pool's most workers: the row ");
+                n = put(note, n, most);
+                n = put(note, n, ", the link word in hexadecimal");
+            }
             n = put(note, n, "; the hard limit is the managed heap window's free memory at the start, less what the row keeps when that window is the internal one; a miss NULL)");
             note[n] = 0;
             pass("shim-env", note);
@@ -1209,6 +1393,16 @@ static int core_ladder(void)
 #endif /* RHU_SHIMTEST_LADDER_CORE */
 
 #ifdef RHU_SHIMTEST_LADDER_FDMAP
+
+/* The mode verb, declared as the caller sees it (the store's per-area
+ * header does not carry it). */
+int32_t SystemNative_ChMod(const char *path, int32_t mode);
+/* The descriptor forms of open, mkdir and unlink and the mode verb by
+ * descriptor, declared as the caller sees them. */
+intptr_t SystemNative_OpenAt(intptr_t dirfd, const char *path, int32_t flags, int32_t mode);
+int32_t SystemNative_MkDirAt(intptr_t dirfd, const char *path, int32_t mode);
+int32_t SystemNative_UnlinkAt(intptr_t dirfd, const char *path, int32_t flags);
+int32_t SystemNative_FChMod(intptr_t fd, int32_t mode);
 
 /* Two of these churn the store's tables at once, each through its own
  * file: create with truncation, write a tag, close, reopen, read the tag
@@ -1630,7 +1824,7 @@ static int fdmap_ladder(void)
         }
         SCHECK(n == RHU_SHIM_FD_FILE_COUNT, "shim-fdmap-identity-leak", "(the descriptor band did not fill)");
         /* more refused identity opens than the store has object slots: each must give back the slot it took */
-        for (int i = 0; i < 16; i++)
+        for (int i = 0; i < 40; i++)
             SCHECK(SystemNative_Open("/proc/self/stat", RHU_PAL_O_RDONLY, 0) == -1, "shim-fdmap-identity-leak", "(an identity open past the band succeeded)");
         SCHECK(SystemNative_Close(held[n - 1]) == 0, "shim-fdmap-identity-leak", "(close)");
         intptr_t id = SystemNative_Open("/proc/self/stat", RHU_PAL_O_RDONLY, 0);
@@ -1640,7 +1834,493 @@ static int fdmap_ladder(void)
         for (int i = 0; i < n - 1; i++)
             SystemNative_Close(held[i]);
         SCHECK(SystemNative_Unlink("/tmp/ident.txt") == 0, "shim-fdmap-identity-leak", "(unlink)");
-        pass("shim-fdmap-identity-leak", " (sixteen refused opens of the identity file past the band, each giving back the slot it took; the file opens and reads once a descriptor is free)");
+        pass("shim-fdmap-identity-leak", " (forty refused opens of the identity file past the band, each giving back the slot it took; the file opens and reads once a descriptor is free)");
+    }
+
+    /* /etc: a root that exists and holds nothing. A read under it is a
+     * missing file; a verb that would create a name there, or change the
+     * root itself, is refused with the read-only file system's code; a
+     * verb that would change or remove a name that is not there answers
+     * that it is missing, as Linux does on a read-only file system; and
+     * making the root itself answers that it exists. */
+    {
+        rhu_pal_filestatus st;
+        rhu_pal_directoryentry e;
+        rhu_pal_timespec times[2] = {{1000, 5}, {2000, 7}};
+        SCHECK(SystemNative_Stat("/etc", &st) == 0 && (st.Mode & RHU_PAL_S_IFMT) == RHU_PAL_S_IFDIR, "shim-fdmap-etc-root", "(/etc is not a directory)");
+        SCHECK(SystemNative_Stat("/etc/", &st) == 0 && (st.Mode & RHU_PAL_S_IFMT) == RHU_PAL_S_IFDIR, "shim-fdmap-etc-root", "(/etc with a trailing slash is not the same directory)");
+        void *dir = SystemNative_OpenDir("/etc");
+        SCHECK(dir != NULL && SystemNative_ReadDir(dir, &e) != 0 && SystemNative_CloseDir(dir) == 0, "shim-fdmap-etc-root", "(the listing of /etc is not empty)");
+        SCHECK(SystemNative_Open("/etc/resolv.conf", RHU_PAL_O_RDONLY, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-etc-root", "(a read under /etc was not answered as a missing file)");
+        SCHECK(SystemNative_Stat("/etc/resolv.conf", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-etc-root", "(the status of a name under /etc was not ENOENT)");
+        SCHECK(SystemNative_Open("/etc", RHU_PAL_O_WRONLY, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_EISDIR, "shim-fdmap-etc-root", "(an open of /etc itself that writes was not EISDIR)");
+        SCHECK(SystemNative_Open("/etc/made.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4) == -1 && SystemNative_GetErrNo() == RHU_GERR_EROFS, "shim-fdmap-etc-root", "(a file created under /etc was not refused with EROFS)");
+        SCHECK(SystemNative_Open("/etc/made.txt", RHU_PAL_O_RDONLY | RHU_PAL_O_CREAT, 0x1A4) == -1 && SystemNative_GetErrNo() == RHU_GERR_EROFS, "shim-fdmap-etc-root", "(a file created under /etc by a read-only open was not refused with EROFS)");
+        SCHECK(SystemNative_Open("/etc/resolv.conf", RHU_PAL_O_WRONLY, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-etc-root", "(a missing file opened for writing under /etc was not answered ENOENT)");
+        SCHECK(SystemNative_Open("/etc/resolv.conf", RHU_PAL_O_RDWR, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-etc-root", "(a missing file opened for reading and writing under /etc was not answered ENOENT)");
+        SCHECK(SystemNative_Open("/etc/resolv.conf", RHU_PAL_O_RDONLY | RHU_PAL_O_TRUNC, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-etc-root", "(a truncating open of a missing file under /etc was not answered ENOENT)");
+        SCHECK(SystemNative_MkDir("/etc/made", 0x1ED) == -1 && SystemNative_GetErrNo() == RHU_GERR_EROFS, "shim-fdmap-etc-root", "(a directory made under /etc was not refused with EROFS)");
+        SCHECK(SystemNative_MkDir("/etc", 0x1ED) == -1 && SystemNative_GetErrNo() == RHU_GERR_EEXIST, "shim-fdmap-etc-root", "(making /etc itself was not answered EEXIST)");
+        intptr_t fd = SystemNative_Open("/tmp/etc-in.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4);
+        SCHECK(fd >= 0 && SystemNative_Close(fd) == 0, "shim-fdmap-etc-root", "(a file to rename was not made)");
+        SCHECK(SystemNative_Rename("/tmp/etc-in.txt", "/etc/in.txt") == -1 && SystemNative_GetErrNo() == RHU_GERR_EROFS && SystemNative_Stat("/tmp/etc-in.txt", &st) == 0, "shim-fdmap-etc-root", "(a rename into /etc was not refused with EROFS, or the file left its place)");
+        SCHECK(SystemNative_Rename("/etc/resolv.conf", "/tmp/etc-out.txt") == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT && SystemNative_Stat("/tmp/etc-out.txt", &st) == -1, "shim-fdmap-etc-root", "(a rename of a missing name out of /etc was not answered ENOENT, or it made a file)");
+        SCHECK(SystemNative_Unlink("/tmp/etc-in.txt") == 0, "shim-fdmap-etc-root", "(unlink)");
+        SCHECK(SystemNative_Unlink("/etc/resolv.conf") == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-etc-root", "(a removal of a missing file under /etc was not answered ENOENT)");
+        SCHECK(SystemNative_RmDir("/etc/made") == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-etc-root", "(a removal of a missing directory under /etc was not answered ENOENT)");
+        SCHECK(SystemNative_RmDir("/etc") == -1 && SystemNative_GetErrNo() == RHU_GERR_EROFS, "shim-fdmap-etc-root", "(a removal of /etc itself was not refused with EROFS)");
+        SCHECK(SystemNative_ChMod("/etc", 0x1FF) == -1 && SystemNative_GetErrNo() == RHU_GERR_EROFS, "shim-fdmap-etc-root", "(a change of the mode of /etc was not refused with EROFS)");
+        SCHECK(SystemNative_ChMod("/etc/resolv.conf", 0x1A4) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-etc-root", "(a change of mode of a missing name under /etc was not answered ENOENT)");
+        SCHECK(SystemNative_UTimensat("/etc", times) == -1 && SystemNative_GetErrNo() == RHU_GERR_EROFS, "shim-fdmap-etc-root", "(a change of the times of /etc was not refused with EROFS)");
+        SCHECK(SystemNative_UTimensat("/etc/resolv.conf", times) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-etc-root", "(a change of times of a missing name under /etc was not answered ENOENT)");
+        dir = SystemNative_OpenDir("/etc");
+        SCHECK(dir != NULL && SystemNative_ReadDir(dir, &e) != 0 && SystemNative_CloseDir(dir) == 0 && SystemNative_Stat("/etc/made.txt", &st) == -1, "shim-fdmap-etc-root", "(a refused verb left a name under /etc)");
+        fd = SystemNative_Open("/etcetera", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4);
+        SCHECK(fd >= 0 && SystemNative_Close(fd) == 0 && SystemNative_Unlink("/etcetera") == 0, "shim-fdmap-etc-root", "(a name that only begins with the root's letters was taken for the root)");
+        pass("shim-fdmap-etc-root", " (/etc is a directory with an empty listing; a read under it is a missing file, ENOENT; a name made under it, a rename into it and a change or removal of the root are refused with EROFS; a missing name answers ENOENT to a write open without the create flag, a rename, a removal and a change; making the root answers EEXIST; a name that only begins with its letters is not under it)");
+    }
+
+    /* a descriptor for a directory: the open's four answers, then what the descriptor serves */
+    {
+        /* a directory under a missing parent is ENOENT: the code that steers a creation that makes the parents first */
+        SCHECK(SystemNative_MkDir("/tmp/dd/in", 0x1C0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-dir-open", "(a directory under a missing parent was not ENOENT)");
+        SCHECK(SystemNative_MkDir("/tmp/dd", 0x1ED) == 0, "shim-fdmap-dir-open", "(mkdir)");
+        intptr_t ff = SystemNative_Open("/tmp/dd/f.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4);
+        SCHECK(ff >= 0 && SystemNative_Close(ff) == 0, "shim-fdmap-dir-open", "(a file in the directory)");
+        /* one: a read-only open of a directory gives a descriptor, with the directory flag and without it */
+        intptr_t d1 = SystemNative_Open("/tmp/dd", RHU_PAL_O_RDONLY | RHU_PAL_O_CLOEXEC | RHU_PAL_O_NOFOLLOW | RHU_PAL_O_DIRECTORY, 0);
+        SCHECK(d1 >= 0, "shim-fdmap-dir-open", "(a read-only open of a directory was refused)");
+        intptr_t d2 = SystemNative_Open("/tmp/dd", RHU_PAL_O_RDONLY, 0);
+        SCHECK(d2 >= 0 && d2 != d1, "shim-fdmap-dir-open", "(a read-only open of a directory without the directory flag was refused)");
+        /* two: an open of a directory that writes or creates is EISDIR */
+        intptr_t x = SystemNative_Open("/tmp/dd", RHU_PAL_O_WRONLY, 0);
+        SCHECK(x == -1 && SystemNative_GetErrNo() == RHU_GERR_EISDIR, "shim-fdmap-dir-open", "(a write-only open of a directory was not EISDIR)");
+        if (x >= 0)
+            SystemNative_Close(x);
+        x = SystemNative_Open("/tmp/dd", RHU_PAL_O_RDWR, 0);
+        SCHECK(x == -1 && SystemNative_GetErrNo() == RHU_GERR_EISDIR, "shim-fdmap-dir-open", "(a read-write open of a directory was not EISDIR)");
+        if (x >= 0)
+            SystemNative_Close(x);
+        x = SystemNative_Open("/tmp/dd", RHU_PAL_O_RDONLY | RHU_PAL_O_CREAT, 0x1A4);
+        SCHECK(x == -1 && SystemNative_GetErrNo() == RHU_GERR_EISDIR, "shim-fdmap-dir-open", "(an open of a directory that creates was not EISDIR)");
+        if (x >= 0)
+            SystemNative_Close(x);
+        /* three: the directory flag on a path that is a file is ENOTDIR */
+        x = SystemNative_Open("/tmp/dd/f.txt", RHU_PAL_O_RDONLY | RHU_PAL_O_DIRECTORY, 0);
+        SCHECK(x == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOTDIR, "shim-fdmap-dir-open", "(the directory flag on a file was not ENOTDIR)");
+        if (x >= 0)
+            SystemNative_Close(x);
+        /* four: a path that is not there is ENOENT, with the flag and without it */
+        x = SystemNative_Open("/tmp/dd/none", RHU_PAL_O_RDONLY | RHU_PAL_O_DIRECTORY, 0);
+        SCHECK(x == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-dir-open", "(a missing path with the directory flag was not ENOENT)");
+        if (x >= 0)
+            SystemNative_Close(x);
+        x = SystemNative_Open("/tmp/dd/none", RHU_PAL_O_RDONLY, 0);
+        SCHECK(x == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-dir-open", "(a missing path was not ENOENT)");
+        if (x >= 0)
+            SystemNative_Close(x);
+        /* the descriptor: a directory's status with its mode and the one owner; a read is EISDIR; a write is refused */
+        SCHECK(SystemNative_FStat(d1, &st) == 0 && is_type(&st, RHU_PAL_S_IFDIR) && (st.Mode & 0x1FF) == 0x1ED && st.Uid == 0, "shim-fdmap-dir-open", "(the descriptor's status is not a directory's with its mode and owner 0)");
+        SCHECK(SystemNative_Read(d1, buf, 4) == -1 && SystemNative_GetErrNo() == RHU_GERR_EISDIR, "shim-fdmap-dir-open", "(a read of a directory's descriptor was not EISDIR)");
+        SCHECK(SystemNative_Write(d1, "x", 1) == -1 && SystemNative_GetErrNo() == RHU_GERR_EBADF, "shim-fdmap-dir-open", "(a write to a directory's descriptor was not EBADF)");
+        /* a root opens as a directory too */
+        intptr_t dr = SystemNative_Open("/tmp", RHU_PAL_O_RDONLY | RHU_PAL_O_DIRECTORY, 0);
+        SCHECK(dr >= 0 && SystemNative_FStat(dr, &st) == 0 && is_type(&st, RHU_PAL_S_IFDIR) && SystemNative_Close(dr) == 0, "shim-fdmap-dir-open", "(the temporary root does not open as a directory)");
+        /* the read-only root too: it holds nothing and takes nothing, and a read-only open is owed its descriptor */
+        dr = SystemNative_Open("/etc", RHU_PAL_O_RDONLY | RHU_PAL_O_DIRECTORY, 0);
+        SCHECK(dr >= 0 && SystemNative_FStat(dr, &st) == 0 && is_type(&st, RHU_PAL_S_IFDIR) && SystemNative_Close(dr) == 0, "shim-fdmap-dir-open", "(the read-only root does not open as a directory)");
+        /* a directory removed while a descriptor holds it: the name goes at once, the descriptor answers until its last close */
+        SCHECK(SystemNative_Unlink("/tmp/dd/f.txt") == 0 && SystemNative_RmDir("/tmp/dd") == 0, "shim-fdmap-dir-open", "(the removal of a directory that a descriptor holds was refused)");
+        SCHECK(SystemNative_Stat("/tmp/dd", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-dir-open", "(the removed directory's name still resolves)");
+        SCHECK(SystemNative_FStat(d1, &st) == 0 && is_type(&st, RHU_PAL_S_IFDIR), "shim-fdmap-dir-open", "(the removed directory's descriptor no longer answers)");
+        SCHECK(SystemNative_MkDir("/tmp/dd", 0x1ED) == 0 && SystemNative_RmDir("/tmp/dd") == 0, "shim-fdmap-dir-open", "(the name of a removed directory that a descriptor holds cannot be made again)");
+        SCHECK(SystemNative_Close(d1) == 0 && SystemNative_Close(d2) == 0, "shim-fdmap-dir-open", "(close)");
+        SCHECK(SystemNative_FStat(d1, &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_EBADF, "shim-fdmap-dir-open", "(a closed directory descriptor answers)");
+        pass("shim-fdmap-dir-open", " (a read-only open of a directory gives a descriptor; one that writes or creates is EISDIR; the directory flag on a file is ENOTDIR; a missing path is ENOENT; the descriptor answers a directory's status, refuses a read with EISDIR and outlives the directory's name)");
+    }
+
+    /* the descriptor forms of open, mkdir and unlink: the path forms' own verbs under a directory's descriptor */
+    {
+        SCHECK(SystemNative_MkDir("/tmp/at", 0x1ED) == 0, "shim-fdmap-at", "(mkdir)");
+        intptr_t d = SystemNative_Open("/tmp/at", RHU_PAL_O_RDONLY | RHU_PAL_O_DIRECTORY, 0);
+        SCHECK(d >= 0, "shim-fdmap-at", "(the directory's descriptor)");
+        SCHECK(SystemNative_MkDirAt(d, "sub", 0x1C0) == 0, "shim-fdmap-at", "(mkdirat refused)");
+        SCHECK(SystemNative_Stat("/tmp/at/sub", &st) == 0 && is_type(&st, RHU_PAL_S_IFDIR), "shim-fdmap-at", "(mkdirat did not make the directory under its descriptor's path)");
+        SCHECK(SystemNative_MkDirAt(d, "sub", 0x1C0) == -1 && SystemNative_GetErrNo() == RHU_GERR_EEXIST, "shim-fdmap-at", "(a second mkdirat of one name was not EEXIST)");
+        intptr_t f = SystemNative_OpenAt(d, "f.bin", RHU_PAL_O_RDWR | RHU_PAL_O_NOFOLLOW | RHU_PAL_O_CLOEXEC, 0);
+        SCHECK(f == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-at", "(openat of an absent name without create was not ENOENT)");
+        if (f >= 0)
+            SystemNative_Close(f);
+        f = SystemNative_OpenAt(d, "f.bin", RHU_PAL_O_RDWR | RHU_PAL_O_NOFOLLOW | RHU_PAL_O_CLOEXEC | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0x180);
+        SCHECK(f >= 0 && SystemNative_Write(f, "ATAT", 4) == 4, "shim-fdmap-at", "(openat with create and exclusive refused)");
+        intptr_t g = SystemNative_OpenAt(d, "f.bin", RHU_PAL_O_RDWR | RHU_PAL_O_NOFOLLOW | RHU_PAL_O_CLOEXEC | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0x180);
+        SCHECK(g == -1 && SystemNative_GetErrNo() == RHU_GERR_EEXIST, "shim-fdmap-at", "(openat with exclusive on an existing name was not EEXIST)");
+        if (g >= 0)
+            SystemNative_Close(g);
+        g = SystemNative_OpenAt(d, "f.bin", RHU_PAL_O_RDWR | RHU_PAL_O_NOFOLLOW | RHU_PAL_O_CLOEXEC, 0);
+        SCHECK(g >= 0 && g != f && SystemNative_PRead(g, buf, 4, 0) == 4 && memcmp(buf, "ATAT", 4) == 0, "shim-fdmap-at", "(openat of an existing name does not read its bytes)");
+        SCHECK(SystemNative_Stat("/tmp/at/f.bin", &st) == 0 && st.Size == 4 && (st.Mode & 0x1FF) == 0x180, "shim-fdmap-at", "(the file is not at its descriptor's path with its size and mode)");
+        /* the descriptor of the call: a file's is ENOTDIR, the console's is ENOTDIR, a closed one EBADF; an absolute path ignores it; the empty name is ENOENT */
+        SCHECK(SystemNative_OpenAt(f, "x", RHU_PAL_O_RDONLY, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOTDIR, "shim-fdmap-at", "(openat under a file's descriptor was not ENOTDIR)");
+        SCHECK(SystemNative_MkDirAt(f, "x", 0x1C0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOTDIR, "shim-fdmap-at", "(mkdirat under a file's descriptor was not ENOTDIR)");
+        SCHECK(SystemNative_UnlinkAt(f, "x", 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOTDIR, "shim-fdmap-at", "(unlinkat under a file's descriptor was not ENOTDIR)");
+        SCHECK(SystemNative_OpenAt(1, "x", RHU_PAL_O_RDONLY, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOTDIR, "shim-fdmap-at", "(openat under the console's descriptor was not ENOTDIR)");
+        SCHECK(SystemNative_Close(g) == 0, "shim-fdmap-at", "(close)");
+        SCHECK(SystemNative_OpenAt(g, "f.bin", RHU_PAL_O_RDONLY, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_EBADF, "shim-fdmap-at", "(openat under a closed descriptor was not EBADF)");
+        SCHECK(SystemNative_MkDirAt(g, "y", 0x1C0) == -1 && SystemNative_GetErrNo() == RHU_GERR_EBADF, "shim-fdmap-at", "(mkdirat under a closed descriptor was not EBADF)");
+        SCHECK(SystemNative_UnlinkAt(g, "f.bin", 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_EBADF, "shim-fdmap-at", "(unlinkat under a closed descriptor was not EBADF)");
+        intptr_t a = SystemNative_OpenAt(f, "/tmp/at/f.bin", RHU_PAL_O_RDONLY, 0);
+        SCHECK(a >= 0 && SystemNative_Close(a) == 0, "shim-fdmap-at", "(an absolute path did not ignore the descriptor)");
+        SCHECK(SystemNative_OpenAt(d, "", RHU_PAL_O_RDONLY, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-at", "(openat of the empty name was not ENOENT)");
+        /* unlinkat: a flag out of range; a directory that is not empty; a directory without the directory flag and a
+         * file with it, each as the path form answers; an absent name; then the file and the directory */
+        SCHECK(SystemNative_UnlinkAt(d, "f.bin", 2) == -1 && SystemNative_GetErrNo() == RHU_GERR_EINVAL, "shim-fdmap-at", "(unlinkat accepted a flag out of range)");
+        intptr_t in = SystemNative_Open("/tmp/at/sub/in.txt", RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT, 0x1A4);
+        SCHECK(in >= 0 && SystemNative_Close(in) == 0, "shim-fdmap-at", "(a file in the nested directory)");
+        SCHECK(SystemNative_UnlinkAt(d, "sub", RHU_PAL_AT_REMOVEDIR) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOTEMPTY, "shim-fdmap-at", "(unlinkat removed a directory that is not empty)");
+        SCHECK(SystemNative_Unlink("/tmp/at/sub/in.txt") == 0, "shim-fdmap-at", "(unlink)");
+        int32_t by_path = SystemNative_Unlink("/tmp/at/sub") == -1 ? SystemNative_GetErrNo() : 0;
+        SCHECK(by_path != 0 && SystemNative_UnlinkAt(d, "sub", 0) == -1 && SystemNative_GetErrNo() == by_path, "shim-fdmap-at", "(unlinkat of a directory without the directory flag does not answer as unlink does)");
+        by_path = SystemNative_RmDir("/tmp/at/f.bin") == -1 ? SystemNative_GetErrNo() : 0;
+        SCHECK(by_path != 0 && SystemNative_UnlinkAt(d, "f.bin", RHU_PAL_AT_REMOVEDIR) == -1 && SystemNative_GetErrNo() == by_path, "shim-fdmap-at", "(unlinkat of a file with the directory flag does not answer as rmdir does)");
+        SCHECK(SystemNative_UnlinkAt(d, "none", 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-at", "(unlinkat of an absent name was not ENOENT)");
+        SCHECK(SystemNative_Close(f) == 0 && SystemNative_UnlinkAt(d, "f.bin", 0) == 0, "shim-fdmap-at", "(unlinkat of a file refused)");
+        SCHECK(SystemNative_Stat("/tmp/at/f.bin", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-at", "(the file unlinkat removed still resolves)");
+        SCHECK(SystemNative_UnlinkAt(d, "sub", RHU_PAL_AT_REMOVEDIR) == 0, "shim-fdmap-at", "(unlinkat of a directory refused)");
+        SCHECK(SystemNative_Stat("/tmp/at/sub", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-at", "(the directory unlinkat removed still resolves)");
+        /* under a directory removed while its descriptor stood nothing is made */
+        SCHECK(SystemNative_RmDir("/tmp/at") == 0, "shim-fdmap-at", "(rmdir)");
+        f = SystemNative_OpenAt(d, "late.bin", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT, 0x180);
+        SCHECK(f == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-at", "(openat under a removed directory was not ENOENT)");
+        if (f >= 0)
+            SystemNative_Close(f);
+        SCHECK(SystemNative_MkDirAt(d, "late", 0x1C0) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-at", "(mkdirat under a removed directory was not ENOENT)");
+        SCHECK(SystemNative_Close(d) == 0, "shim-fdmap-at", "(close)");
+        pass("shim-fdmap-at", " (openat, mkdirat and unlinkat act under their descriptor's directory as the path forms act on the composed path; a file's descriptor is ENOTDIR, a closed one EBADF, an absolute path ignores it, a removed directory holds nothing new)");
+    }
+
+    /* a directory keeps its mode: as given at mkdir and mkdirat, changed by chmod and fchmod, reported by both statuses */
+    {
+        SCHECK(SystemNative_MkDir("/tmp/dm", 0x1C0) == 0 && SystemNative_Stat("/tmp/dm", &st) == 0 && is_type(&st, RHU_PAL_S_IFDIR) && (st.Mode & 0x1FF) == 0x1C0, "shim-fdmap-dir-mode", "(a directory's mode is not the one given at mkdir)");
+        SCHECK(SystemNative_ChMod("/tmp/dm", 0x1FF) == 0 && SystemNative_Stat("/tmp/dm", &st) == 0 && (st.Mode & 0x1FF) == 0x1FF, "shim-fdmap-dir-mode", "(chmod of a directory is not kept)");
+        intptr_t d = SystemNative_Open("/tmp/dm", RHU_PAL_O_RDONLY | RHU_PAL_O_DIRECTORY, 0);
+        SCHECK(d >= 0 && SystemNative_FChMod(d, 0x1C0) == 0 && SystemNative_FStat(d, &st) == 0 && (st.Mode & 0x1FF) == 0x1C0, "shim-fdmap-dir-mode", "(fchmod of a directory's descriptor is not kept)");
+        SCHECK(SystemNative_Stat("/tmp/dm", &st) == 0 && (st.Mode & 0x1FF) == 0x1C0, "shim-fdmap-dir-mode", "(the mode set through the descriptor is not the path's)");
+        SCHECK(SystemNative_MkDirAt(d, "in", 0x1FF) == 0 && SystemNative_Stat("/tmp/dm/in", &st) == 0 && (st.Mode & 0x1FF) == 0x1FF, "shim-fdmap-dir-mode", "(a directory's mode is not the one given at mkdirat)");
+        SCHECK(SystemNative_UnlinkAt(d, "in", RHU_PAL_AT_REMOVEDIR) == 0 && SystemNative_Close(d) == 0 && SystemNative_RmDir("/tmp/dm") == 0, "shim-fdmap-dir-mode", "(unlinkat, close, rmdir)");
+        SCHECK(SystemNative_Stat("/tmp", &st) == 0 && (st.Mode & 0x1FF) == 0x1ED, "shim-fdmap-dir-mode", "(the temporary root's mode is not 0755)");
+        pass("shim-fdmap-dir-mode", " (a directory's mode is the one given at mkdir or mkdirat until chmod or fchmod changes it, and both statuses report it; a root's is 0755)");
+    }
+
+    /* the advisory lock on a directory's descriptor: the record a file has */
+    {
+        SCHECK(SystemNative_MkDir("/tmp/dl", 0x1ED) == 0, "shim-fdmap-dir-flock", "(mkdir)");
+        intptr_t d1 = SystemNative_Open("/tmp/dl", RHU_PAL_O_RDONLY | RHU_PAL_O_DIRECTORY, 0);
+        intptr_t d2 = SystemNative_Open("/tmp/dl", RHU_PAL_O_RDONLY | RHU_PAL_O_DIRECTORY, 0);
+        SCHECK(d1 >= 0 && d2 >= 0 && d1 != d2, "shim-fdmap-dir-flock", "(two descriptors of one directory)");
+        SCHECK(SystemNative_FLock(d1, RHU_PAL_LOCK_EX) == 0, "shim-fdmap-dir-flock", "(an exclusive lock on a free directory refused)");
+        SCHECK(SystemNative_FLock(d2, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == -1 && SystemNative_GetErrNo() == RHU_GERR_EAGAIN, "shim-fdmap-dir-flock", "(a second descriptor took the directory's exclusive lock)");
+        SCHECK(SystemNative_FLock(d1, RHU_PAL_LOCK_UN) == 0 && SystemNative_FLock(d2, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == 0, "shim-fdmap-dir-flock", "(the lock was not given back at the unlock)");
+        SCHECK(SystemNative_Close(d2) == 0 && SystemNative_FLock(d1, RHU_PAL_LOCK_EX | RHU_PAL_LOCK_NB) == 0, "shim-fdmap-dir-flock", "(the lock was not given back at the close)");
+        SCHECK(SystemNative_FLock(d1, RHU_PAL_LOCK_UN) == 0 && SystemNative_Close(d1) == 0 && SystemNative_RmDir("/tmp/dl") == 0, "shim-fdmap-dir-flock", "(unlock, close, rmdir)");
+        pass("shim-fdmap-dir-flock", " (a directory's descriptor carries the advisory lock: exclusive, refused to a second descriptor, given back at the unlock and at the close)");
+    }
+
+    /* THE LOCK IN CONFLICT IS REFUSED AT ONCE, BLOCKING OR NOT -- a decision on record, with its error code. Every
+     * descriptor of the store belongs to the one process, and the lock is advisory per descriptor: a request that
+     * waited for another descriptor's holder would wait on the caller's own process. No timer is read here: the
+     * check is that each call returns at all, with its code; a request that waited would never return, and the
+     * gate's own bound on the run would report the hang. */
+    {
+        _Static_assert(RHU_GERR_EAGAIN == 11, "the code a lock in conflict answers is 11");
+        intptr_t f1 = SystemNative_Open("/tmp/lock-b.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT, 0x1A4);
+        intptr_t f2 = SystemNative_Open("/tmp/lock-b.txt", RHU_PAL_O_RDWR, 0);
+        SCHECK(f1 >= 0 && f2 >= 0, "shim-fdmap-flock-blocking", "(two descriptors)");
+        SCHECK(SystemNative_FLock(f1, RHU_PAL_LOCK_EX) == 0, "shim-fdmap-flock-blocking", "(a blocking exclusive lock on a free file refused)");
+        SCHECK(SystemNative_FLock(f2, RHU_PAL_LOCK_EX) == -1 && SystemNative_GetErrNo() == RHU_GERR_EAGAIN, "shim-fdmap-flock-blocking", "(a blocking exclusive request in conflict was not refused with EWOULDBLOCK, 11)");
+        SCHECK(SystemNative_FLock(f2, RHU_PAL_LOCK_SH) == -1 && SystemNative_GetErrNo() == RHU_GERR_EAGAIN, "shim-fdmap-flock-blocking", "(a blocking shared request in conflict was not refused with EWOULDBLOCK, 11)");
+        SCHECK(SystemNative_FLock(f1, RHU_PAL_LOCK_UN) == 0 && SystemNative_FLock(f2, RHU_PAL_LOCK_EX) == 0, "shim-fdmap-flock-blocking", "(the blocking exclusive request was not granted after the unlock)");
+        SCHECK(SystemNative_FLock(f2, RHU_PAL_LOCK_UN) == 0 && SystemNative_FLock(f1, RHU_PAL_LOCK_SH) == 0 && SystemNative_FLock(f2, RHU_PAL_LOCK_SH) == 0, "shim-fdmap-flock-blocking", "(blocking shared requests do not coexist)");
+        SCHECK(SystemNative_FLock(f1, RHU_PAL_LOCK_EX) == -1 && SystemNative_GetErrNo() == RHU_GERR_EAGAIN, "shim-fdmap-flock-blocking", "(a blocking exclusive request over another descriptor's shared lock was not refused with EWOULDBLOCK, 11)");
+        SCHECK(SystemNative_Close(f1) == 0 && SystemNative_Close(f2) == 0 && SystemNative_Unlink("/tmp/lock-b.txt") == 0, "shim-fdmap-flock-blocking", "(close, unlink)");
+        pass("shim-fdmap-flock-blocking", " (a blocking request in conflict is refused at once with EWOULDBLOCK, 11, exclusive or shared, and is granted after the unlock)");
+    }
+
+    /* a shared mapping of a store file is the file's own bytes */
+    {
+        intptr_t f = SystemNative_Open("/tmp/map.bin", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0x180);
+        SCHECK(f >= 0 && SystemNative_FTruncate(f, 4096) == 0, "shim-fdmap-map", "(create and size)");
+        uint8_t *m = f >= 0 ? SystemNative_MMap(NULL, 4096, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE, RHU_PAL_MAP_SHARED, f, 0) : NULL;
+        SCHECK(m != NULL && ((uintptr_t)m & 4095u) == 0, "shim-fdmap-map", "(a shared mapping of a sized file was refused, or is not page-aligned)");
+        if (m != NULL) {
+            int zero = 1;
+            for (uint32_t i = 0; i < 4096u; i++)
+                zero &= m[i] == 0;
+            SCHECK(zero, "shim-fdmap-map", "(the mapping of a file sized by truncation is not zero)");
+            memcpy(m, "MAP!", 4);
+            SCHECK(SystemNative_PRead(f, buf, 4, 0) == 4 && memcmp(buf, "MAP!", 4) == 0, "shim-fdmap-map", "(a write through the mapping is not what the file reads)");
+            SCHECK(SystemNative_PWrite(f, "FILE", 4, 100) == 4 && memcmp(m + 100, "FILE", 4) == 0, "shim-fdmap-map", "(a write to the file is not what the mapping shows)");
+            uint8_t *twin = SystemNative_MMap(NULL, 4096, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE, RHU_PAL_MAP_SHARED, f, 0);
+            SCHECK(twin != NULL && memcmp(twin, "MAP!", 4) == 0, "shim-fdmap-map", "(a second mapping of the file does not show its bytes)");
+            if (twin != NULL) {
+                twin[8] = 0x5A;
+                SCHECK(m[8] == 0x5A, "shim-fdmap-map", "(two mappings of one file are not the same bytes)");
+                SCHECK(SystemNative_MUnmap(twin, 4096) == 0, "shim-fdmap-map", "(munmap of the second mapping)");
+            }
+            /* what a mapping is not: a private one, a directory's, one that asks more than its descriptor may */
+            SCHECK(SystemNative_MMap(NULL, 4096, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE, RHU_PAL_MAP_PRIVATE, f, 0) == NULL, "shim-fdmap-map", "(a private mapping of a descriptor was granted)");
+            intptr_t dr = SystemNative_Open("/tmp", RHU_PAL_O_RDONLY | RHU_PAL_O_DIRECTORY, 0);
+            SCHECK(dr >= 0 && SystemNative_MMap(NULL, 4096, RHU_PAL_PROT_READ, RHU_PAL_MAP_SHARED, dr, 0) == NULL && SystemNative_GetErrNo() == RHU_GERR_ENODEV, "shim-fdmap-map", "(a mapping of a directory's descriptor was not ENODEV)");
+            if (dr >= 0)
+                SystemNative_Close(dr);
+            intptr_t ro = SystemNative_Open("/tmp/map.bin", RHU_PAL_O_RDONLY, 0);
+            SCHECK(ro >= 0 && SystemNative_MMap(NULL, 4096, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE, RHU_PAL_MAP_SHARED, ro, 0) == NULL && SystemNative_GetErrNo() == RHU_GERR_EACCES, "shim-fdmap-map", "(a writable shared mapping through a read-only descriptor was not EACCES)");
+            if (ro >= 0)
+                SystemNative_Close(ro);
+            SCHECK(SystemNative_MUnmap(m, 4096) == 0, "shim-fdmap-map", "(munmap)");
+        }
+        if (f >= 0)
+            SystemNative_Close(f);
+        SCHECK(SystemNative_Unlink("/tmp/map.bin") == 0, "shim-fdmap-map", "(unlink)");
+        /* a file of less than a page is mapped too, and shows its bytes */
+        f = SystemNative_Open("/tmp/map-s.bin", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0x180);
+        SCHECK(f >= 0 && SystemNative_Write(f, "0123456789", 10) == 10, "shim-fdmap-map", "(a small file)");
+        m = f >= 0 ? SystemNative_MMap(NULL, 10, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE, RHU_PAL_MAP_SHARED, f, 0) : NULL;
+        SCHECK(m != NULL && ((uintptr_t)m & 4095u) == 0 && memcmp(m, "0123456789", 10) == 0, "shim-fdmap-map", "(the mapping of a file of less than a page does not show its bytes)");
+        if (m != NULL) {
+            m[9] = 'X';
+            SCHECK(SystemNative_PRead(f, buf, 10, 0) == 10 && memcmp(buf, "012345678X", 10) == 0, "shim-fdmap-map", "(a write through a small file's mapping is not what the file reads)");
+            SCHECK(SystemNative_MUnmap(m, 10) == 0, "shim-fdmap-map", "(munmap of the small file's mapping)");
+        }
+        if (f >= 0)
+            SystemNative_Close(f);
+        SCHECK(SystemNative_Unlink("/tmp/map-s.bin") == 0, "shim-fdmap-map", "(unlink)");
+        pass("shim-fdmap-map", " (a shared mapping of a store file is page-aligned and is the file's own bytes: a write through it is what the file reads, a write to the file is what it shows, two mappings are the same bytes; a private mapping, a directory's and one past its descriptor's access are refused)");
+    }
+
+    /* the mapping's lifetime: the block is freed when name, descriptors and mappings are all gone, and is moved only
+     * while no mapping stands */
+    {
+        intptr_t f = SystemNative_Open("/tmp/map-l.bin", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0x180);
+        SCHECK(f >= 0 && SystemNative_FTruncate(f, 4096) == 0, "shim-fdmap-map-lifetime", "(create and size)");
+        uint8_t *m = f >= 0 ? SystemNative_MMap(NULL, 4096, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE, RHU_PAL_MAP_SHARED, f, 0) : NULL;
+        SCHECK(m != NULL, "shim-fdmap-map-lifetime", "(a shared mapping of a sized file was refused)");
+        if (m != NULL) {
+            /* a resize within the block is granted in place, the newly shown bytes zero */
+            memcpy(m, "KEEP", 4);
+            m[2000] = 0x55;
+            SCHECK(SystemNative_FTruncate(f, 1000) == 0 && SystemNative_FStat(f, &st) == 0 && st.Size == 1000, "shim-fdmap-map-lifetime", "(a mapped file did not shrink within its block)");
+            SCHECK(SystemNative_FTruncate(f, 4096) == 0 && SystemNative_FStat(f, &st) == 0 && st.Size == 4096, "shim-fdmap-map-lifetime", "(a mapped file did not grow within its block)");
+            SCHECK(memcmp(m, "KEEP", 4) == 0 && m[2000] == 0, "shim-fdmap-map-lifetime", "(a resize within the block moved the bytes, or showed old bytes again)");
+            /* past the block: EFBIG while a mapping stands, a truncation and a write alike; nothing moves */
+            SCHECK(SystemNative_FTruncate(f, 4097) == -1 && SystemNative_GetErrNo() == RHU_GERR_EFBIG, "shim-fdmap-map-lifetime", "(a growth past a mapped file's block was not EFBIG)");
+            SCHECK(SystemNative_PWrite(f, "x", 1, 4096) == -1 && SystemNative_GetErrNo() == RHU_GERR_EFBIG, "shim-fdmap-map-lifetime", "(a write past a mapped file's block was not EFBIG)");
+            SCHECK(SystemNative_FStat(f, &st) == 0 && st.Size == 4096 && memcmp(m, "KEEP", 4) == 0, "shim-fdmap-map-lifetime", "(a refused growth changed the file)");
+            uint8_t *twin = SystemNative_MMap(NULL, 4096, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE, RHU_PAL_MAP_SHARED, f, 0);
+            SCHECK(twin != NULL && SystemNative_MUnmap(twin, 4096) == 0, "shim-fdmap-map-lifetime", "(a second mapping and its unmap)");
+            SCHECK(SystemNative_FTruncate(f, 8192) == -1 && SystemNative_GetErrNo() == RHU_GERR_EFBIG, "shim-fdmap-map-lifetime", "(the unmap of one mapping of two released the block's bound)");
+            /* granted once no mapping stands: the bytes go with the file */
+            SCHECK(SystemNative_MUnmap(m, 4096) == 0 && SystemNative_FTruncate(f, 8192) == 0, "shim-fdmap-map-lifetime", "(a growth past the block was not granted after the last unmap)");
+            SCHECK(SystemNative_PRead(f, buf, 4, 0) == 4 && memcmp(buf, "KEEP", 4) == 0, "shim-fdmap-map-lifetime", "(the grown file lost its bytes)");
+            /* an unlink and a close leave the bytes to the mapping that stands */
+            m = SystemNative_MMap(NULL, 8192, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE, RHU_PAL_MAP_SHARED, f, 0);
+            SCHECK(m != NULL, "shim-fdmap-map-lifetime", "(a mapping of the grown file was refused)");
+            if (m != NULL) {
+                m[5000] = 0x77;
+                SCHECK(SystemNative_Unlink("/tmp/map-l.bin") == 0 && SystemNative_Close(f) == 0, "shim-fdmap-map-lifetime", "(unlink and close of a mapped file)");
+                f = -1;
+                SCHECK(SystemNative_Stat("/tmp/map-l.bin", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-fdmap-map-lifetime", "(the unlinked name still resolves)");
+                SCHECK(memcmp(m, "KEEP", 4) == 0 && m[5000] == 0x77, "shim-fdmap-map-lifetime", "(the bytes did not stay with the mapping after the unlink and the close)");
+                m[1] = 'e';
+                SCHECK(m[1] == 'e' && SystemNative_MUnmap(m, 8192) == 0, "shim-fdmap-map-lifetime", "(the last unmap of a file with no name and no descriptor)");
+            }
+        }
+        if (f >= 0) {
+            SystemNative_Close(f);
+            SystemNative_Unlink("/tmp/map-l.bin");
+        }
+        /* a file with no name is sized and mapped through its descriptor */
+        f = SystemNative_Open("/tmp/map-n.bin", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0x180);
+        SCHECK(f >= 0 && SystemNative_Unlink("/tmp/map-n.bin") == 0 && SystemNative_FTruncate(f, 4096) == 0, "shim-fdmap-map-lifetime", "(a file with no name was not sized through its descriptor)");
+        m = f >= 0 ? SystemNative_MMap(NULL, 4096, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE, RHU_PAL_MAP_SHARED, f, 0) : NULL;
+        SCHECK(m != NULL, "shim-fdmap-map-lifetime", "(a file with no name was not mapped through its descriptor)");
+        if (m != NULL) {
+            m[10] = 0x33;
+            SCHECK(SystemNative_PRead(f, buf, 1, 10) == 1 && buf[0] == 0x33, "shim-fdmap-map-lifetime", "(a write through the mapping of a file with no name is not what its descriptor reads)");
+            SCHECK(SystemNative_MUnmap(m, 4096) == 0, "shim-fdmap-map-lifetime", "(munmap)");
+        }
+        if (f >= 0)
+            SystemNative_Close(f);
+        /* TEN THOUSAND ROUNDS END WITH THE STORE AS IT BEGAN: create, size, map, unmap, close, unlink, as the named
+         * mutex's last handle goes; then two thousand in the two other orders, the mapping last and the descriptor
+         * last. A round that kept its page would stop within sixteen rounds, since the hosting layer's heap is 64 KiB
+         * on this row; a round that kept its row would stop the 33rd. */
+        int bad = 0;
+        for (uint32_t r = 0; r < 12000u && bad == 0; r++) {
+            intptr_t rf = SystemNative_Open("/tmp/map-r.bin", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0x180);
+            if (rf < 0 || SystemNative_FTruncate(rf, 4096) != 0) {
+                bad = 1;
+                if (rf >= 0) {
+                    SystemNative_Close(rf);
+                    SystemNative_Unlink("/tmp/map-r.bin");
+                }
+                break;
+            }
+            uint8_t *rm = SystemNative_MMap(NULL, 4096, RHU_PAL_PROT_READ | RHU_PAL_PROT_WRITE, RHU_PAL_MAP_SHARED, rf, 0);
+            if (rm == NULL || rm[0] != 0) {
+                bad = 2;
+                SystemNative_Close(rf);
+                SystemNative_Unlink("/tmp/map-r.bin");
+                break;
+            }
+            rm[0] = 0xA5;
+            if (r < 10000u)
+                bad = SystemNative_MUnmap(rm, 4096) != 0 || SystemNative_Close(rf) != 0 || SystemNative_Unlink("/tmp/map-r.bin") != 0 ? 3 : 0;
+            else if ((r & 1u) == 0)
+                bad = SystemNative_Unlink("/tmp/map-r.bin") != 0 || SystemNative_Close(rf) != 0 || rm[0] != 0xA5 || SystemNative_MUnmap(rm, 4096) != 0 ? 4 : 0;
+            else
+                bad = SystemNative_Unlink("/tmp/map-r.bin") != 0 || SystemNative_MUnmap(rm, 4096) != 0 || SystemNative_Close(rf) != 0 ? 5 : 0;
+        }
+        SCHECK(bad != 1, "shim-fdmap-map-lifetime", "(a round could not create and size its file: an earlier round kept its row or its page)");
+        SCHECK(bad != 2, "shim-fdmap-map-lifetime", "(a round's mapping was refused, or showed an earlier round's byte)");
+        SCHECK(bad == 0, "shim-fdmap-map-lifetime", "(a round's unmap, close or unlink was refused)");
+        pass("shim-fdmap-map-lifetime", " (a mapped file is resized in place within its block and refused past it with EFBIG until its last unmap; an unlink and a close leave the bytes to the mapping; a file with no name is sized and mapped; twelve thousand rounds end with the store as it began)");
+    }
+
+    /* the store's bounds as numbers: 32 files, 24 made directories, 29 descriptors in two ranges, a path under 128
+     * characters */
+    {
+        char p[160];
+        int made = 0;
+        intptr_t last = -1;
+        /* the ladder's own file of the groups above is given back first: the files are counted on an empty store */
+        SCHECK(SystemNative_Unlink("/tmp/v.txt") == 0, "shim-fdmap-store-bounds", "(the ladder's own file was not there to give back)");
+        for (int i = 0; i < 33; i++) {
+            memcpy(p, "/tmp/bf-00", 11);
+            p[8] = (char)('0' + i / 10);
+            p[9] = (char)('0' + i % 10);
+            last = SystemNative_Open(p, RHU_PAL_O_WRONLY | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0x1A4);
+            if (last < 0)
+                break;
+            SystemNative_Close(last);
+            made++;
+        }
+        SCHECK(made == 32 && last == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOSPC, "shim-fdmap-store-bounds", "(the store does not hold 32 files and refuse the 33rd with ENOSPC)");
+        for (int i = 0; i < made; i++) {
+            memcpy(p, "/tmp/bf-00", 11);
+            p[8] = (char)('0' + i / 10);
+            p[9] = (char)('0' + i % 10);
+            SCHECK(SystemNative_Unlink(p) == 0, "shim-fdmap-store-bounds", "(unlink)");
+        }
+        made = 0;
+        int32_t rc = 0;
+        for (int i = 0; i < 25; i++) {
+            memcpy(p, "/tmp/bd-00", 11);
+            p[8] = (char)('0' + i / 10);
+            p[9] = (char)('0' + i % 10);
+            rc = SystemNative_MkDir(p, 0x1ED);
+            if (rc != 0)
+                break;
+            made++;
+        }
+        SCHECK(made == 24 && rc == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOSPC, "shim-fdmap-store-bounds", "(the store does not hold 24 made directories and refuse the 25th with ENOSPC)");
+        for (int i = 0; i < made; i++) {
+            memcpy(p, "/tmp/bd-00", 11);
+            p[8] = (char)('0' + i / 10);
+            p[9] = (char)('0' + i % 10);
+            SCHECK(SystemNative_RmDir(p) == 0, "shim-fdmap-store-bounds", "(rmdir)");
+        }
+        /* a path of 127 characters is a path; one of 128 is ENAMETOOLONG */
+        memset(p, 'p', sizeof p);
+        memcpy(p, "/tmp/", 5);
+        p[127] = 0;
+        intptr_t lf = SystemNative_Open(p, RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0x1A4);
+        SCHECK(lf >= 0 && SystemNative_Close(lf) == 0 && SystemNative_Stat(p, &st) == 0 && SystemNative_Unlink(p) == 0, "shim-fdmap-store-bounds", "(a path of 127 characters was refused)");
+        p[127] = 'p';
+        p[128] = 0;
+        lf = SystemNative_Open(p, RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0x1A4);
+        SCHECK(lf == -1 && SystemNative_GetErrNo() == RHU_GERR_ENAMETOOLONG, "shim-fdmap-store-bounds", "(a path of 128 characters was not ENAMETOOLONG)");
+        if (lf >= 0) {
+            SystemNative_Close(lf);
+            SystemNative_Unlink(p);
+        }
+        /* what the row's memory gives before the refused opens below: a file of two pages, sized and given back */
+        intptr_t big = SystemNative_Open("/tmp/bfd-m.bin", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        SCHECK(big >= 0 && SystemNative_FTruncate(big, 8192) == 0 && SystemNative_Close(big) == 0 && SystemNative_Unlink("/tmp/bfd-m.bin") == 0, "shim-fdmap-store-bounds", "(a file of two pages could not be sized and given back)");
+        /* the descriptors: 29, each number in 3 to 15 or in 48 to 63, and one more is EMFILE */
+        intptr_t held[30];
+        int n = 0;
+        for (int i = 0; i < 30; i++)
+            held[i] = -2;
+        int in_band = 1;
+        held[0] = SystemNative_Open("/tmp/bfd.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        SCHECK(held[0] >= 0, "shim-fdmap-store-bounds", "(the file to hold)");
+        for (n = 1; n < 30; n++) {
+            held[n] = SystemNative_Open("/tmp/bfd.txt", RHU_PAL_O_RDONLY, 0);
+            if (held[n] < 0)
+                break;
+        }
+        for (int i = 0; i < n; i++)
+            in_band &= (held[i] >= 3 && held[i] <= 15) || (held[i] >= 48 && held[i] <= 63);
+        SCHECK(n == 29 && RHU_SHIM_FD_FILE_COUNT == 29 && held[29] == -1 && SystemNative_GetErrNo() == RHU_GERR_EMFILE, "shim-fdmap-store-bounds", "(the store does not serve 29 descriptors and refuse one more with EMFILE)");
+        SCHECK(in_band, "shim-fdmap-store-bounds", "(a descriptor's number is outside 3 to 15 and 48 to 63)");
+        /* with no descriptor free, a refused open of the process identity file gives back everything it took: four
+         * thousand refused opens, sixteen times what the hosting layer's heap could carry if each kept its record */
+        int kept = 0;
+        for (uint32_t r = 0; r < 4096u && kept == 0; r++)
+            kept = !(SystemNative_Open("/proc/self/stat", RHU_PAL_O_RDONLY, 0) == -1 && SystemNative_GetErrNo() == RHU_GERR_EMFILE);
+        SCHECK(kept == 0, "shim-fdmap-store-bounds", "(a refused open of the identity file past the band did not stay EMFILE over four thousand tries)");
+        for (int i = 0; i < n && i < 30; i++)
+            SystemNative_Close(held[i]);
+        big = SystemNative_Open("/tmp/bfd-m.bin", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        SCHECK(big >= 0 && SystemNative_FTruncate(big, 8192) == 0, "shim-fdmap-store-bounds", "(the file of two pages cannot be sized again after the refused opens: they kept memory)");
+        if (big >= 0)
+            SystemNative_Close(big);
+        SystemNative_Unlink("/tmp/bfd-m.bin");
+        SCHECK(SystemNative_Unlink("/tmp/bfd.txt") == 0, "shim-fdmap-store-bounds", "(unlink)");
+        pass("shim-fdmap-store-bounds", " (32 files and the 33rd ENOSPC; 24 made directories and the 25th ENOSPC; a path of 127 characters, and 128 ENAMETOOLONG; 29 descriptors in 3 to 15 and 48 to 63, and one more EMFILE; a refused open keeps nothing)");
+    }
+
+    /* THE ROW's POOL IN LIVE PAGES. The store's bytes are the hosting layer's heap, 64 KiB on this row, and a page
+     * block is carved by the kernel heap's own aligned entry: the heap's header stands directly before the page, so
+     * two pages never touch and a page takes 8 KiB of the heap's span -- seven or eight pages stand at once. A page
+     * block padded by a lead of its own alignment takes 12 KiB of span and never gives more than five (six would
+     * need 69632 bytes). Seven are asked. One page past the pool is refused by the storage rule, ENOSPC at the
+     * truncation with the file's size untouched, and the pool carries the same pages again once all are given back. */
+    {
+        char p[16];
+        int live[2] = {0, 0};
+        int clean = 1;
+        for (int round = 0; round < 2; round++) {
+            int n = 0;
+            for (; n < 32; n++) {
+                memcpy(p, "/tmp/pg-00", 11);
+                p[8] = (char)('0' + n / 10);
+                p[9] = (char)('0' + n % 10);
+                intptr_t f = SystemNative_Open(p, RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_EXCL, 0x180);
+                if (f < 0)
+                    break;
+                int32_t rc = SystemNative_FTruncate(f, 4096);
+                int32_t e = rc == 0 ? 0 : SystemNative_GetErrNo();
+                SystemNative_Close(f);
+                if (rc != 0) {
+                    clean &= rc == -1 && e == RHU_GERR_ENOSPC && SystemNative_Stat(p, &st) == 0 && st.Size == 0;
+                    SystemNative_Unlink(p);
+                    break;
+                }
+            }
+            live[round] = n;
+            for (int i = 0; i < n; i++) {
+                memcpy(p, "/tmp/pg-00", 11);
+                p[8] = (char)('0' + i / 10);
+                p[9] = (char)('0' + i % 10);
+                SystemNative_Unlink(p);
+            }
+        }
+        SCHECK(live[0] >= 7, "shim-fdmap-store-pool", "(the row's pool does not carry seven page files at once: a page takes more of the heap than its bytes and one header)");
+        SCHECK(clean, "shim-fdmap-store-pool", "(a page file past the pool was not refused with ENOSPC at the truncation, its size untouched)");
+        SCHECK(live[1] == live[0], "shim-fdmap-store-pool", "(the pool does not carry the same pages again after all were given back)");
+        pass("shim-fdmap-store-pool", " (seven page files or more stand at once on the row's 64 KiB; one past the pool is refused with ENOSPC at the truncation; the pool gives the same again)");
     }
 
     out("SHIMTEST-FDMAP: ALL GOOD (explicit descriptor bands; the console never answers for a file)");
@@ -1792,16 +2472,16 @@ static void *act_spin_worker(void *a)
 {
     (void)a;
     rhu_glibc_sigset s;
-    attr_slot at;
-    void *lo = NULL;
-    size_t len = 0;
+    uint32_t lo = 0;
+    uint32_t len = 0;
     sigemptyset(&s);
     sigaddset(&s, g_actsig);
     pthread_sigmask(RHU_GLIBC_SIG_BLOCK, &s, NULL);
-    pthread_getattr_np(pthread_self(), &at);
-    pthread_attr_getstack(&at, &lo, &len);
-    g_w_lo = (uint32_t)(uintptr_t)lo;
-    g_w_len = (uint32_t)len;
+    /* The carve itself, from the kernel: the attribute call reports the
+     * bounds the runtime's stack-depth helper needs, which begin lower. */
+    rhu_thread_stack_bounds((int32_t)pthread_self(), &lo, &len);
+    g_w_lo = lo;
+    g_w_len = len;
     g_w_tid = pthread_self();
     g_w_spinning = 1;
     spin_in_window();
@@ -1952,13 +2632,12 @@ static void *act_fault_worker(void *a)
     volatile uint32_t zero = 0;
     uint32_t nul = zero;
     uint32_t word;
-    attr_slot at;
-    void *lo = NULL;
-    size_t len = 0;
-    pthread_getattr_np(pthread_self(), &at);
-    pthread_attr_getstack(&at, &lo, &len);
-    g_w_lo = (uint32_t)(uintptr_t)lo;
-    g_w_len = (uint32_t)len;
+    uint32_t lo = 0;
+    uint32_t len = 0;
+    /* the carve itself, from the kernel (see the spinning worker) */
+    rhu_thread_stack_bounds((int32_t)pthread_self(), &lo, &len);
+    g_w_lo = lo;
+    g_w_len = len;
     g_w_tid = pthread_self();
     __asm__ volatile(
         "movw r4, #4\n\tmovt r4, #0x4000\n\t"
@@ -2366,7 +3045,7 @@ static int tls_ladder(void)
  * stand-ins carry the prototypes the generated header declares and read
  * the table by the slot names and export names it declares: a stand-in
  * that disagreed with the pin would prove the wrong contract. */
-#include "rhu_rt_entry_net11_rc3.h"
+#include "rhu_rt_entry_net11.h"
 
 _Static_assert(RHU_RT_CLASSLIB_SLOTS > RHU_RT_CLASSLIB_SLOT_ResolveDispatch, "the table holds the dispatch slot");
 _Static_assert(RHU_RT_CLASSLIB_EXPORTS == 8, "eight slots carry an export at this pin");
@@ -2388,6 +3067,10 @@ static uint32_t g_managed_bytes;
 static uint32_t g_unbox_bytes;
 static uint32_t g_classlib_slots;
 static void *g_classlib[RHU_RT_CLASSLIB_SLOTS];
+
+/* The shim's event routine and the word a debugger writes (rhu_host.c). */
+extern uint32_t __lamella_debug_events;
+void rhu_debug_event_unhandled(void);
 
 /* The class-library exports, by the names the bootstrapper installs. */
 void GetRuntimeException(void)
@@ -2420,8 +3103,22 @@ void OnFirstChanceException(void)
 {
 }
 
-void OnUnhandledException(void)
+/* The class library's function for an exception that no handler takes. The
+ * shim's event routine reaches it by a branch, with the registers it was
+ * entered with; this stand-in hands them on the same way, so the record
+ * reads the routine's own argument. */
+static uint32_t g_unhandled_calls;
+static void *g_unhandled_argument;
+
+__attribute__((used)) static void host_unhandled_record(void *exception)
 {
+    g_unhandled_calls++;
+    g_unhandled_argument = exception;
+}
+
+__attribute__((naked)) void OnUnhandledException(void)
+{
+    __asm__("b host_unhandled_record");
 }
 
 bool RhInitialize(bool isDll)
@@ -2460,6 +3157,9 @@ static void host_record_modules(void *os_module, int count)
  * the time it checks them. */
 static int32_t host_checks(int argc)
 {
+    static const uint32_t words[4] = { 0u, (uint32_t)RHU_DEBUG_EVENTS_MAGIC << 16, 1u << RHU_DEBUG_EVENT_UNHANDLED,
+                                       ((uint32_t)(RHU_DEBUG_EVENTS_MAGIC + 1) << 16) | (1u << RHU_DEBUG_EVENT_UNHANDLED) };
+    void (*routine)(void *) = NULL;
     int i;
 
     out("shimtest: the host's initialization contract, in order");
@@ -2479,10 +3179,33 @@ static int32_t host_checks(int argc)
     CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_ResolveDispatch] == (void *)(uintptr_t)&ResolveDispatch, "shim-host-classlib", "(slot 4 is not the dispatch resolver)");
     CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_GetSystemArrayEEType] == (void *)(uintptr_t)&GetSystemArrayEEType, "shim-host-classlib", "(slot 5 is not the array-type export)");
     CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_OnFirstChanceException] == (void *)(uintptr_t)&OnFirstChanceException, "shim-host-classlib", "(slot 6 is not the first-chance export)");
-    CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_OnUnhandledException] == (void *)(uintptr_t)&OnUnhandledException, "shim-host-classlib", "(slot 7 is not the unhandled-exception export)");
+    CHECK(g_classlib[RHU_RT_CLASSLIB_SLOT_OnUnhandledException] == (void *)(uintptr_t)&rhu_debug_event_unhandled, "shim-host-classlib", "(slot 7 is not the shim's routine for an unhandled exception)");
     for (i = RHU_RT_CLASSLIB_EXPORTS; i < RHU_RT_CLASSLIB_SLOTS; i++)
         CHECK(g_classlib[i] == NULL, "shim-host-classlib", "(a slot past the exports is not null)");
-    pass("shim-host-classlib", " (twelve slots; eight exports by the bootstrapper's names, four null)");
+    pass("shim-host-classlib", " (twelve slots; seven exports by the bootstrapper's names, the shim's routine for an unhandled exception in slot 7, four null)");
+
+    /* The routine in slot 7 while the debug events word does not ask: clear,
+     * the magic without the event's bit, the bit without the magic, another
+     * magic with the bit. Each time it reaches the class library's function
+     * with the argument it was given. */
+    routine = (void (*)(void *))(uintptr_t)g_classlib[RHU_RT_CLASSLIB_SLOT_OnUnhandledException];
+    CHECK(__lamella_debug_events == 0u, "shim-host-debug-event", "(the debug events word is not zero at the managed entry)");
+    for (i = 0; i < 4; i++) {
+        __lamella_debug_events = words[i];
+        routine((void *)(uintptr_t)(0x00176170u + (uint32_t)i));
+        __lamella_debug_events = 0u;
+        CHECK(g_unhandled_calls == (uint32_t)i + 1u && g_unhandled_argument == (void *)(uintptr_t)(0x00176170u + (uint32_t)i), "shim-host-debug-event", "(the routine did not reach the class library's function with its argument)");
+    }
+    pass("shim-host-debug-event", " (with the debug events word clear the routine in slot 7 reaches the class library's function with its argument; so it does while the word holds the magic without the event's bit, the bit without the magic, and another magic with the bit)");
+#ifdef RHU_SHIMTEST_HOST_DEBUG_EVENT
+    /* The word set as a debugger sets it. The routine's BKPT follows, and with
+     * no debugger on the core the kernel reports the fault at that instruction;
+     * a routine that comes back executed none. */
+    out("shimtest: the debug events word set to the magic and the unhandled event's bit; the routine's BKPT follows");
+    __lamella_debug_events = ((uint32_t)RHU_DEBUG_EVENTS_MAGIC << 16) | (1u << RHU_DEBUG_EVENT_UNHANDLED);
+    routine((void *)(uintptr_t)0x00176176u);
+    return fail("shim-host-debug-event", "(the routine came back with the event asked for: no BKPT was executed)");
+#endif
 
     CHECK(g_registered_module == (void *)(uintptr_t)__vector_table, "shim-host-module", "(the module handle is not the image's load address, the vector table's)");
     CHECK(g_modules_module == g_registered_module, "shim-host-module", "(the module list was initialized under another handle)");
@@ -2617,13 +3340,13 @@ static int busdev_ladder(void)
         pass("shim-busdev-funcs", " (one four-byte word, the word after it untouched; NULL refused EFAULT)");
     }
     /* The one RHU request on the I2C node: the bus's rate for the program's
-     * run (the rate request). This row's emulated block serves 100 kHz alone (the
-     * generic timing arm's one pair), so the served rate is the default, and
-     * the refusal of a second served rate (EBUSY with the running rate read
-     * back) can be tested only on a board whose block serves two rates. The
-     * request on a fresh
-     * node of the same bus: the claim is the bus's, not the node's, and the
-     * transaction then runs through the first node. */
+     * run (the rate request), under the kernel's contract for the claim
+     * (rhu.h, the I2C paragraph): a served rate claims the bus and the same
+     * rate again answers 0; another served rate (400 kHz, which the ladder's
+     * row makes) is refused EBUSY and the node reads the running rate back; a
+     * rate outside the set is refused ENOTSUP before the bus's state. The
+     * request is made on a fresh node of the same bus: the claim is the bus's,
+     * not the node's, and the transaction then runs through the first node. */
     {
         int fr = open(bd_name("/dev/i2c-", (uint32_t)i2c_bus, 0, 0), BD_O_RDWR);
         CHECK(fr >= RHU_SHIM_FD_DEVICE_LO && fr != fi, "shim-busdev-rate", "(a second I2C node of the bus did not open apart)");
@@ -2642,11 +3365,11 @@ static int busdev_ladder(void)
         hz = 100000u;
         CHECK(ioctl(fr, BD_I2C_RATE, &hz) == 0 && hz == 100000u, "shim-busdev-rate", "(the same rate again did not answer 0)");
         hz = 400000u;
-        CHECK(ioctl(fr, BD_I2C_RATE, &hz) == -1 && BD_ERRNO_IS(RHU_GERR_ENOTSUP) && hz == 400000u, "shim-busdev-rate", "(an unserved rate was not refused ENOTSUP with the word untouched)");
+        CHECK(ioctl(fr, BD_I2C_RATE, &hz) == -1 && BD_ERRNO_IS(RHU_GERR_EBUSY) && hz == 100000u, "shim-busdev-rate", "(a second served rate was not refused EBUSY with the running rate read back)");
         hz = 250000u;
         CHECK(ioctl(fr, BD_I2C_RATE, &hz) == -1 && BD_ERRNO_IS(RHU_GERR_ENOTSUP) && hz == 250000u, "shim-busdev-rate", "(a rate outside the set was not refused ENOTSUP with the word untouched)");
         CHECK(close(fr) == 0, "shim-busdev-rate", "(the second node's close refused)");
-        pass("shim-busdev-rate", " (the one RHU request on the I2C node: a served rate claims the bus for the run and reads back, the same rate again 0, an unserved rate ENOTSUP before the state with the word untouched, NULL EFAULT, 0 EINVAL, the SPI node ENOTTY; this row serves one rate, so a second served rate's EBUSY with the running rate read back is the bench's, by the kernel's contract)");
+        pass("shim-busdev-rate", " (the one RHU request on the I2C node: a served rate claims the bus for the run and reads back, the same rate again 0, a second served rate EBUSY with the running rate read back, a rate outside the set ENOTSUP before the state with the word untouched, NULL EFAULT, 0 EINVAL, the SPI node ENOTTY)");
     }
     {
         uint8_t reg = 0xD0;
@@ -2971,6 +3694,272 @@ static int pwmfs_ladder(void)
 
 #endif /* RHU_SHIMTEST_LADDER_PWMFS */
 
+#ifdef RHU_SHIMTEST_LADDER_PWMROWS
+
+/* --- the PWM device files over a board row's own line table, from a
+ * native caller's side. A channel's name is the line's number, and the
+ * kernel bounds a line's number by the row's line space alone, so the unit
+ * holds no bound of its own on a name. This ladder's unit object is the
+ * unit's source compiled with the kernel's eight PWM functions and the
+ * shim's diagnostic function renamed on the compile line; the tenant
+ * defines the nine and answers as the kernel with the PWM-capable lines of
+ * the case's row, in the order of the kernel's facts (PWM_LINES). The unit
+ * computes its channel names once, so one image is one row. The case's rows
+ * number a line by port and pin, so their tables carry numbers that no
+ * small table indexed by the name could hold. The tables below are tied to
+ * the kernel's facts by the hosted-runtime gate's row tie. --- */
+int32_t rows_pwm_count(void);
+int32_t rows_pwm_line(uint32_t index);
+int32_t rows_pwm_claim(uint32_t line);
+int32_t rows_pwm_set(int32_t h, uint64_t period_ns, uint64_t duty_ns, uint32_t polarity);
+int32_t rows_pwm_period(int32_t h, uint64_t *achieved_ns);
+int32_t rows_pwm_enable(int32_t h, uint32_t on);
+int32_t rows_pwm_release(int32_t h);
+int32_t rows_pwm_info(int32_t h, uint32_t *timer, uint32_t *channel, uint32_t *clock_hz);
+void rows_shim_log(const char *fmt, ...);
+
+#if defined(RHU_SHIMTEST_PWMROWS_F769)
+#define PR_ROW "st-stm32f769i-disco"
+static const uint16_t pr_lines[] = { 86, 40, 87, 118, 11, 31 }; /* PWM_LINES of st-stm32f769i-disco */
+#elif defined(RHU_SHIMTEST_PWMROWS_U5A5)
+#define PR_ROW "st-nucleo-u5a5zj-q"
+static const uint16_t pr_lines[] = { 77, 75, 73, 63, 62, 7 }; /* PWM_LINES of st-nucleo-u5a5zj-q */
+#else
+#error "the PWM rows ladder names its row (RHU_SHIMTEST_PWMROWS_F769 or RHU_SHIMTEST_PWMROWS_U5A5)"
+#endif
+#define PR_COUNT ((int32_t)(sizeof pr_lines / sizeof pr_lines[0]))
+#define PR_HELD_MAX 16
+#define PR_CHIP "/sys/class/pwm/pwmchip0"
+#define PR_HANDLE 0x100
+#define PR_ERRNO_IS(e) (SystemNative_GetErrNo() == (e))
+_Static_assert(sizeof pr_lines / sizeof pr_lines[0] <= PR_HELD_MAX, "the row's table is longer than the tenant's record of its claims");
+
+static uint8_t pr_held[PR_HELD_MAX];
+static uint64_t pr_period[PR_HELD_MAX];
+/* The format of the unit's last diagnostic line. */
+static const char *pr_log;
+
+/* The table's index of a line, -1 for a line the row does not list. */
+static int32_t pr_at(uint32_t line)
+{
+    for (int32_t i = 0; i < PR_COUNT; i++) {
+        if ((uint32_t)pr_lines[i] == line)
+            return i;
+    }
+    return -1;
+}
+
+int32_t rows_pwm_count(void)
+{
+    return PR_COUNT;
+}
+
+int32_t rows_pwm_line(uint32_t index)
+{
+    return index < (uint32_t)PR_COUNT ? (int32_t)pr_lines[index] : RHU_EINVAL;
+}
+
+int32_t rows_pwm_claim(uint32_t line)
+{
+    int32_t i = pr_at(line);
+    if (i < 0)
+        return RHU_EINVAL;
+    if (pr_held[i])
+        return RHU_EBUSY;
+    pr_held[i] = 1;
+    return PR_HANDLE + i;
+}
+
+int32_t rows_pwm_set(int32_t h, uint64_t period_ns, uint64_t duty_ns, uint32_t polarity)
+{
+    (void)polarity;
+    if (h < PR_HANDLE || h >= PR_HANDLE + PR_COUNT || period_ns == 0 || duty_ns > period_ns)
+        return RHU_EINVAL;
+    pr_period[h - PR_HANDLE] = period_ns;
+    return 0;
+}
+
+int32_t rows_pwm_period(int32_t h, uint64_t *achieved_ns)
+{
+    if (h < PR_HANDLE || h >= PR_HANDLE + PR_COUNT)
+        return RHU_EINVAL;
+    *achieved_ns = pr_period[h - PR_HANDLE];
+    return 0;
+}
+
+int32_t rows_pwm_enable(int32_t h, uint32_t on)
+{
+    (void)on;
+    return h < PR_HANDLE || h >= PR_HANDLE + PR_COUNT ? RHU_EINVAL : 0;
+}
+
+int32_t rows_pwm_release(int32_t h)
+{
+    if (h < PR_HANDLE || h >= PR_HANDLE + PR_COUNT)
+        return RHU_EINVAL;
+    pr_held[h - PR_HANDLE] = 0;
+    pr_period[h - PR_HANDLE] = 0;
+    return 0;
+}
+
+int32_t rows_pwm_info(int32_t h, uint32_t *timer, uint32_t *channel, uint32_t *clock_hz)
+{
+    if (h < PR_HANDLE || h >= PR_HANDLE + PR_COUNT)
+        return RHU_EINVAL;
+    *timer = (uint32_t)(h - PR_HANDLE);
+    *channel = 0;
+    *clock_hz = 1000000u;
+    return 0;
+}
+
+void rows_shim_log(const char *fmt, ...)
+{
+    pr_log = fmt;
+}
+
+/* A number's decimal digits at p; their count. */
+static int32_t pr_digits(char *p, uint32_t v)
+{
+    char t[10];
+    int32_t n = 0;
+    do {
+        t[n++] = (char)('0' + v % 10u);
+        v /= 10u;
+    } while (v != 0u);
+    for (int32_t i = 0; i < n; i++)
+        p[i] = t[n - 1 - i];
+    return n;
+}
+
+/* A channel's path: the chip, the channel's directory by the line's
+ * number, and a file's name with its slash ("" for the directory). */
+static const char *pr_path(char *path, uint32_t line, const char *file)
+{
+    size_t n = strlen(PR_CHIP "/pwm");
+    memcpy(path, PR_CHIP "/pwm", n);
+    n += (size_t)pr_digits(path + n, line);
+    memcpy(path + n, file, strlen(file) + 1);
+    return path;
+}
+
+/* One value written to a node through the store, as the class writes one:
+ * the count, or -1 with the write's errno kept past the close. */
+static int32_t pr_put(const char *path, const char *text)
+{
+    intptr_t fd = SystemNative_Open(path, RHU_PAL_O_WRONLY, 0);
+    if (fd < 0)
+        return -1;
+    int32_t n = SystemNative_Write(fd, text, (int32_t)strlen(text));
+    int32_t e = *__errno_location();
+    SystemNative_Close(fd);
+    if (n < 0)
+        *__errno_location() = e;
+    return n;
+}
+
+/* A node's text read through the store: the count with the text
+ * terminated, or -1. */
+static int32_t pr_get(const char *path, char *buf, int32_t cap)
+{
+    intptr_t fd = SystemNative_Open(path, RHU_PAL_O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+    int32_t n = SystemNative_Read(fd, buf, cap - 1);
+    SystemNative_Close(fd);
+    if (n >= 0)
+        buf[n] = 0;
+    return n;
+}
+
+/* A listed line through a channel's whole life: 0, or the step that
+ * refused -- 1 the export, 2 the period, 3 the duty, 4 the period read
+ * back, 5 the unexport, 6 the channel's directory answering after it. */
+static int pr_life(uint32_t line)
+{
+    char path[64], text[12], back[24];
+    rhu_pal_filestatus st;
+    int32_t n = pr_digits(text, line);
+    text[n] = 0;
+    if (pr_put(PR_CHIP "/export", text) != n)
+        return 1;
+    if (pr_put(pr_path(path, line, "/period"), "1000000") != 7)
+        return 2;
+    if (pr_put(pr_path(path, line, "/duty_cycle"), "250000") != 6)
+        return 3;
+    if (pr_get(pr_path(path, line, "/period"), back, (int32_t)sizeof back) != 8 || strcmp(back, "1000000\n") != 0)
+        return 4;
+    if (pr_put(PR_CHIP "/unexport", text) != n)
+        return 5;
+    if (SystemNative_Stat(pr_path(path, line, ""), &st) != -1)
+        return 6;
+    return 0;
+}
+
+static int pwmrows_ladder(void)
+{
+    char text[12], back[24], want[12], detail[96];
+    out("shimtest-pwmrows: the PWM device files over a board row's own line table (" PR_ROW "), the kernel's PWM functions answered by the tenant");
+    CHECK(rhu_shim_init() == 0, "shim-pwmrows-init", "(initialization refused)");
+    pass("shim-pwmrows-init", " (the tenant answers as the kernel with the row's PWM-capable lines)");
+
+    /* npwm: the highest listed line plus one. */
+    uint32_t top = 0;
+    for (int32_t i = 0; i < PR_COUNT; i++) {
+        if ((uint32_t)pr_lines[i] > top)
+            top = (uint32_t)pr_lines[i];
+    }
+    int32_t n = pr_digits(want, top + 1u);
+    want[n] = '\n';
+    want[n + 1] = 0;
+    CHECK(pr_get(PR_CHIP "/npwm", back, (int32_t)sizeof back) == n + 1 && strcmp(back, want) == 0, "shim-pwmrows-npwm", "(npwm did not read the highest listed line plus one)");
+    pass("shim-pwmrows-npwm", " (the highest listed line plus one)");
+
+    /* Every listed line through a channel's whole life; the lines that a
+     * step refused are named in one line, in the table's order. */
+    static const char head[] = "(refused at a step of a channel's life, the lines";
+    size_t at = sizeof head - 1;
+    memcpy(detail, head, at);
+    int refused = 0;
+    for (int32_t i = 0; i < PR_COUNT; i++) {
+        if (pr_life(pr_lines[i]) != 0) {
+            detail[at++] = ' ';
+            at += (size_t)pr_digits(detail + at, pr_lines[i]);
+            refused++;
+        }
+    }
+    detail[at++] = ')';
+    detail[at] = 0;
+    if (refused != 0)
+        return fail("shim-pwmrows-lines", detail);
+    for (int32_t i = 0; i < PR_COUNT; i++)
+        CHECK(pr_held[i] == 0, "shim-pwmrows-lines", "(a line is still claimed after its unexport)");
+    pass("shim-pwmrows-lines", " (every listed line exported under its own number, its period and its duty set, its period read back, unexported and its directory gone; every claim released)");
+
+    /* The names that stand in no table. A hole: the first number under the
+     * top that the row does not list. */
+    uint32_t hole = top;
+    while (hole > 0u && pr_at(hole) >= 0)
+        hole--;
+    CHECK(pr_at(hole) < 0, "shim-pwmrows-names", "(the row's table leaves no hole under its top)");
+    n = pr_digits(text, hole);
+    text[n] = 0;
+    pr_log = NULL;
+    CHECK(pr_put(PR_CHIP "/export", text) == -1 && PR_ERRNO_IS(RHU_GERR_ENODEV), "shim-pwmrows-names", "(a hole under the top was not refused ENODEV)");
+    CHECK(pr_log != NULL && strcmp(pr_log, "%s/export: line %u is not a PWM line of this row (ENODEV)") == 0, "shim-pwmrows-names", "(the hole's refusal did not say that the line is no PWM line of the row)");
+    n = pr_digits(text, top + 1u);
+    text[n] = 0;
+    pr_log = NULL;
+    CHECK(pr_put(PR_CHIP "/export", text) == -1 && PR_ERRNO_IS(RHU_GERR_ENODEV), "shim-pwmrows-names", "(the name past the top was not refused ENODEV)");
+    CHECK(pr_log != NULL && strcmp(pr_log, "%s/export: line %u is past this chip's %u channel names (ENODEV)") == 0, "shim-pwmrows-names", "(the refusal of the name past the top did not say so)");
+    CHECK(pr_put(PR_CHIP "/export", "65536") == -1 && PR_ERRNO_IS(RHU_GERR_ENODEV), "shim-pwmrows-names", "(a name wider than a line's number was not refused ENODEV)");
+    pass("shim-pwmrows-names", " (a hole under the top ENODEV by the kernel's judgement, under the line that says so; the name past the top ENODEV under its own line; a name wider than a line's number ENODEV)");
+
+    out("SHIMTEST-PWMROWS: ALL GOOD (the PWM device files over a board row's own line table, from a native caller's side)");
+    return 0;
+}
+
+#endif /* RHU_SHIMTEST_LADDER_PWMROWS */
+
 #ifdef RHU_SHIMTEST_LADDER_IIOFS
 
 /* --- the analog input device files, from a native caller's side: the
@@ -3233,6 +4222,8 @@ void gpiod_line_release(struct gpiod_line *line);
 int gpiod_line_set_value(struct gpiod_line *line, int value);
 int gpiod_line_get_value(struct gpiod_line *line);
 int gpiod_line_bias(struct gpiod_line *line);
+int gpiod_line_is_free(struct gpiod_line *line);
+int gpiod_line_direction(struct gpiod_line *line);
 int gpiod_line_event_wait(struct gpiod_line *line, const struct gd_timespec *timeout);
 int gpiod_line_event_read(struct gpiod_line *line, struct gd_event *event);
 
@@ -3240,6 +4231,7 @@ int gpiod_line_event_read(struct gpiod_line *line, struct gd_event *event);
 #define GD_FLAG_PULL_UP (1 << 5)
 #define GD_BIAS_AS_IS 1
 #define GD_BIAS_PULL_UP 3
+#define GD_DIRECTION_INPUT 1
 #define GD_RISING 1
 #define GD_FALLING 2
 #define GD_LOOP_OUT 2
@@ -3306,6 +4298,134 @@ static int gd_drain(struct gpiod_line *in)
     return n;
 }
 
+/* The reopen case's blocks: every block of the heap that a request can
+ * take, held while the case runs. */
+#define GD_HOLD_MAX 128u
+static void *g_gd_hold[GD_HOLD_MAX];
+static uint32_t g_gd_held;
+
+/* Takes every free block that a request can take, largest first, and
+ * states the size of the first one taken; 0 when the heap holds more
+ * blocks than the case can hold. The largest request stays under the heap
+ * of this ladder's row (the board's KHEAP_BYTES), so the kernel refuses
+ * none for its size alone. */
+static int gd_take_all(size_t *first)
+{
+    for (size_t size = 32768u; size >= 8u; size >>= 1) {
+        for (;;) {
+            void *p = malloc(size);
+            if (p == NULL)
+                break;
+            if (g_gd_held == GD_HOLD_MAX) {
+                free(p);
+                return 0;
+            }
+            if (first != NULL && g_gd_held == 0u)
+                *first = size;
+            g_gd_hold[g_gd_held++] = p;
+        }
+    }
+    return 1;
+}
+
+/* The reopen case's work: the heap shaped to a room of exactly a table of
+ * lines, a smaller room behind it and one crumb of a chip object's size,
+ * every other block taken; then an open, its close and the open that
+ * follows. The heap is given back before a line goes out, so a refusal
+ * never leaves the ladder without memory. NULL when every clause held,
+ * the clause that did not otherwise. */
+static const char *gd_reopen(void)
+{
+    /* A table's size: a line object's size, read from two handles of one
+     * chip, times the row's lines. */
+    struct gpiod_chip *probe = gpiod_chip_open_by_number(0);
+    struct gpiod_line *l0 = gpiod_chip_get_line(probe, 0);
+    struct gpiod_line *l1 = gpiod_chip_get_line(probe, 1);
+    size_t table = l0 != NULL && l1 != NULL ? (size_t)((uintptr_t)l1 - (uintptr_t)l0) * (size_t)rhu_gpio_count() : 0u;
+    gpiod_chip_close(probe);
+    if (table == 0u)
+        return "(the chip did not open before the heap was shaped)";
+
+    const char *why = NULL;
+    void *fence1 = NULL;
+    void *fence2 = NULL;
+    uintptr_t first_at = 0;
+    uintptr_t room_at = 0;
+    size_t first_size = 0;
+    g_gd_held = 0;
+    if (!gd_take_all(&first_size) || g_gd_held == 0u) {
+        why = "(the heap's free blocks are more than the case holds, or none)";
+    } else {
+        /* The block taken first, the largest, is given back and cut in
+         * address order: a crumb of a chip object's size, a fence, a room
+         * of exactly a table, a fence, a room of half a table; what is
+         * left of it is taken again. With the crumb and the two rooms
+         * given back the heap holds those three blocks and no other that
+         * a request can take. */
+        void *first = g_gd_hold[0];
+        first_at = (uintptr_t)first;
+        g_gd_hold[0] = g_gd_hold[--g_gd_held];
+        free(first);
+        void *crumb = malloc(16u);
+        fence1 = malloc(8u);
+        void *room = malloc(table);
+        fence2 = malloc(8u);
+        void *less = malloc(table / 2u);
+        room_at = (uintptr_t)room;
+        int cut = crumb != NULL && fence1 != NULL && room != NULL && fence2 != NULL && less != NULL;
+        cut = cut && (uintptr_t)crumb < (uintptr_t)fence1 && (uintptr_t)fence1 < room_at && room_at < (uintptr_t)fence2 && (uintptr_t)fence2 < (uintptr_t)less;
+        if (!cut || !gd_take_all(NULL))
+            why = "(the heap's largest block was not cut into the shape)";
+        free(crumb);
+        free(room);
+        free(less);
+    }
+    if (why == NULL) {
+        void *over = malloc(table + 8u);
+        void *exact = malloc(table);
+        if (over != NULL || (uintptr_t)exact != room_at)
+            why = "(the shaped heap does not hold a room of exactly a table)";
+        free(over);
+        free(exact);
+    }
+    if (why == NULL) {
+        struct gpiod_chip *a = gpiod_chip_open_by_number(0);
+        if (a == NULL) {
+            why = GD_ERRNO_IS(RHU_GERR_ENOMEM) ? "(an open was refused for memory on a heap that holds a room of exactly a table)" : "(an open on the shaped heap failed, and not for memory)";
+        } else {
+            struct gpiod_line *la = gpiod_chip_get_line(a, 0);
+            int asked = la != NULL && gpiod_line_request_output(la, "first", 0) == 0;
+            gpiod_chip_close(a);
+            struct gpiod_chip *b = gpiod_chip_open_by_number(0);
+            struct gpiod_line *lb = gpiod_chip_get_line(b, 0);
+            if (!asked)
+                why = "(the line through the first open was refused)";
+            else if (b == NULL)
+                why = "(the open that follows the last close was refused)";
+            else if (lb == NULL || gpiod_line_is_free(lb) != 1 || gpiod_line_direction(lb) != GD_DIRECTION_INPUT || gpiod_line_bias(lb) != GD_BIAS_AS_IS)
+                why = "(a reopened chip's line does not read as a fresh table's)";
+            gpiod_chip_close(b);
+            void *again = malloc(table);
+            if (why == NULL && (uintptr_t)again != room_at)
+                why = "(the last close did not give the table's room back whole)";
+            free(again);
+        }
+    }
+    while (g_gd_held != 0u)
+        free(g_gd_hold[--g_gd_held]);
+    free(fence1);
+    free(fence2);
+    /* The heap as it stood: the block taken first is given at its address
+     * again. */
+    if (first_size != 0u) {
+        void *back = malloc(first_size);
+        if (why == NULL && (uintptr_t)back != first_at)
+            why = "(the heap is not as it stood before the case)";
+        free(back);
+    }
+    return why;
+}
+
 static int gpiod_ladder(void)
 {
     out("shimtest-gpiod: the GPIO library surface from a native caller's side, on the row's virtual lines");
@@ -3323,7 +4443,14 @@ static int gpiod_ladder(void)
         struct gpiod_chip *b = gpiod_chip_open_by_number(0);
         struct gpiod_line *la = gpiod_chip_get_line(a, 0);
         struct gpiod_line *lb = gpiod_chip_get_line(b, 0);
-        CHECK(a != NULL && b != NULL && a != b && la != NULL && lb != NULL && la != lb, "shim-gpiod-opens", "(two opens share one chip or one line object)");
+        CHECK(a != NULL && b != NULL && a != b && la != NULL && lb != NULL && la != lb, "shim-gpiod-opens", "(two opens share one chip or one line handle)");
+        /* One table of lines for the chip, whatever the opens: the two chips' handles of line 0 lie inside one
+         * line's object, closer than two lines of one chip do; an open that made a table of its own would put
+         * them a table apart. */
+        struct gpiod_line *la1 = gpiod_chip_get_line(a, 1);
+        uintptr_t stride = (uintptr_t)la1 - (uintptr_t)la;
+        uintptr_t apart = (uintptr_t)lb > (uintptr_t)la ? (uintptr_t)lb - (uintptr_t)la : (uintptr_t)la - (uintptr_t)lb;
+        CHECK(la1 != NULL && apart < stride, "shim-gpiod-opens", "(a second open took a second table of lines)");
         CHECK(gpiod_line_request_output(la, "first", 0) == 0, "shim-gpiod-opens", "(the request through the first chip refused)");
         CHECK(gpiod_line_request_output(lb, "second", 0) == -1 && GD_ERRNO_IS(RHU_GERR_EBUSY), "shim-gpiod-opens", "(a line held through one chip was granted through another)");
         gpiod_chip_close(a);
@@ -3348,6 +4475,17 @@ static int gpiod_ladder(void)
         CHECK(gpiod_chip_num_lines(mine) == 0 && gpiod_chip_get_line(mine, 0) == NULL && GD_ERRNO_IS(RHU_GERR_EINVAL), "shim-gpiod-open-race",
               "(a closed chip's handle was followed)");
         pass("shim-gpiod-open-race", " (two opens at once are two live chips; a closed chip's handle is refused, never followed)");
+    }
+    {
+        /* An open on a heap that holds a room of exactly a table of lines,
+         * its close and the open that follows it: the unit asks for its
+         * table before any smaller block of its own, and for the pulls only
+         * where none stand, so each open finds the room that a close gave
+         * back. The build that asks its small blocks first is refused for
+         * memory at the first of the opens. */
+        const char *why = gd_reopen();
+        CHECK(why == NULL, "shim-gpiod-reopen", why);
+        pass("shim-gpiod-reopen", " (on a heap that holds a room of exactly a table of lines, a smaller room and a crumb: an open, its close and the open that follows are given; the reopened chip's line reads as a fresh table's; the heap as it stood)");
     }
     {
         struct gpiod_chip_iter *i1 = gpiod_chip_iter_new();
@@ -3655,8 +4793,94 @@ static void *td_blocked_read(void *arg)
     __atomic_store_n(&g_td_finished, 1, __ATOMIC_RELEASE);
     return NULL;
 }
+/* The low-power port's name, by link words. The serial unit names a block
+ * /dev/ttyLP<n> where its link word __rhu_uart_lowpower_blocks has the
+ * block's bit, and serves the folder /sys/class/tty on such a row. This
+ * tenant reads what it expects from a word of its own,
+ * __rhu_shimtest_uart_lowpower, the same mask (a weak absolute symbol: no
+ * word in this image reads NULL), so the gate links it both ways: with
+ * both words, where every check below holds, and with the tenant's word
+ * over the unit's word at zero, where the first check refuses. Without the
+ * tenant's word the ladder below runs as it stands. The row's blocks are
+ * 0, the kernel's console, and 1; the word names block 1. */
+extern const char __rhu_shimtest_uart_lowpower[] __attribute__((weak));
+
+static int ttydev_lowpower_names(void)
+{
+    rhu_pal_filestatus st;
+    rhu_pal_directoryentry e;
+    out("shimtest-ttydev: the low-power port's name by the link word, on the row's UART blocks");
+    CHECK(rhu_shim_init() == 0, "shim-ttydev-init", "(initialization refused)");
+    pass("shim-ttydev-init", " (the shim initialized)");
+    /* the standard class's first search: the folder, one entry for each port, the one folder under each entry */
+    CHECK(SystemNative_Stat("/sys/class/tty", &st) == 0 && (st.Mode & 0xF000) == RHU_PAL_S_IFDIR, "shim-ttydev-lowpower-names", "(/sys/class/tty is not a folder on a row with a low-power block)");
+    CHECK((uintptr_t)__rhu_shimtest_uart_lowpower == 2u, "shim-ttydev-lowpower-names", "(the tenant's word does not name block 1 alone)");
+    {
+        void *dir = SystemNative_OpenDir("/sys/class/tty");
+        CHECK(dir != NULL, "shim-ttydev-lowpower-names", "(/sys/class/tty did not open as a directory)");
+        int seen = 0, order_ok = 1;
+        while (SystemNative_ReadDir(dir, &e) == 0) {
+            if (e.InodeType != RHU_PAL_DT_DIR || (seen == 0 && strcmp(e.Name, "ttyS0") != 0) || (seen == 1 && strcmp(e.Name, "ttyLP1") != 0))
+                order_ok = 0;
+            seen++;
+        }
+        CHECK(SystemNative_CloseDir(dir) == 0, "shim-ttydev-lowpower-names", "(closedir of /sys/class/tty)");
+        CHECK(seen == 2 && order_ok, "shim-ttydev-lowpower-names", "(the listing of /sys/class/tty did not show ttyS0 then ttyLP1 as directories and nothing else)");
+    }
+    CHECK(SystemNative_Stat("/sys/class/tty/ttyLP1/device/tty", &st) == 0 && (st.Mode & 0xF000) == RHU_PAL_S_IFDIR, "shim-ttydev-lowpower-names", "(ttyLP1's entry has no folder device/tty)");
+    CHECK(SystemNative_Stat("/sys/class/tty/ttyS0/device/of_node", &st) == 0 && (st.Mode & 0xF000) == RHU_PAL_S_IFDIR, "shim-ttydev-lowpower-names", "(ttyS0's entry has no folder device/of_node)");
+    CHECK(SystemNative_Stat("/sys/class/tty/ttyLP1/device/of_node", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-ttydev-lowpower-names", "(ttyLP1's entry has a folder device/of_node)");
+    CHECK(SystemNative_Stat("/sys/class/tty/ttyS1", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-ttydev-lowpower-names", "(/sys/class/tty has an entry ttyS1)");
+    {
+        void *dir = SystemNative_OpenDir("/sys/class/tty/ttyLP1/device");
+        CHECK(dir != NULL, "shim-ttydev-lowpower-names", "(ttyLP1's device folder did not open as a directory)");
+        int seen = 0, order_ok = 1;
+        while (SystemNative_ReadDir(dir, &e) == 0) {
+            if (e.InodeType != RHU_PAL_DT_DIR || strcmp(e.Name, "tty") != 0)
+                order_ok = 0;
+            seen++;
+        }
+        CHECK(SystemNative_CloseDir(dir) == 0, "shim-ttydev-lowpower-names", "(closedir of the device folder)");
+        CHECK(seen == 1 && order_ok, "shim-ttydev-lowpower-names", "(ttyLP1's device folder did not list the one folder tty)");
+    }
+    /* the search of /dev: the same two names, as character devices */
+    {
+        void *dir = SystemNative_OpenDir("/dev");
+        CHECK(dir != NULL, "shim-ttydev-lowpower-names", "(/dev did not open as a directory)");
+        int seen = 0, chr = 0, order_ok = 1;
+        while (SystemNative_ReadDir(dir, &e) == 0) {
+            if (strlen(e.Name) < 4 || memcmp(e.Name, "tty", 3) != 0)
+                continue;
+            if (e.InodeType == RHU_PAL_DT_CHR)
+                chr++;
+            if ((seen == 0 && strcmp(e.Name, "ttyS0") != 0) || (seen == 1 && strcmp(e.Name, "ttyLP1") != 0))
+                order_ok = 0;
+            seen++;
+        }
+        CHECK(SystemNative_CloseDir(dir) == 0, "shim-ttydev-lowpower-names", "(closedir of /dev)");
+        CHECK(seen == 2 && chr == 2 && order_ok, "shim-ttydev-lowpower-names", "(the listing of /dev did not show ttyS0 then ttyLP1 as character devices and no other tty name)");
+    }
+    CHECK(SystemNative_Stat("/dev/ttyLP1", &st) == 0 && (st.Mode & 0xF000) == RHU_PAL_S_IFCHR, "shim-ttydev-lowpower-names", "(ttyLP1's status is not a character device)");
+    CHECK(SystemNative_Access("/dev/ttyLP1", RHU_PAL_R_OK | RHU_PAL_W_OK) == 0, "shim-ttydev-lowpower-names", "(ttyLP1 is not readable and writable)");
+    CHECK(SystemNative_Stat("/dev/ttyS1", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-ttydev-lowpower-names", "(the name ttyS1 of a low-power block is not absent)");
+    CHECK(SystemNative_Access("/dev/ttyS1", RHU_PAL_F_OK) == -1, "shim-ttydev-lowpower-names", "(the name ttyS1 of a low-power block is present to access)");
+    CHECK(SystemNative_Stat("/dev/ttyLP0", &st) == -1 && SystemNative_GetErrNo() == RHU_GERR_ENOENT, "shim-ttydev-lowpower-names", "(the name ttyLP0 of an ordinary block is not absent)");
+    /* the open: the block's own name opens it and the alias names the same block; the other kind's name answers ENOENT */
+    CHECK(open("/dev/ttyS1", TD_FLAGS) == -1 && TD_ERRNO_IS(RHU_GERR_ENOENT), "shim-ttydev-lowpower-names", "(the name ttyS1 of a low-power block was not refused ENOENT)");
+    CHECK(open("/dev/ttyLP0", TD_FLAGS) == -1 && TD_ERRNO_IS(RHU_GERR_ENOENT), "shim-ttydev-lowpower-names", "(the name ttyLP0 of an ordinary block was not refused ENOENT)");
+    int fd = open("/dev/ttyLP1", TD_FLAGS);
+    CHECK(TD_IN_BAND(fd), "shim-ttydev-lowpower-names", "(/dev/ttyLP1 did not open)");
+    CHECK(open(TD_ALIAS, TD_FLAGS) == -1 && TD_ERRNO_IS(RHU_GERR_EBUSY), "shim-ttydev-lowpower-names", "(the alias of the held port was not refused EBUSY)");
+    CHECK(close(fd) == 0, "shim-ttydev-lowpower-names", "(the close refused)");
+    pass("shim-ttydev-lowpower-names", " (/sys/class/tty a folder that lists ttyS0 then ttyLP1, device/of_node under the first and device/tty under the second; /dev lists the same two names as character devices; /dev/ttyLP1 opens and its alias names the same block; ttyS1 and ttyLP0 answer ENOENT)");
+    out("SHIMTEST-TTYDEV: ALL GOOD (the low-power port's name and its listing, by the link word)");
+    return 0;
+}
+
 static int ttydev_ladder(void)
 {
+    if ((uintptr_t)__rhu_shimtest_uart_lowpower != 0)
+        return ttydev_lowpower_names();
     out("shimtest-ttydev: the serial device files from a native caller's side, on the row's UART blocks");
     CHECK(rhu_shim_init() == 0, "shim-ttydev-init", "(initialization refused)");
     pass("shim-ttydev-init", " (the shim initialized)");
@@ -4013,7 +5237,7 @@ static int frozen_ladder(void)
 #endif /* RHU_SHIMTEST_LADDER_FROZEN */
 
 #ifdef RHU_SHIMTEST_LADDER_SDFS
-#include "rhu_pal_surface_net11_rc3.h"
+#include "rhu_pal_surface_net11.h"
 int strncmp(const char *a, const char *b, size_t n);
 char *strcpy(char *dst, const char *src);
 char *strncpy(char *dst, const char *src, size_t n);
@@ -4842,6 +6066,2412 @@ static int sdfs_ladder(void)
 }
 #endif /* RHU_SHIMTEST_LADDER_SDFS */
 
+#if defined(RHU_SHIMTEST_LADDER_SOCKADDR) || defined(RHU_SHIMTEST_LADDER_SOCKERRORS) || defined(RHU_SHIMTEST_LADDER_SOCKREFUSALS)
+#include "rhu_pal_networking_net11.h"
+#include "rhu_pal_surface_net11.h"
+#include "rhu_sock.h"
+#endif
+#ifdef RHU_SHIMTEST_LADDER_SOCKADDR
+
+/* --- the socket-address helpers from a native caller's side: the record
+ * sizes, then every field of an address buffer written and read back
+ * through the helpers, with the bytes the buffer then holds read beside
+ * them -- the family as Linux numbers it in the record's first two bytes,
+ * the port in network byte order, the IPv4 address as its four bytes, the
+ * IPv6 address with its scope and the cleared flow word, a Unix-domain
+ * record's path left alone; a buffer too short for a field or a record and
+ * a record of another family, each answered by its own error; then the two
+ * answers about a message's control buffer. The numbers this ladder reads
+ * for are written here, not taken from the unit's header: the sizes and the
+ * offsets of the Linux records. --- */
+static int sockaddr_ladder(void)
+{
+    uint8_t rec[136];
+    out("shimtest-sockaddr: the socket-address helpers from a native caller's side");
+    CHECK(rhu_shim_init() == 0, "shim-sock-addr-init", "(initialization refused)");
+
+    /* the sizes */
+    {
+        int32_t v4 = 0, v6 = 0, uds = 0, max = 0, off = 0, room = 0, size = 0;
+        CHECK(SystemNative_GetSocketAddressSizes(&v4, &v6, &uds, &max) == RHU_PAL_SUCCESS && v4 == 16 && v6 == 28 && uds == 110 && max == 128, "shim-sock-addr-sizes", "(the four record sizes)");
+        CHECK(SystemNative_GetMaximumAddressSize() == 128, "shim-sock-addr-sizes", "(the largest record's size is not 128)");
+        SystemNative_GetDomainSocketSizes(&off, &room, &size);
+        CHECK(off == 2 && room == 108 && size == 110, "shim-sock-addr-sizes", "(the Unix-domain record's path offset, path room and size)");
+        CHECK(SystemNative_GetSocketAddressSizes(&v4, &v6, &uds, NULL) == RHU_PAL_EFAULT && SystemNative_GetSocketAddressSizes(NULL, &v6, &uds, &max) == RHU_PAL_EFAULT, "shim-sock-addr-sizes", "(a null result pointer was not EFAULT)");
+        pass("shim-sock-addr-sizes", " (the four record sizes 16, 28, 110 and 128; the largest record 128; the Unix-domain path at offset 2, 108 bytes; a null result pointer EFAULT)");
+    }
+
+    /* the family: the runtime's number in, the platform's number in the buffer, the runtime's number out */
+    {
+        static const struct {
+            int32_t pal;
+            uint8_t low;
+        } fam[] = {
+            { RHU_PAL_AddressFamily_AF_UNSPEC, 0 }, { RHU_PAL_AddressFamily_AF_UNIX, 1 },    { RHU_PAL_AddressFamily_AF_INET, 2 },
+            { RHU_PAL_AddressFamily_AF_INET6, 10 }, { RHU_PAL_AddressFamily_AF_PACKET, 17 }, { RHU_PAL_AddressFamily_AF_CAN, 29 },
+        };
+        int32_t got = 0;
+        for (uint32_t i = 0; i < sizeof fam / sizeof fam[0]; i++) {
+            memset(rec, 0xEE, sizeof rec);
+            CHECK(SystemNative_SetAddressFamily(rec, 128, fam[i].pal) == RHU_PAL_SUCCESS && rec[0] == fam[i].low && rec[1] == 0 && rec[2] == 0xEE, "shim-sock-addr-family", "(a family was not written as the platform's number in the record's first two bytes)");
+            got = -2;
+            CHECK(SystemNative_GetAddressFamily(rec, 128, &got) == RHU_PAL_SUCCESS && got == fam[i].pal, "shim-sock-addr-family", "(a family written was not read back as the runtime's number)");
+        }
+        rec[0] = 0xFF;
+        rec[1] = 0;
+        got = 0;
+        CHECK(SystemNative_GetAddressFamily(rec, 128, &got) == RHU_PAL_SUCCESS && got == RHU_PAL_AddressFamily_AF_UNKNOWN, "shim-sock-addr-family", "(a number the runtime has no name for was not read as unknown)");
+        rec[0] = 2;
+        CHECK(SystemNative_SetAddressFamily(rec, 128, RHU_PAL_AddressFamily_AF_LINK) == RHU_PAL_EAFNOSUPPORT && SystemNative_SetAddressFamily(rec, 128, RHU_PAL_AddressFamily_AF_UNKNOWN) == RHU_PAL_EAFNOSUPPORT && rec[0] == 2 && rec[1] == 0, "shim-sock-addr-family", "(a family the platform has no number for was not refused with the record left alone)");
+        CHECK(SystemNative_GetAddressFamily(rec, 1, &got) == RHU_PAL_EFAULT && SystemNative_SetAddressFamily(rec, 1, RHU_PAL_AddressFamily_AF_INET) == RHU_PAL_EFAULT && SystemNative_GetAddressFamily(rec, -1, &got) == RHU_PAL_EFAULT, "shim-sock-addr-family", "(a buffer shorter than the family field was not EFAULT)");
+        CHECK(SystemNative_GetAddressFamily(NULL, 128, &got) == RHU_PAL_EFAULT && SystemNative_GetAddressFamily(rec, 128, NULL) == RHU_PAL_EFAULT && SystemNative_SetAddressFamily(NULL, 128, RHU_PAL_AddressFamily_AF_INET) == RHU_PAL_EFAULT, "shim-sock-addr-family", "(a null buffer or a null result was not EFAULT)");
+        pass("shim-sock-addr-family", " (the family written as the platform's number and read back as the runtime's; an unknown number read as unknown; a number the platform lacks refused; a buffer shorter than the field EFAULT)");
+    }
+
+    /* the port: two bytes, the high one first, in an IPv4 and an IPv6 record */
+    {
+        uint16_t port = 0;
+        memset(rec, 0, sizeof rec);
+        CHECK(SystemNative_SetAddressFamily(rec, 16, RHU_PAL_AddressFamily_AF_INET) == RHU_PAL_SUCCESS && SystemNative_SetPort(rec, 16, 0x1234) == RHU_PAL_SUCCESS, "shim-sock-addr-port", "(the port's set on an IPv4 record)");
+        CHECK(rec[2] == 0x12 && rec[3] == 0x34, "shim-sock-addr-port", "(the port's bytes at offset 2 are not in network order)");
+        CHECK(SystemNative_GetPort(rec, 16, &port) == RHU_PAL_SUCCESS && port == 0x1234, "shim-sock-addr-port", "(the port was not read back from an IPv4 record)");
+        CHECK(SystemNative_SetPort(rec, 15, 1) == RHU_PAL_EFAULT && SystemNative_GetPort(rec, 15, &port) == RHU_PAL_EFAULT && rec[2] == 0x12 && rec[3] == 0x34, "shim-sock-addr-port", "(an IPv4 record one byte short was not EFAULT)");
+        memset(rec, 0, sizeof rec);
+        port = 0;
+        CHECK(SystemNative_SetAddressFamily(rec, 28, RHU_PAL_AddressFamily_AF_INET6) == RHU_PAL_SUCCESS && SystemNative_SetPort(rec, 28, 0xABCD) == RHU_PAL_SUCCESS && rec[2] == 0xAB && rec[3] == 0xCD && SystemNative_GetPort(rec, 28, &port) == RHU_PAL_SUCCESS && port == 0xABCD, "shim-sock-addr-port", "(the port of an IPv6 record)");
+        CHECK(SystemNative_SetPort(rec, 27, 1) == RHU_PAL_EFAULT && SystemNative_GetPort(rec, 27, &port) == RHU_PAL_EFAULT && SystemNative_GetPort(rec, 28, NULL) == RHU_PAL_EFAULT && SystemNative_GetPort(NULL, 28, &port) == RHU_PAL_EFAULT && SystemNative_SetPort(NULL, 28, 1) == RHU_PAL_EFAULT, "shim-sock-addr-port", "(an IPv6 record one byte short, a null buffer or a null result was not EFAULT)");
+        CHECK(SystemNative_SetAddressFamily(rec, 110, RHU_PAL_AddressFamily_AF_UNIX) == RHU_PAL_SUCCESS && SystemNative_SetPort(rec, 110, 1) == RHU_PAL_EAFNOSUPPORT && SystemNative_GetPort(rec, 110, &port) == RHU_PAL_EAFNOSUPPORT, "shim-sock-addr-port", "(a family that carries no port was not EAFNOSUPPORT)");
+        pass("shim-sock-addr-port", " (the port in network byte order at offset 2 of an IPv4 and an IPv6 record, read back; another family EAFNOSUPPORT; a short record EFAULT)");
+    }
+
+    /* the IPv4 address: the four bytes as the caller's word holds them */
+    {
+        static const uint8_t want[4] = { 192, 0, 2, 7 };
+        uint32_t given = 0, got = 0;
+        uint16_t port = 0;
+        memcpy(&given, want, sizeof given);
+        memset(rec, 0, sizeof rec);
+        CHECK(SystemNative_SetAddressFamily(rec, 16, RHU_PAL_AddressFamily_AF_INET) == RHU_PAL_SUCCESS && SystemNative_SetPort(rec, 16, 8080) == RHU_PAL_SUCCESS && SystemNative_SetIPv4Address(rec, 16, given) == RHU_PAL_SUCCESS, "shim-sock-addr-ipv4", "(the address's set)");
+        CHECK(memcmp(rec + 4, want, 4) == 0 && rec[0] == 2 && rec[1] == 0, "shim-sock-addr-ipv4", "(the four address bytes are not at offset 4 as given)");
+        CHECK(SystemNative_GetIPv4Address(rec, 16, &got) == RHU_PAL_SUCCESS && got == given && SystemNative_GetPort(rec, 16, &port) == RHU_PAL_SUCCESS && port == 8080, "shim-sock-addr-ipv4", "(the address was not read back, or the port beside it moved)");
+        CHECK(SystemNative_SetIPv4Address(rec, 15, given) == RHU_PAL_EFAULT && SystemNative_GetIPv4Address(rec, 15, &got) == RHU_PAL_EFAULT && SystemNative_GetIPv4Address(rec, 16, NULL) == RHU_PAL_EFAULT && SystemNative_GetIPv4Address(NULL, 16, &got) == RHU_PAL_EFAULT && SystemNative_SetIPv4Address(NULL, 16, given) == RHU_PAL_EFAULT, "shim-sock-addr-ipv4", "(a short record, a null buffer or a null result was not EFAULT)");
+        CHECK(SystemNative_SetAddressFamily(rec, 28, RHU_PAL_AddressFamily_AF_INET6) == RHU_PAL_SUCCESS && SystemNative_SetIPv4Address(rec, 28, given) == RHU_PAL_EINVAL && SystemNative_GetIPv4Address(rec, 28, &got) == RHU_PAL_EINVAL, "shim-sock-addr-ipv4", "(a record of another family was not EINVAL)");
+        pass("shim-sock-addr-ipv4", " (the four address bytes as given at offset 4, read back; the port beside them untouched; another family EINVAL; a short record EFAULT)");
+    }
+
+    /* the IPv6 address: sixteen bytes, the scope after them, the flow word cleared by a write */
+    {
+        static const uint8_t want[16] = { 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7 };
+        uint8_t given[16], got[16];
+        uint32_t scope = 0;
+        uint16_t port = 0;
+        memcpy(given, want, sizeof given);
+        memset(got, 0, sizeof got);
+        memset(rec, 0xEE, sizeof rec);
+        CHECK(SystemNative_SetAddressFamily(rec, 28, RHU_PAL_AddressFamily_AF_INET6) == RHU_PAL_SUCCESS && SystemNative_SetPort(rec, 28, 443) == RHU_PAL_SUCCESS && SystemNative_SetIPv6Address(rec, 28, given, 16, 5) == RHU_PAL_SUCCESS, "shim-sock-addr-ipv6", "(the address's set)");
+        CHECK(memcmp(rec + 8, want, 16) == 0 && rec[24] == 5 && rec[25] == 0 && rec[26] == 0 && rec[27] == 0 && rec[28] == 0xEE, "shim-sock-addr-ipv6", "(the sixteen address bytes are not at offset 8, or the scope not at offset 24)");
+        CHECK(rec[4] == 0 && rec[5] == 0 && rec[6] == 0 && rec[7] == 0, "shim-sock-addr-ipv6", "(the flow word was not cleared by the write)");
+        CHECK(SystemNative_GetIPv6Address(rec, 28, got, 16, &scope) == RHU_PAL_SUCCESS && memcmp(got, want, 16) == 0 && scope == 5 && SystemNative_GetPort(rec, 28, &port) == RHU_PAL_SUCCESS && port == 443, "shim-sock-addr-ipv6", "(the address and its scope were not read back, or the port beside them moved)");
+        CHECK(SystemNative_SetIPv6Address(rec, 27, given, 16, 5) == RHU_PAL_EFAULT && SystemNative_GetIPv6Address(rec, 27, got, 16, &scope) == RHU_PAL_EFAULT && SystemNative_SetIPv6Address(rec, 28, given, 15, 5) == RHU_PAL_EFAULT && SystemNative_GetIPv6Address(rec, 28, got, 15, &scope) == RHU_PAL_EFAULT, "shim-sock-addr-ipv6", "(a short record or a short address was not EFAULT)");
+        CHECK(SystemNative_GetIPv6Address(rec, 28, got, 16, NULL) == RHU_PAL_EFAULT && SystemNative_GetIPv6Address(rec, 28, NULL, 16, &scope) == RHU_PAL_EFAULT && SystemNative_SetIPv6Address(rec, 28, NULL, 16, 5) == RHU_PAL_EFAULT && SystemNative_SetIPv6Address(NULL, 28, given, 16, 5) == RHU_PAL_EFAULT, "shim-sock-addr-ipv6", "(a null pointer was not EFAULT)");
+        CHECK(SystemNative_SetAddressFamily(rec, 28, RHU_PAL_AddressFamily_AF_INET) == RHU_PAL_SUCCESS && SystemNative_SetIPv6Address(rec, 28, given, 16, 5) == RHU_PAL_EINVAL && SystemNative_GetIPv6Address(rec, 28, got, 16, &scope) == RHU_PAL_EINVAL, "shim-sock-addr-ipv6", "(a record of another family was not EINVAL)");
+        pass("shim-sock-addr-ipv6", " (the sixteen address bytes at offset 8 and the scope at offset 24, read back; the flow word cleared; another family EINVAL; a short record or address EFAULT)");
+    }
+
+    /* a Unix-domain record: its family, its path bytes the caller's own, no port */
+    {
+        static const char path[12] = "/run/a.sock";
+        uint16_t port = 0;
+        int32_t got = 0;
+        memset(rec, 0, sizeof rec);
+        memcpy(rec + 2, path, sizeof path);
+        CHECK(SystemNative_SetAddressFamily(rec, 110, RHU_PAL_AddressFamily_AF_UNIX) == RHU_PAL_SUCCESS && rec[0] == 1 && rec[1] == 0 && memcmp(rec + 2, path, sizeof path) == 0, "shim-sock-addr-unix", "(a Unix-domain record's family was not written, or its path bytes moved)");
+        CHECK(SystemNative_GetAddressFamily(rec, 110, &got) == RHU_PAL_SUCCESS && got == RHU_PAL_AddressFamily_AF_UNIX, "shim-sock-addr-unix", "(a Unix-domain record's family was not read back)");
+        CHECK(SystemNative_GetPort(rec, 110, &port) == RHU_PAL_EAFNOSUPPORT, "shim-sock-addr-unix", "(a Unix-domain record answered a port)");
+        pass("shim-sock-addr-unix", " (a Unix-domain record takes its family and keeps the path bytes; it has no port)");
+    }
+
+    /* a message's control buffer: its size by the families asked for, and no packet information in a message */
+    {
+        uint8_t info[16];
+        memset(info, 0x5A, sizeof info);
+        CHECK(SystemNative_GetControlMessageBufferSize(1, 0) == 24 && SystemNative_GetControlMessageBufferSize(0, 1) == 32 && SystemNative_GetControlMessageBufferSize(1, 1) == 56 && SystemNative_GetControlMessageBufferSize(0, 0) == 0, "shim-sock-addr-control", "(the control buffer's size for the families asked for)");
+        CHECK(SystemNative_TryGetIPPacketInformation((MessageHeader *)rec, 1, (IPPacketInformation *)info) == 0 && SystemNative_TryGetIPPacketInformation(NULL, 0, NULL) == 0, "shim-sock-addr-control", "(packet information was found in a message)");
+        for (uint32_t i = 0; i < sizeof info; i++)
+            CHECK(info[i] == 0x5A, "shim-sock-addr-control", "(the caller's packet-information record was written)");
+        pass("shim-sock-addr-control", " (the control buffer's size for a packet-information record of each family, 24 and 32; no packet information found in a message)");
+    }
+
+    out("SHIMTEST-SOCKADDR: ALL GOOD (the socket-address helpers from a native caller's side)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_SOCKADDR */
+
+#ifdef RHU_SHIMTEST_LADDER_SOCKERRORS
+
+/* --- the kernel's network codes as the runtime's errors: every code of the
+ * kernel's set read through the family's table. The rows below are numbers,
+ * the kernel's code beside the runtime's error of the same name, so a pair
+ * that drifts in either header is read here as a wrong answer; the code of
+ * a row with no network medium is read for its one named answer; and every
+ * other number from -200 to 200, with the two ends of the range of a
+ * 32-bit number, is read for the input-output error and never for
+ * success. --- */
+static const struct {
+    int32_t code;
+    int32_t error;
+} g_se_named[] = {
+    { -11, 0x10006 }, /* EAGAIN */
+    { -110, 0x1004D }, /* ETIMEDOUT */
+    { -22, 0x1001C }, /* EINVAL */
+    { -3, 0x1004A }, /* ESRCH */
+    { -4, 0x1001B }, /* EINTR */
+    { -5, 0x1001D }, /* EIO */
+    { -16, 0x1000A }, /* EBUSY */
+    { -13, 0x10002 }, /* EACCES */
+    { -95, 0x1003D }, /* ENOTSUP */
+    { -6, 0x1003F }, /* ENXIO */
+    { -24, 0x10021 }, /* EMFILE */
+    { -32, 0x10043 }, /* EPIPE */
+    { -90, 0x10023 }, /* EMSGSIZE */
+    { -93, 0x10045 }, /* EPROTONOSUPPORT */
+    { -97, 0x10005 }, /* EAFNOSUPPORT */
+    { -98, 0x10003 }, /* EADDRINUSE */
+    { -100, 0x10026 }, /* ENETDOWN */
+    { -101, 0x10028 }, /* ENETUNREACH */
+    { -103, 0x1000D }, /* ECONNABORTED */
+    { -104, 0x1000F }, /* ECONNRESET */
+    { -106, 0x1001E }, /* EISCONN */
+    { -107, 0x10038 }, /* ENOTCONN */
+    { -111, 0x1000E }, /* ECONNREFUSED */
+    { -113, 0x10017 }, /* EHOSTUNREACH */
+    { -114, 0x10007 }, /* EALREADY */
+    { -115, 0x1001A }, /* EINPROGRESS */
+    { -30, 0x10048 }, /* EROFS */
+    { -2, 0x1002D }, /* ENOENT */
+    { -9, 0x10008 }, /* EBADF */
+    { -17, 0x10014 }, /* EEXIST */
+    { -20, 0x10039 }, /* ENOTDIR */
+    { -21, 0x1001F }, /* EISDIR */
+    { -28, 0x10034 }, /* ENOSPC */
+    { -36, 0x10025 }, /* ENAMETOOLONG */
+    { -39, 0x1003A }, /* ENOTEMPTY */
+};
+#define SE_NAMED (sizeof g_se_named / sizeof g_se_named[0])
+#define SE_NODEV (-19)
+
+static int se_in_table(int32_t code)
+{
+    for (uint32_t i = 0; i < SE_NAMED; i++) {
+        if (g_se_named[i].code == code)
+            return 1;
+    }
+    return code == SE_NODEV;
+}
+
+static int sockerrors_ladder(void)
+{
+    out("shimtest-sockerrors: the kernel's network codes as the runtime's errors");
+    CHECK(rhu_shim_init() == 0, "shim-sock-errors-init", "(initialization refused)");
+
+    CHECK(SE_NAMED == 35, "shim-sock-errors-named", "(the ladder's own table is not thirty-five rows)");
+    for (uint32_t i = 0; i < SE_NAMED; i++)
+        CHECK(rhu_sock_error(g_se_named[i].code) == g_se_named[i].error, "shim-sock-errors-named", "(a kernel code was not answered as the runtime's error of the same name)");
+    pass("shim-sock-errors-named", " (thirty-five kernel codes each answered as the runtime's error of the same name)");
+
+    CHECK(RHU_ENODEV == SE_NODEV && rhu_sock_error(SE_NODEV) == RHU_PAL_EAFNOSUPPORT, "shim-sock-errors-nodev", "(the code of a row with no medium was not answered as the address family not supported)");
+    pass("shim-sock-errors-nodev", " (the kernel's answer of a row with no medium answered as the address family not supported)");
+
+    for (int32_t code = -200; code <= 200; code++)
+        CHECK(rhu_sock_error(code) != RHU_PAL_SUCCESS, "shim-sock-errors-unknown", "(a code outside the table was answered as success)");
+    for (int32_t code = -200; code <= 200; code++) {
+        if (!se_in_table(code))
+            CHECK(rhu_sock_error(code) == RHU_PAL_EIO, "shim-sock-errors-unknown", "(a code outside the table, zero or a positive number was not the input-output error)");
+    }
+    CHECK(rhu_sock_error(INT32_MIN) == RHU_PAL_EIO && rhu_sock_error(INT32_MAX) == RHU_PAL_EIO, "shim-sock-errors-unknown", "(the smallest or the largest number was not the input-output error)");
+    pass("shim-sock-errors-unknown", " (a code outside the table, zero and the positive numbers answered as an input-output error; no code from -200 to 200 answered as success)");
+
+    out("SHIMTEST-SOCKERRORS: ALL GOOD (the kernel's network codes as the runtime's errors)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_SOCKERRORS */
+
+#ifdef RHU_SHIMTEST_LADDER_SOCKREFUSALS
+
+/* --- the refused names of the socket surface, each read for the value its
+ * managed caller expects: the runtime's own error from an entry point that
+ * returns one, -1 with the C library's errno from a reader that follows
+ * that convention, zero from a query whose answer is no. One line per
+ * name, in seven families. This image links no socket unit, so its last
+ * group reads the socket band as the descriptor layer answers it alone:
+ * every descriptor of the band a bad descriptor to the seven verbs the
+ * layer hands to the unit, and invalid to Poll at once. The test runner's
+ * control links the surface built with the wait over lists answering
+ * success, which the first group refuses. --- */
+#define SR_ERRNO (*__errno_location())
+#define SR_MINUS1(call) (SR_ERRNO = 0, (call) == -1 && SR_ERRNO == RHU_GERR_ENOTSUP)
+#define SR_BAD(call) (SR_ERRNO = 0, (call) == -1 && SR_ERRNO == RHU_GERR_EBADF)
+
+static int sockrefusals_ladder(void)
+{
+    static const intptr_t band[3] = { 32, 40, 47 };
+    static const int32_t bounds[3] = { 0, 30, -1 };
+    rhu_pal_pollevent pe[2];
+    rhu_pal_filestatus st;
+    uint8_t address[4] = { 192, 0, 2, 1 };
+    uint8_t host[16];
+    intptr_t file = -1;
+    int32_t flag = 0;
+    char name[8] = "eth0";
+    uint8_t value[8];
+    int32_t n = 0;
+    int fds[1] = { 0 };
+    int triggered = 0;
+    int64_t sent = 0;
+    intptr_t made = 0;
+    void *entry = NULL;
+    memset(value, 0, sizeof value);
+    out("shimtest-sockrefusals: the refused names of the socket surface, each read for the value its caller expects");
+    CHECK(rhu_shim_init() == 0, "shim-sock-refusals-init", "(initialization refused)");
+
+    CHECK(SystemNative_GetAtOutOfBandMark(0, &n) == RHU_PAL_ENOTSUP, "shim-sock-refusals-socket", "(the out-of-band mark was not ENOTSUP)");
+    CHECK(SystemNative_Select(fds, 1, NULL, 0, NULL, 0, 0, 0, &triggered) == RHU_PAL_ENOTSUP, "shim-sock-refusals-socket", "(the wait over lists was not ENOTSUP)");
+    CHECK(SystemNative_SendFile(1, 0, 0, 1, &sent) == RHU_PAL_ENOTSUP, "shim-sock-refusals-socket", "(the file send was not ENOTSUP)");
+    pass("shim-sock-refusals-socket", " (the out-of-band mark, the wait over lists and the file send: ENOTSUP)");
+
+    CHECK(SystemNative_ReceiveSocketError(0, NULL) == RHU_PAL_ENOTSUP, "shim-sock-refusals-data", "(the error queue was not ENOTSUP)");
+    CHECK(SystemNative_PlatformSupportsDualModeIPv4PacketInfo() == 0, "shim-sock-refusals-data", "(dual-mode packet information was answered as present)");
+    pass("shim-sock-refusals-data", " (the error queue ENOTSUP; no dual-mode packet information)");
+
+    CHECK(SystemNative_GetRawSockOpt(0, 0, 0, value, &n) == RHU_PAL_ENOTSUP, "shim-sock-refusals-option", "(an option read by the platform's numbers was not ENOTSUP)");
+    CHECK(SystemNative_SetRawSockOpt(0, 0, 0, value, 4) == RHU_PAL_ENOTSUP, "shim-sock-refusals-option", "(an option written by the platform's numbers was not ENOTSUP)");
+    CHECK(SystemNative_GetIPv4MulticastOption(0, 0, NULL) == RHU_PAL_ENOTSUP, "shim-sock-refusals-option", "(the IPv4 multicast option's read was not ENOTSUP)");
+    CHECK(SystemNative_SetIPv4MulticastOption(0, 0, NULL) == RHU_PAL_ENOTSUP, "shim-sock-refusals-option", "(the IPv4 multicast option's write was not ENOTSUP)");
+    CHECK(SystemNative_GetIPv6MulticastOption(0, 0, NULL) == RHU_PAL_ENOTSUP, "shim-sock-refusals-option", "(the IPv6 multicast option's read was not ENOTSUP)");
+    CHECK(SystemNative_SetIPv6MulticastOption(0, 0, NULL) == RHU_PAL_ENOTSUP, "shim-sock-refusals-option", "(the IPv6 multicast option's write was not ENOTSUP)");
+    CHECK(SystemNative_InterfaceNameToIndex(name) == 0, "shim-sock-refusals-option", "(an interface index was answered for a name)");
+    pass("shim-sock-refusals-option", " (the options by the platform's numbers and the four multicast options: ENOTSUP; no interface index for a name)");
+
+    CHECK(SR_MINUS1(SystemNative_EnumerateGatewayAddressesForInterface(NULL, 1, NULL)), "shim-sock-refusals-netinfo", "(the gateway reader was not -1 with ENOTSUP)");
+    CHECK(SystemNative_CreateNetworkChangeListenerSocket(&made) == RHU_PAL_ENOTSUP, "shim-sock-refusals-netinfo", "(the change listener was not ENOTSUP)");
+    CHECK(SystemNative_ReadEvents(0, NULL) == RHU_PAL_ENOTSUP, "shim-sock-refusals-netinfo", "(the change listener's reader was not ENOTSUP)");
+    pass("shim-sock-refusals-netinfo", " (the gateway reader -1 with ENOTSUP; the change listener and its reader: ENOTSUP)");
+
+    CHECK(SR_MINUS1(SystemNative_GetActiveTcpConnectionInfos(NULL, &n)), "shim-sock-refusals-statistics", "(the connection list was not -1 with ENOTSUP)");
+    CHECK(SR_MINUS1(SystemNative_GetActiveUdpListeners(NULL, &n)), "shim-sock-refusals-statistics", "(the datagram listener list was not -1 with ENOTSUP)");
+    CHECK(SR_MINUS1(SystemNative_GetEstimatedTcpConnectionCount()), "shim-sock-refusals-statistics", "(the connection count was not -1 with ENOTSUP)");
+    CHECK(SR_MINUS1(SystemNative_GetEstimatedUdpListenerCount()), "shim-sock-refusals-statistics", "(the datagram listener count was not -1 with ENOTSUP)");
+    CHECK(SR_MINUS1(SystemNative_GetIPv4GlobalStatistics(NULL)), "shim-sock-refusals-statistics", "(the IPv4 statistics were not -1 with ENOTSUP)");
+    CHECK(SR_MINUS1(SystemNative_GetIcmpv4GlobalStatistics(NULL)), "shim-sock-refusals-statistics", "(the ICMPv4 statistics were not -1 with ENOTSUP)");
+    CHECK(SR_MINUS1(SystemNative_GetIcmpv6GlobalStatistics(NULL)), "shim-sock-refusals-statistics", "(the ICMPv6 statistics were not -1 with ENOTSUP)");
+    CHECK(SR_MINUS1(SystemNative_GetNativeIPInterfaceStatistics(name, NULL)), "shim-sock-refusals-statistics", "(the interface statistics were not -1 with ENOTSUP)");
+    CHECK(SR_MINUS1(SystemNative_GetNumRoutes()), "shim-sock-refusals-statistics", "(the route count was not -1 with ENOTSUP)");
+    CHECK(SR_MINUS1(SystemNative_GetTcpGlobalStatistics(NULL)), "shim-sock-refusals-statistics", "(the TCP statistics were not -1 with ENOTSUP)");
+    CHECK(SR_MINUS1(SystemNative_GetUdpGlobalStatistics(NULL)), "shim-sock-refusals-statistics", "(the UDP statistics were not -1 with ENOTSUP)");
+    pass("shim-sock-refusals-statistics", " (the eleven statistics readers: -1 with ENOTSUP)");
+
+    CHECK(SystemNative_GetWasiSocketDescriptor(0, &entry, &n) == RHU_PAL_ENOTSUP, "shim-sock-refusals-wasi", "(the WASI descriptor query was not ENOTSUP)");
+    CHECK(SystemNative_WasiSubscribeSocketPollable(0, 0) == RHU_PAL_ENOTSUP, "shim-sock-refusals-wasi", "(the WASI subscription was not ENOTSUP)");
+    pass("shim-sock-refusals-wasi", " (the two WASI names: ENOTSUP)");
+
+    memset(host, 0, sizeof host);
+    CHECK(SystemNative_GetNameInfo(address, 4, 0, host, 16, NULL, 0, 0) == RHU_PAL_GetAddrInfoErrorFlags_EAI_NONAME, "shim-sock-refusals-resolve", "(the reverse lookup of an address was not EAI_NONAME)");
+    pass("shim-sock-refusals-resolve", " (the reverse lookup of an address: EAI_NONAME)");
+
+    /* the socket band with no socket unit in the image */
+    for (uint32_t i = 0; i < 3; i++) {
+        CHECK(SR_BAD(SystemNative_Close(band[i])) && SR_BAD(SystemNative_Read(band[i], value, 4)) && SR_BAD(SystemNative_Write(band[i], value, 4)) && SR_BAD(SystemNative_FStat(band[i], &st)),
+              "shim-sock-refusals-no-unit", "(Close, Read, Write or FStat did not answer a descriptor of the band as a bad descriptor)");
+        CHECK(SR_BAD(SystemNative_FcntlGetIsNonBlocking(band[i], &flag)) && SR_BAD(SystemNative_FcntlSetIsNonBlocking(band[i], 1)) && SR_BAD(SystemNative_FcntlGetFD(band[i])),
+              "shim-sock-refusals-no-unit", "(a descriptor-flag verb did not answer a descriptor of the band as a bad descriptor)");
+    }
+    file = SystemNative_Open("/tmp/band.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+    CHECK(file >= 3 && file <= 15, "shim-sock-refusals-no-unit", "(a file of the store was not opened beside the band)");
+    for (uint32_t i = 0; i < 3; i += 2) {
+        for (uint32_t b = 0; b < 3; b++) {
+            uint32_t trig = 99;
+            pe[0].FileDescriptor = (int32_t)band[i];
+            pe[0].Events = RHU_PAL_POLLIN | RHU_PAL_POLLOUT;
+            pe[0].TriggeredEvents = 0;
+            CHECK(SystemNative_Poll(pe, 1, bounds[b], &trig) == RHU_PAL_SUCCESS && trig == 1 && pe[0].TriggeredEvents == RHU_PAL_POLLNVAL,
+                  "shim-sock-refusals-no-unit", "(a descriptor of the band polled alone was not answered POLLNVAL at once)");
+            trig = 99;
+            pe[1].FileDescriptor = (int32_t)file;
+            pe[1].Events = RHU_PAL_POLLIN;
+            pe[1].TriggeredEvents = 0;
+            CHECK(SystemNative_Poll(pe, 2, bounds[b], &trig) == RHU_PAL_SUCCESS && trig == 2 && pe[0].TriggeredEvents == RHU_PAL_POLLNVAL && pe[1].TriggeredEvents == RHU_PAL_POLLIN,
+                  "shim-sock-refusals-no-unit", "(a descriptor of the band polled beside a file was not answered POLLNVAL at once)");
+        }
+    }
+    CHECK(SystemNative_Close(file) == 0, "shim-sock-refusals-no-unit", "(the file of the store did not close)");
+    pass("shim-sock-refusals-no-unit", " (in this image, which links no socket unit, descriptors 32, 40 and 47 are each a bad descriptor to Close, Read, Write, FStat and the three descriptor-flag verbs, and descriptors 32 and 47 polled alone and beside a file of the store answer POLLNVAL at once, with and without a bound)");
+
+    out("SHIMTEST-SOCKREFUSALS: ALL GOOD (the refused names of the socket surface, each read for the value its caller expects)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_SOCKREFUSALS */
+
+#if defined(RHU_SHIMTEST_LADDER_SOCKSTREAM) || defined(RHU_SHIMTEST_LADDER_SOCKLISTEN) || defined(RHU_SHIMTEST_LADDER_SOCKDATAGRAM) || defined(RHU_SHIMTEST_LADDER_SOCKOPTIONS) \
+    || defined(RHU_SHIMTEST_LADDER_SOCKPOLL) || defined(RHU_SHIMTEST_LADDER_SOCKPORT) || defined(RHU_SHIMTEST_LADDER_SOCKRESOLVE) || defined(RHU_SHIMTEST_LADDER_SOCKNETINFO)
+#include "rhu_pal_networking_net11.h"
+#include "rhu_pal_surface_net11.h"
+#include "rhu_sock.h"
+
+/* --- the scripted kernel of the socket ladders. The emulator row's ladders
+ * need no network: the tenant serves the kernel functions of the unit's
+ * table itself through the socket unit's hook, from a few sockets in memory in
+ * the kernel's own shapes (the address record, the readiness bits, a word
+ * per socket, the codes at Linux's values). A ladder scripts what the
+ * network does next -- bytes or a datagram arriving, a handshake ending
+ * well or refused, a connection completing behind a listener, the peer
+ * closing, transmit room opening -- and reads in the witness what the unit
+ * asked of the kernel. An event scripted to arrive at a refused call lands
+ * after that call's answer, as an event on the wire lands between a
+ * caller's look and its sleep. --- */
+#define NK_SOCKS 20
+#define NK_BYTES 64
+#define NK_QUEUE 4
+#define NK_DATAGRAM_BUFFER 96u
+
+struct nk_dgram {
+    uint32_t len;
+    rhu_net_addr from;
+    uint8_t data[NK_BYTES];
+};
+struct nk_sock {
+    uint8_t used, type, bound, listening, connected, shut, peer_closed; /* connected: 0 no, 1 a handshake in flight, 2 yes */
+    rhu_net_addr local, peer;
+    int32_t pending;
+    uint32_t word;
+    uint8_t rx[NK_BYTES];
+    uint32_t rx_len;
+    struct nk_dgram dq[NK_QUEUE];
+    uint32_t dq_len;
+    int32_t opt[4];
+    uint32_t ready; /* a listener's completed connections */
+    int32_t seen, risen; /* the level at the last look; the bits that rose since the last take */
+};
+static struct nk_sock g_nk[NK_SOCKS];
+static uint32_t g_nk_events;          /* the one word for all sockets */
+static uint32_t g_nk_takes[NK_SOCKS]; /* the takes of the risen bits, by handle */
+static int32_t nk_level(const struct nk_sock *s);
+
+/* The script: what the network does next. */
+static struct {
+    int32_t connect_end; /* a scripted handshake's end: 0 established, or the code left pending */
+    uint32_t connect_at; /* the handshake ends at this readiness call; 0: it does not end */
+    uint32_t tx_room;    /* a stream's transmit room in bytes */
+    uint32_t room_at;    /* with no room: room opens at this refused send */
+    uint32_t late_at;    /* with nothing queued: the bytes below arrive at this refused receive */
+    uint8_t late[NK_BYTES];
+    uint32_t late_len;
+    uint32_t accept_at;  /* with none completed: a connection completes at this refused accept */
+} g_nks;
+
+/* The witness: what the unit asked. */
+static struct {
+    uint32_t sockets, closes, sends, recvs, peeks, options, shut[3];
+    uint32_t family, type, protocol, backlog, to_null, accepted;
+    uint32_t refused_recvs, refused_sends, refused_accepts, readiness_calls;
+    int32_t made, closed;
+    rhu_net_addr bound, connected, to;
+    uint8_t sent[NK_BYTES * 2];
+    uint32_t sent_len;
+} g_nkw;
+
+static struct nk_sock *nk_of(int32_t h)
+{
+    return h >= 0 && h < NK_SOCKS && g_nk[h].used ? &g_nk[h] : NULL;
+}
+
+/* The bits that rose since the last look join the risen set. A scripted
+ * event looks before it changes a socket and bumps after, so a rise is
+ * never lost behind an earlier fall. */
+static void nk_sync(struct nk_sock *s)
+{
+    int32_t now = s->used ? nk_level(s) : 0;
+    s->risen |= now & ~s->seen;
+    s->seen = now;
+}
+
+/* A socket's change: its own word moves, and the one word for all. */
+static void nk_bump(struct nk_sock *s)
+{
+    nk_sync(s);
+    s->word++;
+    rhu_futex_wake(&s->word, 8);
+    g_nk_events++;
+    rhu_futex_wake(&g_nk_events, 8);
+}
+
+static void nk_address(rhu_net_addr *a, uint8_t last, uint32_t port)
+{
+    memset(a, 0, sizeof *a);
+    a->family = RHU_NET_FAMILY_IPV4;
+    a->port = port;
+    a->addr[0] = 192;
+    a->addr[1] = 0;
+    a->addr[2] = 2;
+    a->addr[3] = last;
+}
+
+/* A free slot from the table's top, so a handle is never its descriptor's
+ * place in the band. */
+static int32_t nk_slot(uint32_t type)
+{
+    for (int32_t h = NK_SOCKS - 1; h >= 0; h--) {
+        if (!g_nk[h].used) {
+            memset(&g_nk[h], 0, sizeof g_nk[h]);
+            g_nk[h].used = 1;
+            g_nk[h].type = (uint8_t)type;
+            g_nk[h].local.family = RHU_NET_FAMILY_IPV4;
+            g_nkw.made = h;
+            return h;
+        }
+    }
+    return RHU_EMFILE;
+}
+
+static int32_t nk_socket(uint32_t family, uint32_t type, uint32_t protocol)
+{
+    g_nkw.sockets++;
+    g_nkw.family = family;
+    g_nkw.type = type;
+    g_nkw.protocol = protocol;
+    if (family != RHU_NET_FAMILY_IPV4)
+        return RHU_EAFNOSUPPORT;
+    if (!((type == RHU_NET_STREAM && (protocol == 0 || protocol == 6)) || (type == RHU_NET_DATAGRAM && (protocol == 0 || protocol == 17))))
+        return RHU_EPROTONOSUPPORT;
+#ifdef RHU_SHIMTEST_LADDER_SOCKDATAGRAM
+    /* The kernel's pool holds two datagram sockets and refuses a third
+     * after it has judged the family and the protocol. The datagram
+     * ladder's scripted kernel does the same, so that ladder can ask what
+     * a caller is answered while the pool is exhausted. (The stream pool
+     * is not modelled anywhere: the stream ladder fills the hosting
+     * layer's own band of sixteen descriptors on this table.) */
+    if (type == RHU_NET_DATAGRAM) {
+        int32_t held = 0;
+        for (int32_t i = 0; i < NK_SOCKS; i++)
+            held += (g_nk[i].used && g_nk[i].type == RHU_NET_DATAGRAM) ? 1 : 0;
+        if (held >= 2)
+            return RHU_EMFILE;
+    }
+#endif
+    return nk_slot(type);
+}
+
+static int32_t nk_bind(int32_t h, const rhu_net_addr *local)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    if (local == NULL || local->family != RHU_NET_FAMILY_IPV4)
+        return RHU_EAFNOSUPPORT;
+    g_nkw.bound = *local;
+    if (s->bound || s->connected || local->port == 0)
+        return RHU_EINVAL;
+    for (int32_t i = 0; i < NK_SOCKS; i++) {
+        const struct nk_sock *o = &g_nk[i];
+        if (o != s && o->used && o->type == s->type && o->bound && o->local.port == local->port && !(o->opt[RHU_NET_OPT_REUSEADDR] && s->opt[RHU_NET_OPT_REUSEADDR]))
+            return RHU_EADDRINUSE;
+    }
+    s->local = *local;
+    s->bound = 1;
+    return 0;
+}
+
+static int32_t nk_listen(int32_t h, uint32_t backlog)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    g_nkw.backlog = backlog;
+    if (s->type != RHU_NET_STREAM || !s->bound || backlog == 0)
+        return RHU_EINVAL;
+    s->listening = 1;
+    return 0;
+}
+
+static int32_t nk_accept(int32_t h, rhu_net_addr *peer)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    if (!s->listening)
+        return RHU_EINVAL;
+    if (s->ready == 0) {
+        g_nkw.refused_accepts++;
+        if (g_nks.accept_at != 0 && g_nkw.refused_accepts == g_nks.accept_at) {
+            s->ready++;
+            nk_bump(s);
+        }
+        return RHU_EAGAIN;
+    }
+    int32_t made = nk_slot(RHU_NET_STREAM);
+    if (made < 0)
+        return made;
+    s->ready--;
+    g_nkw.accepted++;
+    g_nk[made].connected = 2;
+    g_nk[made].bound = 1;
+    g_nk[made].local = s->local;
+    nk_address(&g_nk[made].peer, 20, 40000u + g_nkw.accepted);
+    if (peer != NULL)
+        *peer = g_nk[made].peer;
+    return made;
+}
+
+static void nk_bind_auto(struct nk_sock *s)
+{
+    if (!s->bound) {
+        nk_address(&s->local, 10, 49152);
+        s->bound = 1;
+    }
+}
+
+static int32_t nk_connect(int32_t h, const rhu_net_addr *peer)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    if (peer == NULL || peer->family != RHU_NET_FAMILY_IPV4)
+        return RHU_EAFNOSUPPORT;
+    g_nkw.connected = *peer;
+    if (s->type == RHU_NET_DATAGRAM) {
+        s->peer = *peer;
+        s->connected = 2;
+        nk_bind_auto(s);
+        return 0;
+    }
+    if (s->connected == 1)
+        return RHU_EALREADY;
+    if (s->connected == 2)
+        return RHU_EISCONN;
+    s->connected = 1;
+    s->peer = *peer;
+    nk_bind_auto(s);
+    g_nkw.readiness_calls = 0;
+    return RHU_EINPROGRESS;
+}
+
+/* A handshake's end: established, or failed with the code pending. */
+static void nk_end(struct nk_sock *s, int32_t code)
+{
+    nk_sync(s);
+    if (code == 0) {
+        s->connected = 2;
+    } else {
+        s->connected = 0;
+        s->pending = code;
+        memset(&s->peer, 0, sizeof s->peer);
+    }
+    nk_bump(s);
+}
+
+static int32_t nk_level(const struct nk_sock *s)
+{
+    int32_t m = 0;
+    if (s->type == RHU_NET_DATAGRAM) {
+        if (s->dq_len != 0)
+            m |= RHU_NET_READABLE;
+        if (s->bound)
+            m |= RHU_NET_WRITABLE;
+        return m;
+    }
+    if (s->listening)
+        return s->ready != 0 ? RHU_NET_READABLE : 0;
+    if (s->rx_len != 0 || s->peer_closed)
+        m |= RHU_NET_READABLE;
+    if (s->peer_closed)
+        m |= RHU_NET_HANGUP;
+    if (s->connected == 2 && g_nks.tx_room != 0)
+        m |= RHU_NET_WRITABLE;
+    if (s->pending != 0)
+        m |= RHU_NET_WRITABLE | RHU_NET_ERROR | RHU_NET_HANGUP;
+    return m;
+}
+
+static int32_t nk_readiness(int32_t h, uint32_t take)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    g_nkw.readiness_calls++;
+    nk_sync(s);
+    int32_t level = nk_level(s);
+    if (take != 0) {
+        level = s->risen;
+        s->risen = 0;
+        g_nk_takes[h]++;
+    }
+    if (s->connected == 1 && g_nks.connect_at != 0 && g_nkw.readiness_calls == g_nks.connect_at)
+        nk_end(s, g_nks.connect_end);
+    return level;
+}
+
+static int32_t nk_name(int32_t h, rhu_net_addr *local, rhu_net_addr *peer)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    if (local != NULL)
+        *local = s->local;
+    if (peer != NULL) {
+        if (s->connected == 2)
+            *peer = s->peer;
+        else
+            memset(peer, 0, sizeof *peer);
+    }
+    return 0;
+}
+
+static int32_t nk_shutdown(int32_t h, uint32_t how)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    if (how > RHU_NET_SHUT_RDWR)
+        return RHU_EINVAL;
+    g_nkw.shut[how]++;
+    s->shut |= (uint8_t)(how == RHU_NET_SHUT_RD ? 1 : how == RHU_NET_SHUT_WR ? 2 : 3);
+    return 0;
+}
+
+static int32_t nk_close(int32_t h)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    g_nkw.closes++;
+    g_nkw.closed = h;
+    s->used = 0;
+    nk_bump(s);
+    return 0;
+}
+
+static int32_t nk_available(int32_t h)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    if (s->type == RHU_NET_STREAM)
+        return (int32_t)s->rx_len;
+    return s->dq_len != 0 ? (int32_t)s->dq[0].len : 0;
+}
+
+static int32_t nk_error(int32_t h)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    int32_t code = s->pending;
+    s->pending = 0;
+    return code;
+}
+
+static const uint32_t *nk_event_word(int32_t h)
+{
+    struct nk_sock *s = nk_of(h);
+    return s != NULL ? &s->word : NULL;
+}
+
+static void nk_queue_dgram(struct nk_sock *s, const void *bytes, uint32_t n, uint32_t port)
+{
+    struct nk_dgram *d = &s->dq[s->dq_len++];
+    d->len = n;
+    memcpy(d->data, bytes, n);
+    nk_address(&d->from, 20, port);
+}
+
+static int32_t nk_recv(int32_t h, void *buf, uint32_t n, uint32_t flags, rhu_net_addr *from)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    g_nkw.recvs++;
+    if ((flags & ~RHU_NET_PEEK) != 0)
+        return RHU_EINVAL;
+    int peek = (flags & RHU_NET_PEEK) != 0;
+    if (peek)
+        g_nkw.peeks++;
+    if (s->pending != 0)
+        return nk_error(h);
+    if (s->type == RHU_NET_STREAM) {
+        if (s->connected != 2)
+            return s->connected == 1 ? RHU_EAGAIN : RHU_ENOTCONN;
+        if (s->rx_len == 0) {
+            if (s->peer_closed || (s->shut & 1) != 0)
+                return 0;
+            g_nkw.refused_recvs++;
+            if (g_nks.late_at != 0 && g_nkw.refused_recvs == g_nks.late_at) {
+                memcpy(s->rx, g_nks.late, g_nks.late_len);
+                s->rx_len = g_nks.late_len;
+                nk_bump(s);
+            }
+            return RHU_EAGAIN;
+        }
+        uint32_t take = n < s->rx_len ? n : s->rx_len;
+        memcpy(buf, s->rx, take);
+        if (!peek) {
+            for (uint32_t i = take; i < s->rx_len; i++)
+                s->rx[i - take] = s->rx[i];
+            s->rx_len -= take;
+        }
+        return (int32_t)take;
+    }
+    if (s->dq_len == 0) {
+        g_nkw.refused_recvs++;
+        if (g_nks.late_at != 0 && g_nkw.refused_recvs == g_nks.late_at) {
+            nk_queue_dgram(s, g_nks.late, g_nks.late_len, s->peer.port);
+            nk_bump(s);
+        }
+        return RHU_EAGAIN;
+    }
+    struct nk_dgram first = s->dq[0];
+    if (!peek || n < first.len) {
+        for (uint32_t i = 1; i < s->dq_len; i++)
+            s->dq[i - 1] = s->dq[i];
+        s->dq_len--;
+    }
+    if (n < first.len)
+        return RHU_EMSGSIZE;
+    memcpy(buf, first.data, first.len);
+    if (from != NULL)
+        *from = first.from;
+    return (int32_t)first.len;
+}
+
+static int32_t nk_send(int32_t h, const void *buf, uint32_t n, const rhu_net_addr *to)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    g_nkw.sends++;
+    if (s->pending != 0)
+        return nk_error(h);
+    if (s->type == RHU_NET_STREAM) {
+        if (s->connected != 2)
+            return s->connected == 1 ? RHU_EAGAIN : RHU_ENOTCONN;
+        if (s->peer_closed || (s->shut & 2) != 0)
+            return RHU_EPIPE;
+        if (g_nks.tx_room == 0) {
+            g_nkw.refused_sends++;
+            if (g_nks.room_at != 0 && g_nkw.refused_sends == g_nks.room_at) {
+                g_nks.tx_room = 16;
+                nk_bump(s);
+            }
+            return RHU_EAGAIN;
+        }
+        uint32_t take = n < g_nks.tx_room ? n : g_nks.tx_room;
+        memcpy(g_nkw.sent, buf, take);
+        g_nkw.sent_len = take;
+        return (int32_t)take;
+    }
+    g_nkw.to_null = to == NULL;
+    if (to != NULL)
+        g_nkw.to = *to;
+    if (to == NULL && s->connected != 2)
+        return RHU_ENOTCONN;
+    if (n > NK_DATAGRAM_BUFFER)
+        return RHU_EMSGSIZE;
+    nk_bind_auto(s);
+    memcpy(g_nkw.sent, buf, n);
+    g_nkw.sent_len = n;
+    return (int32_t)n;
+}
+
+static int32_t nk_option(int32_t h, uint32_t option, uint32_t set, int32_t value)
+{
+    struct nk_sock *s = nk_of(h);
+    if (s == NULL)
+        return RHU_EBADF;
+    g_nkw.options++;
+    if (option < RHU_NET_OPT_NODELAY || option > RHU_NET_OPT_REUSEADDR)
+        return RHU_ENOTSUP;
+    if (s->type == RHU_NET_DATAGRAM && option != RHU_NET_OPT_REUSEADDR)
+        return RHU_ENOTSUP;
+    if (set == 0)
+        return s->opt[option];
+    s->opt[option] = value;
+    return 0;
+}
+
+static int32_t nk_limits(rhu_net_limits_desc *out_limits)
+{
+    if (out_limits == NULL)
+        return RHU_EINVAL;
+    out_limits->streams = 8;
+    out_limits->datagrams = 8;
+    out_limits->stream_rx = 2048;
+    out_limits->stream_tx = 1024;
+    out_limits->datagram_buf = NK_DATAGRAM_BUFFER;
+    out_limits->resolve_slots = 2;
+    return 0;
+}
+
+/* --- the scripted kernel's second part: the one word for all sockets, the
+ * media and the lease, the resolver, and a second thread for the calls
+ * that sleep. --- */
+#define NK_QUERIES 2
+struct nk_query {
+    uint8_t used, done;
+    int32_t code; /* how the query ended: 0 with the two addresses, or the refusal */
+    uint32_t word;
+};
+static struct nk_query g_nkq[NK_QUERIES];
+
+/* The script of the media and the resolver. */
+static struct {
+    uint32_t media; /* 0 or 1 */
+    rhu_net_medium_desc medium;
+    rhu_net_lease_desc lease; /* source 0: no lease yet */
+    int32_t filing;           /* a filing's refusal; 0: the query is filed */
+    uint32_t busy;            /* while not 0 a filing finds no slot free */
+    uint32_t free_at;         /* a slot comes free behind this filing: the one word moves */
+    int32_t end;              /* how a filed query ends */
+    uint32_t end_at_filing;   /* 1: a query has ended when its filing answers */
+} g_nks2;
+
+/* The witness of the one word and the resolver. */
+static struct {
+    uint32_t bumps; /* the unit's own moves of the one word */
+    uint32_t filings, filed, final_reads;
+    int32_t handle; /* the last query filed */
+    char name[64];
+    uint32_t name_len;
+} g_nkw2;
+
+static void nk_events_move(void)
+{
+    g_nk_events++;
+    rhu_futex_wake(&g_nk_events, 8);
+}
+
+static void nk_events_bump(void)
+{
+    g_nkw2.bumps++;
+    nk_events_move();
+}
+
+static const uint32_t *nk_events_word(void)
+{
+    return &g_nk_events;
+}
+
+/* A kernel with no medium answers the count 0 and refuses the rest. */
+static int32_t nk_count(void)
+{
+    return (int32_t)g_nks2.media;
+}
+
+static int32_t nk_medium(uint32_t medium, rhu_net_medium_desc *out)
+{
+    if (g_nks2.media == 0)
+        return RHU_ENODEV;
+    if (medium >= g_nks2.media || out == NULL)
+        return RHU_EINVAL;
+    *out = g_nks2.medium;
+    return 0;
+}
+
+static int32_t nk_lease(uint32_t medium, rhu_net_lease_desc *out)
+{
+    if (g_nks2.media == 0)
+        return RHU_ENODEV;
+    if (medium >= g_nks2.media || out == NULL)
+        return RHU_EINVAL;
+    if (g_nks2.lease.source == RHU_NET_LEASE_NONE)
+        return RHU_EAGAIN;
+    *out = g_nks2.lease;
+    return 0;
+}
+
+/* A filed query's end: the answer or the refusal lands and the query's
+ * own word moves. */
+static void nk_query_ends(int32_t h)
+{
+    g_nkq[h].done = 1;
+    g_nkq[h].code = g_nks2.end;
+    g_nkq[h].word++;
+    rhu_futex_wake(&g_nkq[h].word, 8);
+}
+
+static int32_t nk_resolve(const char *name, uint32_t len)
+{
+    g_nkw2.filings++;
+    g_nkw2.name_len = len;
+    memset(g_nkw2.name, 0, sizeof g_nkw2.name);
+    memcpy(g_nkw2.name, name, len < sizeof g_nkw2.name ? len : sizeof g_nkw2.name - 1u);
+    if (g_nks2.busy != 0) {
+        if (g_nks2.free_at != 0 && g_nkw2.filings == g_nks2.free_at) {
+            g_nks2.busy = 0;
+            nk_events_move();
+        }
+        return RHU_EAGAIN;
+    }
+    if (g_nks2.filing != 0)
+        return g_nks2.filing;
+    for (int32_t h = NK_QUERIES - 1; h >= 0; h--) {
+        if (!g_nkq[h].used) {
+            memset(&g_nkq[h], 0, sizeof g_nkq[h]);
+            g_nkq[h].used = 1;
+            g_nkw2.filed++;
+            g_nkw2.handle = h;
+            if (g_nks2.end_at_filing)
+                nk_query_ends(h);
+            return h;
+        }
+    }
+    return RHU_EAGAIN;
+}
+
+/* The answer: two addresses, 198.51.100.7 and 198.51.100.8. Any final
+ * answer releases the slot. */
+static int32_t nk_resolve_result(int32_t h, rhu_net_addr *out, uint32_t max)
+{
+    if (h < 0 || h >= NK_QUERIES || !g_nkq[h].used)
+        return RHU_EINVAL;
+    if (!g_nkq[h].done)
+        return RHU_EAGAIN;
+    g_nkq[h].used = 0;
+    g_nkw2.final_reads++;
+    if (g_nkq[h].code != 0)
+        return g_nkq[h].code;
+    uint32_t n = max < 2u ? max : 2u;
+    for (uint32_t i = 0; i < n; i++) {
+        memset(&out[i], 0, sizeof out[i]);
+        out[i].family = RHU_NET_FAMILY_IPV4;
+        out[i].addr[0] = 198;
+        out[i].addr[1] = 51;
+        out[i].addr[2] = 100;
+        out[i].addr[3] = (uint8_t)(7u + i);
+    }
+    return (int32_t)n;
+}
+
+static const uint32_t *nk_resolve_word(int32_t h)
+{
+    return h >= 0 && h < NK_QUERIES && g_nkq[h].used ? &g_nkq[h].word : NULL;
+}
+
+static __attribute__((unused)) uint32_t nk_slots_held(void)
+{
+    uint32_t n = 0;
+    for (int32_t h = 0; h < NK_QUERIES; h++)
+        n += g_nkq[h].used;
+    return n;
+}
+
+/* An address or a mask as the lease carries it: the four octets in the
+ * wire's order read as one word, the first octet in the lowest byte. */
+static __attribute__((unused)) uint32_t nk_ip4(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+{
+    return a | (b << 8) | (c << 16) | (d << 24);
+}
+
+/* One wired medium, its link up, with a lease of 192.0.2.10 in a network
+ * of 24 bits. */
+static __attribute__((unused)) void nk_medium_up(void)
+{
+    static const uint8_t hw[6] = { 0x02, 0x00, 0x5E, 0x10, 0x20, 0x30 };
+    memset(&g_nks2.medium, 0, sizeof g_nks2.medium);
+    memset(&g_nks2.lease, 0, sizeof g_nks2.lease);
+    g_nks2.media = 1;
+    g_nks2.medium.kind = RHU_NET_MEDIUM_WIRED;
+    g_nks2.medium.link = 1;
+    memcpy(g_nks2.medium.hw, hw, 6);
+    g_nks2.lease.ip4 = nk_ip4(192, 0, 2, 10);
+    g_nks2.lease.mask = nk_ip4(255, 255, 255, 0);
+    g_nks2.lease.source = RHU_NET_LEASE_DHCP;
+}
+
+/* The peer closes a stream. */
+static __attribute__((unused)) void nk_peer_closes(int32_t h)
+{
+    nk_sync(&g_nk[h]);
+    g_nk[h].peer_closed = 1;
+    nk_bump(&g_nk[h]);
+}
+
+/* A second thread, one step less urgent than the ladder's: it runs only
+ * while the ladder's thread sleeps, and a wake it makes hands the
+ * processor back at once. The ladder opens a stage before the call under
+ * proof; this thread marks the stage begun, which is the witness that the
+ * call slept, and runs the stage's script. */
+#define NK_STAGES 4
+static void (*g_nk_script[NK_STAGES])(void);
+static volatile uint32_t g_nk_open;  /* the stages the ladder has opened */
+static volatile uint32_t g_nk_begun; /* the stages this thread has begun */
+static __attribute__((unused)) volatile uint32_t g_nk_back; /* the stages whose call has returned to the ladder */
+
+static void nk_below(void *arg)
+{
+    (void)arg;
+    for (uint32_t i = 0; i < NK_STAGES && g_nk_script[i] != NULL; i++) {
+        while (g_nk_open <= i)
+            rhu_sleep_ns(1000000ull);
+        g_nk_begun = i + 1u;
+        g_nk_script[i]();
+    }
+}
+
+static __attribute__((unused)) int nk_below_start(void)
+{
+    return rhu_thread_spawn(nk_below, NULL, 16384u, (uint32_t)RHU_HOSTED_PRIO_FLAT + 1u, "below") >= 0;
+}
+
+/* The unit's table (rhu_sock.h: twenty-four functions in its order),
+ * served through the unit's hook. */
+static const rhu_sock_kernel g_nk_table = {
+    nk_socket, nk_bind, nk_listen, nk_accept, nk_connect, nk_name, nk_shutdown, nk_close,
+    nk_available, nk_error, nk_event_word, nk_readiness, nk_recv, nk_send, nk_option, nk_limits,
+    nk_events_bump, nk_events_word, nk_count, nk_lease, nk_resolve, nk_resolve_result, nk_resolve_word, nk_medium,
+};
+const rhu_sock_kernel *rhu_sock_kernel_hook(void)
+{
+    return &g_nk_table;
+}
+
+/* The network's events a ladder scripts. */
+static __attribute__((unused)) void nk_bytes_arrive(int32_t h, const char *bytes, uint32_t n)
+{
+    nk_sync(&g_nk[h]);
+    memcpy(g_nk[h].rx + g_nk[h].rx_len, bytes, n);
+    g_nk[h].rx_len += n;
+    nk_bump(&g_nk[h]);
+}
+
+static __attribute__((unused)) void nk_datagram_arrives(int32_t h, const void *bytes, uint32_t n, uint32_t port)
+{
+    nk_sync(&g_nk[h]);
+    nk_queue_dgram(&g_nk[h], bytes, n, port);
+    nk_bump(&g_nk[h]);
+}
+
+static __attribute__((unused)) void nk_late(const char *bytes, uint32_t n, uint32_t at)
+{
+    memcpy(g_nks.late, bytes, n);
+    g_nks.late_len = n;
+    g_nks.late_at = at;
+    g_nkw.refused_recvs = 0;
+}
+
+/* A caller's Linux IPv4 record, written and read here byte by byte: the
+ * family 2 in the first two bytes, the port in network byte order at
+ * offset 2, the address at offset 4, eight zero bytes after it. */
+static void sin_record(uint8_t *rec, uint8_t last, uint16_t port)
+{
+    memset(rec, 0, 16);
+    rec[0] = 2;
+    rec[2] = (uint8_t)(port >> 8);
+    rec[3] = (uint8_t)port;
+    rec[4] = 192;
+    rec[5] = 0;
+    rec[6] = 2;
+    rec[7] = last;
+}
+
+static __attribute__((unused)) int sin_is(const uint8_t *rec, uint8_t last, uint16_t port)
+{
+    uint8_t want[16];
+    sin_record(want, last, port);
+    return memcmp(rec, want, 16) == 0;
+}
+
+static __attribute__((unused)) int nk_address_is(const rhu_net_addr *a, uint8_t last, uint32_t port)
+{
+    return a->family == 2 && a->port == port && a->addr[0] == 192 && a->addr[1] == 0 && a->addr[2] == 2 && a->addr[3] == last;
+}
+
+/* A connected stream socket of the band: made, connected by the
+ * non-blocking path with the handshake ended by the script, then left
+ * blocking or not as asked. */
+static __attribute__((unused)) int nk_stream(intptr_t *fd, int32_t *h, int32_t nonblocking)
+{
+    uint8_t rec[16];
+    sin_record(rec, 20, 7);
+    if (SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, fd) != RHU_PAL_SUCCESS)
+        return 0;
+    *h = g_nkw.made;
+    if (SystemNative_FcntlSetIsNonBlocking(*fd, 1) != 0 || SystemNative_Connect(*fd, rec, 16) != RHU_PAL_EINPROGRESS)
+        return 0;
+    nk_end(&g_nk[*h], 0);
+    return SystemNative_FcntlSetIsNonBlocking(*fd, nonblocking) == 0;
+}
+#endif
+#ifdef RHU_SHIMTEST_LADDER_SOCKSTREAM
+
+/* --- a stream socket from a native caller's side: a socket made at the
+ * band's first descriptor and read back; the descriptor layer's verbs on
+ * it; a connect on a non-blocking and on a blocking socket, to a peer that
+ * answers and to one that refuses; the two names in Linux records; bytes
+ * sent and received through the socket functions and through Read and
+ * Write; the peek; the blocking calls, each waiting on the socket's word
+ * for an event that lands during its wait; the two timeouts by the kernel's
+ * clock; the three shutdown directions; and a handle's close as the managed
+ * class performs it, a zero linger first. The numbers this ladder reads
+ * for are written here: the band's descriptors, the record's bytes, the
+ * kernel's numbers. --- */
+static int sockstream_ladder(void)
+{
+    static const uint8_t twelve[12] = { 'h', 'e', 'l', 'l', 'o', ',', ' ', 'b', 'o', 'a', 'r', 'd' };
+    uint8_t rec[32], buf[32];
+    int32_t len = 0, n = 0, err = 0, family = 0, type = 0, protocol = 0, listening = 0, flag = 0, h = -1, h2 = -1;
+    intptr_t fd = -1, other = -1;
+    uint64_t t0 = 0, waited = 0;
+    out("shimtest-sockstream: a stream socket over a scripted kernel, from a native caller's side");
+    CHECK(rhu_shim_init() == 0, "shim-sock-stream-init", "(initialization refused)");
+    g_nks.tx_room = 16;
+
+    /* create */
+    {
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &fd) == RHU_PAL_SUCCESS && fd == 32, "shim-sock-stream-create", "(an IPv4 stream socket did not land at descriptor 32)");
+        h = g_nkw.made;
+        CHECK(g_nkw.sockets == 1 && g_nkw.family == 2 && g_nkw.type == 1 && g_nkw.protocol == 6, "shim-sock-stream-create", "(the kernel was not asked for an IPv4 stream socket)");
+        CHECK(SystemNative_GetSocketType(fd, &family, &type, &protocol, &listening) == RHU_PAL_SUCCESS && family == 2 && type == 1 && protocol == 6 && listening == 0, "shim-sock-stream-create", "(the family, type and protocol were not read back)");
+        other = 5;
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET6, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &other) == RHU_PAL_EAFNOSUPPORT && other == -1, "shim-sock-stream-create", "(an IPv6 socket was not answered EAFNOSUPPORT)");
+        other = 5;
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_RAW, RHU_PAL_ProtocolType_PT_UNSPECIFIED, &other) == RHU_PAL_EPROTONOSUPPORT && other == -1, "shim-sock-stream-create", "(a raw socket was not answered EPROTONOSUPPORT)");
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &other) == RHU_PAL_SUCCESS && other == 33 && SystemNative_Close(other) == 0, "shim-sock-stream-create", "(a refused socket took a descriptor)");
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, NULL) == RHU_PAL_EFAULT, "shim-sock-stream-create", "(a null result pointer was not answered EFAULT)");
+        pass("shim-sock-stream-create", " (an IPv4 stream socket at descriptor 32, the band's first, its family, type and protocol read back; an IPv6 socket EAFNOSUPPORT and a raw socket EPROTONOSUPPORT, no descriptor taken; a null result pointer EFAULT)");
+    }
+
+    /* the descriptor layer's verbs */
+    {
+        rhu_pal_filestatus st;
+        CHECK(SystemNative_FStat(fd, &st) == 0 && (st.Mode & 0xF000) == 0xC000, "shim-sock-stream-descriptor", "(the socket's status is not a socket's mode)");
+        CHECK(SystemNative_FcntlGetFD(fd) == 1, "shim-sock-stream-descriptor", "(the close-on-exec bit is not set)");
+        flag = 7;
+        CHECK(SystemNative_FcntlGetIsNonBlocking(fd, &flag) == 0 && flag == 0, "shim-sock-stream-descriptor", "(a new socket is not blocking)");
+        CHECK(SystemNative_FcntlSetIsNonBlocking(fd, 1) == 0 && SystemNative_FcntlGetIsNonBlocking(fd, &flag) == 0 && flag == 1, "shim-sock-stream-descriptor", "(the non-blocking flag was not read back)");
+        pass("shim-sock-stream-descriptor", " (the socket's status a socket's mode; the close-on-exec bit set; the non-blocking flag written and read back)");
+    }
+
+    /* connect */
+    {
+        sin_record(rec, 20, 7);
+        CHECK(SystemNative_Connect(fd, rec, 16) == RHU_PAL_EINPROGRESS, "shim-sock-stream-connect", "(a non-blocking connect did not answer EINPROGRESS)");
+        CHECK(nk_address_is(&g_nkw.connected, 20, 7), "shim-sock-stream-connect", "(the kernel was not given the peer's address and the port in the host's order)");
+        nk_end(&g_nk[h], 0);
+        err = 99;
+        CHECK(SystemNative_GetSocketErrorOption(fd, &err) == RHU_PAL_SUCCESS && err == RHU_PAL_SUCCESS, "shim-sock-stream-connect", "(an established connect left a pending error)");
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &other) == RHU_PAL_SUCCESS, "shim-sock-stream-connect", "(socket)");
+        g_nks.connect_end = 0;
+        g_nks.connect_at = 1;
+        CHECK(SystemNative_Connect(other, rec, 16) == RHU_PAL_SUCCESS, "shim-sock-stream-connect", "(a blocking connect did not answer success at the handshake's end)");
+        CHECK(g_nkw.readiness_calls >= 2, "shim-sock-stream-connect", "(a blocking connect did not wait for the handshake's end)");
+        g_nks.connect_at = 0;
+        CHECK(SystemNative_Close(other) == 0, "shim-sock-stream-connect", "(close)");
+        pass("shim-sock-stream-connect", " (a non-blocking connect EINPROGRESS and no pending error at the handshake's end; a blocking connect waits for the handshake's end and answers success; the kernel given the peer's address and the port in the host's order)");
+    }
+
+    /* the pending error */
+    {
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &other) == RHU_PAL_SUCCESS, "shim-sock-stream-pending-error", "(socket)");
+        h2 = g_nkw.made;
+        CHECK(SystemNative_FcntlSetIsNonBlocking(other, 1) == 0 && SystemNative_Connect(other, rec, 16) == RHU_PAL_EINPROGRESS, "shim-sock-stream-pending-error", "(connect)");
+        nk_end(&g_nk[h2], RHU_ECONNREFUSED);
+        err = 0;
+        CHECK(SystemNative_GetSocketErrorOption(other, &err) == RHU_PAL_SUCCESS && err == RHU_PAL_ECONNREFUSED, "shim-sock-stream-pending-error", "(a refused connect's pending code was not answered)");
+        CHECK(SystemNative_GetSocketErrorOption(other, &err) == RHU_PAL_SUCCESS && err == RHU_PAL_SUCCESS, "shim-sock-stream-pending-error", "(the pending code was answered twice)");
+        CHECK(SystemNative_Close(other) == 0, "shim-sock-stream-pending-error", "(close)");
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &other) == RHU_PAL_SUCCESS, "shim-sock-stream-pending-error", "(socket)");
+        g_nks.connect_end = RHU_ECONNREFUSED;
+        g_nks.connect_at = 1;
+        CHECK(SystemNative_Connect(other, rec, 16) == RHU_PAL_ECONNREFUSED, "shim-sock-stream-pending-error", "(a blocking connect to a peer that refuses did not answer ECONNREFUSED)");
+        g_nks.connect_end = 0;
+        g_nks.connect_at = 0;
+        CHECK(SystemNative_Close(other) == 0, "shim-sock-stream-pending-error", "(close)");
+        pass("shim-sock-stream-pending-error", " (a refused connect's code read once as the runtime's connection-refused error, then none; a blocking connect to a peer that refuses answers that error)");
+    }
+
+    /* the names */
+    {
+        memset(rec, 0xEE, sizeof rec);
+        len = 32;
+        CHECK(SystemNative_GetSockName(fd, rec, &len) == RHU_PAL_SUCCESS && len == 16 && sin_is(rec, 10, 49152), "shim-sock-stream-names", "(the local name is not the Linux IPv4 record of the socket's own address)");
+        memset(rec, 0xEE, sizeof rec);
+        len = 32;
+        CHECK(SystemNative_GetPeerName(fd, rec, &len) == RHU_PAL_SUCCESS && len == 16 && sin_is(rec, 20, 7), "shim-sock-stream-names", "(the peer name is not the Linux IPv4 record of the peer's address)");
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &other) == RHU_PAL_SUCCESS, "shim-sock-stream-names", "(socket)");
+        len = 32;
+        CHECK(SystemNative_GetPeerName(other, rec, &len) == RHU_PAL_ENOTCONN, "shim-sock-stream-names", "(an unconnected socket's peer name was not answered ENOTCONN)");
+        len = 8;
+        CHECK(SystemNative_GetSockName(fd, rec, &len) == RHU_PAL_EFAULT, "shim-sock-stream-names", "(a buffer shorter than the record was not answered EFAULT)");
+        CHECK(SystemNative_Close(other) == 0, "shim-sock-stream-names", "(close)");
+        pass("shim-sock-stream-names", " (the local and the peer address each in a Linux IPv4 record of 16 bytes, the port in network byte order; an unconnected socket's peer ENOTCONN; a buffer shorter than the record EFAULT)");
+    }
+
+    /* the data calls; the socket is non-blocking */
+    {
+        g_nks.tx_room = 8;
+        n = -1;
+        CHECK(SystemNative_Send(fd, (void *)twelve, 12, 0, &n) == RHU_PAL_SUCCESS && n == 8 && g_nkw.sent_len == 8 && memcmp(g_nkw.sent, twelve, 8) == 0, "shim-sock-stream-data", "(twelve bytes sent into a room of eight were not reported as eight)");
+        g_nks.tx_room = 16;
+        nk_bytes_arrive(h, "abcdefghij", 10);
+        CHECK(SystemNative_GetBytesAvailable(fd, &n) == RHU_PAL_SUCCESS && n == 10, "shim-sock-stream-data", "(the queued bytes were not counted as available)");
+        CHECK(SystemNative_Receive(fd, buf, 6, 0, &n) == RHU_PAL_SUCCESS && n == 6 && memcmp(buf, "abcdef", 6) == 0, "shim-sock-stream-data", "(the first six bytes were not received)");
+        CHECK(SystemNative_Receive(fd, buf, 32, 0, &n) == RHU_PAL_SUCCESS && n == 4 && memcmp(buf, "ghij", 4) == 0, "shim-sock-stream-data", "(the rest of the queue was not received)");
+        n = 5;
+        CHECK(SystemNative_Receive(fd, buf, 32, 0, &n) == RHU_PAL_EAGAIN && n == 0, "shim-sock-stream-data", "(an empty queue on a non-blocking socket was not answered EAGAIN)");
+        CHECK(SystemNative_Write(fd, twelve, 5) == 5 && g_nkw.sent_len == 5 && memcmp(g_nkw.sent, twelve, 5) == 0, "shim-sock-stream-data", "(Write on the descriptor did not send its bytes)");
+        nk_bytes_arrive(h, "xyz", 3);
+        CHECK(SystemNative_Read(fd, buf, 32) == 3 && memcmp(buf, "xyz", 3) == 0, "shim-sock-stream-data", "(Read on the descriptor did not receive the queued bytes)");
+        CHECK(SystemNative_Read(fd, buf, 32) == -1 && SystemNative_GetErrNo() == 11, "shim-sock-stream-data", "(Read on an empty queue did not set the platform's EAGAIN)");
+        CHECK(nk_stream(&other, &h2, 1), "shim-sock-stream-data", "(a second connected socket)");
+        g_nk[h2].peer_closed = 1;
+        nk_bump(&g_nk[h2]);
+        n = 5;
+        CHECK(SystemNative_Receive(other, buf, 32, 0, &n) == RHU_PAL_SUCCESS && n == 0, "shim-sock-stream-data", "(the peer's close was not read as 0 bytes)");
+        CHECK(SystemNative_Close(other) == 0, "shim-sock-stream-data", "(close)");
+        pass("shim-sock-stream-data", " (twelve bytes sent and the kernel's partial take of eight reported; the bytes queued received byte for byte and counted as available; 0 at the peer's close; an empty queue EAGAIN on a non-blocking socket; Read and Write on the descriptor move the same bytes and set the platform's errno)");
+    }
+
+    /* the peek */
+    {
+        nk_bytes_arrive(h, "peekab", 6);
+        CHECK(SystemNative_Receive(fd, buf, 4, RHU_PAL_SocketFlags_MSG_PEEK, &n) == RHU_PAL_SUCCESS && n == 4 && memcmp(buf, "peek", 4) == 0, "shim-sock-stream-peek", "(a peek did not answer the queued bytes)");
+        CHECK(SystemNative_Receive(fd, buf, 32, 0, &n) == RHU_PAL_SUCCESS && n == 6 && memcmp(buf, "peekab", 6) == 0, "shim-sock-stream-peek", "(a peek consumed the bytes it read)");
+        CHECK(SystemNative_Receive(fd, buf, 4, RHU_PAL_SocketFlags_MSG_OOB, &n) == RHU_PAL_ENOTSUP && SystemNative_Send(fd, (void *)twelve, 4, RHU_PAL_SocketFlags_MSG_DONTROUTE, &n) == RHU_PAL_ENOTSUP, "shim-sock-stream-peek", "(a flag the stack does not serve was not answered ENOTSUP)");
+        pass("shim-sock-stream-peek", " (a peek answers the bytes and leaves them queued; a flag the stack does not serve ENOTSUP)");
+    }
+
+    /* the blocking calls */
+    {
+        CHECK(SystemNative_FcntlSetIsNonBlocking(fd, 0) == 0, "shim-sock-stream-blocking", "(the socket was not set blocking)");
+        nk_late("late!", 5, 2);
+        CHECK(SystemNative_Receive(fd, buf, 32, 0, &n) == RHU_PAL_SUCCESS && n == 5 && memcmp(buf, "late!", 5) == 0, "shim-sock-stream-blocking", "(a blocking receive did not answer the bytes that arrived during its wait)");
+        g_nks.late_at = 0;
+        g_nks.tx_room = 0;
+        g_nkw.refused_sends = 0;
+        g_nks.room_at = 2;
+        CHECK(SystemNative_Send(fd, (void *)twelve, 12, 0, &n) == RHU_PAL_SUCCESS && n == 12, "shim-sock-stream-blocking", "(a blocking send with no room did not wait for room)");
+        g_nks.room_at = 0;
+        CHECK(SystemNative_Receive(fd, buf, 32, RHU_PAL_SocketFlags_MSG_DONTWAIT, &n) == RHU_PAL_EAGAIN, "shim-sock-stream-blocking", "(the don't-wait flag did not answer EAGAIN at once on a blocking socket)");
+        pass("shim-sock-stream-blocking", " (a blocking receive whose bytes arrive during its wait answers them; a blocking send with no room waits for room; the don't-wait flag answers EAGAIN at once on a blocking socket)");
+    }
+
+    /* the timeouts, by the kernel's clock */
+    {
+        CHECK(SystemNative_SetReceiveTimeout(fd, 30) == RHU_PAL_SUCCESS, "shim-sock-stream-timeout", "(the receive timeout was not taken)");
+        t0 = rhu_now_ns();
+        err = SystemNative_Receive(fd, buf, 32, 0, &n);
+        waited = rhu_now_ns() - t0;
+        CHECK(err == RHU_PAL_EAGAIN, "shim-sock-stream-timeout", "(a blocking receive at its receive timeout did not answer EAGAIN)");
+        CHECK(waited >= 30000000ull, "shim-sock-stream-timeout", "(a blocking receive answered before its bound)");
+        g_nks.tx_room = 0;
+        CHECK(SystemNative_SetSendTimeout(fd, 20) == RHU_PAL_SUCCESS, "shim-sock-stream-timeout", "(the send timeout was not taken)");
+        t0 = rhu_now_ns();
+        err = SystemNative_Send(fd, (void *)twelve, 12, 0, &n);
+        waited = rhu_now_ns() - t0;
+        CHECK(err == RHU_PAL_EAGAIN && waited >= 20000000ull, "shim-sock-stream-timeout", "(a blocking send with no room did not answer EAGAIN at its send timeout)");
+        g_nks.tx_room = 16;
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &other) == RHU_PAL_SUCCESS && SystemNative_SetSendTimeout(other, 20) == RHU_PAL_SUCCESS, "shim-sock-stream-timeout", "(socket)");
+        sin_record(rec, 20, 7);
+        t0 = rhu_now_ns();
+        err = SystemNative_Connect(other, rec, 16);
+        waited = rhu_now_ns() - t0;
+        CHECK(err == RHU_PAL_EINPROGRESS && waited >= 20000000ull, "shim-sock-stream-timeout", "(a blocking connect with no answer did not answer EINPROGRESS at the send timeout)");
+        CHECK(SystemNative_Close(other) == 0, "shim-sock-stream-timeout", "(close)");
+        CHECK(SystemNative_SetReceiveTimeout(fd, -1) == RHU_PAL_EINVAL && SystemNative_SetSendTimeout(fd, -1) == RHU_PAL_EINVAL, "shim-sock-stream-timeout", "(a negative timeout was not answered EINVAL)");
+        CHECK(SystemNative_SetReceiveTimeout(fd, 0) == RHU_PAL_SUCCESS && SystemNative_SetSendTimeout(fd, 0) == RHU_PAL_SUCCESS, "shim-sock-stream-timeout", "(the bounds were not cleared)");
+        pass("shim-sock-stream-timeout", " (a blocking receive answers EAGAIN at its receive timeout and not before; a blocking send at its send timeout; a blocking connect with no answer EINPROGRESS at the send timeout; a negative timeout EINVAL)");
+    }
+
+    /* shutdown */
+    {
+        uint32_t rd = g_nkw.shut[0], wr = g_nkw.shut[1], both = g_nkw.shut[2];
+        CHECK(SystemNative_Shutdown(fd, RHU_PAL_SocketShutdown_SHUT_READ) == RHU_PAL_SUCCESS && g_nkw.shut[0] == rd + 1 && g_nkw.shut[1] == wr && g_nkw.shut[2] == both, "shim-sock-stream-shutdown", "(the read direction did not reach the kernel as its own)");
+        CHECK(SystemNative_Shutdown(fd, RHU_PAL_SocketShutdown_SHUT_WRITE) == RHU_PAL_SUCCESS && g_nkw.shut[0] == rd + 1 && g_nkw.shut[1] == wr + 1 && g_nkw.shut[2] == both, "shim-sock-stream-shutdown", "(the write direction did not reach the kernel as its own)");
+        CHECK(SystemNative_Shutdown(fd, RHU_PAL_SocketShutdown_SHUT_BOTH) == RHU_PAL_SUCCESS && g_nkw.shut[0] == rd + 1 && g_nkw.shut[1] == wr + 1 && g_nkw.shut[2] == both + 1, "shim-sock-stream-shutdown", "(both directions did not reach the kernel as one call)");
+        CHECK(SystemNative_Shutdown(fd, 3) == RHU_PAL_EINVAL && SystemNative_Shutdown(fd, -1) == RHU_PAL_EINVAL && g_nkw.shut[2] == both + 1, "shim-sock-stream-shutdown", "(another value was not answered EINVAL)");
+        CHECK(SystemNative_Disconnect(fd) == RHU_PAL_SUCCESS && g_nkw.shut[2] == both + 2, "shim-sock-stream-shutdown", "(a disconnect did not shut both directions)");
+        pass("shim-sock-stream-shutdown", " (each of the three directions reaches the kernel as its own; another value EINVAL; a disconnect shuts both)");
+    }
+
+    /* a handle's close, as the managed class performs it */
+    {
+        rhu_pal_lingeroption zero_linger = { 1, 0 }, back = { 7, 7 };
+        intptr_t all[16];
+        uint32_t closes = g_nkw.closes;
+        CHECK(SystemNative_SetLingerOption(fd, (LingerOption *)&zero_linger) == RHU_PAL_SUCCESS, "shim-sock-stream-close", "(the zero linger of a handle's close was not answered as success)");
+        CHECK(SystemNative_GetLingerOption(fd, (LingerOption *)&back) == RHU_PAL_SUCCESS && back.OnOff == 1 && back.Seconds == 0, "shim-sock-stream-close", "(the zero linger was not read back)");
+        CHECK(SystemNative_Close(fd) == 0 && g_nkw.closes == closes + 1 && g_nkw.closed == h, "shim-sock-stream-close", "(the kernel's close was not called once for the socket's handle)");
+        CHECK(SystemNative_Close(fd) == -1 && SystemNative_GetErrNo() == 9 && g_nkw.closes == closes + 1, "shim-sock-stream-close", "(a closed descriptor was closed a second time)");
+        CHECK(SystemNative_Receive(fd, buf, 4, 0, &n) == RHU_PAL_EBADF, "shim-sock-stream-close", "(a closed descriptor was not answered EBADF)");
+        for (int32_t i = 0; i < 16; i++)
+            CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &all[i]) == RHU_PAL_SUCCESS && all[i] == 32 + i, "shim-sock-stream-close", "(the band's descriptors were not handed out from its first, the closed one free again)");
+        other = 5;
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &other) == RHU_PAL_EMFILE && other == -1, "shim-sock-stream-close", "(a seventeenth socket was not answered EMFILE)");
+        for (int32_t i = 0; i < 16; i++)
+            CHECK(SystemNative_Close(all[i]) == 0, "shim-sock-stream-close", "(close)");
+        pass("shim-sock-stream-close", " (a zero linger written as a handle's close writes it and read back; the kernel's close called once and the descriptor free for the next socket; a closed descriptor EBADF; the band's sixteen descriptors and the seventeenth socket EMFILE)");
+    }
+
+    out("SHIMTEST-SOCKSTREAM: ALL GOOD (a stream socket over a scripted kernel, from a native caller's side)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_SOCKSTREAM */
+
+#ifdef RHU_SHIMTEST_LADDER_SOCKLISTEN
+
+/* --- a listening socket from a native caller's side: a bind that hands the
+ * kernel the caller's Linux record, the port in use, the backlog, an accept
+ * with no connection completed on a non-blocking and on a blocking
+ * listener, an accept that writes the peer's address into the caller's
+ * record and makes a blocking stream socket at a new descriptor, and a
+ * blocking accept whose connection completes during its wait. --- */
+static int socklisten_ladder(void)
+{
+    uint8_t rec[32], rec2[32];
+    int32_t len = 0, err = 0, family = 0, type = 0, protocol = 0, listening = 0, flag = 0, lh = -1;
+    intptr_t lfd = -1, fd2 = -1, a1 = -1, a2 = -1;
+    uint64_t t0 = 0, waited = 0;
+    out("shimtest-socklisten: a listening socket over a scripted kernel, from a native caller's side");
+    CHECK(rhu_shim_init() == 0, "shim-sock-listen-init", "(initialization refused)");
+
+    /* bind */
+    {
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &lfd) == RHU_PAL_SUCCESS, "shim-sock-listen-bind", "(socket)");
+        lh = g_nkw.made;
+        sin_record(rec, 10, 8080);
+        CHECK(SystemNative_Bind(lfd, RHU_PAL_ProtocolType_PT_TCP, rec, 16) == RHU_PAL_SUCCESS && nk_address_is(&g_nkw.bound, 10, 8080), "shim-sock-listen-bind", "(the kernel was not given the address and the port of the caller's record)");
+        memset(rec, 0xEE, sizeof rec);
+        len = 32;
+        CHECK(SystemNative_GetSockName(lfd, rec, &len) == RHU_PAL_SUCCESS && len == 16 && sin_is(rec, 10, 8080), "shim-sock-listen-bind", "(the bound port was not read back through the local name)");
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &fd2) == RHU_PAL_SUCCESS, "shim-sock-listen-bind", "(socket)");
+        memset(rec, 0, sizeof rec);
+        rec[0] = 1;
+        CHECK(SystemNative_Bind(fd2, RHU_PAL_ProtocolType_PT_TCP, rec, 16) == RHU_PAL_EAFNOSUPPORT, "shim-sock-listen-bind", "(a Unix-domain record was not answered EAFNOSUPPORT)");
+        rec[0] = 10;
+        CHECK(SystemNative_Bind(fd2, RHU_PAL_ProtocolType_PT_TCP, rec, 28) == RHU_PAL_EAFNOSUPPORT, "shim-sock-listen-bind", "(an IPv6 record was not answered EAFNOSUPPORT)");
+        sin_record(rec, 10, 8081);
+        CHECK(SystemNative_Bind(fd2, RHU_PAL_ProtocolType_PT_TCP, rec, 8) == RHU_PAL_EFAULT, "shim-sock-listen-bind", "(a short record was not answered EFAULT)");
+        pass("shim-sock-listen-bind", " (the kernel given the address and the port of the caller's Linux record, the port in the host's order; the bound port read back through the local name; a record of another family EAFNOSUPPORT; a short record EFAULT)");
+    }
+
+    /* the port in use */
+    {
+        sin_record(rec, 10, 8080);
+        CHECK(SystemNative_Bind(fd2, RHU_PAL_ProtocolType_PT_TCP, rec, 16) == RHU_PAL_EADDRINUSE, "shim-sock-listen-in-use", "(a second socket's bind to the port in use was not answered EADDRINUSE)");
+        pass("shim-sock-listen-in-use", " (a second socket's bind to the port in use EADDRINUSE)");
+    }
+
+    /* listen */
+    {
+        CHECK(SystemNative_Listen(fd2, 4) == RHU_PAL_EINVAL, "shim-sock-listen-listen", "(an unbound socket was not answered EINVAL)");
+        CHECK(SystemNative_Listen(lfd, 4) == RHU_PAL_SUCCESS && g_nkw.backlog == 4, "shim-sock-listen-listen", "(the backlog was not handed to the kernel)");
+        CHECK(SystemNative_GetSocketType(lfd, &family, &type, &protocol, &listening) == RHU_PAL_SUCCESS && listening == 1, "shim-sock-listen-listen", "(the socket was not read as listening)");
+        CHECK(SystemNative_GetSocketType(fd2, &family, &type, &protocol, &listening) == RHU_PAL_SUCCESS && listening == 0, "shim-sock-listen-listen", "(a socket that does not listen was read as listening)");
+        CHECK(SystemNative_Close(fd2) == 0, "shim-sock-listen-listen", "(close)");
+        pass("shim-sock-listen-listen", " (the backlog handed to the kernel and the socket then read as listening; an unbound socket EINVAL)");
+    }
+
+    /* no connection completed */
+    {
+        CHECK(SystemNative_FcntlSetIsNonBlocking(lfd, 1) == 0, "shim-sock-listen-none-ready", "(the listener was not set non-blocking)");
+        a1 = 5;
+        len = 32;
+        CHECK(SystemNative_Accept(lfd, rec, &len, &a1) == RHU_PAL_EAGAIN && a1 == -1, "shim-sock-listen-none-ready", "(a non-blocking accept with none completed did not answer EAGAIN and no descriptor)");
+        CHECK(SystemNative_FcntlSetIsNonBlocking(lfd, 0) == 0 && SystemNative_SetReceiveTimeout(lfd, 30) == RHU_PAL_SUCCESS, "shim-sock-listen-none-ready", "(the listener was not set blocking with a bound)");
+        a1 = 5;
+        len = 32;
+        t0 = rhu_now_ns();
+        err = SystemNative_Accept(lfd, rec, &len, &a1);
+        waited = rhu_now_ns() - t0;
+        CHECK(err == RHU_PAL_EAGAIN && a1 == -1 && waited >= 30000000ull, "shim-sock-listen-none-ready", "(a blocking accept did not answer EAGAIN at the receive timeout)");
+        CHECK(SystemNative_SetReceiveTimeout(lfd, 0) == RHU_PAL_SUCCESS, "shim-sock-listen-none-ready", "(the bound was not cleared)");
+        pass("shim-sock-listen-none-ready", " (with no connection completed a non-blocking accept answers EAGAIN and no descriptor; a blocking accept answers EAGAIN at the receive timeout and not before)");
+    }
+
+    /* accept */
+    {
+        g_nk[lh].ready++;
+        nk_bump(&g_nk[lh]);
+        memset(rec, 0xEE, sizeof rec);
+        len = 32;
+        CHECK(SystemNative_Accept(lfd, rec, &len, &a1) == RHU_PAL_SUCCESS && a1 >= 32 && a1 <= 47 && a1 != lfd, "shim-sock-listen-accept", "(a completed connection was not accepted at a new descriptor of the band)");
+        CHECK(len == 16 && sin_is(rec, 20, 40001), "shim-sock-listen-accept", "(the accepted connection's peer address was not written)");
+        flag = 7;
+        CHECK(SystemNative_FcntlGetIsNonBlocking(a1, &flag) == 0 && flag == 0 && SystemNative_GetSocketType(a1, &family, &type, &protocol, &listening) == RHU_PAL_SUCCESS && type == 1 && listening == 0, "shim-sock-listen-accept", "(the accepted socket is not a blocking stream)");
+        len = 32;
+        CHECK(SystemNative_GetPeerName(a1, rec2, &len) == RHU_PAL_SUCCESS && len == 16 && sin_is(rec2, 20, 40001), "shim-sock-listen-accept", "(the accepted socket's peer name is not the address written)");
+        g_nkw.refused_accepts = 0;
+        g_nks.accept_at = 2;
+        memset(rec, 0xEE, sizeof rec);
+        len = 32;
+        CHECK(SystemNative_Accept(lfd, rec, &len, &a2) == RHU_PAL_SUCCESS && a2 >= 32 && a2 <= 47 && a2 != a1 && a2 != lfd && len == 16 && sin_is(rec, 20, 40002), "shim-sock-listen-accept", "(a blocking accept did not answer the connection that completed during its wait)");
+        g_nks.accept_at = 0;
+        pass("shim-sock-listen-accept", " (a completed connection accepted at a new descriptor of the band with the peer's address in a Linux IPv4 record of 16 bytes; the new socket a blocking stream whose peer name is that address; a blocking accept answers a connection that completes during its wait)");
+    }
+
+    /* close */
+    {
+        uint32_t closes = g_nkw.closes;
+        CHECK(SystemNative_Close(a1) == 0 && SystemNative_Close(a2) == 0 && SystemNative_Close(lfd) == 0 && g_nkw.closes == closes + 3, "shim-sock-listen-close", "(the three sockets were not each closed through the kernel once)");
+        pass("shim-sock-listen-close", " (the listener and the two accepted sockets each closed through the kernel once)");
+    }
+
+    out("SHIMTEST-SOCKLISTEN: ALL GOOD (a listening socket over a scripted kernel, from a native caller's side)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_SOCKLISTEN */
+
+#ifdef RHU_SHIMTEST_LADDER_SOCKDATAGRAM
+
+/* --- a datagram socket from a native caller's side: a message sent to the
+ * destination in the caller's record and one received with its sender's
+ * address, the default peer a connect sets, a datagram larger than the
+ * socket's buffer and one larger than the caller's, a message of several
+ * buffers leaving as one datagram and one datagram received across several
+ * buffers, and a blocking receive whose datagram arrives during its wait. --- */
+static int sockdatagram_ladder(void)
+{
+    static uint8_t big[100];
+    uint8_t dest[16], from[32], buf[48], control[24], p0[4], p1[4], p2[8];
+    rhu_pal_iovector v[3];
+    rhu_pal_messageheader m;
+    int64_t count = 0;
+    int32_t n = 0, family = 0, type = 0, protocol = 0, listening = 0, h = -1;
+    intptr_t fd = -1;
+    uint32_t sends = 0;
+    out("shimtest-sockdatagram: a datagram socket over a scripted kernel, from a native caller's side");
+    CHECK(rhu_shim_init() == 0, "shim-sock-datagram-init", "(initialization refused)");
+
+    /* create */
+    {
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_DGRAM, RHU_PAL_ProtocolType_PT_UDP, &fd) == RHU_PAL_SUCCESS && fd == 32 && g_nkw.type == 2 && g_nkw.protocol == 17, "shim-sock-datagram-create", "(the kernel was not asked for an IPv4 datagram socket)");
+        h = g_nkw.made;
+        CHECK(SystemNative_GetSocketType(fd, &family, &type, &protocol, &listening) == RHU_PAL_SUCCESS && family == 2 && type == 2 && protocol == 17 && listening == 0, "shim-sock-datagram-create", "(the type and protocol were not read back)");
+        pass("shim-sock-datagram-create", " (an IPv4 datagram socket, its type and protocol read back)");
+    }
+
+    /* the family's refusal whatever the pool holds: with both datagram
+     * sockets of the pool held, the family is still what the kernel
+     * judges first, and the pool's own refusal follows for a family it
+     * serves; neither refusal keeps a descriptor of the band */
+    {
+        intptr_t second = -1, other = -1, next = -1;
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_DGRAM, RHU_PAL_ProtocolType_PT_UDP, &second) == RHU_PAL_SUCCESS && second == 33, "shim-sock-datagram-family", "(the pool's second datagram socket was not given)");
+        uint32_t asked = g_nkw.sockets;
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET6, RHU_PAL_SocketType_SOCK_DGRAM, RHU_PAL_ProtocolType_PT_UDP, &other) == RHU_PAL_EAFNOSUPPORT && other == -1 && g_nkw.sockets == asked + 1 && g_nkw.family == RHU_NET_FAMILY_IPV6, "shim-sock-datagram-family", "(an IPv6 socket asked with both datagram sockets held was not refused by the kernel with the family's code)");
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_DGRAM, RHU_PAL_ProtocolType_PT_UDP, &other) == RHU_PAL_EMFILE && other == -1 && g_nkw.sockets == asked + 2, "shim-sock-datagram-family", "(a third IPv4 datagram socket was not refused by the kernel with the pool's code)");
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &next) == RHU_PAL_SUCCESS && next == 34, "shim-sock-datagram-family", "(a refused socket kept a descriptor: the next one given is not the band's third)");
+        CHECK(SystemNative_Close(next) == 0 && SystemNative_Close(second) == 0, "shim-sock-datagram-family", "(close)");
+        pass("shim-sock-datagram-family", " (with both datagram sockets of the kernel's pool held, an IPv6 datagram socket is refused with the family's code, EAFNOSUPPORT, and a third IPv4 one with the pool's, EMFILE; the kernel was asked both times and the band kept no descriptor)");
+    }
+
+    /* send to an address */
+    {
+        memset(&m, 0, sizeof m);
+        v[0].Base = (uint8_t *)"datagram";
+        v[0].Count = 8;
+        m.IOVectors = v;
+        m.IOVectorCount = 1;
+        count = 5;
+        CHECK(SystemNative_SendMessage(fd, (MessageHeader *)&m, 0, &count) == RHU_PAL_ENOTCONN && count == 0, "shim-sock-datagram-send-to", "(a send with no destination and no default peer was not answered ENOTCONN)");
+        sin_record(dest, 20, 5353);
+        m.SocketAddress = dest;
+        m.SocketAddressLen = 16;
+        sends = g_nkw.sends;
+        CHECK(SystemNative_SendMessage(fd, (MessageHeader *)&m, 0, &count) == RHU_PAL_SUCCESS && count == 8 && g_nkw.sends == sends + 1 && g_nkw.sent_len == 8 && memcmp(g_nkw.sent, "datagram", 8) == 0, "shim-sock-datagram-send-to", "(the datagram was not handed to the kernel whole)");
+        CHECK(!g_nkw.to_null && nk_address_is(&g_nkw.to, 20, 5353), "shim-sock-datagram-send-to", "(the kernel was not given the destination of the caller's record)");
+        m.ControlBuffer = control;
+        m.ControlBufferLen = 24;
+        CHECK(SystemNative_SendMessage(fd, (MessageHeader *)&m, 0, &count) == RHU_PAL_ENOTSUP && g_nkw.sends == sends + 1, "shim-sock-datagram-send-to", "(a message that carries control data was not answered ENOTSUP)");
+        pass("shim-sock-datagram-send-to", " (a datagram handed to the kernel whole with the destination of the caller's record; with no destination and no default peer ENOTCONN; a message that carries control data ENOTSUP)");
+    }
+
+    /* receive from an address */
+    {
+        nk_datagram_arrives(h, "reply-1", 7, 5353);
+        CHECK(SystemNative_GetBytesAvailable(fd, &n) == RHU_PAL_SUCCESS && n == 7, "shim-sock-datagram-receive-from", "(the next datagram's length was not counted as available)");
+        memset(from, 0xEE, sizeof from);
+        v[0].Base = buf;
+        v[0].Count = 32;
+        m.SocketAddress = from;
+        m.SocketAddressLen = 32;
+        m.ControlBuffer = control;
+        m.ControlBufferLen = 24;
+        m.Flags = 0x55;
+        CHECK(SystemNative_ReceiveMessage(fd, (MessageHeader *)&m, 0, &count) == RHU_PAL_SUCCESS && count == 7 && memcmp(buf, "reply-1", 7) == 0, "shim-sock-datagram-receive-from", "(the datagram was not received whole)");
+        CHECK(m.SocketAddressLen == 16 && sin_is(from, 20, 5353) && m.ControlBufferLen == 0 && m.Flags == 0, "shim-sock-datagram-receive-from", "(the sender's address, the control length or the flags are not as a datagram's)");
+        m.SocketAddressLen = 32;
+        count = 5;
+        CHECK(SystemNative_FcntlSetIsNonBlocking(fd, 1) == 0 && SystemNative_ReceiveMessage(fd, (MessageHeader *)&m, 0, &count) == RHU_PAL_EAGAIN && count == 0, "shim-sock-datagram-receive-from", "(with none queued a non-blocking receive was not answered EAGAIN)");
+        pass("shim-sock-datagram-receive-from", " (a datagram received whole with the sender's address in the caller's record, its length 16, no control data and no flag; the next datagram's length counted as available; none queued EAGAIN on a non-blocking socket)");
+    }
+
+    /* the default peer */
+    {
+        sin_record(dest, 20, 9000);
+        CHECK(SystemNative_Connect(fd, dest, 16) == RHU_PAL_SUCCESS && nk_address_is(&g_nkw.connected, 20, 9000), "shim-sock-datagram-default-peer", "(a datagram socket's connect did not set the default peer at once)");
+        CHECK(SystemNative_Send(fd, "to-peer", 7, 0, &n) == RHU_PAL_SUCCESS && n == 7 && g_nkw.to_null && g_nkw.sent_len == 7 && memcmp(g_nkw.sent, "to-peer", 7) == 0, "shim-sock-datagram-default-peer", "(a send with no destination did not go to the default peer)");
+        nk_datagram_arrives(h, "from-peer", 9, 9000);
+        CHECK(SystemNative_Receive(fd, buf, 32, 0, &n) == RHU_PAL_SUCCESS && n == 9 && memcmp(buf, "from-peer", 9) == 0, "shim-sock-datagram-default-peer", "(a receive did not read the default peer's datagram)");
+        pass("shim-sock-datagram-default-peer", " (a connect sets the default peer and answers at once; a send with no destination goes to it and a receive reads from it)");
+    }
+
+    /* a datagram too large */
+    {
+        n = 5;
+        CHECK(SystemNative_Send(fd, big, 100, 0, &n) == RHU_PAL_EMSGSIZE && n == 0, "shim-sock-datagram-oversize", "(a datagram larger than the socket's buffer was not answered EMSGSIZE on a send)");
+        nk_datagram_arrives(h, big, 40, 9000);
+        n = 5;
+        CHECK(SystemNative_Receive(fd, buf, 16, 0, &n) == RHU_PAL_EMSGSIZE && n == 0, "shim-sock-datagram-oversize", "(a datagram larger than the caller's buffer was not answered EMSGSIZE on a receive)");
+        pass("shim-sock-datagram-oversize", " (a datagram larger than the socket's buffer EMSGSIZE on a send; a datagram larger than the caller's buffer EMSGSIZE on a receive, nothing counted)");
+    }
+
+    /* several buffers */
+    {
+        memset(&m, 0, sizeof m);
+        v[0].Base = (uint8_t *)"one-";
+        v[0].Count = 4;
+        v[1].Base = (uint8_t *)"two-";
+        v[1].Count = 4;
+        v[2].Base = (uint8_t *)"three";
+        v[2].Count = 5;
+        m.IOVectors = v;
+        m.IOVectorCount = 3;
+        sends = g_nkw.sends;
+        CHECK(SystemNative_SendMessage(fd, (MessageHeader *)&m, 0, &count) == RHU_PAL_SUCCESS && count == 13 && g_nkw.sends == sends + 1 && g_nkw.sent_len == 13 && memcmp(g_nkw.sent, "one-two-three", 13) == 0, "shim-sock-datagram-gather", "(a datagram of several buffers did not leave as one)");
+        nk_datagram_arrives(h, "abcdefghijkl", 12, 9000);
+        v[0].Base = p0;
+        v[0].Count = 4;
+        v[1].Base = p1;
+        v[1].Count = 4;
+        v[2].Base = p2;
+        v[2].Count = 8;
+        CHECK(SystemNative_ReceiveMessage(fd, (MessageHeader *)&m, 0, &count) == RHU_PAL_SUCCESS && count == 12 && memcmp(p0, "abcd", 4) == 0 && memcmp(p1, "efgh", 4) == 0 && memcmp(p2, "ijkl", 4) == 0, "shim-sock-datagram-gather", "(one datagram was not received across three buffers in order)");
+        CHECK(SystemNative_FcntlSetIsNonBlocking(fd, 0) == 0, "shim-sock-datagram-gather", "(the socket was not set blocking)");
+        nk_late("late-dgram", 10, 2);
+        CHECK(SystemNative_Receive(fd, buf, 32, 0, &n) == RHU_PAL_SUCCESS && n == 10 && memcmp(buf, "late-dgram", 10) == 0, "shim-sock-datagram-gather", "(a blocking receive did not answer the datagram that arrived during its wait)");
+        g_nks.late_at = 0;
+        CHECK(SystemNative_Close(fd) == 0, "shim-sock-datagram-gather", "(close)");
+        pass("shim-sock-datagram-gather", " (three buffers leave as one datagram in one send, their bytes in order; one datagram received across three buffers in order; a blocking receive answers a datagram that arrives during its wait)");
+    }
+
+    out("SHIMTEST-SOCKDATAGRAM: ALL GOOD (a datagram socket over a scripted kernel, from a native caller's side)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_SOCKDATAGRAM */
+
+#ifdef RHU_SHIMTEST_LADDER_SOCKOPTIONS
+
+/* --- the socket options from a native caller's side: the kernel's three by
+ * their numbers, exclusive address use as the inverse of address reuse, the
+ * linger record, the two timeouts each bounding its own direction, the type
+ * and the listening state, the two buffer sizes of the board's pool with a
+ * write to one answered as success, every other option answered
+ * ENOPROTOOPT with the kernel not asked, and the pending error. The
+ * option numbers the kernel is read for are written here. --- */
+static int get_option(intptr_t fd, int32_t level, int32_t name, int32_t *value)
+{
+    int32_t len = 4;
+    int32_t rc = SystemNative_GetSockOpt(fd, level, name, (uint8_t *)value, &len);
+    return rc == RHU_PAL_SUCCESS && len != 4 ? -1 : rc;
+}
+
+static int set_option(intptr_t fd, int32_t level, int32_t name, int32_t value)
+{
+    return SystemNative_SetSockOpt(fd, level, name, (uint8_t *)&value, 4);
+}
+
+static int sockoptions_ladder(void)
+{
+    static const uint8_t twelve[12] = { 'h', 'e', 'l', 'l', 'o', ',', ' ', 'b', 'o', 'a', 'r', 'd' };
+    uint8_t rec[16], buf[16];
+    int32_t v = 0, len = 0, n = 0, err = 0, h = -1;
+    intptr_t fd = -1, dfd = -1, lfd = -1;
+    uint64_t t0 = 0, waited = 0;
+    out("shimtest-sockoptions: the socket options over a scripted kernel, from a native caller's side");
+    CHECK(rhu_shim_init() == 0, "shim-sock-options-init", "(initialization refused)");
+    g_nks.tx_room = 16;
+    CHECK(nk_stream(&fd, &h, 0), "shim-sock-options-init", "(a connected stream socket)");
+    CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_DGRAM, RHU_PAL_ProtocolType_PT_UDP, &dfd) == RHU_PAL_SUCCESS, "shim-sock-options-init", "(a datagram socket)");
+
+    /* the kernel's three */
+    {
+        CHECK(set_option(fd, RHU_PAL_SocketOptionLevel_SOL_TCP, RHU_PAL_SocketOptionName_SO_TCP_NODELAY, 1) == RHU_PAL_SUCCESS && g_nk[h].opt[1] == 1 && get_option(fd, RHU_PAL_SocketOptionLevel_SOL_TCP, RHU_PAL_SocketOptionName_SO_TCP_NODELAY, &v) == RHU_PAL_SUCCESS && v == 1, "shim-sock-options-kernel", "(no-delay was not written to the kernel as its option 1 and read back)");
+        CHECK(set_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_KEEPALIVE, 1) == RHU_PAL_SUCCESS && g_nk[h].opt[2] == 1 && get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_KEEPALIVE, &v) == RHU_PAL_SUCCESS && v == 1, "shim-sock-options-kernel", "(keep-alive was not written to the kernel as its option 2 and read back)");
+        CHECK(set_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_REUSEADDR, 1) == RHU_PAL_SUCCESS && g_nk[h].opt[3] == 1 && get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_REUSEADDR, &v) == RHU_PAL_SUCCESS && v == 1, "shim-sock-options-kernel", "(address reuse was not written to the kernel as its option 3 and read back)");
+        CHECK(get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_EXCLUSIVEADDRUSE, &v) == RHU_PAL_SUCCESS && v == 0, "shim-sock-options-kernel", "(exclusive address use was not read as the inverse of address reuse)");
+        CHECK(set_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_EXCLUSIVEADDRUSE, 1) == RHU_PAL_SUCCESS && g_nk[h].opt[3] == 0 && get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_REUSEADDR, &v) == RHU_PAL_SUCCESS && v == 0, "shim-sock-options-kernel", "(exclusive address use was not written as address reuse off)");
+        v = 1;
+        len = 2;
+        CHECK(SystemNative_SetSockOpt(fd, RHU_PAL_SocketOptionLevel_SOL_TCP, RHU_PAL_SocketOptionName_SO_TCP_NODELAY, (uint8_t *)&v, 2) == RHU_PAL_EINVAL && SystemNative_GetSockOpt(fd, RHU_PAL_SocketOptionLevel_SOL_TCP, RHU_PAL_SocketOptionName_SO_TCP_NODELAY, (uint8_t *)&v, &len) == RHU_PAL_EINVAL, "shim-sock-options-kernel", "(a value shorter than four bytes was not answered EINVAL)");
+        pass("shim-sock-options-kernel", " (no-delay, keep-alive and address reuse each written to the kernel by its own number and read back from it; exclusive address use the inverse of address reuse; a value shorter than four bytes EINVAL)");
+    }
+
+    /* linger */
+    {
+        rhu_pal_lingeroption linger = { 9, 9 };
+        CHECK(SystemNative_GetLingerOption(fd, (LingerOption *)&linger) == RHU_PAL_SUCCESS && linger.OnOff == 0 && linger.Seconds == 0, "shim-sock-options-linger", "(linger is not off at a socket's start)");
+        linger.OnOff = 1;
+        linger.Seconds = 5;
+        CHECK(SystemNative_SetLingerOption(fd, (LingerOption *)&linger) == RHU_PAL_SUCCESS, "shim-sock-options-linger", "(the linger record was not taken)");
+        linger.OnOff = 9;
+        linger.Seconds = 9;
+        CHECK(SystemNative_GetLingerOption(fd, (LingerOption *)&linger) == RHU_PAL_SUCCESS && linger.OnOff == 1 && linger.Seconds == 5, "shim-sock-options-linger", "(the linger record was not read back)");
+        linger.Seconds = -1;
+        CHECK(SystemNative_SetLingerOption(fd, (LingerOption *)&linger) == RHU_PAL_EINVAL, "shim-sock-options-linger", "(negative seconds were not answered EINVAL)");
+        linger.Seconds = 65536;
+        CHECK(SystemNative_SetLingerOption(fd, (LingerOption *)&linger) == RHU_PAL_EINVAL, "shim-sock-options-linger", "(seconds past 65535 were not answered EINVAL)");
+        linger.Seconds = 65535;
+        CHECK(SystemNative_SetLingerOption(fd, (LingerOption *)&linger) == RHU_PAL_SUCCESS, "shim-sock-options-linger", "(65535 seconds were not taken)");
+        CHECK(SystemNative_SetLingerOption(fd, NULL) == RHU_PAL_EFAULT && SystemNative_GetLingerOption(fd, NULL) == RHU_PAL_EFAULT, "shim-sock-options-linger", "(a null record was not answered EFAULT)");
+        linger.OnOff = 0;
+        CHECK(SystemNative_SetLingerOption(fd, (LingerOption *)&linger) == RHU_PAL_SUCCESS && SystemNative_GetLingerOption(fd, (LingerOption *)&linger) == RHU_PAL_SUCCESS && linger.OnOff == 0, "shim-sock-options-linger", "(linger was not set off)");
+        pass("shim-sock-options-linger", " (the linger record kept and read back, off at a socket's start; seconds outside 0 to 65535 EINVAL; a null record EFAULT)");
+    }
+
+    /* the two timeouts */
+    {
+        CHECK(SystemNative_SetReceiveTimeout(fd, 20) == RHU_PAL_SUCCESS && SystemNative_SetSendTimeout(fd, 60) == RHU_PAL_SUCCESS, "shim-sock-options-timeouts", "(the timeouts were not taken)");
+        t0 = rhu_now_ns();
+        err = SystemNative_Receive(fd, buf, 8, 0, &n);
+        waited = rhu_now_ns() - t0;
+        CHECK(err == RHU_PAL_EAGAIN && waited >= 20000000ull, "shim-sock-options-timeouts", "(a blocking receive did not answer at the receive timeout)");
+        g_nks.tx_room = 0;
+        t0 = rhu_now_ns();
+        err = SystemNative_Send(fd, (void *)twelve, 12, 0, &n);
+        waited = rhu_now_ns() - t0;
+        CHECK(err == RHU_PAL_EAGAIN && waited >= 60000000ull, "shim-sock-options-timeouts", "(a blocking send answered before the send timeout)");
+        g_nks.tx_room = 16;
+        CHECK(SystemNative_SetReceiveTimeout(fd, 0) == RHU_PAL_SUCCESS && SystemNative_SetSendTimeout(fd, 0) == RHU_PAL_SUCCESS, "shim-sock-options-timeouts", "(the bounds were not cleared)");
+        pass("shim-sock-options-timeouts", " (the two timeouts kept apart: a blocking receive answers at the receive timeout of 20 ms and a blocking send not before the send timeout of 60 ms)");
+    }
+
+    /* the type and the listening state */
+    {
+        CHECK(get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_TYPE, &v) == RHU_PAL_SUCCESS && v == 1, "shim-sock-options-type", "(a stream socket's type was not read as 1)");
+        CHECK(get_option(dfd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_TYPE, &v) == RHU_PAL_SUCCESS && v == 2, "shim-sock-options-type", "(a datagram socket's type was not read as 2)");
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &lfd) == RHU_PAL_SUCCESS, "shim-sock-options-type", "(socket)");
+        sin_record(rec, 10, 8090);
+        CHECK(SystemNative_Bind(lfd, RHU_PAL_ProtocolType_PT_TCP, rec, 16) == RHU_PAL_SUCCESS && SystemNative_Listen(lfd, 2) == RHU_PAL_SUCCESS, "shim-sock-options-type", "(listen)");
+        CHECK(get_option(lfd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_ACCEPTCONN, &v) == RHU_PAL_SUCCESS && v == 1, "shim-sock-options-type", "(a listener was not read as accepting connections)");
+        CHECK(get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_ACCEPTCONN, &v) == RHU_PAL_SUCCESS && v == 0, "shim-sock-options-type", "(a connected socket was read as accepting connections)");
+        CHECK(SystemNative_Close(lfd) == 0, "shim-sock-options-type", "(close)");
+        pass("shim-sock-options-type", " (the type read as the runtime's number for a stream and for a datagram socket; a listener read as accepting connections)");
+    }
+
+    /* the buffer sizes: the scripted pool's 2048, 1024 and 96 */
+    {
+        CHECK(get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_RCVBUF, &v) == RHU_PAL_SUCCESS && v == 2048, "shim-sock-options-buffers", "(a stream socket's receive buffer size was not read from the pool)");
+        CHECK(get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_SNDBUF, &v) == RHU_PAL_SUCCESS && v == 1024, "shim-sock-options-buffers", "(a stream socket's send buffer size was not read from the pool)");
+        CHECK(get_option(dfd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_RCVBUF, &v) == RHU_PAL_SUCCESS && v == 96 && get_option(dfd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_SNDBUF, &v) == RHU_PAL_SUCCESS && v == 96, "shim-sock-options-buffers", "(a datagram socket's buffer size was not read from the pool)");
+        CHECK(set_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_RCVBUF, 65536) == RHU_PAL_SUCCESS && get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_RCVBUF, &v) == RHU_PAL_SUCCESS && v == 2048, "shim-sock-options-buffers", "(a write to a stream's buffer size was not answered as success with the size as it was)");
+        CHECK(set_option(dfd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_SNDBUF, 65536) == RHU_PAL_SUCCESS && get_option(dfd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_SNDBUF, &v) == RHU_PAL_SUCCESS && v == 96, "shim-sock-options-buffers", "(a write to a datagram socket's buffer size was not answered as success with the size as it was)");
+        pass("shim-sock-options-buffers", " (a stream socket's two buffer sizes and a datagram socket's read from the row's pool; a write to a buffer size answered as success and the size as it was)");
+    }
+
+    /* the options outside the served set */
+    {
+        uint32_t asked = g_nkw.options;
+        CHECK(set_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_BROADCAST, 1) == RHU_PAL_ENOPROTOOPT, "shim-sock-options-refusal", "(an option outside the served set was accepted)");
+        CHECK(get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_BROADCAST, &v) == RHU_PAL_ENOPROTOOPT, "shim-sock-options-refusal", "(a read of an option outside the served set was not answered ENOPROTOOPT)");
+        CHECK(set_option(fd, RHU_PAL_SocketOptionLevel_SOL_IP, RHU_PAL_SocketOptionName_SO_IP_TTL, 64) == RHU_PAL_ENOPROTOOPT && get_option(fd, RHU_PAL_SocketOptionLevel_SOL_IP, RHU_PAL_SocketOptionName_SO_IP_TTL, &v) == RHU_PAL_ENOPROTOOPT, "shim-sock-options-refusal", "(the time-to-live was not answered ENOPROTOOPT)");
+        CHECK(get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_LINGER, &v) == RHU_PAL_ENOPROTOOPT && get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_RCVTIMEO, &v) == RHU_PAL_ENOPROTOOPT && get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_SNDTIMEO, &v) == RHU_PAL_ENOPROTOOPT && get_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_ERROR, &v) == RHU_PAL_ENOPROTOOPT, "shim-sock-options-refusal", "(linger, a timeout or the pending error asked by name was not answered ENOPROTOOPT)");
+        CHECK(set_option(dfd, RHU_PAL_SocketOptionLevel_SOL_UDP, 1, 1) == RHU_PAL_ENOPROTOOPT && set_option(fd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_TYPE, 2) == RHU_PAL_ENOPROTOOPT, "shim-sock-options-refusal", "(an option of another level, or a write to the type, was not answered ENOPROTOOPT)");
+        CHECK(g_nkw.options == asked, "shim-sock-options-refusal", "(the kernel was asked for an option outside the served set)");
+        CHECK(set_option(dfd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_KEEPALIVE, 1) == RHU_PAL_ENOTSUP && get_option(dfd, RHU_PAL_SocketOptionLevel_SOL_SOCKET, RHU_PAL_SocketOptionName_SO_KEEPALIVE, &v) == RHU_PAL_ENOTSUP, "shim-sock-options-refusal", "(a stream option on a datagram socket was not answered as the kernel's ENOTSUP)");
+        pass("shim-sock-options-refusal", " (an option outside the served set ENOPROTOOPT on a read and on a write and the kernel not asked; a stream option on a datagram socket the kernel's ENOTSUP)");
+    }
+
+    /* the pending error */
+    {
+        g_nk[h].pending = RHU_ECONNRESET;
+        nk_bump(&g_nk[h]);
+        err = 0;
+        CHECK(SystemNative_GetSocketErrorOption(fd, &err) == RHU_PAL_SUCCESS && err == RHU_PAL_ECONNRESET, "shim-sock-options-error", "(a reset's pending code was not read as ECONNRESET)");
+        CHECK(SystemNative_GetSocketErrorOption(fd, &err) == RHU_PAL_SUCCESS && err == RHU_PAL_SUCCESS, "shim-sock-options-error", "(the pending code was answered twice)");
+        CHECK(SystemNative_GetSocketErrorOption(fd, NULL) == RHU_PAL_EFAULT, "shim-sock-options-error", "(a null result pointer was not answered EFAULT)");
+        CHECK(SystemNative_Close(fd) == 0 && SystemNative_Close(dfd) == 0, "shim-sock-options-error", "(close)");
+        pass("shim-sock-options-error", " (a reset's pending code read once as ECONNRESET, then none; a null result pointer EFAULT)");
+    }
+
+    out("SHIMTEST-SOCKOPTIONS: ALL GOOD (the socket options over a scripted kernel, from a native caller's side)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_SOCKOPTIONS */
+
+#ifdef RHU_SHIMTEST_LADDER_SOCKPOLL
+
+/* --- Poll over the socket band from a native caller's side: a socket's
+ * level as poll events and the level standing over two polls, the events
+ * asked and the two that are always answered, a poll with a bound and one
+ * with none that sleeps until bytes arrive, one call over a file of the
+ * store and a socket, and a descriptor of the band that is not open. --- */
+static int32_t g_pl_h;
+
+static void pl_bytes_arrive(void)
+{
+    nk_bytes_arrive(g_pl_h, "z", 1);
+}
+
+static int pl_poll(rhu_pal_pollevent *pe, uint32_t count, int32_t ms, uint32_t want)
+{
+    uint32_t trig = 99;
+    return SystemNative_Poll(pe, count, ms, &trig) == RHU_PAL_SUCCESS && trig == want;
+}
+
+static int sockpoll_ladder(void)
+{
+    rhu_pal_pollevent pe[2];
+    uint8_t rec[16], buf[8];
+    int32_t h = -1, h2 = -1, h3 = -1, got = 0;
+    intptr_t fd = -1, fd2 = -1, fd3 = -1, file = -1;
+    uint64_t t0 = 0, waited = 0;
+    uint32_t closes = 0;
+    int ok = 0;
+    out("shimtest-sockpoll: Poll over the socket band over a scripted kernel, from a native caller's side");
+    CHECK(rhu_shim_init() == 0, "shim-sock-poll-init", "(initialization refused)");
+    g_nks.tx_room = 16;
+    closes = g_nkw.closes;
+
+    /* the level */
+    {
+        CHECK(nk_stream(&fd, &h, 1), "shim-sock-poll-level", "(a connected stream socket was not made)");
+        nk_bytes_arrive(h, "abc", 3);
+        pe[0].FileDescriptor = (int32_t)fd;
+        pe[0].Events = RHU_PAL_POLLIN | RHU_PAL_POLLOUT;
+        pe[0].TriggeredEvents = 0x7F;
+        CHECK(pl_poll(pe, 1, 0, 1) && pe[0].TriggeredEvents == (RHU_PAL_POLLIN | RHU_PAL_POLLOUT), "shim-sock-poll-level", "(bytes queued and transmit room were not answered as POLLIN and POLLOUT)");
+        CHECK(pl_poll(pe, 1, 0, 1) && pe[0].TriggeredEvents == (RHU_PAL_POLLIN | RHU_PAL_POLLOUT), "shim-sock-poll-level", "(a second poll of a standing level answered no event: an edge-triggered poll)");
+        CHECK(SystemNative_Receive(fd, buf, 8, 0, &got) == RHU_PAL_SUCCESS && got == 3, "shim-sock-poll-level", "(the queued bytes were not received)");
+        pe[0].Events = RHU_PAL_POLLIN;
+        CHECK(pl_poll(pe, 1, 0, 0) && pe[0].TriggeredEvents == 0, "shim-sock-poll-level", "(a quiet socket polled for POLLIN answered an event)");
+        pass("shim-sock-poll-level", " (a socket's level as poll events: nothing for a quiet socket, POLLIN and POLLOUT with bytes queued and transmit room; a second poll of the standing level answers the same events)");
+    }
+
+    /* the events asked, and the two always answered */
+    {
+        pe[0].Events = RHU_PAL_POLLOUT;
+        CHECK(pl_poll(pe, 1, 0, 1) && pe[0].TriggeredEvents == RHU_PAL_POLLOUT, "shim-sock-poll-events", "(a poll for POLLOUT alone did not answer POLLOUT alone)");
+        nk_bytes_arrive(h, "d", 1);
+        pe[0].Events = RHU_PAL_POLLIN;
+        CHECK(pl_poll(pe, 1, 0, 1) && pe[0].TriggeredEvents == RHU_PAL_POLLIN, "shim-sock-poll-events", "(a poll for POLLIN alone answered an event that was not asked)");
+        nk_peer_closes(h);
+        CHECK(pl_poll(pe, 1, 0, 1) && pe[0].TriggeredEvents == (RHU_PAL_POLLIN | RHU_PAL_POLLHUP), "shim-sock-poll-events", "(the peer's close did not add POLLHUP)");
+        pe[0].Events = 0;
+        CHECK(pl_poll(pe, 1, 0, 1) && pe[0].TriggeredEvents == RHU_PAL_POLLHUP, "shim-sock-poll-events", "(POLLHUP was not answered where no event was asked)");
+        sin_record(rec, 20, 7);
+        CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &fd2) == RHU_PAL_SUCCESS, "shim-sock-poll-events", "(socket)");
+        h2 = g_nkw.made;
+        CHECK(SystemNative_FcntlSetIsNonBlocking(fd2, 1) == 0 && SystemNative_Connect(fd2, rec, 16) == RHU_PAL_EINPROGRESS, "shim-sock-poll-events", "(a handshake was not started)");
+        pe[0].FileDescriptor = (int32_t)fd2;
+        pe[0].Events = RHU_PAL_POLLOUT;
+        CHECK(pl_poll(pe, 1, 0, 0) && pe[0].TriggeredEvents == 0, "shim-sock-poll-events", "(a handshake in flight answered an event)");
+        nk_end(&g_nk[h2], RHU_ECONNREFUSED);
+        CHECK(pl_poll(pe, 1, 0, 1) && pe[0].TriggeredEvents == (RHU_PAL_POLLOUT | RHU_PAL_POLLERR | RHU_PAL_POLLHUP), "shim-sock-poll-events", "(a handshake that did not succeed was not answered as POLLOUT, POLLERR and POLLHUP)");
+        pass("shim-sock-poll-events", " (only the events asked are answered; the peer's close adds POLLHUP and a handshake that did not succeed POLLERR and POLLHUP, asked or not; a handshake in flight answers no event)");
+    }
+
+    /* a bound, and no bound */
+    {
+        CHECK(nk_stream(&fd3, &h3, 1), "shim-sock-poll-timeout", "(a connected stream socket was not made)");
+        pe[0].FileDescriptor = (int32_t)fd3;
+        pe[0].Events = RHU_PAL_POLLIN;
+        t0 = rhu_now_ns();
+        ok = pl_poll(pe, 1, 30, 0);
+        waited = rhu_now_ns() - t0;
+        CHECK(ok && pe[0].TriggeredEvents == 0 && waited >= 30000000ull, "shim-sock-poll-timeout", "(a quiet socket polled with a bound of 30 ms did not answer none at the bound)");
+        g_pl_h = h3;
+        g_nk_script[0] = pl_bytes_arrive;
+        CHECK(nk_below_start(), "shim-sock-poll-timeout", "(the second thread did not start)");
+        g_nk_open = 1;
+        ok = pl_poll(pe, 1, -1, 1);
+        CHECK(ok && pe[0].TriggeredEvents == RHU_PAL_POLLIN && g_nk_begun == 1u, "shim-sock-poll-timeout", "(a poll with no bound did not sleep until the bytes' arrival)");
+        CHECK(SystemNative_Receive(fd3, buf, 8, 0, &got) == RHU_PAL_SUCCESS && got == 1, "shim-sock-poll-timeout", "(the byte was not received)");
+        pass("shim-sock-poll-timeout", " (a quiet socket polled with a bound answers none at the bound and not before; a poll with no bound ends at the bytes' arrival, the caller asleep until then)");
+    }
+
+    /* a file and a socket in one call */
+    {
+        file = SystemNative_Open("/tmp/poll.txt", RHU_PAL_O_RDWR | RHU_PAL_O_CREAT | RHU_PAL_O_TRUNC, 0x1A4);
+        CHECK(file >= 3 && file <= 15, "shim-sock-poll-file-and-socket", "(a file of the store did not open)");
+        pe[0].FileDescriptor = (int32_t)file;
+        pe[0].Events = RHU_PAL_POLLIN | RHU_PAL_POLLOUT;
+        pe[1].FileDescriptor = (int32_t)fd3;
+        pe[1].Events = RHU_PAL_POLLIN;
+        CHECK(pl_poll(pe, 2, 0, 1) && pe[0].TriggeredEvents == (RHU_PAL_POLLIN | RHU_PAL_POLLOUT) && pe[1].TriggeredEvents == 0, "shim-sock-poll-file-and-socket", "(a file and a quiet socket were not answered as the file alone)");
+        CHECK(pl_poll(pe, 2, -1, 1) && pe[0].TriggeredEvents == (RHU_PAL_POLLIN | RHU_PAL_POLLOUT) && pe[1].TriggeredEvents == 0, "shim-sock-poll-file-and-socket", "(a ready file did not end a poll with no bound at once)");
+        nk_bytes_arrive(h3, "y", 1);
+        CHECK(pl_poll(pe, 2, 0, 2) && pe[1].TriggeredEvents == RHU_PAL_POLLIN, "shim-sock-poll-file-and-socket", "(the socket's level was not answered beside the file)");
+        CHECK(SystemNative_Receive(fd3, buf, 8, 0, &got) == RHU_PAL_SUCCESS && got == 1, "shim-sock-poll-file-and-socket", "(the byte was not received)");
+        pe[0].FileDescriptor = 0;
+        pe[0].Events = RHU_PAL_POLLIN;
+        t0 = rhu_now_ns();
+        ok = pl_poll(pe, 2, 30, 0);
+        waited = rhu_now_ns() - t0;
+        CHECK(ok && waited >= 30000000ull, "shim-sock-poll-file-and-socket", "(the console's input and a quiet socket did not wait together to the bound)");
+        CHECK(SystemNative_Close(file) == 0, "shim-sock-poll-file-and-socket", "(the file did not close)");
+        pass("shim-sock-poll-file-and-socket", " (one call over a file of the store and a socket: the file answers at once and the socket its level; the console's input and a quiet socket wait together to the bound)");
+    }
+
+    /* a descriptor of the band that is not open */
+    {
+        pe[0].FileDescriptor = 47;
+        pe[0].Events = RHU_PAL_POLLIN;
+        CHECK(pl_poll(pe, 1, 0, 1) && pe[0].TriggeredEvents == RHU_PAL_POLLNVAL, "shim-sock-poll-invalid", "(a slot of the band that is not open was not answered POLLNVAL)");
+        CHECK(pl_poll(pe, 1, -1, 1) && pe[0].TriggeredEvents == RHU_PAL_POLLNVAL, "shim-sock-poll-invalid", "(a descriptor that is not open did not end a poll with no bound)");
+        CHECK(SystemNative_Close(fd2) == 0, "shim-sock-poll-invalid", "(close)");
+        pe[0].FileDescriptor = (int32_t)fd2;
+        CHECK(pl_poll(pe, 1, 0, 1) && pe[0].TriggeredEvents == RHU_PAL_POLLNVAL, "shim-sock-poll-invalid", "(a closed socket's descriptor was not answered POLLNVAL)");
+        pass("shim-sock-poll-invalid", " (a descriptor of the band that is not open answers POLLNVAL and counts as triggered, with or without a bound)");
+    }
+
+    /* close */
+    {
+        CHECK(SystemNative_Close(fd) == 0 && SystemNative_Close(fd3) == 0 && g_nkw.closes == closes + 3, "shim-sock-poll-close", "(the three sockets were not each closed through the kernel once)");
+        pass("shim-sock-poll-close", " (the sockets closed through the kernel once each)");
+    }
+
+    out("SHIMTEST-SOCKPOLL: ALL GOOD (Poll over the socket band over a scripted kernel, from a native caller's side)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_SOCKPOLL */
+
+#ifdef RHU_SHIMTEST_LADDER_SOCKPORT
+
+/* --- the socket event port from a native caller's side: a port and its
+ * buffer, the port table at its edge (four ports together, the fifth
+ * refused, a closed port's place given again), the refusals of a
+ * registration, a socket's level at its first wait
+ * and its risen bits after, several sockets in one wait, a buffer with
+ * less room than events, and a registration and a close made by a second
+ * thread while the ladder's thread sleeps in its wait. Seven sockets: the
+ * first four connected streams, the next two with a handshake in flight,
+ * the last made in a closed socket's place. --- */
+#define PT_RW (RHU_PAL_SocketEvents_SA_READ | RHU_PAL_SocketEvents_SA_WRITE)
+#define PT_DATA(i) ((uintptr_t)0xA0000000u + (uintptr_t)(i))
+static intptr_t g_pt_port, g_pt_fd[7];
+static int32_t g_pt_h[7];
+static uint32_t g_pt_slept; /* a wait that this ladder had to wake itself */
+
+static void pt_bytes_on_second(void)
+{
+    nk_bytes_arrive(g_pt_h[1], "b", 1);
+}
+
+/* A registration while the ladder's thread sleeps in its wait. The unit's
+ * move of the one word wakes that thread at once, so it is back before
+ * this thread's next step; if it is not, it slept through the
+ * registration, and this thread wakes it so that the run can say so. */
+static void pt_register_third(void)
+{
+    (void)SystemNative_TryChangeSocketEventRegistration(g_pt_port, g_pt_fd[2], RHU_PAL_SocketEvents_SA_NONE, PT_RW, PT_DATA(2));
+    if (g_nk_back < 2u) {
+        g_pt_slept = 1;
+        nk_events_move();
+    }
+}
+
+/* A registered socket closed while the ladder's thread sleeps in its wait,
+ * a new socket made at its descriptor with bytes queued, then bytes for
+ * the first socket. */
+static void pt_close_fourth(void)
+{
+    (void)SystemNative_Close(g_pt_fd[3]);
+    if (nk_stream(&g_pt_fd[6], &g_pt_h[6], 1))
+        nk_bytes_arrive(g_pt_h[6], "e", 1);
+    nk_bytes_arrive(g_pt_h[0], "a", 1);
+}
+
+static int pt_is(const rhu_pal_socketevent *ev, int32_t n, uintptr_t data, int32_t events)
+{
+    for (int32_t i = 0; i < n; i++) {
+        if (ev[i].Data == data)
+            return ev[i].Events == events;
+    }
+    return 0;
+}
+
+static int pt_took(intptr_t fd, int32_t count)
+{
+    uint8_t buf[8];
+    int32_t got = -1;
+    return SystemNative_Receive(fd, buf, 8, 0, &got) == RHU_PAL_SUCCESS && got == count;
+}
+
+static int sockport_ladder(void)
+{
+    rhu_pal_socketevent *ev = NULL;
+    SocketEvent *buffer = NULL;
+    intptr_t port2 = -1;
+    uint8_t rec[16];
+    int32_t n = 0, rc = 0;
+    uint32_t closes = 0, takes = 0;
+    out("shimtest-sockport: the socket event port over a scripted kernel, from a native caller's side");
+    CHECK(rhu_shim_init() == 0, "shim-sock-port-init", "(initialization refused)");
+    g_nks.tx_room = 16;
+
+    /* a port and its buffer */
+    {
+        CHECK(SystemNative_CreateSocketEventPort(NULL) == RHU_PAL_EFAULT, "shim-sock-port-create", "(a null pointer was not answered EFAULT)");
+        CHECK(SystemNative_CreateSocketEventPort(&g_pt_port) == RHU_PAL_SUCCESS && g_pt_port > 143, "shim-sock-port-create", "(a port's handle is not a value outside every descriptor band)");
+        CHECK(SystemNative_Close(g_pt_port) == -1 && *__errno_location() == RHU_GERR_EBADF, "shim-sock-port-create", "(the descriptor layer's close took a port's handle)");
+        CHECK(SystemNative_CreateSocketEventPort(&port2) == RHU_PAL_SUCCESS && port2 > 143 && port2 != g_pt_port, "shim-sock-port-create", "(a second port was not made beside the first)");
+        CHECK(SystemNative_CloseSocketEventPort(port2) == RHU_PAL_SUCCESS && SystemNative_CloseSocketEventPort(port2) == RHU_PAL_EBADF, "shim-sock-port-create", "(a port did not close once and answer EBADF after)");
+        CHECK(SystemNative_CreateSocketEventBuffer(1024, NULL) == RHU_PAL_EFAULT && SystemNative_CreateSocketEventBuffer(-1, &buffer) == RHU_PAL_EFAULT, "shim-sock-port-create", "(a null pointer or a count below 0 was not answered EFAULT)");
+        CHECK(SystemNative_CreateSocketEventBuffer(1024, &buffer) == RHU_PAL_SUCCESS && buffer != NULL, "shim-sock-port-create", "(the event buffer was not made)");
+        ev = (rhu_pal_socketevent *)buffer;
+        pass("shim-sock-port-create", " (a port's handle outside every descriptor band, a bad descriptor to the descriptor layer's close; a second port beside it; the event buffer made; a null pointer EFAULT)");
+    }
+
+    /* the port table at its edge: three more ports beside the first, each
+     * closed again before the registrations */
+    {
+        intptr_t more[3] = { -1, -1, -1 }, fifth = 0, again = -1;
+        for (int i = 0; i < 3; i++) {
+            CHECK(SystemNative_CreateSocketEventPort(&more[i]) == RHU_PAL_SUCCESS && more[i] > 143 && more[i] != g_pt_port, "shim-sock-port-table", "(four ports did not stand together)");
+        }
+        CHECK(more[0] != more[1] && more[0] != more[2] && more[1] != more[2], "shim-sock-port-table", "(two ports that stand together share a handle)");
+        CHECK(SystemNative_CreateSocketEventPort(&fifth) == RHU_PAL_EMFILE && fifth == -1, "shim-sock-port-table", "(a fifth port was not refused with EMFILE and -1 for its handle)");
+        CHECK(SystemNative_CloseSocketEventPort(more[1]) == RHU_PAL_SUCCESS && SystemNative_CreateSocketEventPort(&again) == RHU_PAL_SUCCESS && again == more[1], "shim-sock-port-table", "(a closed port's place was not given again)");
+        CHECK(SystemNative_CloseSocketEventPort(more[0]) == RHU_PAL_SUCCESS && SystemNative_CloseSocketEventPort(again) == RHU_PAL_SUCCESS && SystemNative_CloseSocketEventPort(more[2]) == RHU_PAL_SUCCESS,
+              "shim-sock-port-table", "(a port of the four did not close)");
+        pass("shim-sock-port-table", " (four ports stand together; a fifth is refused with EMFILE and -1 for its handle; a closed port's place is given again)");
+    }
+
+    /* the refusals of a registration */
+    {
+        for (int i = 0; i < 4; i++) {
+            CHECK(nk_stream(&g_pt_fd[i], &g_pt_h[i], 1), "shim-sock-port-register", "(a connected stream socket was not made)");
+        }
+        CHECK(SystemNative_TryChangeSocketEventRegistration(g_pt_port, g_pt_fd[0], RHU_PAL_SocketEvents_SA_NONE, 0x40, PT_DATA(0)) == RHU_PAL_EINVAL
+              && SystemNative_TryChangeSocketEventRegistration(g_pt_port, g_pt_fd[0], 0x40, PT_RW, PT_DATA(0)) == RHU_PAL_EINVAL, "shim-sock-port-register", "(an event bit outside the five was not answered EINVAL)");
+        CHECK(SystemNative_TryChangeSocketEventRegistration(g_pt_port, g_pt_fd[0], PT_RW, PT_RW, PT_DATA(9)) == RHU_PAL_SUCCESS, "shim-sock-port-register", "(the same events twice were not answered as success)");
+        CHECK(SystemNative_TryChangeSocketEventRegistration(g_pt_port, 5, RHU_PAL_SocketEvents_SA_NONE, PT_RW, 0) == RHU_PAL_ENOTSOCK, "shim-sock-port-register", "(a descriptor outside the band was not answered ENOTSOCK)");
+        CHECK(SystemNative_TryChangeSocketEventRegistration(g_pt_port, 47, RHU_PAL_SocketEvents_SA_NONE, PT_RW, 0) == RHU_PAL_EBADF
+              && SystemNative_TryChangeSocketEventRegistration(port2, g_pt_fd[0], RHU_PAL_SocketEvents_SA_NONE, PT_RW, 0) == RHU_PAL_EBADF, "shim-sock-port-register", "(a slot not open or a port not open was not answered EBADF)");
+        CHECK(SystemNative_TryChangeSocketEventRegistration(g_pt_port, g_pt_fd[1], PT_RW, RHU_PAL_SocketEvents_SA_NONE, 0) == RHU_PAL_ENOENT, "shim-sock-port-register", "(a removal with no registration was not answered ENOENT)");
+        nk_bytes_arrive(g_pt_h[0], "aa", 2);
+        CHECK(SystemNative_TryChangeSocketEventRegistration(g_pt_port, g_pt_fd[0], RHU_PAL_SocketEvents_SA_NONE, PT_RW, PT_DATA(0)) == RHU_PAL_SUCCESS, "shim-sock-port-register", "(the same events twice changed a registration, or a socket was not registered)");
+        CHECK(SystemNative_TryChangeSocketEventRegistration(g_pt_port, g_pt_fd[0], RHU_PAL_SocketEvents_SA_NONE, PT_RW, PT_DATA(0)) == RHU_PAL_EEXIST, "shim-sock-port-register", "(a socket registered twice was not answered EEXIST)");
+        CHECK(SystemNative_TryChangeSocketEventRegistration(g_pt_port, g_pt_fd[1], RHU_PAL_SocketEvents_SA_NONE, PT_RW, PT_DATA(1)) == RHU_PAL_SUCCESS
+              && SystemNative_TryChangeSocketEventRegistration(g_pt_port, g_pt_fd[3], RHU_PAL_SocketEvents_SA_NONE, PT_RW, PT_DATA(3)) == RHU_PAL_SUCCESS, "shim-sock-port-register", "(a socket was not registered)");
+        pass("shim-sock-port-register", " (an event bit outside the five EINVAL; the same events twice a success that changes nothing; a descriptor outside the band ENOTSOCK, a slot not open and a port not open EBADF; a socket registered twice EEXIST; a removal with no registration ENOENT)");
+    }
+
+    /* the level, once */
+    {
+        n = 1024;
+        CHECK(SystemNative_WaitForSocketEvents(g_pt_port, buffer, &n) == RHU_PAL_SUCCESS && n == 3 && pt_is(ev, n, PT_DATA(0), PT_RW)
+              && pt_is(ev, n, PT_DATA(1), RHU_PAL_SocketEvents_SA_WRITE) && pt_is(ev, n, PT_DATA(3), RHU_PAL_SocketEvents_SA_WRITE), "shim-sock-port-level-once", "(the first wait did not report each registered socket's level once with its data word)");
+        pass("shim-sock-port-level-once", " (a socket readable before its registration is reported at the first wait with its data word: its level, read and write)");
+    }
+
+    /* the risen bits, once */
+    {
+        g_nk_script[0] = pt_bytes_on_second;
+        g_nk_script[1] = pt_register_third;
+        g_nk_script[2] = pt_close_fourth;
+        CHECK(nk_below_start(), "shim-sock-port-risen-once", "(the second thread did not start)");
+        g_nk_open = 1;
+        n = 1024;
+        rc = SystemNative_WaitForSocketEvents(g_pt_port, buffer, &n);
+        g_nk_back = 1;
+        CHECK(rc == RHU_PAL_SUCCESS && n == 1 && pt_is(ev, n, PT_DATA(1), RHU_PAL_SocketEvents_SA_READ) && g_nk_begun == 1u, "shim-sock-port-risen-once", "(the port reported socket 1 a second time with no new edge (a level-triggered port))");
+        CHECK(pt_took(g_pt_fd[1], 1) && pt_took(g_pt_fd[0], 2), "shim-sock-port-risen-once", "(the queued bytes were not received)");
+        nk_bytes_arrive(g_pt_h[0], "x", 1);
+        n = 1024;
+        CHECK(SystemNative_WaitForSocketEvents(g_pt_port, buffer, &n) == RHU_PAL_SUCCESS && n == 1 && pt_is(ev, n, PT_DATA(0), RHU_PAL_SocketEvents_SA_READ), "shim-sock-port-risen-once", "(bytes that arrived after the queue was emptied were not reported once)");
+        CHECK(pt_took(g_pt_fd[0], 1), "shim-sock-port-risen-once", "(the byte was not received)");
+        pass("shim-sock-port-risen-once", " (with that level standing the second wait sleeps and reports the next socket's arrival alone; bytes that arrive after a receive emptied the queue are reported once)");
+    }
+
+    /* several sockets in one wait */
+    {
+        sin_record(rec, 20, 7);
+        for (int i = 4; i < 6; i++) {
+            CHECK(SystemNative_Socket(RHU_PAL_AddressFamily_AF_INET, RHU_PAL_SocketType_SOCK_STREAM, RHU_PAL_ProtocolType_PT_TCP, &g_pt_fd[i]) == RHU_PAL_SUCCESS, "shim-sock-port-several", "(socket)");
+            g_pt_h[i] = g_nkw.made;
+            CHECK(SystemNative_FcntlSetIsNonBlocking(g_pt_fd[i], 1) == 0 && SystemNative_Connect(g_pt_fd[i], rec, 16) == RHU_PAL_EINPROGRESS
+                  && SystemNative_TryChangeSocketEventRegistration(g_pt_port, g_pt_fd[i], RHU_PAL_SocketEvents_SA_NONE, PT_RW, PT_DATA(i)) == RHU_PAL_SUCCESS, "shim-sock-port-several", "(a socket with its handshake in flight was not registered)");
+        }
+        nk_end(&g_nk[g_pt_h[4]], 0);
+        nk_end(&g_nk[g_pt_h[5]], RHU_ECONNREFUSED);
+        nk_peer_closes(g_pt_h[1]);
+        n = 1024;
+        CHECK(SystemNative_WaitForSocketEvents(g_pt_port, buffer, &n) == RHU_PAL_SUCCESS && n == 3 && pt_is(ev, n, PT_DATA(4), RHU_PAL_SocketEvents_SA_WRITE) && pt_is(ev, n, PT_DATA(1), PT_RW)
+              && pt_is(ev, n, PT_DATA(5), PT_RW | RHU_PAL_SocketEvents_SA_ERROR), "shim-sock-port-several", "(three sockets were not each reported once with their own events)");
+        pass("shim-sock-port-several", " (three sockets in one wait, each once with its own data word: a handshake's end as write, the peer's close as read and write, a handshake that did not succeed as read, write and error)");
+    }
+
+    /* a buffer with room for fewer */
+    {
+        nk_bytes_arrive(g_pt_h[0], "1", 1);
+        nk_bytes_arrive(g_pt_h[3], "2", 1);
+        nk_bytes_arrive(g_pt_h[4], "3", 1);
+        memset(&ev[2], 0xEE, sizeof ev[2]);
+        n = 2;
+        CHECK(SystemNative_WaitForSocketEvents(g_pt_port, buffer, &n) == RHU_PAL_SUCCESS && n == 2 && pt_is(ev, 2, PT_DATA(0), RHU_PAL_SocketEvents_SA_READ)
+              && pt_is(ev, 2, PT_DATA(3), RHU_PAL_SocketEvents_SA_READ) && ev[2].Data == (uintptr_t)0xEEEEEEEEu, "shim-sock-port-buffer-bound", "(room for two events was not answered with two and no record past them)");
+        n = 1024;
+        CHECK(SystemNative_WaitForSocketEvents(g_pt_port, buffer, &n) == RHU_PAL_SUCCESS && n == 1 && pt_is(ev, n, PT_DATA(4), RHU_PAL_SocketEvents_SA_READ), "shim-sock-port-buffer-bound", "(the third socket's bits were not kept for the next wait)");
+        n = 0;
+        CHECK(SystemNative_WaitForSocketEvents(g_pt_port, buffer, &n) == RHU_PAL_EINVAL, "shim-sock-port-buffer-bound", "(room for no event was not answered EINVAL)");
+        n = 4;
+        CHECK(SystemNative_WaitForSocketEvents(g_pt_port, NULL, &n) == RHU_PAL_EFAULT && SystemNative_WaitForSocketEvents(g_pt_port, buffer, NULL) == RHU_PAL_EFAULT, "shim-sock-port-buffer-bound", "(a null pointer was not answered EFAULT)");
+        CHECK(pt_took(g_pt_fd[0], 1) && pt_took(g_pt_fd[3], 1) && pt_took(g_pt_fd[4], 1), "shim-sock-port-buffer-bound", "(the queued bytes were not received)");
+        pass("shim-sock-port-buffer-bound", " (three sockets risen and room for two: two reported, no record written past them, the third at the next wait; room for none EINVAL; a null buffer EFAULT)");
+    }
+
+    /* a registration under a waiter */
+    {
+        nk_bytes_arrive(g_pt_h[2], "c", 1);
+        g_nk_open = 2;
+        n = 1024;
+        rc = SystemNative_WaitForSocketEvents(g_pt_port, buffer, &n);
+        g_nk_back = 2;
+        CHECK(g_pt_slept == 0, "shim-sock-port-registration-under-waiter", "(a waiter slept through a registration)");
+        CHECK(rc == RHU_PAL_SUCCESS && n == 1 && pt_is(ev, n, PT_DATA(2), PT_RW) && g_nk_begun == 2u, "shim-sock-port-registration-under-waiter", "(the wait did not report the socket registered under it)");
+        CHECK(pt_took(g_pt_fd[2], 1), "shim-sock-port-registration-under-waiter", "(the byte was not received)");
+        pass("shim-sock-port-registration-under-waiter", " (a socket registered while a wait sleeps wakes it: the wait reports that socket's level)");
+    }
+
+    /* a close under a waiter */
+    {
+        closes = g_nkw.closes;
+        takes = g_nk_takes[g_pt_h[0]];
+        g_nk_open = 3;
+        n = 1024;
+        rc = SystemNative_WaitForSocketEvents(g_pt_port, buffer, &n);
+        g_nk_back = 3;
+        CHECK(rc == RHU_PAL_SUCCESS && n == 1 && pt_is(ev, n, PT_DATA(0), RHU_PAL_SocketEvents_SA_READ), "shim-sock-port-close-under-waiter", "(the port reported a closed socket's registration: its data word for a new socket at its descriptor)");
+        CHECK(g_nk_begun == 3u && g_nkw.closes == closes + 1 && g_pt_fd[6] == g_pt_fd[3] && g_nk_takes[g_pt_h[0]] >= takes + 3u, "shim-sock-port-close-under-waiter", "(the waiter did not sleep again with no event after the close and the new socket's bytes)");
+        pass("shim-sock-port-close-under-waiter", " (a registered socket closed while a wait sleeps ends its registration: a new socket at its descriptor is not reported, the waiter sleeps again with no event and reports the next arrival alone)");
+    }
+
+    /* the port closes */
+    {
+        closes = g_nkw.closes;
+        CHECK(SystemNative_CloseSocketEventPort(g_pt_port) == RHU_PAL_SUCCESS, "shim-sock-port-close", "(the port did not close)");
+        n = 4;
+        CHECK(SystemNative_TryChangeSocketEventRegistration(g_pt_port, g_pt_fd[0], PT_RW, RHU_PAL_SocketEvents_SA_NONE, 0) == RHU_PAL_EBADF
+              && SystemNative_WaitForSocketEvents(g_pt_port, buffer, &n) == RHU_PAL_EBADF && n == 0, "shim-sock-port-close", "(a closed port's handle was not answered EBADF)");
+        CHECK(SystemNative_FreeSocketEventBuffer(buffer) == RHU_PAL_SUCCESS, "shim-sock-port-close", "(the buffer was not freed)");
+        for (int i = 0; i < 7; i++) {
+            if (i != 3) {
+                CHECK(SystemNative_Close(g_pt_fd[i]) == 0, "shim-sock-port-close", "(close)");
+            }
+        }
+        CHECK(g_nkw.closes == closes + 6, "shim-sock-port-close", "(the sockets were not each closed through the kernel once)");
+        pass("shim-sock-port-close", " (the port closed: its handle then EBADF to a registration and to a wait; the buffer freed; the sockets closed through the kernel once each)");
+    }
+
+    out("SHIMTEST-SOCKPORT: ALL GOOD (the socket event port over a scripted kernel, from a native caller's side)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_SOCKPORT */
+
+#ifdef RHU_SHIMTEST_LADDER_SOCKRESOLVE
+
+/* --- name resolution from a native caller's side: a name whose answer
+ * arrives while the caller sleeps, the board's own name and localhost
+ * with no query, each refusal of the kernel's resolver as the runtime's
+ * answer, a filing that finds no slot free, and every slot released. --- */
+static void rs_answer_arrives(void)
+{
+    nk_query_ends(g_nkw2.handle);
+}
+
+static int32_t rs_lookup(const char *name, int32_t family, rhu_pal_hostentry *e)
+{
+    memset(e, 0xEE, sizeof *e);
+    return SystemNative_GetHostEntryForName((const uint8_t *)name, family, (HostEntry *)e);
+}
+
+static int rs_empty(const rhu_pal_hostentry *e)
+{
+    return e->CanonicalName == NULL && e->Aliases == NULL && e->IPAddressList == NULL && e->IPAddressCount == 0;
+}
+
+/* An entry of one IPv4 address under the name asked; the entry is freed. */
+static int rs_one(rhu_pal_hostentry *e, const char *name, uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+{
+    const uint8_t want[4] = { a, b, c, d };
+    int ok = e->CanonicalName != NULL && e->IPAddressList != NULL && strcmp((const char *)e->CanonicalName, name) == 0 && e->Aliases == NULL && e->IPAddressCount == 1
+             && memcmp(e->IPAddressList[0].Address, want, 4) == 0 && e->IPAddressList[0].IsIPv6 == 0;
+    SystemNative_FreeHostEntry((HostEntry *)e);
+    return ok;
+}
+
+static int sockresolve_ladder(void)
+{
+    static const uint8_t first[4] = { 198, 51, 100, 7 }, second[4] = { 198, 51, 100, 8 };
+    rhu_pal_hostentry e;
+    char own[64], upper[64];
+    int32_t rc = 0;
+    uint32_t filings = 0;
+    uint64_t t0 = 0, waited = 0;
+    out("shimtest-sockresolve: name resolution over a scripted kernel, from a native caller's side");
+    CHECK(rhu_shim_init() == 0, "shim-sock-resolve-init", "(initialization refused)");
+    nk_medium_up();
+
+    /* a name the server answers */
+    {
+        g_nk_script[0] = rs_answer_arrives;
+        CHECK(nk_below_start(), "shim-sock-resolve-name", "(the second thread did not start)");
+        g_nk_open = 1;
+        rc = rs_lookup("device.example", RHU_PAL_AddressFamily_AF_UNSPEC, &e);
+        CHECK(nk_slots_held() == 0, "shim-sock-resolve-name", "(a lookup ended with its resolver slot still held)");
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_SUCCESS && g_nk_begun == 1u, "shim-sock-resolve-name", "(the lookup did not sleep until the answer and then succeed)");
+        CHECK(g_nkw2.name_len == 14 && memcmp(g_nkw2.name, "device.example", 14) == 0, "shim-sock-resolve-name", "(the query was not filed with the name's bytes)");
+        CHECK(e.CanonicalName != NULL && strcmp((const char *)e.CanonicalName, "device.example") == 0 && e.Aliases == NULL && e.IPAddressCount == 2 && e.IPAddressList != NULL, "shim-sock-resolve-name", "(the entry does not carry the name asked, no aliases and two addresses)");
+        CHECK(memcmp(e.IPAddressList[0].Address, first, 4) == 0 && memcmp(e.IPAddressList[1].Address, second, 4) == 0 && e.IPAddressList[0].IsIPv6 == 0 && e.IPAddressList[1].IsIPv6 == 0
+              && e.IPAddressList[0].ScopeId == 0, "shim-sock-resolve-name", "(the addresses are not the kernel's two, as IPv4)");
+        SystemNative_FreeHostEntry((HostEntry *)&e);
+        SystemNative_FreeHostEntry(NULL);
+        CHECK(e.CanonicalName == NULL && e.IPAddressList == NULL && e.IPAddressCount == 0, "shim-sock-resolve-name", "(the freed entry still names its allocations)");
+        pass("shim-sock-resolve-name", " (a name the server answers: the query filed with the name's bytes, the caller asleep until the answer, then an entry with the name asked as its canonical name, no aliases and the two IPv4 addresses as the kernel wrote them; the entry's two allocations freed)");
+    }
+
+    /* the board's own name */
+    {
+        CHECK(SystemNative_GetHostName((uint8_t *)own, 64) == 0 && own[0] != '\0', "shim-sock-resolve-own-name", "(the host name was not read)");
+        for (uint32_t i = 0; i < 64u; i++) {
+            upper[i] = own[i] >= 'a' && own[i] <= 'z' ? (char)(own[i] - ('a' - 'A')) : own[i];
+            if (own[i] == '\0')
+                break;
+        }
+        filings = g_nkw2.filings;
+        rc = rs_lookup(own, RHU_PAL_AddressFamily_AF_INET, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_SUCCESS && rs_one(&e, own, 192, 0, 2, 10), "shim-sock-resolve-own-name", "(the board's own name did not answer the address of the medium's lease)");
+        rc = rs_lookup(upper, RHU_PAL_AddressFamily_AF_UNSPEC, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_SUCCESS && rs_one(&e, upper, 192, 0, 2, 10), "shim-sock-resolve-own-name", "(the board's own name in another letter case did not answer the lease's address)");
+        g_nks2.lease.source = RHU_NET_LEASE_NONE;
+        rc = rs_lookup(own, RHU_PAL_AddressFamily_AF_UNSPEC, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_SUCCESS && rs_one(&e, own, 127, 0, 0, 1), "shim-sock-resolve-own-name", "(with no lease the board's own name did not answer 127.0.0.1)");
+        g_nks2.media = 0;
+        rc = rs_lookup(own, RHU_PAL_AddressFamily_AF_UNSPEC, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_SUCCESS && rs_one(&e, own, 127, 0, 0, 1), "shim-sock-resolve-own-name", "(with no medium the board's own name did not answer 127.0.0.1)");
+        CHECK(g_nkw2.filings == filings, "shim-sock-resolve-own-name", "(a query was filed for the board's own name)");
+        nk_medium_up();
+        pass("shim-sock-resolve-own-name", " (the board's own name in either letter case files no query: the address of the medium's lease, and 127.0.0.1 with no lease and with no medium)");
+    }
+
+    /* localhost */
+    {
+        filings = g_nkw2.filings;
+        rc = rs_lookup("localhost", RHU_PAL_AddressFamily_AF_UNSPEC, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_SUCCESS && rs_one(&e, "localhost", 127, 0, 0, 1), "shim-sock-resolve-localhost", "(localhost did not answer 127.0.0.1)");
+        rc = rs_lookup("LocalHost", RHU_PAL_AddressFamily_AF_INET, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_SUCCESS && rs_one(&e, "LocalHost", 127, 0, 0, 1), "shim-sock-resolve-localhost", "(localhost in another letter case did not answer 127.0.0.1)");
+        CHECK(g_nkw2.filings == filings, "shim-sock-resolve-localhost", "(a query was filed for localhost)");
+        pass("shim-sock-resolve-localhost", " (localhost in either letter case answers 127.0.0.1 and files no query)");
+    }
+
+    /* the refusals */
+    {
+        g_nks2.end_at_filing = 1;
+        g_nks2.end = RHU_EHOSTUNREACH;
+        rc = rs_lookup("absent.example", RHU_PAL_AddressFamily_AF_UNSPEC, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_NONAME && rs_empty(&e), "shim-sock-resolve-failures", "(a name the server does not have was not answered EAI_NONAME with an empty entry)");
+        g_nks2.filing = RHU_EINVAL;
+        rc = rs_lookup("bad_name", RHU_PAL_AddressFamily_AF_UNSPEC, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_NONAME && rs_empty(&e), "shim-sock-resolve-failures", "(a name the resolver does not take was not answered EAI_NONAME with an empty entry)");
+        g_nks2.filing = RHU_ENETUNREACH;
+        rc = rs_lookup("device.example", RHU_PAL_AddressFamily_AF_UNSPEC, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_AGAIN && rs_empty(&e), "shim-sock-resolve-failures", "(no name server was not answered EAI_AGAIN with an empty entry)");
+        g_nks2.filing = 0;
+        g_nks2.end = RHU_ETIMEDOUT;
+        rc = rs_lookup("device.example", RHU_PAL_AddressFamily_AF_UNSPEC, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_AGAIN && rs_empty(&e), "shim-sock-resolve-failures", "(the stack's budget passed was not answered EAI_AGAIN with an empty entry)");
+        filings = g_nkw2.filings;
+        rc = rs_lookup("device.example", RHU_PAL_AddressFamily_AF_INET6, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_FAMILY && rs_empty(&e), "shim-sock-resolve-failures", "(the IPv6 family was not answered EAI_FAMILY with an empty entry)");
+        rc = rs_lookup("device.example", 99, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_FAMILY && rs_empty(&e) && g_nkw2.filings == filings, "shim-sock-resolve-failures", "(a family outside the three was not answered EAI_FAMILY with no query)");
+        CHECK(SystemNative_GetHostEntryForName(NULL, 0, (HostEntry *)&e) == RHU_PAL_GetAddrInfoErrorFlags_EAI_BADARG
+              && SystemNative_GetHostEntryForName((const uint8_t *)"device.example", 0, NULL) == RHU_PAL_GetAddrInfoErrorFlags_EAI_BADARG, "shim-sock-resolve-failures", "(a null name or entry was not answered EAI_BADARG)");
+        pass("shim-sock-resolve-failures", " (a name the server does not have and a name the resolver does not take answer EAI_NONAME; no name server and the stack's budget passed EAI_AGAIN; the IPv6 family and a family outside the three EAI_FAMILY with no query; a null name or entry EAI_BADARG; each leaves the entry empty)");
+    }
+
+    /* no slot free */
+    {
+        g_nks2.end = 0;
+        filings = g_nkw2.filings;
+        g_nks2.busy = 1;
+        g_nks2.free_at = filings + 1u;
+        rc = rs_lookup("device.example", RHU_PAL_AddressFamily_AF_UNSPEC, &e);
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_SUCCESS && e.IPAddressCount == 2 && g_nkw2.filings == filings + 2u, "shim-sock-resolve-no-slot", "(a filing was not tried again when the one word moved)");
+        SystemNative_FreeHostEntry((HostEntry *)&e);
+        filings = g_nkw2.filings;
+        g_nks2.busy = 1;
+        g_nks2.free_at = 0;
+        t0 = rhu_now_ns();
+        rc = rs_lookup("device.example", RHU_PAL_AddressFamily_AF_UNSPEC, &e);
+        waited = rhu_now_ns() - t0;
+        CHECK(rc == RHU_PAL_GetAddrInfoErrorFlags_EAI_AGAIN && rs_empty(&e) && waited >= 2000000000ull && g_nkw2.filings == filings + 2u, "shim-sock-resolve-no-slot", "(with no slot freed the lookup did not answer EAI_AGAIN at its bound after one more filing)");
+        g_nks2.busy = 0;
+        pass("shim-sock-resolve-no-slot", " (with no slot free the filing is tried again when the one word moves and then succeeds; with none freed it answers EAI_AGAIN at its bound and not before, after one more filing)");
+    }
+
+    /* every slot released */
+    {
+        CHECK(nk_slots_held() == 0 && g_nkw2.filed == 4u && g_nkw2.final_reads == 4u, "shim-sock-resolve-slots", "(a slot the kernel handed out was not released by one final read)");
+        pass("shim-sock-resolve-slots", " (every slot the kernel handed out was released by one final read: after the answer, after each failure, after the wait for a slot)");
+    }
+
+    out("SHIMTEST-SOCKRESOLVE: ALL GOOD (name resolution over a scripted kernel, from a native caller's side)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_SOCKRESOLVE */
+
+#ifdef RHU_SHIMTEST_LADDER_SOCKNETINFO
+
+/* --- the network interface records from a native caller's side: the
+ * loopback and the medium in one block with their addresses, the prefix
+ * length for three masks, the name and the type by the medium's kind, a
+ * link that is down, a medium with no lease, a kernel with no medium, and
+ * the enumeration through the caller's three functions. --- */
+static struct {
+    uint32_t v4, v6, ll;
+    void *context;
+    char name[2][16], link_name[16];
+    rhu_pal_ipaddressinfo address[2];
+    rhu_pal_linklayeraddressinfo link;
+} g_ni;
+
+static void ni_copy(char *dst, const char *src)
+{
+    uint32_t i = 0;
+    for (; i < 15u && src[i] != '\0'; i++)
+        dst[i] = src[i];
+    dst[i] = '\0';
+}
+
+static void ni_v4(void *context, const char *name, IpAddressInfo *info)
+{
+    g_ni.context = context;
+    if (g_ni.v4 < 2u) {
+        ni_copy(g_ni.name[g_ni.v4], name);
+        memcpy(&g_ni.address[g_ni.v4], info, sizeof g_ni.address[0]);
+    }
+    g_ni.v4++;
+}
+
+static void ni_v6(void *context, const char *name, IpAddressInfo *info, uint32_t *scope)
+{
+    (void)context;
+    (void)name;
+    (void)info;
+    (void)scope;
+    g_ni.v6++;
+}
+
+static void ni_ll(void *context, const char *name, LinkLayerAddressInfo *info)
+{
+    g_ni.context = context;
+    ni_copy(g_ni.link_name, name);
+    memcpy(&g_ni.link, info, sizeof g_ni.link);
+    g_ni.ll++;
+}
+
+static int ni_read(int32_t *ni, rhu_pal_networkinterfaceinfo **ifs, int32_t *na, rhu_pal_ipaddressinfo **addrs)
+{
+    *ni = -1;
+    *na = -1;
+    *ifs = NULL;
+    *addrs = NULL;
+    return SystemNative_GetNetworkInterfaces(ni, (NetworkInterfaceInfo **)ifs, na, (IpAddressInfo **)addrs) == 0;
+}
+
+static int socknetinfo_ladder(void)
+{
+    static const uint8_t hw[6] = { 0x02, 0x00, 0x5E, 0x10, 0x20, 0x30 };
+    static const uint8_t lo4[4] = { 127, 0, 0, 1 }, ip4[4] = { 192, 0, 2, 10 };
+    static const uint32_t masks[3][5] = { { 255, 255, 240, 0, 20 }, { 255, 255, 255, 255, 32 }, { 255, 0, 0, 0, 8 } };
+    rhu_pal_networkinterfaceinfo *ifs = NULL;
+    rhu_pal_ipaddressinfo *addrs = NULL;
+    int32_t ni = 0, na = 0;
+    out("shimtest-socknetinfo: the network interface records over a scripted kernel, from a native caller's side");
+    CHECK(rhu_shim_init() == 0, "shim-sock-netinfo-init", "(initialization refused)");
+    nk_medium_up();
+
+    /* the records */
+    {
+        CHECK(SystemNative_GetNetworkInterfaces(NULL, (NetworkInterfaceInfo **)&ifs, &na, (IpAddressInfo **)&addrs) == -1 && *__errno_location() == RHU_GERR_EFAULT, "shim-sock-netinfo-interfaces", "(a null pointer was not answered EFAULT)");
+        CHECK(ni_read(&ni, &ifs, &na, &addrs) && ni == 2 && na == 2 && ifs != NULL && (void *)addrs == (void *)(ifs + 2), "shim-sock-netinfo-interfaces", "(the loopback and the medium were not answered in one block, the addresses after the interfaces)");
+        CHECK(strcmp(ifs[0].Name, "lo") == 0 && ifs[0].InterfaceIndex == 1 && ifs[0].HardwareType == RHU_PAL_NetworkInterfaceType_Loopback && ifs[0].OperationalState == RHU_PAL_OperationalStatus_Up
+              && ifs[0].NumAddressBytes == 0, "shim-sock-netinfo-interfaces", "(the loopback's record is not lo at index 1, up, with no hardware address)");
+        CHECK(addrs[0].InterfaceIndex == 1 && addrs[0].NumAddressBytes == 4 && memcmp(addrs[0].AddressBytes, lo4, 4) == 0 && addrs[0].PrefixLength == 8, "shim-sock-netinfo-interfaces", "(the loopback's address is not 127.0.0.1 with a prefix of 8)");
+        CHECK(strcmp(ifs[1].Name, "eth0") == 0 && ifs[1].InterfaceIndex == 2 && ifs[1].HardwareType == RHU_PAL_NetworkInterfaceType_Ethernet && ifs[1].OperationalState == RHU_PAL_OperationalStatus_Up,
+              "shim-sock-netinfo-interfaces", "(the medium's record is not eth0 at index 2, Ethernet, up)");
+        CHECK(ifs[1].NumAddressBytes == 6 && memcmp(ifs[1].AddressBytes, hw, 6) == 0 && ifs[1].Speed == -1 && ifs[1].Mtu == -1 && ifs[1].SupportsMulticast == 0, "shim-sock-netinfo-interfaces", "(the medium's record does not carry its six hardware bytes, or its speed and MTU are not -1)");
+        CHECK(addrs[1].InterfaceIndex == 2 && addrs[1].NumAddressBytes == 4 && memcmp(addrs[1].AddressBytes, ip4, 4) == 0, "shim-sock-netinfo-interfaces", "(the medium's address is not the lease's)");
+        CHECK(addrs[1].PrefixLength == 24, "shim-sock-netinfo-interfaces", "(an address's prefix length is not the count of its mask's bits)");
+        free(ifs);
+        pass("shim-sock-netinfo-interfaces", " (the loopback and the medium in one block, the address records after the interface records: lo at index 1 with 127.0.0.1 and a prefix of 8; eth0 at index 2, Ethernet, up, its six hardware bytes, speed and MTU not known, with the lease's address and a prefix of 24; a null pointer EFAULT)");
+    }
+
+    /* the prefix length */
+    {
+        for (int i = 0; i < 3; i++) {
+            g_nks2.lease.mask = nk_ip4(masks[i][0], masks[i][1], masks[i][2], masks[i][3]);
+            CHECK(ni_read(&ni, &ifs, &na, &addrs) && na == 2 && addrs[1].PrefixLength == masks[i][4], "shim-sock-netinfo-prefix", "(a prefix length is not the count of its mask's bits)");
+            free(ifs);
+        }
+        nk_medium_up();
+        pass("shim-sock-netinfo-prefix", " (the prefix length is the count of the mask's bits: 20 for 255.255.240.0, 32 for 255.255.255.255, 8 for 255.0.0.0)");
+    }
+
+    /* the name and the type by the medium's kind */
+    {
+        g_nks2.medium.kind = RHU_NET_MEDIUM_WIRELESS;
+        CHECK(ni_read(&ni, &ifs, &na, &addrs) && ni == 2 && strcmp(ifs[1].Name, "wlan0") == 0 && ifs[1].HardwareType == RHU_PAL_NetworkInterfaceType_Wireless80211, "shim-sock-netinfo-kinds", "(a wireless medium is not wlan0 of the wireless type)");
+        free(ifs);
+        g_nks2.medium.kind = RHU_NET_MEDIUM_VIRTUAL;
+        CHECK(ni_read(&ni, &ifs, &na, &addrs) && ni == 2 && strcmp(ifs[1].Name, "eth0") == 0 && ifs[1].HardwareType == RHU_PAL_NetworkInterfaceType_Ethernet, "shim-sock-netinfo-kinds", "(the emulator's medium is not eth0 of the Ethernet type)");
+        free(ifs);
+        nk_medium_up();
+        pass("shim-sock-netinfo-kinds", " (a wireless medium is wlan0 of the wireless type; the emulator's medium is eth0 of the Ethernet type)");
+    }
+
+    /* a link that is down, a medium with no lease */
+    {
+        g_nks2.medium.link = 0;
+        CHECK(ni_read(&ni, &ifs, &na, &addrs) && ni == 2 && ifs[1].OperationalState == RHU_PAL_OperationalStatus_Down && ifs[0].OperationalState == RHU_PAL_OperationalStatus_Up, "shim-sock-netinfo-link-down", "(a link that is down was not read as down)");
+        free(ifs);
+        g_nks2.lease.source = RHU_NET_LEASE_NONE;
+        CHECK(ni_read(&ni, &ifs, &na, &addrs) && ni == 2 && na == 1 && addrs[0].InterfaceIndex == 1 && strcmp(ifs[1].Name, "eth0") == 0, "shim-sock-netinfo-link-down", "(a medium with no lease did not keep its record with no address record)");
+        free(ifs);
+        nk_medium_up();
+        pass("shim-sock-netinfo-link-down", " (a link that is down reads as down; a medium with no lease has its record and no address record)");
+    }
+
+    /* a kernel with no medium */
+    {
+        g_nks2.media = 0;
+        CHECK(ni_read(&ni, &ifs, &na, &addrs) && ni == 0 && na == 0, "shim-sock-netinfo-no-medium", "(a kernel with no medium answered an interface or an address)");
+        free(ifs);
+        nk_medium_up();
+        pass("shim-sock-netinfo-no-medium", " (a kernel with no medium answers no interface and no address)");
+    }
+
+    /* the enumeration */
+    {
+        memset(&g_ni, 0, sizeof g_ni);
+        CHECK(SystemNative_EnumerateInterfaceAddresses(&g_ni, ni_v4, ni_v6, ni_ll) == 0 && g_ni.v4 == 2u && g_ni.v6 == 0u && g_ni.ll == 1u && g_ni.context == (void *)&g_ni, "shim-sock-netinfo-enumerate", "(the three functions were not called twice, never and once with the context)");
+        CHECK(strcmp(g_ni.name[0], "lo") == 0 && g_ni.address[0].InterfaceIndex == 1 && memcmp(g_ni.address[0].AddressBytes, lo4, 4) == 0 && g_ni.address[0].PrefixLength == 8, "shim-sock-netinfo-enumerate", "(the loopback's address was not handed to the IPv4 function)");
+        CHECK(strcmp(g_ni.name[1], "eth0") == 0 && g_ni.address[1].InterfaceIndex == 2 && g_ni.address[1].NumAddressBytes == 4 && memcmp(g_ni.address[1].AddressBytes, ip4, 4) == 0 && g_ni.address[1].PrefixLength == 24,
+              "shim-sock-netinfo-enumerate", "(the medium's address and prefix were not handed to the IPv4 function)");
+        CHECK(strcmp(g_ni.link_name, "eth0") == 0 && g_ni.link.InterfaceIndex == 2 && g_ni.link.NumAddressBytes == 6 && memcmp(g_ni.link.AddressBytes, hw, 6) == 0
+              && g_ni.link.HardwareType == RHU_PAL_NetworkInterfaceType_Ethernet, "shim-sock-netinfo-enumerate", "(the medium's hardware address was not handed to the link-layer function)");
+        memset(&g_ni, 0, sizeof g_ni);
+        CHECK(SystemNative_EnumerateInterfaceAddresses(&g_ni, NULL, NULL, ni_ll) == 0 && g_ni.v4 == 0u && g_ni.ll == 1u, "shim-sock-netinfo-enumerate", "(a null function was not skipped)");
+        pass("shim-sock-netinfo-enumerate", " (the enumeration calls the IPv4 function for the loopback and for the medium's address with its prefix, the link-layer function for the medium's hardware address, the IPv6 function never; the context handed through; a null function skipped)");
+    }
+
+    out("SHIMTEST-SOCKNETINFO: ALL GOOD (the network interface records over a scripted kernel, from a native caller's side)");
+    return 0;
+}
+#endif /* RHU_SHIMTEST_LADDER_SOCKNETINFO */
+
 /* The managed entry, spelled as the runtime's own bootstrapper declares
  * it: the kernel's default entry calls it in every ladder but the host's,
  * where the host does. */
@@ -4869,6 +8499,9 @@ int __managed__Main(int argc, char *argv[])
 #elif defined(RHU_SHIMTEST_LADDER_PWMFS)
     (void)argc;
     return pwmfs_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_PWMROWS)
+    (void)argc;
+    return pwmrows_ladder();
 #elif defined(RHU_SHIMTEST_LADDER_IIOFS)
     (void)argc;
     return iiofs_ladder();
@@ -4881,6 +8514,39 @@ int __managed__Main(int argc, char *argv[])
 #elif defined(RHU_SHIMTEST_LADDER_FROZEN)
     (void)argc;
     return frozen_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_SOCKADDR)
+    (void)argc;
+    return sockaddr_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_SOCKERRORS)
+    (void)argc;
+    return sockerrors_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_SOCKREFUSALS)
+    (void)argc;
+    return sockrefusals_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_SOCKSTREAM)
+    (void)argc;
+    return sockstream_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_SOCKLISTEN)
+    (void)argc;
+    return socklisten_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_SOCKDATAGRAM)
+    (void)argc;
+    return sockdatagram_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_SOCKOPTIONS)
+    (void)argc;
+    return sockoptions_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_SOCKPOLL)
+    (void)argc;
+    return sockpoll_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_SOCKPORT)
+    (void)argc;
+    return sockport_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_SOCKRESOLVE)
+    (void)argc;
+    return sockresolve_ladder();
+#elif defined(RHU_SHIMTEST_LADDER_SOCKNETINFO)
+    (void)argc;
+    return socknetinfo_ladder();
 #else
     return host_checks(argc);
 #endif

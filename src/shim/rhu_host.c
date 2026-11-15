@@ -44,7 +44,7 @@
 #include "rhu_shim.h"
 
 #include "rhu.h"
-#include "rhu_rt_entry_net11_rc3.h"
+#include "rhu_rt_entry_net11.h"
 
 /* The stream-shaped surface the C runtime offers. Declared here rather
  * than included: the standard header spells the stream names as macros,
@@ -87,6 +87,55 @@ _Static_assert(RHU_RT_CLASSLIB_SLOT_OnUnhandledException == 7, "the unhandled-ex
 _Static_assert(RHU_RT_CLASSLIB_SLOTS == 12, "the slot count ties the pin");
 _Static_assert(RHU_RT_CLASSLIB_SLOTS > RHU_RT_CLASSLIB_SLOT_ResolveDispatch, "the table holds the dispatch slot");
 _Static_assert(RHU_RT_CLASSLIB_EXPORTS == 8, "eight slots carry an export at this pin");
+
+/* The debug events word and the unhandled-exception event.
+ *
+ * The word is 32 bits of the image's zero-filled RAM: the kernel's reset
+ * zeroes it with the rest of the image's zero-filled data, a debugger
+ * writes it, and the image only reads it (its layout: rhu_shim.h).
+ *
+ * The runtime calls one function through the class-library table when its
+ * search for a handler of a thrown exception has found none: the slot
+ * RHU_RT_CLASSLIB_SLOT_OnUnhandledException, with the exception object as
+ * its argument, before any handler the program registered for such an
+ * exception runs and before anything is printed or unwound. This host
+ * fills that slot with the routine below. While the word holds the magic
+ * and the event's bit, the routine executes the event's BKPT instruction,
+ * where a debugger halts the core with every frame of the throw still on
+ * the stack. After it, and at once while the word does not ask, the
+ * routine branches to the class library's own function with the argument
+ * registers, the link register and the stack pointer as it was entered,
+ * so no frame of its own stands on the stack while that function runs.
+ * The routine carries an unwind index entry that says its return address
+ * is in the link register. */
+uint32_t __lamella_debug_events;
+void rhu_debug_event_unhandled(void);
+#define RHU_HOST_STR2(x) #x
+#define RHU_HOST_STR(x) RHU_HOST_STR2(x)
+__asm__(
+    "    .syntax unified\n"
+    "    .section .text.rhu_debug_event_unhandled,\"ax\",%progbits\n"
+    "    .balign 4\n"
+    "    .global rhu_debug_event_unhandled\n"
+    "    .type rhu_debug_event_unhandled,%function\n"
+    "    .thumb_func\n"
+    "rhu_debug_event_unhandled:\n"
+    "    .fnstart\n"
+    "    ldr     r3, 2f\n"
+    "    ldr     r3, [r3]\n"
+    "    movw    r2, #" RHU_HOST_STR(RHU_DEBUG_EVENTS_MAGIC) "\n"
+    "    cmp     r2, r3, lsr #16\n"
+    "    bne     1f\n"
+    "    lsls    r3, r3, #(31 - " RHU_HOST_STR(RHU_DEBUG_EVENT_UNHANDLED) ")\n"
+    "    bpl     1f\n"
+    "    bkpt    #(" RHU_HOST_STR(RHU_DEBUG_EVENT_BKPT_BASE) " + " RHU_HOST_STR(RHU_DEBUG_EVENT_UNHANDLED) ")\n"
+    "1:  b       " RHU_HOST_STR(RHU_RT_CLASSLIB_EXPORT_OnUnhandledException) "\n"
+    "    .balign 4\n"
+    "2:  .word   __lamella_debug_events\n"
+    "    .fnend\n"
+    "    .size rhu_debug_event_unhandled, . - rhu_debug_event_unhandled\n"
+    "    .text\n"
+);
 
 /* The image's load address, passed to the runtime as the module handle:
  * the address of the vector table's symbol. Every board map places the
@@ -384,7 +433,7 @@ int32_t rhu_host_main(int argc, char **argv)
     classlib[RHU_RT_CLASSLIB_SLOT_ResolveDispatch] = (void *)(uintptr_t)&RHU_RT_CLASSLIB_EXPORT_ResolveDispatch;
     classlib[RHU_RT_CLASSLIB_SLOT_GetSystemArrayEEType] = (void *)(uintptr_t)&RHU_RT_CLASSLIB_EXPORT_GetSystemArrayEEType;
     classlib[RHU_RT_CLASSLIB_SLOT_OnFirstChanceException] = (void *)(uintptr_t)&RHU_RT_CLASSLIB_EXPORT_OnFirstChanceException;
-    classlib[RHU_RT_CLASSLIB_SLOT_OnUnhandledException] = (void *)(uintptr_t)&RHU_RT_CLASSLIB_EXPORT_OnUnhandledException;
+    classlib[RHU_RT_CLASSLIB_SLOT_OnUnhandledException] = (void *)(uintptr_t)&rhu_debug_event_unhandled;
     managed_bytes = range_bytes(__rhu_managedcode_lo, __rhu_managedcode_hi, "the managed-code bracket pair is inverted");
     unbox_bytes = range_bytes(__rhu_unbox_lo, __rhu_unbox_hi, "the unboxing-stub bracket pair is inverted");
     host_logu2("runtime: managed code ", managed_bytes, " bytes, unboxing stubs ", unbox_bytes, " bytes");

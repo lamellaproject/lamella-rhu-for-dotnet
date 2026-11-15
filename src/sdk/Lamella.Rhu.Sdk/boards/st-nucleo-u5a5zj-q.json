@@ -11,13 +11,80 @@
   "functions": "gpio",
   "pwm": {
     "chip": 0,
-    "lines": []
+    "lines": [
+      77,
+      75,
+      73,
+      63,
+      62,
+      7
+    ]
   },
   "adc": {
-    "converters": []
+    "converters": [
+      {
+        "number": 0,
+        "bits": 14,
+        "referenceMillivolts": 3300,
+        "channels": [
+          {
+            "number": 8,
+            "pin": 3
+          },
+          {
+            "number": 7,
+            "pin": 2
+          },
+          {
+            "number": 4,
+            "pin": 35
+          },
+          {
+            "number": 15,
+            "pin": 16
+          },
+          {
+            "number": 2,
+            "pin": 33
+          },
+          {
+            "number": 1,
+            "pin": 32
+          },
+          {
+            "number": 0,
+            "pin": null
+          }
+        ]
+      }
+    ]
   },
-  "i2c": [],
-  "spi": [],
+  "i2c": [
+    {
+      "block": 1,
+      "sda": 25,
+      "scl": 24,
+      "rates": [
+        100000,
+        400000,
+        1000000
+      ]
+    }
+  ],
+  "spi": [
+    {
+      "block": 1,
+      "sck": 5,
+      "mosi": 7,
+      "miso": 6,
+      "cs": [
+        62,
+        63
+      ],
+      "min": 62500,
+      "max": 8000000
+    }
+  ],
   "ram": [
     {
       "name": "SRAM",
@@ -27,7 +94,7 @@
       "cached": false
     }
   ],
-  "uart": [],
+  "uart": [{"block": 1, "tx": 103, "rx": 104, "kind": "lowpower"}],
   "uartPairs": [],
   "channels": {
     "log": "probe",

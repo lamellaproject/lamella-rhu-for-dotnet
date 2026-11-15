@@ -949,7 +949,8 @@ int32_t rhu_net_limits(rhu_net_limits_desc *out);
  * once: RHU_EAGAIN when no slot is free, RHU_ENETUNREACH when the row
  * has no name server (no lease yet, or a static record naming none).
  * rhu_net_resolve_result answers the address records (family 2, the port
- * 0) written into out, at most max: the count written; RHU_EAGAIN while
+ * 0) written into out, at most max and at most two a name (the first two
+ * of a longer answer): the count written; RHU_EAGAIN while
  * the answer is pending; RHU_EHOSTUNREACH for a name the server does not
  * have; RHU_ETIMEDOUT when the stack's retry budget passed with no
  * answer; RHU_EINVAL for a handle not in use. THE SLOT's LIFETIME: a slot
@@ -970,7 +971,9 @@ const uint32_t *rhu_net_resolve_word(int32_t handle);
  * for another family (IPv6 included, which turns a hosted runtime's
  * dual-mode default off), RHU_EPROTONOSUPPORT for another type or
  * protocol. rhu_net_bind records a stream's local port or binds a
- * datagram socket (the address 0.0.0.0 or the row's own; the port not 0):
+ * datagram socket (the address 0.0.0.0 or the row's own; the port 0
+ * takes a free port of the row's choosing from 49152 up, which
+ * rhu_net_name reads back):
  * RHU_EADDRINUSE when another socket of the kind holds the port (unless
  * both set reuse-address), RHU_EINVAL for a bound, connecting or connected
  * socket or a foreign address. rhu_net_listen puts a bound stream to
@@ -981,7 +984,10 @@ const uint32_t *rhu_net_resolve_word(int32_t handle);
  * behind a listener to a new handle, writes the peer's address when peer
  * is not NULL, and arms a fresh socket in its place where the pool has
  * one: the new handle; RHU_EAGAIN when none completed; RHU_EMFILE when no
- * handle is free. rhu_net_connect on a stream starts the handshake and
+ * handle is free. A listener that an accept left with no socket (the
+ * pool had none) is given one on the network thread's pass that returns
+ * a stream socket to the pool, before a new socket can take it.
+ * rhu_net_connect on a stream starts the handshake and
  * answers RHU_EINPROGRESS on every medium (the loopback included; the
  * readiness word reports its end), with RHU_EALREADY while one is in
  * flight, RHU_EISCONN after one ended, RHU_ENETDOWN with the link down and

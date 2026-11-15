@@ -29,7 +29,7 @@ MEMORY
   /* Reserved for the split-image app slot: nothing from the kernel may
    * land here. 0x10c00000 is a 4 KB-sector boundary, so the slot erases
    * without touching CODE sectors. */
-  APP  (rx)  : ORIGIN = 0x10c00000, LENGTH = 4M
+  APP  (rx)  : ORIGIN = 0x10c00000, LENGTH = 3840K
   DATA (rwx) : ORIGIN = 0x20000000, LENGTH = 520K
   /* The board's 8 MB PSRAM part behind the flash interface's second chip
    * select (GPIO 47), shown through the chip's cached window for that
@@ -281,3 +281,11 @@ PROVIDE(__rhu_uart1_rx = 0);
 /* The handler stack's watermark word: 0 = off; 1 = the boot stack reserve is
  * filled with a pattern at reset and its deepest use printed at the end. */
 PROVIDE(__rhu_stack_watermark = 0);
+
+/* The radio's corner: the last 262144 B of the flash device hold the wireless
+ * module's firmware and the stored network. A flash tool writes them and no
+ * link does: the kernel's window ends where the app slot begins, and the app
+ * slot ends where the corner begins, so no image and no later use of the slot
+ * can reach the corner. */
+ASSERT(ORIGIN(CODE) + LENGTH(CODE) <= ORIGIN(APP) && ORIGIN(APP) + LENGTH(APP) == 0x10fc0000,
+  "a flash region of this map reaches the radio's corner, the last 262144 B of the flash device");

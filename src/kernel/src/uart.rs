@@ -26,10 +26,10 @@
 //! The witness `__rhu_uart_witness` is read by symbol (a debugger, the api
 //! flavor's checks). The transmit ring is sized so a
 //! verbose boot report fits the wire of a held console port without loss
-//! (4 KB); the receive ring holds
+//! (4 KB; a row that offers no port as a console wire states its own sizes in its facts); the receive ring holds
 //! 89 ms of a 115200 Bd wire (1 KB).
 
-#![cfg_attr(not(rhu_uart_rows), allow(dead_code))] // a row without a UART row compiles the functions' helpers unused
+#![cfg_attr(not(rhu_uart_rows), allow(dead_code))] // a row without a UART row compiles the functions' helpers unused, and a row whose port is a program's alone the console's half
 
 use core::ptr::{addr_of_mut, read_volatile, write_volatile};
 
@@ -45,9 +45,9 @@ pub const PORTS: usize = facts::UART_ROWS.len();
 
 /// The ring sizes: the receive ring (89 ms of a 115200 Bd wire, 13.6 ms at
 /// 750,000 Bd), the transmit ring (a verbose boot report's burst on a held
-/// console port).
-pub const RX_BYTES: usize = 1024;
-pub const TX_BYTES: usize = 4096;
+/// console port); a row that offers no port as a console wire states its own two sizes in its facts.
+#[cfg(not(rhu_uart_st))] pub const RX_BYTES: usize = 1024; #[cfg(rhu_uart_st)] pub const RX_BYTES: usize = facts::UART_RX_BYTES;
+#[cfg(not(rhu_uart_st))] pub const TX_BYTES: usize = 4096; #[cfg(rhu_uart_st)] pub const TX_BYTES: usize = facts::UART_TX_BYTES;
 
 /// The parity codes (`RHU_UART_PARITY_*`) and the flush selectors
 /// (`RHU_UART_FLUSH_*`) the header states.
@@ -191,7 +191,7 @@ pub fn port(index: u32, block: *mut u32, tx: *mut u32, rx: *mut u32, clock_hz: *
 
 // ---------------- the rows with a table: the functions over the backend ----------------
 
-#[cfg(rhu_uart_rows)]
+#[cfg(any(rhu_uart_rows, rhu_uart_st))]
 mod served {
     use super::*;
     use crate::board::uart_backend as hw;
@@ -460,7 +460,7 @@ mod served {
             data_bits == 8 && parity == PARITY_NONE && stop_bits == 1
         } else {
             (5..=8).contains(&data_bits) && parity <= PARITY_SPACE && (1..=2).contains(&stop_bits)
-        };
+        }; #[cfg(rhu_uart_st)] let frame_ok = frame_ok && crate::stm32_usart_math::frame_ok(data_bits, parity, stop_bits);
         if !frame_ok {
             return refused(block, sched::ERR_INVAL);
         }
@@ -837,13 +837,13 @@ mod served {
     }
 }
 
-#[cfg(rhu_uart_rows)]
+#[cfg(any(rhu_uart_rows, rhu_uart_st))]
 #[allow(unused_imports)] // the rows use different halves of the set
 pub use served::{block_serves_wire, brk, claim, configure, console_hold, console_holds, console_holds_any, drain_held, event_word, flush, held_getb, held_pins, held_putb, held_room, info, irq, loopback, pins_for, read, release, set_polled, status, write};
 
 // ---------------- the rows without a table: every function but the count and the enumeration refuses ----------------
 
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 mod served {
     pub const CLOCK_HZ: u32 = 0;
     pub fn pins_of(_ix: usize) -> (u32, u32) {
@@ -851,79 +851,79 @@ mod served {
     }
 }
 
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn claim(block: u32) -> i32 {
     refused(block, sched::ERR_NODEV)
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn configure(h: i32, _baud: u32, _data_bits: u32, _parity: u32, _stop_bits: u32, _achieved: *mut u32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn write(h: i32, _buf: *const u8, _n: u32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn read(h: i32, _buf: *mut u8, _n: u32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn status(h: i32, _a: *mut u32, _p: *mut u32, _r: *mut u32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn event_word(_h: i32) -> *const u32 {
     core::ptr::null()
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn flush(h: i32, _which: u32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn brk(h: i32, _on: u32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn release(h: i32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn info(h: i32, _block: *mut u32, _tx: *mut u32, _rx: *mut u32, _clock_hz: *mut u32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn console_hold(_block: u32, _hardware: bool) -> bool {
     true
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn console_holds(_block: u32) -> bool {
     false
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn console_holds_any() -> bool {
     false
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn held_pins(_block: u32) -> (u32, u32) {
     (NO_PIN, NO_PIN)
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn held_putb(_block: u32, _b: u8) {}
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn held_room(_block: u32) -> usize {
     usize::MAX
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn held_getb(_block: u32) -> Option<u8> {
     None
 }
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn set_polled() {}
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn drain_held() {}
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn irq(_ix: usize) {}
-#[cfg(not(rhu_uart_rows))]
+#[cfg(not(any(rhu_uart_rows, rhu_uart_st)))]
 pub fn loopback(_h: i32, _on: bool) -> bool {
     false
 }

@@ -1,0 +1,20 @@
+<Project Sdk="Lamella.Sdk">
+
+  <!-- The gate's program for the thread pool's bound: it prints the most
+       workers the runtime says the pool will run, asks for one more, and
+       queues more work items than the bound allows at once. The
+       verification chain publishes it for its own emulator row and reads
+       the booted program's lines against the number it computes from the
+       board table. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+    <!-- The kernel's own lines are on the console beside the program's:
+         the chain reads the kernel's return line after the program's end. -->
+    <RhuLogLevel>verbose</RhuLogLevel>
+  </PropertyGroup>
+
+</Project>

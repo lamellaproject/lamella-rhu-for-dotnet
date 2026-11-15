@@ -76,16 +76,46 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(rhu_console_probe)");
     println!("cargo:rustc-check-cfg=cfg(rhu_uart_rows)");
     // A row with a network medium under the `net` feature -- the
-    // emulator rows' virtual medium.
+    // emulator rows' virtual medium with its scripted peer, and the
+    // STM32F769 row's Ethernet controller (every link map of the row
+    // carries the window for the controller's rings).
     println!("cargo:rustc-check-cfg=cfg(rhu_net_rows)");
+    println!("cargo:rustc-check-cfg=cfg(rhu_net_virtual)");
+    println!("cargo:rustc-check-cfg=cfg(rhu_net_wired)");
     if cfg!(all(feature = "net", any(feature = "board-mps2-an500", feature = "board-mps2-an505"))) {
         println!("cargo:rustc-cfg=rhu_net_rows");
+        println!("cargo:rustc-cfg=rhu_net_virtual");
+    }
+    if cfg!(all(feature = "net", feature = "board-st-stm32f769i-disco")) {
+        println!("cargo:rustc-cfg=rhu_net_rows");
+        println!("cargo:rustc-cfg=rhu_net_wired");
+    }
+    // The radio as the medium, under the `wifi-cyw43` feature: the two
+    // Pimoroni boards with a wireless module and PSRAM, at the PLL posture.
+    // On any other board the feature is refused by name; so is the crystal
+    // posture beside it (the radio's bus engine was flown on the 150 MHz
+    // system clock alone, and that posture has no PSRAM window for the
+    // network's memory). `net` alone on those boards compiles the functions
+    // that answer that the board has no network, as before.
+    println!("cargo:rustc-check-cfg=cfg(rhu_net_wireless)");
+    if cfg!(feature = "wifi-cyw43") {
+        if !cfg!(any(feature = "board-pimoroni-pico-plus-2-w", feature = "board-pimoroni-pico-lipo-2-xl-w")) {
+            panic!("wifi-cyw43 is the radio's medium of the Pimoroni Pico Plus 2 W and the Pimoroni Pico LiPo 2 XL W: select board-pimoroni-pico-plus-2-w or board-pimoroni-pico-lipo-2-xl-w beside it");
+        }
+        if cfg!(any(feature = "pimoroni-pico-plus-2-w-xtal12", feature = "pimoroni-pico-lipo-2-xl-w-xtal12")) {
+            panic!("wifi-cyw43 is not built at the 12 MHz crystal posture (the radio's bus engine runs on the 150 MHz system clock): drop the board's -xtal12 feature");
+        }
+        println!("cargo:rustc-cfg=rhu_net_rows");
+        println!("cargo:rustc-cfg=rhu_net_wireless");
     }
     println!("cargo:rustc-check-cfg=cfg(rhu_uart_pl011)");
     println!("cargo:rustc-check-cfg=cfg(rhu_uart_cmsdk)");
-    // The rows with a UART table: the Pico rows over the PL011
-    // backend, the emulator rows over the CMSDK backend; the ST rows carry
-    // none, so the kernel's UART API answers RHU_ENODEV there.
+    // The rows with a UART table whose port can also be a console wire: the
+    // Pico rows over the PL011 backend, the emulator rows over the CMSDK
+    // backend. Two ST rows serve a program's port over the ST serial
+    // backend behind a switch of their own (`rhu_uart_st`, below); the other
+    // ST rows carry no table, so the kernel's UART API answers RHU_ENODEV
+    // there.
     if cfg!(any(
         feature = "board-adafruit-feather-rp2350-hstx",
         feature = "board-adafruit-feather-rp2350-hstx-psram",
@@ -333,6 +363,12 @@ fn main() {
     if cfg!(feature = "test-sd-flight") && !(cfg!(feature = "api-smoke") && cfg!(any(feature = "board-st-stm32f769i-disco", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-sparkfun-iot-redboard-rp2350"))) {
         panic!("test-sd-flight is the flight flavor of a socket row's api image (the SD and FAT checks alone): select api-smoke and a row with a microSD socket beside it");
     }
+    // The flight flavor of the wired row's api image (the network flight
+    // alone after the boot): the api flavor, the net feature and the row with
+    // the Ethernet controller beside it, never alone.
+    if cfg!(feature = "test-net-flight") && !cfg!(all(feature = "api-smoke", feature = "net", feature = "board-st-stm32f769i-disco")) {
+        panic!("test-net-flight is the flight flavor of the wired row's api image (the network flight alone): select api-smoke, net and board-st-stm32f769i-disco beside it");
+    }
     // The external RAM's init mode. A lazy feature compiles to its cfg
     // only where the image has an external window to be lazy about (the
     // Pimoroni rows at the PLL posture, the STM32F769 row at both postures,
@@ -497,6 +533,55 @@ fn main() {
         feature = "board-raspberrypi-pico-2-w"
     )) {
         println!("cargo:rustc-cfg=rhu_pwm_adc_rows");
+    }
+    // The two ST rows whose PWM lines are timer channels of the chip (the
+    // STM32F769 Discovery and the NUCLEO-U5A5ZJ-Q): the PWM functions' served
+    // half over the ST timer backend. Their analog tables are empty, so the
+    // analog functions keep refusing there.
+    println!("cargo:rustc-check-cfg=cfg(rhu_pwm_st)");
+    if cfg!(any(feature = "board-st-stm32f769i-disco", feature = "board-st-nucleo-u5a5zj-q")) {
+        println!("cargo:rustc-cfg=rhu_pwm_st");
+    }
+    // The row whose chip feeds a group of pins from a second I/O supply that
+    // the program must declare valid (the STM32U5: PG2 to PG15): the step at
+    // boot, by the reference manual's sequence.
+    println!("cargo:rustc-check-cfg=cfg(rhu_io2_supply)");
+    if cfg!(feature = "board-st-nucleo-u5a5zj-q") {
+        println!("cargo:rustc-cfg=rhu_io2_supply");
+    }
+    if cfg!(feature = "test-pwm-flight") && !(cfg!(feature = "api-smoke") && cfg!(any(feature = "board-st-stm32f769i-disco", feature = "board-st-nucleo-u5a5zj-q"))) {
+        panic!("test-pwm-flight is the flight flavor of an ST timer row's api image (the PWM check alone): select api-smoke and board-st-stm32f769i-disco or board-st-nucleo-u5a5zj-q beside it");
+    }
+    if cfg!(feature = "test-io2-probe") && !cfg!(all(feature = "test-pwm-flight", feature = "board-st-nucleo-u5a5zj-q")) {
+        panic!("test-io2-probe leaves the second I/O supply's step out of the boot for the flight check's probe: select test-pwm-flight and board-st-nucleo-u5a5zj-q beside it");
+    }
+    // The two ST rows whose analog pins are channels of the chip's own
+    // converters (the STM32F769 Discovery and the NUCLEO-U5A5ZJ-Q): the
+    // analog functions' served half over the ST converter backends.
+    println!("cargo:rustc-check-cfg=cfg(rhu_adc_st)");
+    if cfg!(any(feature = "board-st-stm32f769i-disco", feature = "board-st-nucleo-u5a5zj-q")) {
+        println!("cargo:rustc-cfg=rhu_adc_st");
+    }
+    if cfg!(feature = "test-adc-flight") && !(cfg!(feature = "api-smoke") && cfg!(any(feature = "board-st-stm32f769i-disco", feature = "board-st-nucleo-u5a5zj-q")) && !cfg!(feature = "test-pwm-flight")) {
+        panic!("test-adc-flight is the flight flavor of an ST converter row's api image (the analog check alone): select api-smoke and board-st-stm32f769i-disco or board-st-nucleo-u5a5zj-q beside it, and not test-pwm-flight");
+    }
+    if cfg!(feature = "test-asv-probe") && !cfg!(all(feature = "test-adc-flight", feature = "board-st-nucleo-u5a5zj-q")) {
+        panic!("test-asv-probe leaves the converter's power-up to the flight check's probe of the analog supply: select test-adc-flight and board-st-nucleo-u5a5zj-q beside it");
+    }
+    // The two ST rows with a program's serial port on the connector's D0
+    // and D1 (the STM32F769 Discovery's USART6 and the NUCLEO-U5A5ZJ-Q's
+    // LPUART1): the serial functions' served half over the ST serial
+    // backend. The port is a program's alone: the console's code for a UART
+    // wire stays behind `rhu_uart_rows`, which these rows do not set.
+    println!("cargo:rustc-check-cfg=cfg(rhu_uart_st)");
+    if cfg!(any(feature = "board-st-stm32f769i-disco", feature = "board-st-nucleo-u5a5zj-q")) {
+        println!("cargo:rustc-cfg=rhu_uart_st");
+    }
+    if cfg!(feature = "test-uart-flight") && !(cfg!(feature = "api-smoke") && cfg!(any(feature = "board-st-stm32f769i-disco", feature = "board-st-nucleo-u5a5zj-q")) && !cfg!(any(feature = "test-pwm-flight", feature = "test-adc-flight"))) {
+        panic!("test-uart-flight is the flight flavor of an ST serial row's api image (the serial check alone): select api-smoke and board-st-stm32f769i-disco or board-st-nucleo-u5a5zj-q beside it, and neither test-pwm-flight nor test-adc-flight");
+    }
+    if cfg!(feature = "test-uart-doctored") && !cfg!(feature = "test-uart-flight") {
+        panic!("test-uart-doctored is the control of the ST serial rows' flight check (the backend writes the divisor twice as long): select test-uart-flight beside it");
     }
 
     // The version of record: the one line of the VERSION file at the

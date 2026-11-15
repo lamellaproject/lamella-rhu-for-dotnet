@@ -35,8 +35,8 @@ const GCTEST_WORK: u32 = 4;
 const LINK_TIMEOUT_S: u64 = 120;
 
 /// Frozen-input pin table: must equal goldens/payload/MANIFEST.md.
-const SHA_RTSMOKE_O: &str = "55bedf1cf0e0d294bc460f80767a20b5f71a0d407e265580ed0f6542c660359b";
-const SHA_GCTEST_O: &str = "5d88a76ac668947e0839b43473ccd9ab9041cfddeb9cfa76782a2963cb6feb70";
+const SHA_RTSMOKE_O: &str = "16837e6ebd64963bd9d3500641137fa5842c3c9590fa266c5498ba84830d486d";
+const SHA_GCTEST_O: &str = "f7ae8cc93b72ec7da8c77e4a36a26ea2cba0bd2f3aa700adde860734e37bc5e0";
 const SHA_RTSMOKE_G: &str = "230e32ad303a37564fdc2093fde03730592113aa3718f533e70adfe547c90eb5";
 const SHA_GCTEST_G: &str = "0eb3d1ba8a9f0fc4be43ee4fe5d626626147d98a9a5605da6d1c8ae2887d8b2c";
 
@@ -241,7 +241,7 @@ fn payload_verdict(cases: usize, negative: usize, absent: &[(&str, &str)]) -> St
         tiers.join(", ")
     )
 }
-const RT_MANAGED_BYTES: u64 = 350_646;
+const RT_MANAGED_BYTES: u64 = 351_298;
 const RT_UNBOX_BYTES: u64 = 742;
 const RT_HYDRATED_BYTES: u64 = 74_320;
 const RT_TDATA_BYTES: u64 = 152;
@@ -317,6 +317,10 @@ const AN500_MAP: &str = "src/kernel/payload-mps2-an500.x";
 /// The STM32F769 row's execute-in-place map and the renamed frozen object its link takes.
 const XIP_MAP: &str = "src/kernel/payload-st-stm32f769i-disco-xip.x";
 const XIP_MERGED: &str = "src/kernel/target/payload-gate/rt/rthello-merged-xip.o";
+/// The STM32F769 row's default map, and the lowest RAM address the row's
+/// Ethernet controller reaches by its DMA (the core's own RAM lies below it).
+const F769_MAP: &str = "src/kernel/payload-st-stm32f769i-disco.x";
+const F769_DMA_FLOOR: u64 = 0x2002_0000;
 
 /// PT_GNU_RELRO: the read-only-after-relocation segment the linker emits
 /// over the GOT, the constructor arrays and the TLS template.
@@ -324,8 +328,11 @@ const PT_GNU_RELRO: u32 = 0x6474_e552;
 
 /// One board of the rt-link family: its payload map, cargo target and
 /// feature set (the QEMU boards with `qemu-exit`, as the batteries build
-/// them). The an500 link reuses the gate's shared staticlib; the others
-/// build into target dirs of their own.
+/// them; the STM32F769 row with `net`, so that its two link cases link the
+/// kernel that carries the Ethernet rings; the two rows whose table names a
+/// second kernel set for the radio with `wifi-cyw43`, so that their link
+/// cases link the kernel that carries the radio). The an500 link reuses the
+/// gate's shared staticlib; the others build into target dirs of their own.
 struct RtBoard {
     board: &'static str,
     target: &'static str,
@@ -343,14 +350,14 @@ const RT_BOARDS: [RtBoard; 15] = [
     RtBoard { board: "adafruit-metro-rp2350", target: "thumbv8m.main-none-eabihf", features: "board-adafruit-metro-rp2350,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "adafruit-metro-rp2350-psram", target: "thumbv8m.main-none-eabihf", features: "board-adafruit-metro-rp2350-psram,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "pimoroni-pico-lipo-2", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-lipo-2,payload", world: &crate::gates::rt::WORLD_M33 },
-    RtBoard { board: "pimoroni-pico-lipo-2-xl-w", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-lipo-2-xl-w,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "pimoroni-pico-lipo-2-xl-w", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-lipo-2-xl-w,payload,wifi-cyw43", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "sparkfun-iot-redboard-rp2350", target: "thumbv8m.main-none-eabihf", features: "board-sparkfun-iot-redboard-rp2350,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "pimoroni-pico-plus-2", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-plus-2,payload", world: &crate::gates::rt::WORLD_M33 },
-    RtBoard { board: "pimoroni-pico-plus-2-w", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-plus-2-w,payload", world: &crate::gates::rt::WORLD_M33 },
+    RtBoard { board: "pimoroni-pico-plus-2-w", target: "thumbv8m.main-none-eabihf", features: "board-pimoroni-pico-plus-2-w,payload,wifi-cyw43", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "raspberrypi-pico-2", target: "thumbv8m.main-none-eabihf", features: "board-raspberrypi-pico-2,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "raspberrypi-pico-2-w", target: "thumbv8m.main-none-eabihf", features: "board-raspberrypi-pico-2-w,payload", world: &crate::gates::rt::WORLD_M33 },
     RtBoard { board: "st-nucleo-u5a5zj-q", target: "thumbv8m.main-none-eabihf", features: "board-st-nucleo-u5a5zj-q,payload", world: &crate::gates::rt::WORLD_M33 },
-    RtBoard { board: "st-stm32f769i-disco", target: "thumbv7em-none-eabihf", features: "board-st-stm32f769i-disco,payload", world: &crate::gates::rt::WORLD_M7 },
+    RtBoard { board: "st-stm32f769i-disco", target: "thumbv7em-none-eabihf", features: "board-st-stm32f769i-disco,payload,net", world: &crate::gates::rt::WORLD_M7 },
 ];
 
 /// What the rt-link checker reads off a linked artifact.
@@ -944,6 +951,27 @@ fn bracket(dump: &[u8], lo: &str, hi: &str) -> Result<(u64, u64), String> {
         (Some(a), Some(b)) => Err(format!("bracket {lo}..{hi} inverted ({a:#x} > {b:#x})")),
         _ => Err(format!("bracket pair {lo}/{hi} not value-parseable from the artifact")),
     }
+}
+
+/// The STM32F769 row's Ethernet rings read off a linked image: the section
+/// between the console mirror's end and its own end symbol is not empty
+/// (the row's kernel carries the network), it starts at or above the
+/// lowest address the controller's DMA reaches, and the arena window
+/// starts at its 8-aligned end. Returns the rings' address and size.
+fn check_net_rings(dump: &[u8], dma_floor: u64) -> Result<(u64, u64), String> {
+    let (lo, hi) = bracket(dump, "__rhu_console_log_end", "__rhu_net_rings_end")?;
+    if hi == lo {
+        return Err("the Ethernet rings' section is empty: the row's kernel was linked without the network".to_string());
+    }
+    if lo < dma_floor {
+        return Err(format!("the Ethernet rings start at {lo:#x}, below {dma_floor:#x}, where the controller's DMA does not reach"));
+    }
+    let arena = word_sym_value(dump, "__rhu_arena_lo").ok_or_else(|| "__rhu_arena_lo not value-parseable from the artifact".to_string())?;
+    let end = (hi + 7) & !7;
+    if arena != end {
+        return Err(format!("the arena window starts at {arena:#x}, not at the Ethernet rings' end {end:#x}"));
+    }
+    Ok((lo, hi - lo))
 }
 
 /// The rt-link placement check over parsed inputs (the nm dump, the
@@ -2559,6 +2587,7 @@ impl MPayload {
             self.run_hydrated_home_control();
             self.run_rt_link_xip();
             self.run_xip_home_control();
+            self.run_net_rings_home_control();
         }
     }
 
@@ -2613,12 +2642,16 @@ impl MPayload {
             Ok(p) => p,
             Err(e) => self.fail_case(CASE, "null", "null", &sha, &path_rel, None, &e),
         };
+        let (r_lo, r_len) = match check_net_rings(&dump, F769_DMA_FLOOR) {
+            Ok(r) => r,
+            Err(e) => self.fail_case(CASE, "null", "null", &sha, &path_rel, None, &format!("the kernel's Ethernet rings: {e}")),
+        };
         println!(
-            "  {CASE}: the window's sections {} B from {x_lo:#x}; managed {} unbox {} hydrated {} exidx {}; unresolved {}, all in the frozen demand list; code free {} B; arena window {} B over the {} B floor",
+            "  {CASE}: the window's sections {} B from {x_lo:#x}; managed {} unbox {} hydrated {} exidx {}; unresolved {}, all in the frozen demand list; code free {} B; arena window {} B over the {} B floor; the Ethernet rings {r_len} B from {r_lo:#x}, the arena window at their end",
             x_hi - x_lo, facts.managed, facts.unbox, facts.hydrated, facts.exidx, facts.unresolved, facts.code_free, facts.arena_window, facts.arena_floor
         );
         let stats = format!(
-            "{{\"window\":{},\"managed\":{},\"unbox\":{},\"hydrated\":{},\"exidx\":{},\"unresolved\":{},\"code_free\":{},\"arena_window\":{},\"arena_floor\":{}}}",
+            "{{\"window\":{},\"managed\":{},\"unbox\":{},\"hydrated\":{},\"exidx\":{},\"unresolved\":{},\"code_free\":{},\"arena_window\":{},\"arena_floor\":{},\"net_rings\":{r_len},\"net_rings_at\":{r_lo}}}",
             x_hi - x_lo, facts.managed, facts.unbox, facts.hydrated, facts.exidx, facts.unresolved, facts.code_free, facts.arena_window, facts.arena_floor
         );
         self.emit_case(CASE, "pass", "null", "null", &sha, &path_rel, "null", None, Some(&stats));
@@ -2770,6 +2803,40 @@ impl MPayload {
         println!("  refused as predicted: {}", refusal.unwrap_or_default());
         self.emit_control_case(CASE, "pass", BROKE);
         println!("== control {CASE}: PASS (the linker refused the managed code outside the external flash window) ==");
+    }
+
+    /// Negative control (link): the STM32F769 row's default map with the
+    /// Ethernet rings' section moved to the head of the RAM region, ahead
+    /// of the initialized data, into the core's own RAM, while the ring
+    /// assert stands -- the linker must refuse with the assert's words.
+    fn run_net_rings_home_control(&mut self) {
+        const CASE: &str = "net-rings-home-control";
+        const BROKE: &str = "the Ethernet rings' section moved to the head of the RAM region, ahead of the initialized data, in the STM32F769 row's default map (its ring assert standing)";
+        let map = std::fs::read_to_string(self.ctx.repo.join(F769_MAP)).unwrap_or_default();
+        let block = "  .rhu_net_rings (NOLOAD) : ALIGN(8)\n  {\n    KEEP(*(.rhu_net_rings));\n    . = ALIGN(8);\n    __rhu_net_rings_end = .;\n  } > DATA\n";
+        let head = "  .data : ALIGN(8)\n";
+        if map.matches(block).count() != 1 || map.matches(head).count() != 1 {
+            self.ctx.gate_fail(&format!("{CASE}: cannot arm the control -- the map's ring section or its .data head is not unique"));
+        }
+        let doctored = map.replacen(block, "", 1).replacen(head, &format!("{block}\n{head}"), 1);
+        let map_rel = "src/kernel/target/payload-gate/rt/net-rings-home-control.x";
+        write_fixture(&self.ctx.repo.join(map_rel), doctored.as_bytes());
+        let Some(b) = RT_BOARDS.iter().find(|b| b.board == "st-stm32f769i-disco") else {
+            self.ctx.gate_fail(&format!("{CASE}: no STM32F769 row in the rt-link table"));
+        };
+        let lib_rel = Self::rt_staticlib_rel(b);
+        let merged = rt_merged_o(b.world);
+        let (ok, ld_log, _) = self.link_raw(CASE, &merged, &[], &lib_rel, map_rel, &RT_LD_WORDS);
+        let text = String::from_utf8_lossy(&std::fs::read(&ld_log).unwrap_or_default()).into_owned();
+        let refusal = text.lines().find(|l| l.contains("the Ethernet rings lie in the core's own RAM")).map(|l| l.trim_end_matches('\r').to_string());
+        if ok || refusal.is_none() {
+            echo_file(&ld_log, "  | ");
+            self.emit_control_case(CASE, "fail", BROKE);
+            self.ctx.gate_fail(&format!("{CASE}: the doctored map was NOT refused by the ring ASSERT"));
+        }
+        println!("  refused as predicted: {}", refusal.unwrap_or_default());
+        self.emit_control_case(CASE, "pass", BROKE);
+        println!("== control {CASE}: PASS (the linker refused the Ethernet rings below the RAM the controller's DMA reaches) ==");
     }
 
     /// Negative control: the an500 map with its managed-code KEEP line
@@ -3895,6 +3962,18 @@ pub fn selfcheck(repo: &Path) -> ! {
     sc.probe("rt-managed-outside-window", "managed code left in CODE under a map with an external flash window", check_win(&xip_dump(g_m, g_u, u_w.1 + 2), &ph_w(true)));
     sc.probe("rt-frozen-outside-window", "the frozen pair left in CODE under a map with an external flash window", check_win(&xip_dump(m_w, u_w, 0xc70c0), &ph_w(true)));
     sc.probe("rt-window-header-missing", "no load segment at the window's base (the window header not in the image)", check_win(&xip_dump(m_w, u_w, u_w.1 + 2), &ph_w(false)));
+    // The ring rule: the STM32F769 row's Ethernet rings stand after the console mirror, not empty, where the controller's DMA reaches, the arena window at their end.
+    let rings_dump = |log_end: u64, rings_end: u64, arena_lo: u64| -> Vec<u8> {
+        format!("{log_end:08x} B __rhu_console_log_end\n{rings_end:08x} B __rhu_net_rings_end\n{arena_lo:08x} B __rhu_arena_lo\n").into_bytes()
+    };
+    sc.accept_probe(
+        "net-rings-genuine",
+        "the Ethernet rings after the console mirror, above the core's own RAM, the arena window at their end, accepted",
+        check_net_rings(&rings_dump(0x2003_cea0, 0x2003_f300, 0x2003_f300), F769_DMA_FLOOR).is_ok(),
+    );
+    sc.probe("net-rings-empty", "the rings' section empty under the row's map (a kernel linked without the network)", check_net_rings(&rings_dump(0x2003_4170, 0x2003_4170, 0x2003_4170), F769_DMA_FLOOR).is_ok());
+    sc.probe("net-rings-below-reach", "the rings in the core's own RAM, below the lowest address the controller's DMA reaches", check_net_rings(&rings_dump(0x2000_0000, 0x2000_2460, 0x2000_2460), F769_DMA_FLOOR).is_ok());
+    sc.probe("net-rings-under-arena", "the arena's floor left at the console mirror's end, the arena window over the rings", check_net_rings(&rings_dump(0x2003_cea0, 0x2003_f300, 0x2003_cea0), F769_DMA_FLOOR).is_ok());
     // The external rule: a map with an external RAM region places the region at its head, the arena's second window after it.
     let ext = Some((0x6000_0000u64, 16u64 << 20));
     let h_x = (0x6000_0000u64, 0x6000_0000 + RT_HYDRATED_BYTES);

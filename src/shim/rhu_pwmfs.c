@@ -66,8 +66,8 @@
 #include "rhu_shim.h"
 
 #include "rhu.h"
-#include "rhu_pal_io_net11_rc3.h"
-#include "rhu_pal_errno_net11_rc3.h"
+#include "rhu_pal_io_net11.h"
+#include "rhu_pal_errno_net11.h"
 
 extern int *__errno_location(void);
 void *memcpy(void *dst, const void *src, size_t n);
@@ -86,8 +86,11 @@ int pthread_mutex_unlock(void *slot);
 #define PWMFS_ROOT "/sys/class/pwm"
 #define PWMFS_CHIP "/sys/class/pwm/pwmchip0"
 #define PWMFS_PATH_MAX 64
-/* The table's reach over lines: the largest package in hand has 48. */
-#define PWMFS_LINES_MAX 64
+/* The table's reach over channels: an entry is a PWM-capable line at the
+ * kernel's own index of it (rhu_pwm_line), so a line's number is a name
+ * alone and no size here bounds it. A row that states more such lines than
+ * the table holds has the lines past it refused by name at their export. */
+#define PWMFS_CHANNELS_MAX 48
 /* The size Linux reports for a sysfs attribute file. */
 #define PWMFS_ATTR_SIZE 4096
 /* A text of a node, with its newline and terminator. */
@@ -112,7 +115,7 @@ enum {
 
 typedef struct pwmfs_node {
     uint8_t kind;
-    uint8_t line;
+    uint16_t line; /* the channel's name: the line's number, as wide as the kernel states one */
 } pwmfs_node;
 
 /* An exported channel: the kernel's handle, the period and duty asked, the
@@ -131,12 +134,12 @@ typedef struct pwmfs_channel {
 typedef struct pwmfs_fd {
     uint8_t used;
     uint8_t kind;
-    uint8_t line;
+    uint16_t line;
     uint8_t access;
     uint32_t pos;
 } pwmfs_fd;
 
-static pwmfs_channel g_ch[PWMFS_LINES_MAX];
+static pwmfs_channel g_ch[PWMFS_CHANNELS_MAX];
 static pwmfs_fd g_fd[RHU_SHIM_FD_SYSFS_COUNT];
 static uint8_t g_mutex[24];
 /* The number of channel names: computed once from the kernel's enumeration
@@ -200,6 +203,26 @@ static int32_t npwm_locked(void)
     g_npwm = count > 0 ? top + 1 : 0;
 #endif
     return g_npwm;
+}
+
+/* The kernel's index of a line among the row's PWM-capable lines, the
+ * table's key; -1 for a line no timer drives. */
+static int32_t index_of(uint32_t line)
+{
+    int32_t count = rhu_pwm_count();
+    for (int32_t i = 0; i < count; i++) {
+        if (rhu_pwm_line((uint32_t)i) == (int32_t)line)
+            return i;
+    }
+    return -1;
+}
+
+/* A line's entry in the table (under the lock); NULL for a line no timer
+ * drives and for a line whose index is past the table. */
+static pwmfs_channel *channel_locked(uint32_t line)
+{
+    int32_t at = index_of(line);
+    return at >= 0 && at < PWMFS_CHANNELS_MAX ? &g_ch[at] : NULL;
 }
 
 /* A decimal number: digits alone, no sign, no leading zero but "0" itself. */
@@ -277,9 +300,9 @@ static int parse_path(const char *path, pwmfs_node *n)
         return 0;
     p += 3;
     uint32_t line;
-    if (!parse_number(&p, &line) || line >= PWMFS_LINES_MAX)
+    if (!parse_number(&p, &line) || line > UINT16_MAX)
         return 0;
-    n->line = (uint8_t)line;
+    n->line = (uint16_t)line;
     if (*p == 0) {
         n->kind = NODE_DIR_CHANNEL;
         return 1;
@@ -323,7 +346,10 @@ static int node_exists_locked(const pwmfs_node *n)
     case NODE_DUTY:
     case NODE_POLARITY:
     case NODE_ENABLE:
-        return npwm_locked() > 0 && n->line < npwm_locked() && g_ch[n->line].exported != 0;
+    {
+        const pwmfs_channel *c = channel_locked(n->line);
+        return c != NULL && c->exported != 0;
+    }
     default:
         return 0;
     }
@@ -351,7 +377,7 @@ static void status_of(rhu_pal_filestatus *st, const pwmfs_node *n)
         st->Mode = (int32_t)(RHU_PAL_S_IFREG | node_mode(n->kind));
         st->Size = PWMFS_ATTR_SIZE;
     }
-    st->Ino = 0x50000 + (int64_t)n->kind * PWMFS_LINES_MAX + n->line;
+    st->Ino = 0x50000 + (int64_t)n->kind * 0x10000 + n->line;
     st->Dev = 2;
     st->HardLinkCount = 1;
 }
@@ -385,7 +411,11 @@ static uint32_t put_word(char *buf, const char *w)
 /* The text a readable node answers (under the lock). */
 static uint32_t text_of_locked(const pwmfs_fd *h, char *buf)
 {
-    pwmfs_channel *c = &g_ch[h->line];
+    const pwmfs_channel *c = channel_locked(h->line);
+    if (c == NULL && h->kind != NODE_NPWM) {
+        buf[0] = 0;
+        return 0;
+    }
     switch (h->kind) {
     case NODE_NPWM:
         return put_number(buf, (uint64_t)npwm_locked());
@@ -454,12 +484,27 @@ static int take_u64(const char *text, uint64_t *out)
 static int32_t export_locked(uint32_t line)
 {
     int32_t npwm = npwm_locked();
-    if (line >= (uint32_t)npwm || line >= PWMFS_LINES_MAX) {
+#ifdef RHU_SHIM_BREAK_PWMFS_NAMES_AT_64
+    /* Built with this define, a channel name of 64 or more is refused before
+     * the kernel is asked, so a row whose PWM-capable lines carry such
+     * numbers cannot export them. Never set in a hosted image. */
+    if (line >= 64) {
         rhu_shim_log("%s/export: line %u is past this chip's %u channel names (ENODEV)", PWMFS_CHIP, line, (uint32_t)npwm);
         return RHU_GERR_ENODEV;
     }
-    pwmfs_channel *c = &g_ch[line];
-    if (c->exported) {
+#endif
+    if (line >= (uint32_t)npwm) {
+        rhu_shim_log("%s/export: line %u is past this chip's %u channel names (ENODEV)", PWMFS_CHIP, line, (uint32_t)npwm);
+        return RHU_GERR_ENODEV;
+    }
+    int32_t at = index_of(line);
+    if (at >= PWMFS_CHANNELS_MAX) {
+        rhu_shim_log("%s/export: line %u is the row's PWM line of index %u, past this table's %u channels (ENODEV)", PWMFS_CHIP, line, (uint32_t)at, (uint32_t)PWMFS_CHANNELS_MAX);
+        return RHU_GERR_ENODEV;
+    }
+    /* A line no timer drives has no entry; the kernel's claim judges it below. */
+    pwmfs_channel *c = at >= 0 ? &g_ch[at] : NULL;
+    if (c != NULL && c->exported) {
         rhu_shim_log("%s/export: line %u is exported already (EBUSY)", PWMFS_CHIP, line);
         return RHU_GERR_EBUSY;
     }
@@ -482,6 +527,17 @@ static int32_t export_locked(uint32_t line)
         rhu_shim_log("%s/export: the claim of line %u answered %d (EIO)", PWMFS_CHIP, line, h);
         return RHU_GERR_EIO;
     }
+    if (c == NULL) {
+#ifdef RHU_SHIM_BREAK_PWMFS_EXPORT_UNJUDGED
+        return 0;
+#else
+        /* The claim answered a handle for a line the enumeration does not
+         * list: the two functions of the kernel disagree. */
+        rhu_pwm_release(h);
+        rhu_shim_log("%s/export: line %u was claimed and is not among the row's PWM lines; released (EIO)", PWMFS_CHIP, line);
+        return RHU_GERR_EIO;
+#endif
+    }
     memset(c, 0, sizeof *c);
     c->exported = 1;
     c->handle = h;
@@ -495,7 +551,8 @@ static int32_t export_locked(uint32_t line)
 
 static int32_t unexport_locked(uint32_t line)
 {
-    if (line >= (uint32_t)npwm_locked() || line >= PWMFS_LINES_MAX || !g_ch[line].exported) {
+    pwmfs_channel *c = channel_locked(line);
+    if (c == NULL || !c->exported) {
         rhu_shim_log("%s/unexport: line %u is not exported (ENODEV)", PWMFS_CHIP, line);
         return RHU_GERR_ENODEV;
     }
@@ -504,7 +561,6 @@ static int32_t unexport_locked(uint32_t line)
      * Never set in a hosted image. */
     return 0;
 #else
-    pwmfs_channel *c = &g_ch[line];
     int32_t rc = rhu_pwm_release(c->handle);
     if (rc != 0)
         rhu_shim_log("%s/unexport: the release of line %u answered %d; the channel is dropped", PWMFS_CHIP, line, rc);
@@ -517,8 +573,8 @@ static int32_t unexport_locked(uint32_t line)
  * C library's code. */
 static int32_t attribute_write_locked(const pwmfs_fd *h, const char *text)
 {
-    pwmfs_channel *c = &g_ch[h->line];
-    if (!c->exported) {
+    pwmfs_channel *c = channel_locked(h->line);
+    if (c == NULL || !c->exported) {
         rhu_shim_log("%s/pwm%u: written after its unexport (ENODEV)", PWMFS_CHIP, h->line);
         return RHU_GERR_ENODEV;
     }

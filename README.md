@@ -21,18 +21,19 @@ Lamella RHU is free and open source under the [licenses below](#license).
 
 ## Development status
 
-Lamella RHU 1.0.0-alpha.2 is available for early testing.
+Lamella RHU 1.0.0-alpha.3 is available for early testing.
 
 Available today:
-- Build and deploy .NET 11 RC3 (NativeAOT) apps to the supported boards and emulators listed below.
+- Build and deploy .NET 11 (NativeAOT) apps to the supported boards and emulators listed below.
 - Peripheral support: ADC, GPIO, I2C, PWM, SPI and UART (using the standard `System.Device`, `System.Device.Analog` and `System.IO.Ports` classes)
 - SD card support (using the standard `System.IO` classes)
+- Networking support (using the standard `System.Net` classes)
 - `Lamella.Hardware.TargetBoard` offers convenient access to board details and peripherals
 - .NET IoT Libraries support on boards with sufficient flash and RAM
 - For kernel evaluators, a quality gate chain: build and validate the unikernel and a hosted .NET program on an emulator
 
 Not in this release:
-- Networking or TLS support
+- TLS support
 - Compression support
 
 Supported boards:

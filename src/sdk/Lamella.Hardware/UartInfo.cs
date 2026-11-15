@@ -3,7 +3,8 @@ namespace Lamella.Hardware;
 
 /// <summary>
 /// One serial port: <paramref name="Number"/> is the chip's UART block number, the number in the port's device
-/// file name; <paramref name="PortName"/> is that device file ("/dev/ttyS0" for UART0), the name
+/// file name; <paramref name="PortName"/> is that device file ("/dev/ttyS0" for UART0, "/dev/ttyLP1" for a
+/// low-power UART whose block is 1), the name
 /// <c>System.IO.Ports.SerialPort</c> takes; <paramref name="Tx"/> and <paramref name="Rx"/> are the pins the port
 /// drives in this image, null where the board's facts name no pair for the block; <paramref name="IsConsole"/> and
 /// <paramref name="IsLog"/> say that the image routes its console or its kernel log through this port, as the build

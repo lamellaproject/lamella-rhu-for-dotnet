@@ -1,0 +1,18 @@
+<Project Sdk="Lamella.Sdk">
+
+  <!-- The gate's program for the debugger's unhandled-exception event:
+       one exception nothing catches, thrown two calls below Main, with a
+       handler of the program's own on the unhandled-exception event. The
+       verification chain publishes it in the Debug and the Release
+       configuration, reads each image's symbols and debug information
+       (tools/rt-publish/debug-readings.py) and runs each through the
+       emulator's debug port. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+
+</Project>

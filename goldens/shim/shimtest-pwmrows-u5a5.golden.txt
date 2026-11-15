@@ -1,0 +1,6 @@
+shimtest-pwmrows: the PWM device files over a board row's own line table (st-nucleo-u5a5zj-q), the kernel's PWM functions answered by the tenant
+PASS shim-pwmrows-init (the tenant answers as the kernel with the row's PWM-capable lines)
+PASS shim-pwmrows-npwm (the highest listed line plus one)
+PASS shim-pwmrows-lines (every listed line exported under its own number, its period and its duty set, its period read back, unexported and its directory gone; every claim released)
+PASS shim-pwmrows-names (a hole under the top ENODEV by the kernel's judgement, under the line that says so; the name past the top ENODEV under its own line; a name wider than a line's number ENODEV)
+SHIMTEST-PWMROWS: ALL GOOD (the PWM device files over a board row's own line table, from a native caller's side)

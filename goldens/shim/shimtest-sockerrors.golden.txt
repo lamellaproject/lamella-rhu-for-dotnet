@@ -1,0 +1,5 @@
+shimtest-sockerrors: the kernel's network codes as the runtime's errors
+PASS shim-sock-errors-named (thirty-five kernel codes each answered as the runtime's error of the same name)
+PASS shim-sock-errors-nodev (the kernel's answer of a row with no medium answered as the address family not supported)
+PASS shim-sock-errors-unknown (a code outside the table, zero and the positive numbers answered as an input-output error; no code from -200 to 200 answered as success)
+SHIMTEST-SOCKERRORS: ALL GOOD (the kernel's network codes as the runtime's errors)

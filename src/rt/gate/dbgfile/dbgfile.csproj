@@ -1,0 +1,26 @@
+<Project Sdk="Lamella.Sdk">
+
+  <!-- The gate's program for a compiled file's code: it references the
+       class library dbgownlib as a compiled assembly, by its file, where
+       the program dbgown references the same library by project. The
+       verification chain builds the library by itself, publishes this
+       program in the Debug configuration and reads its image as a
+       debugger reads it (tools/rt-publish/debug-readings.py): the
+       program's lines, and the library's, which are not the program's own
+       code. Program.cs carries no comment: the readings name its
+       statements by line number. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="dbgownlib">
+      <HintPath>../dbgownlib/bin/Debug/net11.0/dbgownlib.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>

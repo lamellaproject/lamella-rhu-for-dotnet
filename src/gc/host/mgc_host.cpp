@@ -1,4 +1,4 @@
-/* mgc_host.cpp -- the GC gate's activation host (gate case gc.A).
+/* mgc_host.cpp -- the GC gate's activation host (gate case gc.activation).
  *
  * Plays the execution engine's INITIALIZATION role against the mgc
  * interface skeleton on a bare QEMU image: drives the standalone-GC
@@ -8,7 +8,7 @@
  * the five flat GCToEEInterface methods its initialization path calls,
  * plus the small console C runtime its logging uses.
  *
- * Under -DMGC_HOST_DRIVE_ALLOC (gate case gc.B) the same host also
+ * Under -DMGC_HOST_DRIVE_ALLOC (gate case gc.allocator) the same host also
  * plays the EE's allocation-era role for a bounded drive: it serves
  * the allocator's import surface -- the glibc-shaped anonymous mmap
  * served from the kernel arena, the write-barrier stomp sink, and
@@ -17,7 +17,7 @@
  * after activation succeeds. Compiled without the define this file is
  * the activation-only host.
  *
- * Under -DMGC_HOST_DRIVE_COLLECT (gate case gc.C; extends the drive
+ * Under -DMGC_HOST_DRIVE_COLLECT (gate case gc.mark; extends the drive
  * world above) the host additionally plays the EE's COLLECTION-era
  * role: the twelve flat methods the collector's mark calls around a
  * stop-the-world collection (SuspendEE ... RestartEE in the EE's
@@ -36,7 +36,7 @@
  * never allocates -- so suspend-anywhere is safe by construction; the
  * policy layer belongs to the real EE.
  *
- * Under -DMGC_HOST_DRIVE_SWEEP (gate case gc.C-sweep; extends the
+ * Under -DMGC_HOST_DRIVE_SWEEP (gate case gc.sweep; extends the
  * collection world) the host plays the EE's DEATH-PIPELINE-era role:
  * the four flat methods the pipeline calls (EagerFinalized -- true for
  * the host's WR-mirror MethodTable, destroying the mirrored
@@ -53,7 +53,7 @@
  * PRINTS, never asserts: the same host must run the collector's
  * MGC_BREAK_WEAK control to exit 0, and the gate is the detector.
  *
- * Under -DMGC_HOST_DRIVE_TUNE (gate case gc.D; extends the sweep
+ * Under -DMGC_HOST_DRIVE_TUNE (gate case gc.windows; extends the sweep
  * world) the host plays the EE's WINDOW-era role: the fast path
  * (serving small allocations from the context's bump window exactly
  * as the EE's inline allocator would, so window consumption and the
@@ -169,7 +169,7 @@
 #error "MGC_HOST_DRIVE_FROZEN_BOUND is a windows-world drive (needs MGC_HOST_DRIVE_TUNE)"
 #endif
 #endif
-/* The collector drives past gc.D share the bulk births and the counter
+/* The collector drives past gc.windows share the bulk births and the counter
  * worker. */
 #if defined(MGC_HOST_DRIVE_MARKOVF) || defined(MGC_HOST_DRIVE_HANDLE_GROWTH) \
     || defined(MGC_HOST_DRIVE_ALLOC_BOUND) || defined(MGC_HOST_DRIVE_TAIL_REJOIN) \
@@ -629,8 +629,8 @@ uint32_t GCToEEInterface::GetCurrentProcessCpuCount()
 
 #ifdef MGC_HOST_DRIVE_ALLOC
 /* ------------------------------------------------------------------ */
-/* the allocator-drive surface (gate case gc.B): the allocator's       */
-/* imports, satisfied the EE-for-initialization way                    */
+/* the allocator-drive surface (gate case gc.allocator): the          */
+/* allocator's imports, satisfied the EE-for-initialization way       */
 /* ------------------------------------------------------------------ */
 
 /* The allocator initializes the write-barrier globals through this
@@ -811,7 +811,7 @@ extern "C" int mincore(void* addr, size_t len, unsigned char* vec)
 
 #ifdef MGC_HOST_DRIVE_COLLECT
 /* ------------------------------------------------------------------ */
-/* the collection-drive surface (gate case gc.C): the collector's      */
+/* the collection-drive surface (gate case gc.mark): the collector's  */
 /* EE imports, and the one real mutator the world stops               */
 /* ------------------------------------------------------------------ */
 
@@ -1174,7 +1174,7 @@ void GCToEEInterface::DiagGCEnd(size_t index, int gen, int reason,
 }
 
 #ifdef MGC_HOST_DRIVE_SWEEP
-/* --- the death-pipeline-era flat EE methods (gate case gc.C-sweep) - */
+/* --- the death-pipeline-era flat EE methods (gate case gc.sweep) --- */
 
 /* The partition's FIRST question about every dead registered entry.
  * True only for the WR-mirror type, and the true path carries the
@@ -1245,7 +1245,7 @@ extern "C" void* __mgc_dlopen_hook(const char* f);
 extern "C" void* __mgc_dlsym_hook(void* h, const char* n);
 
 /* The module-initializer walk the kernel entry sequence performs. The
- * gc.A image links no managed module, so the bracketed table is empty
+ * gc.activation image links no managed module, so the bracketed table is empty
  * by construction; a non-empty table here is a foreign object in the
  * image and dies loudly. */
 extern "C" void InitializeModules(uintptr_t os_module, const uintptr_t* headers,
@@ -1264,10 +1264,10 @@ extern "C" void InitializeModules(uintptr_t os_module, const uintptr_t* headers,
 
 #ifdef MGC_HOST_DRIVE_ALLOC
 /* ------------------------------------------------------------------ */
-/* the allocator drive (gate case gc.B): a bounded, deterministic      */
-/* schedule through IGCHeap::Alloc -- the discriminator between the    */
-/* live-allocator image (every step verified, exit 0) and the bare-    */
-/* skeleton control (the first allocation must fail-fast).             */
+/* the allocator drive (gate case gc.allocator): a bounded,           */
+/* deterministic schedule through IGCHeap::Alloc -- the discriminator */
+/* between the live-allocator image (every step verified, exit 0) and */
+/* the bare-skeleton control (the first allocation must fail-fast).   */
 /* ------------------------------------------------------------------ */
 
 static void drive_check(bool ok, const char* what)
@@ -2389,13 +2389,13 @@ static int32_t drive_allocator(IGCHeap* heap)
     return drive_no_gc_region(heap);
 #endif
 #if defined(MGC_HOST_DRIVE_TUNE)
-    printf("[gc-host] gc.D windows+event drive: the same payload under window posture, the GC-done futex, and the activation break-out\n");
+    printf("[gc-host] gc.windows windows+event drive: the same payload under window posture, the GC-done futex, and the activation break-out\n");
 #elif defined(MGC_HOST_DRIVE_SWEEP)
-    printf("[gc-host] gc.C-sweep death-pipeline drive: the schedule + a death cast, then collections that actually reclaim\n");
+    printf("[gc-host] gc.sweep death-pipeline drive: the schedule + a death cast, then collections that actually reclaim\n");
 #elif defined(MGC_HOST_DRIVE_COLLECT)
-    printf("[gc-host] gc.C suspension+mark drive: allocation schedule, then two collections over the real interface\n");
+    printf("[gc-host] gc.mark suspension+mark drive: allocation schedule, then two collections over the real interface\n");
 #else
-    printf("[gc-host] gc.B allocator drive: exercising IGCHeap::Alloc over the live region\n");
+    printf("[gc-host] gc.allocator allocator drive: exercising IGCHeap::Alloc over the live region\n");
 #endif
 
     gc_alloc_context* acx = &g_mutator.acx;
@@ -2897,7 +2897,7 @@ extern "C" int32_t __managed__Main(int32_t argc, const uint8_t* const* argv)
            (unsigned)MGC_ROW_FROZEN_SEGS);
 #endif
 
-    printf("[gc-host] gc.A activation host: driving the standalone-GC loader protocol\n");
+    printf("[gc-host] gc.activation activation host: driving the standalone-GC loader protocol\n");
 
     g_free_mt.InitializeFreeObject();
 

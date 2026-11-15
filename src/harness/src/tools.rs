@@ -1098,3 +1098,139 @@ impl Echo {
         }
     }
 }
+
+/// One step of a gathering echo's record: a receive from the chardev or a
+/// write back to it, with its time since the echo connected, the offset
+/// of its first byte in the stream echoed, and its length.
+#[derive(Clone, Copy)]
+pub struct EchoStep {
+    pub at: Duration,
+    pub write: bool,
+    pub offset: u64,
+    pub len: usize,
+}
+
+/// The wire's echo in its gathering mode, for a case whose check needs
+/// the bytes of one guest write to come back together. The echo above
+/// answers each receive with its own write, and the emulated port sends
+/// byte by byte: two bytes of one guest write can come in two receives
+/// and leave in two writes, with whatever time the machine running the
+/// gate puts between them. Here a receive opens a hold; what arrives
+/// before the hold ends joins it, and the whole leaves in ONE write. The
+/// hold runs from its first receive and is never extended, so it bounds
+/// what the mode adds to an echoed byte's way back. Every receive and
+/// every write is recorded with its time, and `finish` answers the
+/// record, so a case that misses a timer over the echo can print what
+/// the peer did. The mode has its own spawn: `spawn_echo` and the loop
+/// above run as they stand.
+pub struct GatheringEcho {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<Result<Vec<EchoStep>, String>>,
+}
+
+pub fn spawn_gathering_echo(port: u16, deadline: Duration, hold: Duration) -> GatheringEcho {
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let thread = std::thread::spawn(move || echo_gathered_until_closed(port, deadline, hold, &flag));
+    GatheringEcho { stop, thread }
+}
+
+fn echo_gathered_until_closed(port: u16, deadline: Duration, hold: Duration, stop: &AtomicBool) -> Result<Vec<EchoStep>, String> {
+    fn timeout_fault(e: std::io::Error) -> String {
+        format!("the wire's gathering echo cannot set a timeout: {e}")
+    }
+    let start = Instant::now();
+    let mut stream = loop {
+        if stop.load(Ordering::SeqCst) {
+            // The run ended before the chardev listened: nothing to echo.
+            return Ok(Vec::new());
+        }
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(s) => break s,
+            Err(e) => {
+                if start.elapsed() >= deadline {
+                    return Err(format!(
+                        "the wire's gathering echo could not connect to the chardev on port {port} within {} s: {e}",
+                        deadline.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    };
+    let _ = stream.set_nodelay(true);
+    // Between gathers the read timeout re-checks the stop flag, as in the
+    // echo above; inside a gather it is what is left of the hold. A write
+    // back is bounded as there.
+    let idle = Duration::from_millis(250);
+    stream.set_read_timeout(Some(idle)).map_err(timeout_fault)?;
+    stream.set_write_timeout(Some(Duration::from_secs(2))).map_err(timeout_fault)?;
+    let connected = Instant::now();
+    let mut buf = [0u8; 4096];
+    let mut echoed = 0u64;
+    let mut steps: Vec<EchoStep> = Vec::new();
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(first) => {
+                let opened = Instant::now();
+                steps.push(EchoStep { at: opened.duration_since(connected), write: false, offset: echoed, len: first });
+                let mut n = first;
+                let mut peer_open = true;
+                while n < buf.len() {
+                    let left = hold.saturating_sub(opened.elapsed());
+                    if left.is_zero() {
+                        break;
+                    }
+                    stream.set_read_timeout(Some(left)).map_err(timeout_fault)?;
+                    match stream.read(&mut buf[n..]) {
+                        Ok(0) => {
+                            peer_open = false;
+                            break;
+                        }
+                        Ok(more) => {
+                            steps.push(EchoStep { at: connected.elapsed(), write: false, offset: echoed + n as u64, len: more });
+                            n += more;
+                        }
+                        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break,
+                        Err(_) => {
+                            peer_open = false;
+                            break;
+                        }
+                    }
+                }
+                stream.set_read_timeout(Some(idle)).map_err(timeout_fault)?;
+                if let Err(e) = stream.write_all(&buf[..n]) {
+                    if !peer_open || stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    return Err(format!("the wire's gathering echo could not write {n} bytes back: {e}"));
+                }
+                steps.push(EchoStep { at: connected.elapsed(), write: true, offset: echoed, len: n });
+                echoed += n as u64;
+                if !peer_open || stop.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            // The peer is gone (the emulator exited): the echo's work is done.
+            Err(_) => break,
+        }
+    }
+    Ok(steps)
+}
+
+impl GatheringEcho {
+    /// Raise the stop flag, join the thread, answer the record.
+    pub fn finish(self) -> Result<Vec<EchoStep>, String> {
+        self.stop.store(true, Ordering::SeqCst);
+        match self.thread.join() {
+            Ok(r) => r,
+            Err(_) => Err("the wire's gathering echo thread panicked".to_string()),
+        }
+    }
+}

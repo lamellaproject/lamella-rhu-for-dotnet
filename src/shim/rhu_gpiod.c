@@ -16,14 +16,20 @@
  * not the version of any libgpiod build.
  *
  * The mapping from the kernel's seven GPIO calls: a chip open takes the
- * line space (rhu_gpio_count) and allocates ITS OWN chip object with one
- * line object per line -- two opens are two objects, each the owner of the
- * lines requested through it, and a close gives back that chip's lines and
- * no other's; a request is the CLAIM (rhu_gpio_claim: an input with its
+ * line space (rhu_gpio_count) and allocates ITS OWN chip object, a few
+ * words -- two opens are two objects, each the owner of the lines
+ * requested through it, and a close gives back that chip's lines and no
+ * other's. The chip's lines live in ONE table of one line object per
+ * line: the first open makes it, every later open shares it, and the close
+ * of the last chip gives it back, so a second open costs its chip object
+ * and no second table. A line handle names its chip and its line (the
+ * address of the line's object plus the chip's number), so two opens
+ * answer two handles for one line, and the line's object names the chip
+ * that holds it. A request is the CLAIM (rhu_gpio_claim: an input with its
  * pull, an output at its initial level), refused EBUSY while any chip
  * object of this program holds the line; a release is the RELEASE
  * (rhu_gpio_release); the value calls are the READ and the WRITE
- * (rhu_gpio_read, rhu_gpio_write) on a line this object holds; a
+ * (rhu_gpio_read, rhu_gpio_write) on a line the handle's chip holds; a
  * both-edges request is the claim as an input, then THE EVENT WORD
  * (rhu_gpio_event_word) read as the consumed mark BEFORE the EDGE ARM
  * (rhu_gpio_edge, both edges), so an edge the kernel counts from the arm's
@@ -43,7 +49,11 @@
  *
  * The limits, plainly: one owner per line (the kernel refuses a second
  * claimant EBUSY; this unit refuses a second request on a line it already
- * holds EBUSY until the release); a refused kernel call is named on the
+ * holds EBUSY until the release); as many chips open at once as a line
+ * object has handle steps, eight on this target (one more open is refused
+ * EMFILE with one line); a line's direction and bias readings are the
+ * line's, through whichever chip's handle they are read; a refused kernel
+ * call is named on the
  * wire in one line; both edges only (the level-triggered and wakeup kinds
  * have no entry point in this binding); the open-drain output the kernel
  * serves has no entry point either; the active-low and open-source flags
@@ -54,8 +64,8 @@
  * than the interrupt handler's latency counts ONCE on a family whose
  * hardware latches one pending bit per line, and is then one event of the
  * level the pad shows afterwards. One thread at a
- * time uses a line object, as the library asks of its callers; separate
- * objects are safe from separate threads: the chips, their lines'
+ * time uses a line handle, as the library asks of its callers; separate
+ * handles are safe from separate threads: the chips, their lines'
  * ownership and the iterators change under one mutex of this unit, held
  * for a few instructions and never across a wait. Nothing here masks
  * anything: the kernel's GPIO calls mask nothing, every call runs on the
@@ -66,7 +76,7 @@
 #include "rhu_shim.h"
 
 #include "rhu.h"
-#include "rhu_pal_errno_net11_rc3.h"
+#include "rhu_pal_errno_net11.h"
 
 extern int *__errno_location(void);
 void *malloc(size_t n);
@@ -136,7 +146,7 @@ struct gpiod_line_event {
 
 struct gpiod_line {
     uint32_t offset;
-    uint8_t requested; /* 1 while this object holds the line */
+    uint8_t holder;    /* the number of the chip that holds the line, plus one; 0 while none does */
     uint8_t direction; /* the last request's; input when never requested */
     uint8_t bias;      /* the living request's flag; "as is" otherwise */
     uint8_t events;    /* 1 while both-edge events are armed */
@@ -145,10 +155,23 @@ struct gpiod_line {
     char consumer[16];
 };
 
-/* One open: its own lines, linked into the unit's list of open chips. */
+/* A line handle is the address of the line's object in the table plus the
+ * chip's number in steps of the object's alignment: every handle is an
+ * address inside its own line's object, and no two chips' handles of one
+ * line are equal. The object's size in steps bounds the chips open at
+ * once: thirty-two bytes at an alignment of four on this target, so
+ * eight. */
+#define GPIOD_HANDLE_STEP ((uintptr_t)_Alignof(struct gpiod_line))
+#define GPIOD_CHIPS_MAX ((uint32_t)(sizeof(struct gpiod_line) / _Alignof(struct gpiod_line)))
+_Static_assert(sizeof(struct gpiod_line) / _Alignof(struct gpiod_line) <= 32u, "the numbers of the open chips fit one word of bits");
+
+/* One open: a few words, linked into the unit's list of open chips. Its
+ * number is the lowest that no other open chip has; the table is the one
+ * table of the chip's lines, which every open shares. */
 struct gpiod_chip {
     struct gpiod_chip *next;
     uint32_t lines;
+    uint32_t number;
     struct gpiod_line *table;
 };
 
@@ -161,6 +184,10 @@ struct gpiod_chip_iter {
 };
 
 static struct gpiod_chip *g_chips;
+#ifndef RHU_SHIM_BREAK_GPIOD_TABLE_PER_OPEN
+/* The one table of the chip's lines while any chip is open. */
+static struct gpiod_line *g_table;
+#endif
 #ifndef RHU_SHIM_BREAK_GPIOD_ITER_SHARED
 static struct gpiod_chip_iter *g_iters;
 #endif
@@ -258,23 +285,54 @@ static int chip_live(const struct gpiod_chip *chip)
     return 0;
 }
 
-static int line_live(const struct gpiod_line *l)
+/* A line handle's line object and its chip: the open chip whose table the
+ * handle lies in and whose number the handle carries; NULL for a handle of
+ * no open chip. */
+static struct gpiod_line *line_of(const struct gpiod_line *handle, struct gpiod_chip **chip)
+{
+    uintptr_t h = (uintptr_t)handle;
+    for (struct gpiod_chip *c = g_chips; c != NULL; c = c->next) {
+        uintptr_t lo = (uintptr_t)c->table;
+        if (h < lo || h - lo >= (uintptr_t)c->lines * sizeof(struct gpiod_line))
+            continue;
+        if ((h - lo) % sizeof(struct gpiod_line) != (uintptr_t)c->number * GPIOD_HANDLE_STEP)
+            continue;
+        *chip = c;
+        return &c->table[(h - lo) / sizeof(struct gpiod_line)];
+    }
+    return NULL;
+}
+
+/* Whether this chip is the line's holder. */
+static int holds(const struct gpiod_chip *chip, const struct gpiod_line *l)
+{
+    return l->holder == (uint8_t)(chip->number + 1u);
+}
+
+/* Whether any open chip holds this line. */
+static int line_held(uint32_t offset)
 {
     for (const struct gpiod_chip *c = g_chips; c != NULL; c = c->next) {
-        if (l >= c->table && l < c->table + c->lines)
-            return ((uintptr_t)l - (uintptr_t)c->table) % sizeof *l == 0;
+        if (offset < c->lines && c->table[offset].holder != 0)
+            return 1;
     }
     return 0;
 }
 
-/* Whether any open chip's object holds this line. */
-static int line_held(uint32_t offset)
+/* A table of the chip's lines, every line free: an input, its bias as it
+ * is. NULL without memory for it. */
+static struct gpiod_line *table_new(uint32_t n)
 {
-    for (const struct gpiod_chip *c = g_chips; c != NULL; c = c->next) {
-        if (offset < c->lines && c->table[offset].requested)
-            return 1;
+    struct gpiod_line *t = (struct gpiod_line *)malloc((size_t)n * sizeof *t);
+    if (t == NULL)
+        return NULL;
+    memset(t, 0, (size_t)n * sizeof *t);
+    for (uint32_t i = 0; i < n; i++) {
+        t[i].offset = i;
+        t[i].direction = GPIOD_DIRECTION_INPUT;
+        t[i].bias = GPIOD_BIAS_AS_IS;
     }
-    return 0;
+    return t;
 }
 
 /* ------------------------------------------------------------------ */
@@ -302,25 +360,102 @@ struct gpiod_chip *gpiod_chip_open_by_number(int number)
         ERRNO = RHU_GERR_ENOMEM;
         return NULL;
     }
-    struct gpiod_chip *c = (struct gpiod_chip *)malloc(sizeof *c);
-    struct gpiod_line *t = (struct gpiod_line *)malloc((size_t)n * sizeof *t);
-    uint8_t *pulls = (uint8_t *)malloc((size_t)n);
-    if (c == NULL || t == NULL || pulls == NULL) {
+    /* What an open asks of the heap, largest first: the one table of the
+     * chip's lines, then its chip object, then the unit's pulls -- the
+     * table and the pulls only where a look under the lock found none
+     * standing. A close gives back the table's room and the chip object's
+     * and no other, so the open that follows the last close asks for those
+     * two rooms again, the table before any smaller block of its own:
+     * where the first open was given, it is given. Each block is made
+     * outside the lock; the loop's last pass holds the lock with all of
+     * them in hand. An open that finds the table takes the room of its
+     * chip object and no more. */
+    struct gpiod_chip *c = NULL;
+    struct gpiod_line *t = NULL;
+    uint8_t *pulls = NULL;
+#ifdef RHU_SHIM_BREAK_GPIOD_PULLS_FIRST
+    /* Built with this define, every open asks its chip object and a block
+     * of pulls before it looks for the table, and the reopen check in
+     * gate/rhu_shimtest.c fails. */
+    c = (struct gpiod_chip *)malloc(sizeof *c);
+    pulls = (uint8_t *)malloc((size_t)n);
+    if (c == NULL || pulls == NULL) {
         free(c);
-        free(t);
         free(pulls);
         ERRNO = RHU_GERR_ENOMEM;
         return NULL;
     }
-    memset(t, 0, (size_t)n * sizeof *t);
-    for (int32_t i = 0; i < n; i++) {
-        t[i].offset = (uint32_t)i;
-        t[i].direction = GPIOD_DIRECTION_INPUT;
-        t[i].bias = GPIOD_BIAS_AS_IS;
-    }
     memset(pulls, RHU_GPIO_PULL_NONE, (size_t)n);
+#endif
+    for (;;) {
+        if (!unit_lock()) {
+            free(c);
+            free(t);
+            free(pulls);
+            return NULL;
+        }
+#ifdef RHU_SHIM_BREAK_GPIOD_TABLE_PER_OPEN
+        /* Built with this define, every open makes a table of its own, and
+         * the two-open check in gate/rhu_shimtest.c fails. */
+        int table_due = t == NULL;
+#else
+        int table_due = t == NULL && g_table == NULL;
+#endif
+        int pulls_due = pulls == NULL && g_pulls == NULL;
+        if (c != NULL && !table_due && !pulls_due)
+            break;
+        unit_unlock();
+        int given = 1;
+        if (table_due)
+            given = (t = table_new((uint32_t)n)) != NULL;
+        if (given && c == NULL)
+            given = (c = (struct gpiod_chip *)malloc(sizeof *c)) != NULL;
+        if (given && pulls_due) {
+            given = (pulls = (uint8_t *)malloc((size_t)n)) != NULL;
+            if (given)
+                memset(pulls, RHU_GPIO_PULL_NONE, (size_t)n);
+        }
+        if (!given) {
+            free(c);
+            free(t);
+            free(pulls);
+            ERRNO = RHU_GERR_ENOMEM;
+            return NULL;
+        }
+    }
     c->lines = (uint32_t)n;
+    /* The chip's number: the lowest that no open chip has. */
+    uint32_t taken = 0;
+    for (const struct gpiod_chip *o = g_chips; o != NULL; o = o->next)
+        taken |= 1u << o->number;
+    uint32_t mine = 0;
+    while (mine < GPIOD_CHIPS_MAX && (taken & (1u << mine)) != 0)
+        mine++;
+    if (mine >= GPIOD_CHIPS_MAX) {
+        unit_unlock();
+        free(c);
+        free(t);
+        free(pulls);
+        rhu_shim_log("gpiod: chip 0 is open %u times, the most at once (EMFILE)", (unsigned)GPIOD_CHIPS_MAX);
+        ERRNO = RHU_GERR_EMFILE;
+        return NULL;
+    }
+    c->number = mine;
+#ifdef RHU_SHIM_BREAK_GPIOD_TABLE_PER_OPEN
     c->table = t;
+    t = NULL;
+#else
+    if (g_table == NULL) {
+        g_table = t;
+        t = NULL;
+    }
+    c->table = g_table;
+#endif
+    if (g_pulls == NULL) {
+        g_pulls = pulls;
+        g_pull_lines = (uint32_t)n;
+        pulls = NULL;
+    }
 #ifdef RHU_SHIM_BREAK_GPIOD_OPEN_UNLOCKED
     /* Built with this define, the list is joined with no lock, the window
      * between the read of its head and the store held open, blocked,
@@ -329,11 +464,7 @@ struct gpiod_chip *gpiod_chip_open_by_number(int number)
      * its chip at once, and the first then stores the stale head over it:
      * one chip is lost from the list every time, and the two-thread open
      * check in gate/rhu_shimtest.c fails. */
-    if (g_pulls == NULL) {
-        g_pulls = pulls;
-        g_pull_lines = (uint32_t)n;
-        pulls = NULL;
-    }
+    unit_unlock();
     struct gpiod_chip *head = g_chips;
     if (__atomic_fetch_add(&g_control_inside, 1u, __ATOMIC_ACQ_REL) == 0u) {
         uint64_t deadline = rhu_now_ns() + GPIOD_CONTROL_WINDOW_NS;
@@ -344,21 +475,13 @@ struct gpiod_chip *gpiod_chip_open_by_number(int number)
     g_chips = c;
     __atomic_fetch_sub(&g_control_inside, 1u, __ATOMIC_ACQ_REL);
 #else
-    if (!unit_lock()) {
-        free(c);
-        free(t);
-        free(pulls);
-        return NULL;
-    }
-    if (g_pulls == NULL) {
-        g_pulls = pulls;
-        g_pull_lines = (uint32_t)n;
-        pulls = NULL;
-    }
     c->next = g_chips;
     g_chips = c;
     unit_unlock();
 #endif
+    /* A table another opener put in place between this open's two looks
+     * makes the one in hand spare. */
+    free(t);
     free(pulls);
     return c;
 }
@@ -371,7 +494,7 @@ static int32_t release_locked(struct gpiod_line *l)
     if (l->events)
         rhu_gpio_edge(l->offset, RHU_GPIO_EDGE_NONE);
     int32_t rc = rhu_gpio_release(l->offset);
-    l->requested = 0;
+    l->holder = 0;
     l->events = 0;
     l->word = NULL;
     l->mark = 0;
@@ -400,13 +523,21 @@ void gpiod_chip_close(struct gpiod_chip *chip)
     }
     /* The close gives back every line this chip handed out and still
      * holds -- the library's own rule for a chip close -- and no other
-     * chip's. */
+     * chip's: a line's object names its holder. */
     for (uint32_t i = 0; i < chip->lines; i++) {
-        if (chip->table[i].requested)
+        if (holds(chip, &chip->table[i]))
             (void)release_locked(&chip->table[i]);
     }
+    /* The one table goes back with the last open chip. */
+    struct gpiod_line *gone = chip->table;
+#ifndef RHU_SHIM_BREAK_GPIOD_TABLE_PER_OPEN
+    if (g_chips != NULL)
+        gone = NULL;
+    else
+        g_table = NULL;
+#endif
     unit_unlock();
-    free(chip->table);
+    free(gone);
     free(chip);
 #endif
 }
@@ -536,7 +667,7 @@ struct gpiod_line *gpiod_chip_get_line(struct gpiod_chip *chip, int offset)
     if (!unit_lock())
         return NULL;
     if (chip_live(chip) && offset >= 0 && (uint32_t)offset < chip->lines)
-        l = &chip->table[offset];
+        l = (struct gpiod_line *)((uintptr_t)&chip->table[offset] + (uintptr_t)chip->number * GPIOD_HANDLE_STEP);
     unit_unlock();
     if (l == NULL)
         ERRNO = RHU_GERR_EINVAL;
@@ -560,16 +691,21 @@ static void remember_consumer(struct gpiod_line *l, const char *consumer)
 /* One request, whole or refused. The order of its checks is the
  * library's: the object, then whether the line is held (EBUSY), then the
  * flags (EINVAL). */
-static int request(struct gpiod_line *l, const char *consumer, uint32_t mode, uint32_t flags, uint32_t initial, int events)
+static int request(struct gpiod_line *line, const char *consumer, uint32_t mode, uint32_t flags, uint32_t initial, int events)
 {
     if (!unit_lock())
         return -1;
-    if (!line_live(l)) {
+    struct gpiod_chip *chip = NULL;
+    struct gpiod_line *l = line_of(line, &chip);
+    if (l == NULL) {
         unit_unlock();
         return fail(RHU_GERR_EINVAL);
     }
     uint32_t offset = l->offset;
-    if (l->requested || line_held(offset)) {
+    /* The holder a granted request writes into the line's object: the
+     * handle's chip. */
+    uint8_t holder = (uint8_t)(chip->number + 1u);
+    if (line_held(offset)) {
         unit_unlock();
         return fail(RHU_GERR_EBUSY);
     }
@@ -659,7 +795,7 @@ static int request(struct gpiod_line *l, const char *consumer, uint32_t mode, ui
     }
     if (offset < g_pull_lines)
         g_pulls[offset] = (uint8_t)pull;
-    l->requested = 1;
+    l->holder = holder;
     l->events = events ? 1 : 0;
     l->direction = mode == RHU_GPIO_INPUT ? GPIOD_DIRECTION_INPUT : GPIOD_DIRECTION_OUTPUT;
 #ifdef RHU_SHIM_BREAK_GPIOD_BIAS_STALE
@@ -700,17 +836,19 @@ void gpiod_line_release(struct gpiod_line *line)
 {
     if (!unit_lock())
         return;
-    if (!line_live(line) || !line->requested) {
+    struct gpiod_chip *chip = NULL;
+    struct gpiod_line *l = line_of(line, &chip);
+    if (l == NULL || !holds(chip, l)) {
         unit_unlock();
         return;
     }
-    uint32_t offset = line->offset;
+    uint32_t offset = l->offset;
 #ifdef RHU_SHIM_BREAK_GPIOD_BIAS_STALE
-    uint8_t keep = line->bias;
+    uint8_t keep = l->bias;
 #endif
-    int32_t rc = release_locked(line);
+    int32_t rc = release_locked(l);
 #ifdef RHU_SHIM_BREAK_GPIOD_BIAS_STALE
-    line->bias = keep;
+    l->bias = keep;
 #endif
     unit_unlock();
     if (rc < 0)
@@ -721,22 +859,24 @@ void gpiod_line_release(struct gpiod_line *line)
 /* the values and the readings                                         */
 /* ------------------------------------------------------------------ */
 
-/* A value call's line: live, and held through this object (EPERM when it
- * is not, the library's answer); its offset and direction out. */
+/* A value call's line: live, and held through this handle's chip (EPERM
+ * when it is not, the library's answer); its offset and direction out. */
 static int held_line(struct gpiod_line *line, uint32_t *offset, uint8_t *direction)
 {
     if (!unit_lock())
         return -1;
-    if (!line_live(line)) {
+    struct gpiod_chip *chip = NULL;
+    struct gpiod_line *l = line_of(line, &chip);
+    if (l == NULL) {
         unit_unlock();
         return fail(RHU_GERR_EINVAL);
     }
-    if (!line->requested) {
+    if (!holds(chip, l)) {
         unit_unlock();
         return fail(RHU_GERR_EPERM);
     }
-    *offset = line->offset;
-    *direction = line->direction;
+    *offset = l->offset;
+    *direction = l->direction;
     unit_unlock();
     return 0;
 }
@@ -767,7 +907,9 @@ int gpiod_line_is_free(struct gpiod_line *line)
 {
     int is_free = 0;
     if (unit_lock()) {
-        is_free = line_live(line) && !line->requested;
+        struct gpiod_chip *chip = NULL;
+        const struct gpiod_line *l = line_of(line, &chip);
+        is_free = l != NULL && !holds(chip, l);
         unit_unlock();
     }
     return is_free;
@@ -777,8 +919,10 @@ int gpiod_line_direction(struct gpiod_line *line)
 {
     int d = GPIOD_DIRECTION_INPUT;
     if (unit_lock()) {
-        if (line_live(line))
-            d = line->direction;
+        struct gpiod_chip *chip = NULL;
+        const struct gpiod_line *l = line_of(line, &chip);
+        if (l != NULL)
+            d = l->direction;
         unit_unlock();
     }
     return d;
@@ -788,8 +932,10 @@ int gpiod_line_bias(struct gpiod_line *line)
 {
     int b = GPIOD_BIAS_AS_IS;
     if (unit_lock()) {
-        if (line_live(line))
-            b = line->bias;
+        struct gpiod_chip *chip = NULL;
+        const struct gpiod_line *l = line_of(line, &chip);
+        if (l != NULL)
+            b = l->bias;
         unit_unlock();
     }
     return b;
@@ -833,17 +979,19 @@ static int event_line(struct gpiod_line *line, const uint32_t **word, uint32_t *
 {
     if (!unit_lock())
         return -1;
-    if (!line_live(line)) {
+    struct gpiod_chip *chip = NULL;
+    const struct gpiod_line *l = line_of(line, &chip);
+    if (l == NULL) {
         unit_unlock();
         return fail(RHU_GERR_EINVAL);
     }
-    if (!line->requested || !line->events || line->word == NULL) {
+    if (!holds(chip, l) || !l->events || l->word == NULL) {
         unit_unlock();
         return fail(RHU_GERR_EPERM);
     }
-    *word = line->word;
-    *mark = line->mark;
-    *offset = line->offset;
+    *word = l->word;
+    *mark = l->mark;
+    *offset = l->offset;
     unit_unlock();
     return 0;
 }
@@ -965,16 +1113,18 @@ int gpiod_line_event_read(struct gpiod_line *line, struct gpiod_line_event *even
          * this one around again. */
         if (!unit_lock())
             return -1;
-        if (!line_live(line) || !line->events || line->word != word) {
+        struct gpiod_chip *chip = NULL;
+        struct gpiod_line *l = line_of(line, &chip);
+        if (l == NULL || !holds(chip, l) || !l->events || l->word != word) {
             unit_unlock();
             return fail(RHU_GERR_EPERM);
         }
-        if (line->mark != mark) {
+        if (l->mark != mark) {
             unit_unlock();
             continue;
         }
         uint32_t pending = cur - mark;
-        line->mark = mark + 1u;
+        l->mark = mark + 1u;
         unit_unlock();
         /* An earlier edge of a coalesced burst is the opposite of the one
          * after it. */

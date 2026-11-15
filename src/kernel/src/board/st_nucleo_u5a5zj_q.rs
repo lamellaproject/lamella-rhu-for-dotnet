@@ -237,7 +237,7 @@ const USART1_IRQ_PRIO: u8 = 0xE0;
 /// The interrupt lines this board claims with its own handlers, folded
 /// into the vector table by the boot module: USART1's line, the console
 /// ring's transmit drain.
-pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[(USART1_IRQ, __rhu_u5a5_usart1_irq)];
+pub const BOARD_IRQS: &[(usize, unsafe extern "C" fn())] = &[(USART1_IRQ, __rhu_u5a5_usart1_irq), #[cfg(rhu_uart_st)] super::stm32_usart::IRQS[0]];
 /// The family GPIO driver's external-interrupt lines (the U5 arm).
 pub use super::stm32_gpio::IRQS as GPIO_IRQS;
 

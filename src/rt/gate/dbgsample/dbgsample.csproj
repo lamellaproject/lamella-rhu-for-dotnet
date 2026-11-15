@@ -1,0 +1,17 @@
+<Project Sdk="Lamella.Sdk">
+
+  <!-- The gate's program for what a debugger reads: six lines with three
+       locals, a call of a local function and one line written, in the
+       project shape of the app template. The verification chain publishes
+       it in the Debug configuration and reads its image's line table and
+       locals (tools/rt-publish/debug-readings.py). Program.cs carries no
+       comment: the readings name its statements by line number. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+
+</Project>

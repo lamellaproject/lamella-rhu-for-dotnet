@@ -49,10 +49,19 @@
          the sources the line-endings rewrite reads (the global usings
          target is the C# compiler's own). -->
     <_RhuIntermediateDirectory>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)'))</_RhuIntermediateDirectory>
-    <PathMap Condition="'$(PathMap)' == '$(_RhuPathMapDefault)'">$(_RhuIntermediateDirectory)=/rhu/obj/$(MSBuildProjectName),$(_RhuPathMapDefault)</PathMap>
+    <_RhuPathMapIsDefault>false</_RhuPathMapIsDefault>
+    <_RhuPathMapIsDefault Condition="'$(PathMap)' == '$(_RhuPathMapDefault)'">true</_RhuPathMapIsDefault>
+    <PathMap Condition="'$(_RhuPathMapIsDefault)' == 'true'">$(_RhuIntermediateDirectory)=/rhu/obj/$(MSBuildProjectName),$(_RhuPathMapDefault)</PathMap>
     <NoWin32Manifest>true</NoWin32Manifest>
     <_RhuGeneratedSourceTargets>GenerateAssemblyInfo;GenerateTargetFrameworkMonikerAttribute</_RhuGeneratedSourceTargets>
     <_RhuGeneratedSourceTargets Condition="'$(Language)' == 'C#'">$(_RhuGeneratedSourceTargets);GenerateGlobalUsings</_RhuGeneratedSourceTargets>
+    <!-- How the framework's and every package's code is compiled: with the
+         code optimization on, unless the build sets the one property read
+         here, and nowhere else, to false; the image is then compiled
+         without the optimization as a whole (the target
+         RhuCodeOptimization tells the rest). -->
+    <_RhuFrameworkOptimized>true</_RhuFrameworkOptimized>
+    <_RhuFrameworkOptimized Condition="'$(LamellaOptimizeNonUserCode)' == 'false'">false</_RhuFrameworkOptimized>
   </PropertyGroup>
 
   <!-- Values the SDK refuses: one row per value, naming the property (its
@@ -72,6 +81,8 @@
   <UsingTask TaskName="Lamella.Rhu.Build.AnalogVoltageScan" AssemblyFile="$(RhuTasksAssembly)" />
   <UsingTask TaskName="Lamella.Rhu.Build.GeneratedSourceLineEndings" AssemblyFile="$(RhuTasksAssembly)" />
   <UsingTask TaskName="Lamella.Rhu.Build.DebugLineSeparators" AssemblyFile="$(RhuTasksAssembly)" />
+  <UsingTask TaskName="Lamella.Rhu.Build.MarkUnoptimized" AssemblyFile="$(RhuTasksAssembly)" />
+  <UsingTask TaskName="Lamella.Rhu.Build.MethodBodyFolding" AssemblyFile="$(RhuTasksAssembly)" />
 
   <!-- The build's host inputs, so that a program's symbol file, its assembly
        and its image are the same bytes on a Windows host as on a Linux one:
@@ -144,6 +155,13 @@
        posture, 4 the packages and tools, 5 the link and the manifest, 6 the
        run). -->
   <Target Name="RhuValidate" BeforeTargets="BeforeBuild;BuildOnlySettings">
+    <!-- The network knob's name stands in these two lines alone: the first
+         reads the project's property, the second states its name for every
+         message; every condition below reads the first's value. -->
+    <PropertyGroup>
+      <_RhuNetwork>$(RhuNetwork)</_RhuNetwork>
+      <_RhuNetworkKnob>RhuNetwork</_RhuNetworkKnob>
+    </PropertyGroup>
     <Error Condition="'$(LamellaShellContract)' == '' or '$(RhuShellContract)' == ''" Code="RHU4003" Text="REFUSE: the contract between the SDK shell and this build package is not stated on both sides (LamellaShellContract '$(LamellaShellContract)', RhuShellContract '$(RhuShellContract)'): a net11.0 project names Sdk=&quot;Lamella.Sdk&quot;, whose shell restores this build package, reads its properties file and imports these targets" />
     <Error Condition="'$(LamellaShellContract)' != '' and '$(RhuShellContract)' != '' and '$(LamellaShellContract)' != '$(RhuShellContract)'" Code="RHU4002" Text="REFUSE: the shell's contract $(LamellaShellContract) is not this build package's $(RhuShellContract) (Lamella.Rhu.Build $(RhuSdkVersion)): the shell and the build package are of different releases" />
     <Error Condition="'$(RhuHostRid)' != 'win-x64' and '$(RhuHostRid)' != 'win-arm64' and '$(RhuHostRid)' != 'osx-arm64' and '$(RhuHostRid)' != 'linux-x64' and '$(RhuHostRid)' != 'linux-arm64'" Code="RHU4001" Text="REFUSE: this release has no tools package for the host $(RhuHostRid) (Lamella.Rhu.Tools.$(RhuHostRid)): the tools packages of this release are win-x64, win-arm64, osx-arm64, linux-x64 and linux-arm64" />
@@ -151,7 +169,8 @@
     <Error Condition="'$(RhuReflection)' != 'on' and '$(RhuReflection)' != 'off'" Code="RHU2002" Text="REFUSE: RhuReflection='$(RhuReflection)' is not one of: on, off" />
     <Error Condition="'$(RhuExternalRamInit)' != 'boot' and '$(RhuExternalRamInit)' != 'first-use' and '$(RhuExternalRamInit)' != 'background'" Code="RHU2003" Text="REFUSE: RhuExternalRamInit='$(RhuExternalRamInit)' is not one of: boot, first-use, background" />
     <Error Condition="'$(RhuManagedMemory)' != 'external' and '$(RhuManagedMemory)' != 'internal'" Code="RHU2004" Text="REFUSE: RhuManagedMemory='$(RhuManagedMemory)' is not one of: external, internal" />
-    <Error Condition="'$(RhuProgramMemory)' != 'internal' and '$(RhuProgramMemory)' != 'external'" Code="RHU2005" Text="REFUSE: RhuProgramMemory='$(RhuProgramMemory)' is not one of: internal, external" />
+    <Error Condition="'$(RhuProgramMemory)' != '' and '$(RhuProgramMemory)' != 'internal' and '$(RhuProgramMemory)' != 'external'" Code="RHU2005" Text="REFUSE: RhuProgramMemory='$(RhuProgramMemory)' is not one of: internal, external" />
+    <Error Condition="'$(_RhuNetwork)' != '' and '$(_RhuNetwork)' != 'on' and '$(_RhuNetwork)' != 'off'" Code="RHU2028" Text="REFUSE: $(_RhuNetworkKnob)='$(_RhuNetwork)' is not one of: on, off" />
     <Error Condition="'$(RhuLogLevel)' != 'silent' and '$(RhuLogLevel)' != 'quiet' and '$(RhuLogLevel)' != 'verbose'" Code="RHU2006" Text="REFUSE: RhuLogLevel='$(RhuLogLevel)' is not one of: silent, quiet, verbose" />
     <Error Condition="'$(RhuLogChannel)' != '' and '$(RhuLogChannel)' != 'memory' and '$(RhuLogChannel)' != 'probe' and '$(RhuLogChannel)' != 'uart0' and '$(RhuLogChannel)' != 'uart1' and '$(RhuLogChannel)' != 'off'" Code="RHU2007" Text="REFUSE: RhuLogChannel='$(RhuLogChannel)' is not one of: memory, probe, uart0, uart1, off" />
     <Error Condition="'$(RhuConsoleChannel)' != '' and '$(RhuConsoleChannel)' != 'memory' and '$(RhuConsoleChannel)' != 'probe' and '$(RhuConsoleChannel)' != 'uart0' and '$(RhuConsoleChannel)' != 'uart1' and '$(RhuConsoleChannel)' != 'off'" Code="RHU2008" Text="REFUSE: RhuConsoleChannel='$(RhuConsoleChannel)' is not one of: memory, probe, uart0, uart1, off" />
@@ -195,7 +214,11 @@
        board package's; the rest the class's runtime package's), the class's
        core archive (the shared Rust members of every kernel of the class,
        linked after the row's), and its two streams' default channels with
-       the row's legal set. -->
+       the row's legal set. The program's home is settled here before
+       anything reads it: a project that names none gets the row's default
+       home (the external flash on a row whose table says so and whose
+       managed memory stays external), the chip's own flash otherwise; what
+       the project named is kept for the link's words. -->
   <Target Name="RhuResolveBoard" DependsOnTargets="RhuValidate">
     <ItemGroup>
       <_RhuRow Include="@(LamellaTargetBoardRow)" Condition="'%(Identity)' == '$(LamellaTargetBoard)'" />
@@ -215,14 +238,48 @@
       <RhuStackPool>@(_RhuRow->'%(StackPool)')</RhuStackPool>
       <RhuStackDefault>@(_RhuRow->'%(StackDefault)')</RhuStackDefault>
       <RhuStackClamp>@(_RhuRow->'%(StackClamp)')</RhuStackClamp>
+      <RhuStackKernel>@(_RhuRow->'%(StackKernel)')</RhuStackKernel>
       <RhuKernelRamInitFirstUse>@(_RhuRow->'%(KernelRamInitFirstUse)')</RhuKernelRamInitFirstUse>
       <RhuKernelRamInitBackground>@(_RhuRow->'%(KernelRamInitBackground)')</RhuKernelRamInitBackground>
       <RhuMapInternal>@(_RhuRow->'%(MapInternal)')</RhuMapInternal>
       <RhuMapExternalFlash>@(_RhuRow->'%(MapExternalFlash)')</RhuMapExternalFlash>
       <RhuAnalogVoltageFits>@(_RhuRow->'%(AnalogVoltageFits)')</RhuAnalogVoltageFits>
+      <RhuKernelNoNetwork>@(_RhuRow->'%(KernelNoNetwork)')</RhuKernelNoNetwork>
+      <RhuKernelNoNetworkRamInitFirstUse>@(_RhuRow->'%(KernelNoNetworkRamInitFirstUse)')</RhuKernelNoNetworkRamInitFirstUse>
+      <RhuKernelNoNetworkRamInitBackground>@(_RhuRow->'%(KernelNoNetworkRamInitBackground)')</RhuKernelNoNetworkRamInitBackground>
+      <RhuFlashRegions>@(_RhuRow->'%(FlashRegions)')</RhuFlashRegions>
+      <RhuUartLowPowerBlocks>@(_RhuRow->'%(UartLowPowerBlocks)')</RhuUartLowPowerBlocks>
+      <RhuProgramMemoryDefault>@(_RhuRow->'%(ProgramMemoryDefault)')</RhuProgramMemoryDefault>
+      <_RhuProgramMemoryNamed>$(RhuProgramMemory)</_RhuProgramMemoryNamed>
+      <RhuProgramMemory Condition="'$(RhuProgramMemory)' == '' and '$(RhuProgramMemoryDefault)' == 'external' and '$(RhuMapExternalFlash)' != '' and '$(RhuManagedMemory)' != 'internal'">external</RhuProgramMemory>
+      <RhuProgramMemory Condition="'$(RhuProgramMemory)' == ''">internal</RhuProgramMemory>
+      <RhuRequiresOptimization Condition="'$(RhuProgramMemory)' != 'external'">@(_RhuRow->'%(RequiresOptimization)')</RhuRequiresOptimization>
       <RhuLogChannelDefault>@(_RhuRow->'%(LogChannel)')</RhuLogChannelDefault>
       <RhuConsoleChannelDefault>@(_RhuRow->'%(ConsoleChannel)')</RhuConsoleChannelDefault>
       <_RhuChannels>@(_RhuRow->'%(Channels)')</_RhuChannels>
+    </PropertyGroup>
+    <!-- The network picks the row's kernel set, on a row whose table names
+         a second set: the row's kernels are built with the network, the
+         second set (KernelNoNetwork and its two lazy archives) without it.
+         A project that names nothing gets the kernel with the network, and
+         the kernel without it where the managed memory is kept in the
+         chip's own RAM, whose map leaves no room beside the network; off
+         takes the kernel without it under every map; on beside the internal
+         managed memory is refused. On a row with one kernel either value is
+         refused: the table does not say whether that kernel carries a
+         network, so the choice is not offered there. All of it before
+         anything is compiled; the init mode below picks within the set. The
+         board line names the archive linked and, on a row with both sets,
+         whether the network is on. -->
+    <Error Condition="'$(_RhuNetwork)' != '' and '$(RhuKernelNoNetwork)' == ''" Code="RHU2029" Text="REFUSE: $(_RhuNetworkKnob)=$(_RhuNetwork), but the board '$(LamellaTargetBoard)' has one kernel; the network is a choice on boards whose packages carry a kernel with it and a kernel without it" />
+    <Error Condition="'$(_RhuNetwork)' == 'on' and '$(RhuManagedMemory)' == 'internal'" Code="RHU2030" Text="REFUSE: $(_RhuNetworkKnob)=on with RhuManagedMemory=internal: with the managed memory in the chip's own RAM this board's kernel is the one without the network; leave $(_RhuNetworkKnob) unset or the managed memory external (its default)" />
+    <PropertyGroup>
+      <_RhuNetworkEffective Condition="'$(RhuKernelNoNetwork)' != ''">on</_RhuNetworkEffective>
+      <_RhuNetworkEffective Condition="'$(RhuKernelNoNetwork)' != '' and ('$(_RhuNetwork)' == 'off' or '$(RhuManagedMemory)' == 'internal')">off</_RhuNetworkEffective>
+      <RhuKernel Condition="'$(_RhuNetworkEffective)' == 'off'">$(RhuKernelNoNetwork)</RhuKernel>
+      <RhuKernelRamInitFirstUse Condition="'$(_RhuNetworkEffective)' == 'off'">$(RhuKernelNoNetworkRamInitFirstUse)</RhuKernelRamInitFirstUse>
+      <RhuKernelRamInitBackground Condition="'$(_RhuNetworkEffective)' == 'off'">$(RhuKernelNoNetworkRamInitBackground)</RhuKernelRamInitBackground>
+      <_RhuNetworkWords Condition="'$(_RhuNetworkEffective)' != ''">; network $(_RhuNetworkEffective)</_RhuNetworkWords>
     </PropertyGroup>
     <!-- The external RAM init mode picks the row's kernel: the row's default
          (init at boot) or one of its two lazy archives, which only a row
@@ -241,9 +298,11 @@
          heap's window in the external RAM: the default) or its second map
          (both in the chip's own RAM), which only a row with an external
          RAM range carries; the internal value on any other row is refused
-         here, before anything is compiled. The map alone moves: the same
-         kernel is linked under either, and the hosting layer finds the
-         heap's home by the map's brackets. The board line names the map
+         here, before anything is compiled. The map moves here, and the
+         hosting layer finds the heap's home by the map's brackets; the
+         kernel is the same under either map on a row with one kernel set,
+         and on a row with two the internal value has already taken the
+         kernel without the network, above. The board line names the map
          linked and, on such a row, the home. -->
     <Error Condition="'$(RhuManagedMemory)' == 'internal' and '$(RhuMapInternal)' == ''" Code="RHU2013" Text="REFUSE: RhuManagedMemory=internal, but the board '$(LamellaTargetBoard)' has no external RAM; the managed memory's home is a choice on boards with external RAM alone" />
     <PropertyGroup>
@@ -252,7 +311,7 @@
     </PropertyGroup>
     <!-- The program's home picks the row's payload map the other way: the
          row's own (the hosted program's managed code and read-only data in
-         the chip's flash: the default) or its external-flash map (both,
+         the chip's flash) or its external-flash map (both,
          with the managed code's unwind tables, in the board's memory-mapped
          external flash, executed in place), which only a row with such a
          flash carries; the external value on any other row is refused
@@ -263,7 +322,9 @@
          data and unwind tables before the merge so the map can place them
          in the flash window; the same kernel is linked under either map,
          and it brings the window up when the map declares it. The board
-         line names the map linked and, on such a row, the program's home. -->
+         line names the map linked and, on such a row, the program's home.
+         The value read here is the effective one: a project that named no
+         home has the row's default, settled where the row is read. -->
     <Error Condition="'$(RhuProgramMemory)' == 'external' and '$(RhuMapExternalFlash)' == ''" Code="RHU2014" Text="REFUSE: RhuProgramMemory=external, but the board '$(LamellaTargetBoard)' has no memory-mapped external flash; the program's home is a choice on boards with such a flash alone" />
     <Error Condition="'$(RhuProgramMemory)' == 'external' and '$(RhuManagedMemory)' == 'internal'" Code="RHU2015" Text="REFUSE: RhuProgramMemory=external with RhuManagedMemory=internal: the external-flash map keeps the managed heap and the runtime's type data in the external RAM; leave RhuManagedMemory external (its default) or the program's home internal" />
     <PropertyGroup>
@@ -326,7 +387,9 @@
       <_RhuLogDefsyms Condition="'$(RhuConsoleChannel)' != ''">$(_RhuLogDefsyms) --defsym=__rhu_console_channel=$(_RhuConsoleChannelCode)</_RhuLogDefsyms>
       <_RhuLogWords>; log $(RhuLogLevel) to $(_RhuLogChannelEffective); console to $(_RhuConsoleChannelEffective)</_RhuLogWords>
     </PropertyGroup>
-    <Message Importance="high" Text="Lamella RHU: board $(LamellaTargetBoard) (class $(RhuClass); map $(RhuMap); kernel $(RhuKernel); base $(RhuBase))$(_RhuExternalRamInitWords)$(_RhuManagedMemoryWords)$(_RhuProgramMemoryWords)$(_RhuLogWords)" />
+    <Message Importance="high" Text="Lamella RHU: board $(LamellaTargetBoard) (class $(RhuClass); map $(RhuMap); kernel $(RhuKernel); base $(RhuBase))$(_RhuExternalRamInitWords)$(_RhuManagedMemoryWords)$(_RhuProgramMemoryWords)$(_RhuNetworkWords)$(_RhuLogWords)" />
+    <Message Importance="high" Condition="'$(_RhuNetworkEffective)' == 'off' and '$(_RhuNetwork)' == 'off'" Text="Lamella RHU: this program is built without networking: $(_RhuNetworkKnob)=off takes the board's kernel without the network" />
+    <Message Importance="high" Condition="'$(_RhuNetworkEffective)' == 'off' and '$(_RhuNetwork)' != 'off'" Text="Lamella RHU: this program is built without networking: RhuManagedMemory=internal takes the board's kernel without the network" />
   </Target>
 
   <!-- The three package roots, from the items the shell resolved for this
@@ -433,7 +496,27 @@
        number of milliseconds or -1, a zero (no word is the row's default,
        and a zero word cannot be told from no word) or a value above the
        32-bit range is refused before anything is compiled; the choice is
-       printed beside the budget line. -->
+       printed beside the budget line.
+       The thread pool's most workers. A pool that asks the kernel for a
+       worker's stack the row's pool does not have ends the program (the
+       class library throws where nothing catches), so the build bounds the
+       pool by what the row holds: the stack pool, less the bytes the
+       kernel's own threads hold of it (the row's StackKernel), less the
+       runtime's service threads (three that size no stack of their own,
+       the finalizer's, the timer's and the socket engine's, at the
+       build's default stack; and the pool's gate thread, which asks more
+       than the row's clamp and is given the clamp), in whole default
+       stacks and never fewer than one. A pool at its bound queues its
+       work. The bound reaches the image as the absolute symbol
+       __rhu_threadpool_max_threads, which the hosting layer states to the
+       runtime as the environment row the pool reads before any compiled
+       option, so the compiled object is the same on every row. A project
+       that sets .NET's own ThreadPoolMaxThreads keeps its value where it
+       is a whole number from 1 to the row's most, and is refused before
+       anything is compiled otherwise; its ThreadPoolMinThreads is refused
+       above the bound, because the runtime drops both bounds when the
+       fewest is above the most. The bound is printed after the budget
+       line. -->
   <!-- With no board named (a build alone) there is no row to budget against: the
        target and the resolution it depends on are skipped. -->
   <Target Name="RhuStackBudget" DependsOnTargets="RhuResolveBoard" BeforeTargets="BeforeBuild;BuildOnlySettings" Condition="'$(LamellaTargetBoard)' != ''">
@@ -463,7 +546,158 @@
       <_RhuPoolTimeoutWords Condition="'$(RhuThreadPoolThreadTimeoutMs)' == '-1'">; idle thread-pool workers keep their stacks (the timeout never)</_RhuPoolTimeoutWords>
     </PropertyGroup>
     <Error Condition="'$(_RhuStackBudgetNeed)' &gt; '$(RhuStackPool)'" Code="RHU2025" Text="REFUSE: RhuThreadStack=$(_RhuThreadStack) leaves fewer than three stacks in the row's pool of $(RhuStackPool) bytes beside the idle thread's (three stacks need $(_RhuStackBudgetNeed)) for $(LamellaTargetBoard)" />
+    <PropertyGroup>
+      <_RhuServiceUnsized>3</_RhuServiceUnsized>
+      <_RhuServiceBytes>$([MSBuild]::Add($([MSBuild]::Multiply($(_RhuServiceUnsized), $(_RhuThreadStack))), $(RhuStackClamp)))</_RhuServiceBytes>
+      <_RhuWorkerBytes>$([MSBuild]::Subtract($([MSBuild]::Subtract($(RhuStackPool), $(RhuStackKernel))), $(_RhuServiceBytes)))</_RhuWorkerBytes>
+      <_RhuPoolFit>$([System.Math]::Floor($([MSBuild]::Divide($(_RhuWorkerBytes), $(_RhuThreadStack)))))</_RhuPoolFit>
+      <_RhuPoolMost>$(_RhuPoolFit)</_RhuPoolMost>
+      <_RhuPoolMost Condition="'$(_RhuPoolFit)' &lt; '1'">1</_RhuPoolMost>
+      <_RhuPoolMaxOwn>@(RuntimeHostConfigurationOption->WithMetadataValue('Identity', 'System.Threading.ThreadPool.MaxThreads')->'%(Value)')</_RhuPoolMaxOwn>
+      <_RhuPoolMinOwn>@(RuntimeHostConfigurationOption->WithMetadataValue('Identity', 'System.Threading.ThreadPool.MinThreads')->'%(Value)')</_RhuPoolMinOwn>
+      <_RhuPoolMaxOwnWhole>$([System.Text.RegularExpressions.Regex]::IsMatch('$(_RhuPoolMaxOwn)', '^[1-9][0-9]{0,4}$'))</_RhuPoolMaxOwnWhole>
+      <_RhuPoolMinOwnWhole>$([System.Text.RegularExpressions.Regex]::IsMatch('$(_RhuPoolMinOwn)', '^[1-9][0-9]{0,4}$'))</_RhuPoolMinOwnWhole>
+    </PropertyGroup>
+    <Error Condition="'$(_RhuPoolMaxOwn)' != '' and ('$(_RhuPoolMaxOwnWhole)' != 'True' or '$(_RhuPoolMaxOwn)' &gt; '$(_RhuPoolMost)')" Code="RHU2026" Text="REFUSE: ThreadPoolMaxThreads='$(_RhuPoolMaxOwn)' is not a whole number from 1 to $(_RhuPoolMost), the most thread-pool workers that fit on $(LamellaTargetBoard): of the thread stack pool's $(RhuStackPool) B the kernel's own threads hold $(RhuStackKernel) B and the runtime's service threads $(_RhuServiceBytes) B (the finalizer's, the timer's and the socket engine's at $(_RhuThreadStack) B each, the pool's gate thread at $(RhuStackClamp) B), which leaves $(_RhuWorkerBytes) B for workers of $(_RhuThreadStack) B each" />
+    <PropertyGroup>
+      <_RhuPoolBound>$(_RhuPoolMost)</_RhuPoolBound>
+      <_RhuPoolBound Condition="'$(_RhuPoolMaxOwn)' != ''">$(_RhuPoolMaxOwn)</_RhuPoolBound>
+    </PropertyGroup>
+    <Error Condition="'$(_RhuPoolMinOwn)' != '' and ('$(_RhuPoolMinOwnWhole)' != 'True' or '$(_RhuPoolMinOwn)' &gt; '$(_RhuPoolBound)')" Code="RHU2027" Text="REFUSE: ThreadPoolMinThreads='$(_RhuPoolMinOwn)' is not a whole number from 1 to $(_RhuPoolBound), the thread pool's most workers in this build for $(LamellaTargetBoard): the runtime drops both bounds when the fewest is above the most, and a pool without a bound ends the program when the board has no stack left for its next worker" />
+    <PropertyGroup>
+      <_RhuPoolBoundDefsym>--defsym=__rhu_threadpool_max_threads=$(_RhuPoolBound)</_RhuPoolBoundDefsym>
+      <!-- The row's low-power UART blocks reach the image as the absolute
+           symbol __rhu_uart_lowpower_blocks, whose bit n is set for UART
+           block n: the hosting layer names such a block's device file
+           /dev/ttyLP<n>. A row whose table names no such block links no
+           word, and every port of it is a /dev/ttyS<n>. -->
+      <_RhuUartLowPowerDefsym Condition="'$(RhuUartLowPowerBlocks)' != ''">--defsym=__rhu_uart_lowpower_blocks=$(RhuUartLowPowerBlocks)</_RhuUartLowPowerDefsym>
+      <_RhuPoolWorkerWord>workers</_RhuPoolWorkerWord>
+      <_RhuPoolWorkerWord Condition="'$(_RhuPoolBound)' == '1'">worker</_RhuPoolWorkerWord>
+      <_RhuPoolWhy Condition="'$(_RhuPoolMaxOwn)' != ''">the project's ThreadPoolMaxThreads; the board holds $(_RhuPoolMost)</_RhuPoolWhy>
+      <_RhuPoolWhy Condition="'$(_RhuPoolMaxOwn)' == '' and '$(_RhuPoolFit)' &gt;= '1'">the board's: of the stack pool's $(RhuStackPool) B the kernel's own threads hold $(RhuStackKernel) B and the runtime's service threads $(_RhuServiceBytes) B, which leaves $(_RhuWorkerBytes) B for workers of $(_RhuThreadStack) B each</_RhuPoolWhy>
+      <_RhuPoolWhy Condition="'$(_RhuPoolMaxOwn)' == '' and '$(_RhuPoolFit)' &lt; '1'">the board's fewest: of the stack pool's $(RhuStackPool) B the kernel's own threads hold $(RhuStackKernel) B and the runtime's service threads $(_RhuServiceBytes) B, which leaves $(_RhuWorkerBytes) B, less than one worker's $(_RhuThreadStack) B: the one worker can be refused its stack while all four service threads run</_RhuPoolWhy>
+    </PropertyGroup>
     <Message Importance="high" Text="Lamella RHU: the thread stack pool $(RhuStackPool) B; the default managed stack $(_RhuThreadStack) B (the row's clamp $(RhuStackClamp) B): $(_RhuStacksFit) hosted stacks of this size fit beside the idle thread's, the main thread's among them$(_RhuPoolTimeoutWords)" />
+    <Message Importance="high" Text="Lamella RHU: the thread pool runs at most $(_RhuPoolBound) $(_RhuPoolWorkerWord) ($(_RhuPoolWhy))" />
+  </Target>
+
+  <!-- The code optimization, by whose code it is (Sdk.props tells why).
+       The framework's and every package's code is compiled with it on in
+       every configuration; the Optimize property decides for the program's
+       own code alone, the project's assembly and the class libraries it
+       references by project. This target states the outcome for the
+       targets after it and for the image's record: the program's own code
+       is unoptimized where Optimize is not on, and its assemblies are then
+       marked for the native compiler (the target RhuOwnCodeUnoptimized);
+       an image compiled without the optimization as a whole is unoptimized
+       in both, nothing marked. The value the C# compile runs with is also
+       written to a file that compile reads as an input (rewritten only
+       when the value moves), so the program's assembly is compiled again
+       when a build gives another value. With no board named the target
+       and the resolution it depends on are skipped. -->
+  <Target Name="RhuCodeOptimization" DependsOnTargets="RhuResolveBoard" BeforeTargets="BeforeBuild;BuildOnlySettings;_PrepareTrimConfiguration;PrepareForILLink;ComputeIlcCompileInputs" Condition="'$(LamellaTargetBoard)' != ''">
+    <PropertyGroup>
+      <_RhuCodegenProfile>optimized</_RhuCodegenProfile>
+      <_RhuCodegenProfile Condition="'$(_RhuFrameworkOptimized)' != 'true'">unoptimized</_RhuCodegenProfile>
+      <_RhuProgramCodegen>unoptimized</_RhuProgramCodegen>
+      <_RhuProgramCodegen Condition="'$(Optimize)' == 'true' and '$(_RhuFrameworkOptimized)' == 'true'">optimized</_RhuProgramCodegen>
+      <_RhuMarkOwnCode>false</_RhuMarkOwnCode>
+      <_RhuMarkOwnCode Condition="'$(Optimize)' != 'true' and '$(_RhuFrameworkOptimized)' == 'true'">true</_RhuMarkOwnCode>
+      <_RhuOptimizeRecord>$(IntermediateOutputPath)rhu-optimize.txt</_RhuOptimizeRecord>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(_RhuOptimizeRecord)" Lines="Optimize=$(Optimize)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <CustomAdditionalCompileInputs Include="$(_RhuOptimizeRecord)" />
+      <FileWrites Include="$(_RhuOptimizeRecord)" />
+    </ItemGroup>
+  </Target>
+
+  <!-- The program's own code handed to the native compiler unoptimized.
+       What is the program's own stands in ONE place, the item _RhuOwnCode
+       below: the native compiler's input, which is the project's
+       assembly, and those of its references that a project reference
+       brought (the metadata the .NET SDK sets on a project reference's
+       output); an assembly referenced by its file, a package's assemblies
+       and the framework's are not in it. Each assembly of the list is
+       copied under the intermediate directory with every method that has
+       an IL body marked not to be optimized and not to be inlined (the
+       task MarkUnoptimized), and the copies take the originals' places in
+       the native compiler's input and references. The compiler pack's own
+       target then writes the response file from the Optimize property, so
+       for that one target the property carries how the framework's code
+       is compiled, and it is put back after it. The pack sets the folding
+       of identical method bodies to all whenever stack traces are off,
+       with no property to ask otherwise, and that folding merges two
+       methods of one body in a program's own code into one function: so
+       for a marked build the pack writes its response file under another
+       name, and the file the native compiler reads is derived from it with
+       the folding at generic (the task MethodBodyFolding), written only
+       when it differs and named again as the native compile's input, so an
+       unchanged build does not compile again. -->
+  <Target Name="RhuOwnCodeUnoptimized" BeforeTargets="WriteIlcRspFileForCompilation" DependsOnTargets="RhuCodeOptimization" Condition="'$(LamellaTargetBoard)' != ''">
+    <ItemGroup Condition="'$(_RhuMarkOwnCode)' == 'true'">
+      <_RhuOwnCode Include="@(IlcCompileInput)" />
+      <_RhuOwnCode Include="@(IlcReference->WithMetadataValue('ReferenceSourceTarget', 'ProjectReference'))" />
+    </ItemGroup>
+    <MarkUnoptimized Condition="'$(_RhuMarkOwnCode)' == 'true'" Assemblies="@(_RhuOwnCode)" Directory="$(IntermediateOutputPath)rhu-own-code/">
+      <Output TaskParameter="Marked" ItemName="_RhuOwnCodeMarked" />
+    </MarkUnoptimized>
+    <ItemGroup Condition="'$(_RhuMarkOwnCode)' == 'true'">
+      <_RhuOwnCodeInput Include="@(IlcCompileInput->'$(IntermediateOutputPath)rhu-own-code/%(Filename)%(Extension)')" />
+      <IlcReference Remove="@(_RhuOwnCode)" />
+      <IlcCompileInput Remove="@(IlcCompileInput)" />
+      <IlcCompileInput Include="@(_RhuOwnCodeInput)" />
+      <IlcReference Include="@(_RhuOwnCodeMarked)" />
+      <FileWrites Include="@(_RhuOwnCodeMarked);@(_RhuOwnCodeMarked->'%(RootDir)%(Directory)%(Filename).pdb')" />
+    </ItemGroup>
+    <PropertyGroup>
+      <_RhuIlcRsp>@(ManagedBinary->'%(IlcRspFile)')</_RhuIlcRsp>
+      <_RhuOptimizeAsBuilt>$(Optimize)</_RhuOptimizeAsBuilt>
+      <Optimize>$(_RhuFrameworkOptimized)</Optimize>
+    </PropertyGroup>
+    <ItemGroup Condition="'$(_RhuMarkOwnCode)' == 'true'">
+      <ManagedBinary>
+        <IlcRspFile>$(NativeIntermediateOutputPath)%(Filename).ilc.pack.rsp</IlcRspFile>
+      </ManagedBinary>
+    </ItemGroup>
+    <Message Importance="high" Condition="'$(_RhuMarkOwnCode)' == 'true'" Text="Lamella RHU: the $(Configuration) configuration leaves the program's own code unoptimized for the debugger (@(_RhuOwnCode->'%(Filename)', ', ')); the framework and every package are compiled with the code optimization on" />
+  </Target>
+
+  <Target Name="RhuOwnCodeFolding" AfterTargets="WriteIlcRspFileForCompilation" Condition="'$(LamellaTargetBoard)' != ''">
+    <MethodBodyFolding Condition="'$(_RhuMarkOwnCode)' == 'true'" Source="@(ManagedBinary->'%(IlcRspFile)')" Output="@(ManagedBinary->'$(NativeIntermediateOutputPath)%(Filename).ilc.rsp')" Value="generic" />
+    <ItemGroup Condition="'$(_RhuMarkOwnCode)' == 'true'">
+      <FileWrites Include="@(ManagedBinary->'%(IlcRspFile)')" />
+      <ManagedBinary>
+        <IlcRspFile>$(_RhuIlcRsp)</IlcRspFile>
+      </ManagedBinary>
+    </ItemGroup>
+    <PropertyGroup>
+      <Optimize>$(_RhuOptimizeAsBuilt)</Optimize>
+    </PropertyGroup>
+  </Target>
+
+  <!-- The path map for the class libraries a program references by project.
+       A referenced project is compiled by its own build, which does not
+       read this SDK's default map, so its sources would be recorded by
+       their paths on the build machine and the program's image would carry
+       them. Where the program's own map is this SDK's default, every
+       project the program references, directly or through another, is
+       built with one global property: a path map holding an entry per
+       referenced project, its directory to /rhu/src/ and its name, the
+       same text to each, so that a library reached by two references is
+       one build. A map the build or the project gave for the program
+       stands as given and nothing is handed down; a referenced project's
+       own PathMap does not stand under the program's build. -->
+  <Target Name="RhuProjectReferencePathMap" BeforeTargets="AssignProjectConfiguration" DependsOnTargets="ResolvePackageDependenciesForBuild" Condition="'$(_RhuPathMapIsDefault)' == 'true' and '@(ProjectReference)' != ''">
+    <PropertyGroup>
+      <_RhuReferencePathMap>@(ProjectReference->'%(RootDir)%(Directory)=/rhu/src/%(Filename)/', ',')</_RhuReferencePathMap>
+    </PropertyGroup>
+    <ItemGroup>
+      <ProjectReference>
+        <AdditionalProperties>%(ProjectReference.AdditionalProperties);PathMap=$(_RhuReferencePathMap)</AdditionalProperties>
+      </ProjectReference>
+    </ItemGroup>
   </Target>
 
   <!-- Every frozen byte the three packages carry is verified against their
@@ -535,7 +769,7 @@
        always and the channels' words when set. The linker of record prints
        nothing: any diagnostic is a refusal. -->
   <Target Name="LinkNative"
-          DependsOnTargets="$(LinkNativeDependsOn);RhuVerifyFrozen">
+          DependsOnTargets="$(LinkNativeDependsOn);RhuVerifyFrozen;RhuFlashRegions">
     <!-- No Inputs and Outputs: the link's words (the board, the output level, the channels, the stack
          knob) are properties, not files, so the image is linked at every publish rather than reused
          from a publish whose words differed. -->
@@ -566,43 +800,68 @@
       <_RhuLinkObject Include="$(RhuObjects.Split(' '))" Root="$(RhuRuntimeRoot)" />
       <_RhuLinkObject Condition="$([System.String]::Copy(' $(RhuBoardObjects) ').Contains(' %(Identity) '))" Root="$(RhuBoardRoot)" />
     </ItemGroup>
-    <Exec Command="&quot;$(RhuLld)&quot; -T &quot;$(RhuBoardRoot)$(RhuMap)&quot; --gc-sections -Map=&quot;$(_RhuMapFile)&quot; -u RhInitialize -u RhRegisterOSModule -u DotNetRuntimeContractDescriptor &quot;$(_RhuMerged)&quot; $(_RhuStackDefsym) $(_RhuPoolTimeoutDefsym) $(_RhuLogDefsyms) @(_RhuLinkObject->'&quot;%(Root)%(Identity)&quot;', ' ') &quot;$(RhuBoardRoot)$(RhuKernel)&quot; &quot;$(RhuRuntimeRoot)$(RhuCore)&quot; -o &quot;$(_RhuElf)&quot;"
+    <Exec Command="&quot;$(RhuLld)&quot; -T &quot;$(RhuBoardRoot)$(RhuMap)&quot; --gc-sections -Map=&quot;$(_RhuMapFile)&quot; -u RhInitialize -u RhRegisterOSModule -u DotNetRuntimeContractDescriptor &quot;$(_RhuMerged)&quot; $(_RhuStackDefsym) $(_RhuPoolTimeoutDefsym) $(_RhuPoolBoundDefsym) $(_RhuUartLowPowerDefsym) $(_RhuLogDefsyms) @(_RhuLinkObject->'&quot;%(Root)%(Identity)&quot;', ' ') &quot;$(RhuBoardRoot)$(RhuKernel)&quot; &quot;$(RhuRuntimeRoot)$(RhuCore)&quot; -o &quot;$(_RhuElf)&quot;"
           WorkingDirectory="$(MSBuildProjectDirectory)" ConsoleToMSBuild="true" IgnoreExitCode="true" IgnoreStandardErrorWarningFormat="true">
       <Output TaskParameter="ExitCode" PropertyName="_RhuLdRc" />
       <Output TaskParameter="ConsoleOutput" ItemName="_RhuLdOut" />
     </Exec>
-    <!-- The linker's words as one line. The arena floor's refusal (the row's
-         map asserts the window its board guarantees) names the remedy: the
-         optimization turned back on where a build turned it off, a board
-         with more memory where the optimized image still does not fit. -->
+    <!-- The linker's words as one line. A refusal for lack of room (the
+         arena floor's assert, where the row's map asserts the window its
+         board guarantees, or a region of the map the image does not fit
+         in) names the remedy by how the image was compiled: the smaller
+         build where the build has one, a board with more memory where the
+         image is the smallest it makes. For an image compiled without the
+         optimization as a whole on a row whose board requires it (the
+         row's RequiresOptimization, read while the program's code lies in
+         the chip's own flash), the words say what the board's memory
+         requires. Two refusals name a knob instead, because the knob is
+         the remedy: the arena floor's assert in an image that links the
+         kernel with the network on a row that carries a kernel without it
+         names the network knob, and a region the image does not fit in,
+         on a row with an external-flash map where the project named the
+         chip's own flash, names the program's home. -->
     <PropertyGroup>
       <_RhuLdWords>@(_RhuLdOut, ' | ')</_RhuLdWords>
+      <_RhuLdRoom Condition="$(_RhuLdWords.Contains('arena window under this board'))">the image's data leaves this board less than the arena window its map guarantees</_RhuLdRoom>
+      <_RhuLdRoom Condition="'$(_RhuLdRoom)' == '' and $(_RhuLdWords.Contains('will not fit in region'))">the image is larger than a memory region of this board's map</_RhuLdRoom>
+      <_RhuLdRemedy>this image was compiled with the code optimization on, so a program that does not fit names a board with more memory</_RhuLdRemedy>
+      <_RhuLdRemedy Condition="'$(_RhuMarkOwnCode)' == 'true'">this image's framework code was compiled with the code optimization on and the program's own code without it, as the $(Configuration) configuration compiles it: a build with the optimization on for the program's own code too (-p:Optimize=true, or the Release configuration) makes the smaller image</_RhuLdRemedy>
+      <_RhuLdRemedy Condition="'$(_RhuFrameworkOptimized)' != 'true'">this image was compiled without the code optimization as a whole, the framework's code included: a build that leaves only the program's own code unoptimized, as the Debug configuration does by itself, makes the smaller image</_RhuLdRemedy>
+      <_RhuLdRemedy Condition="'$(_RhuFrameworkOptimized)' != 'true' and '$(RhuRequiresOptimization)' == 'true'">this image was compiled without the code optimization as a whole, the framework's code included, and this board's memory requires the framework's code compiled with it: the Debug configuration by itself leaves only the program's own code unoptimized</_RhuLdRemedy>
+      <_RhuLdFloor>$(_RhuLdWords.Contains('arena window under this board'))</_RhuLdFloor>
+      <_RhuLdRegion>$(_RhuLdWords.Contains('will not fit in region'))</_RhuLdRegion>
+      <_RhuLdRemedy Condition="'$(_RhuLdFloor)' == 'True' and '$(_RhuNetworkEffective)' == 'on'">this image links the board's kernel with the network, which holds part of the chip's own memory: $(_RhuNetworkKnob)=off links the kernel without it</_RhuLdRemedy>
+      <_RhuLdRemedy Condition="'$(_RhuLdFloor)' != 'True' and '$(_RhuLdRegion)' == 'True' and '$(RhuMapExternalFlash)' != '' and '$(_RhuProgramMemoryNamed)' == 'internal' and '$(RhuManagedMemory)' != 'internal'">RhuProgramMemory=internal places the program in the chip's own flash; without it the program lies in this board's external flash</_RhuLdRemedy>
     </PropertyGroup>
-    <Error Condition="('$(_RhuLdRc)' != '0' or '$(_RhuLdWords)' != '') and $(_RhuLdWords.Contains('arena window under this board'))" Code="RHU5001" Text="REFUSE: the link printed a diagnostic or failed (rc $(_RhuLdRc)): $(_RhuLdWords); the image's data leaves this board less than the arena window its map guarantees: this SDK compiles every configuration with the code optimization on, so a build that turned it off (Optimize=false) is built again with it on, and a program whose optimized image still does not fit names a board with more memory" />
+    <Error Condition="('$(_RhuLdRc)' != '0' or '$(_RhuLdWords)' != '') and '$(_RhuLdRoom)' != ''" Code="RHU5001" Text="REFUSE: the link printed a diagnostic or failed (rc $(_RhuLdRc)): $(_RhuLdWords); $(_RhuLdRoom): $(_RhuLdRemedy)" />
     <Error Condition="'$(_RhuLdRc)' != '0' or '$(_RhuLdWords)' != ''" Code="RHU5001" Text="REFUSE: the link printed a diagnostic or failed (rc $(_RhuLdRc)): $(_RhuLdWords)" />
     <!-- The line tables' separators, before anything reads or hashes the image (its record, the publish copy, a run). -->
     <DebugLineSeparators Image="$(_RhuElf)" />
     <Message Importance="high" Text="Lamella RHU: $(NativeBinary) linked for $(LamellaTargetBoard) under $(RhuMap)" />
-    <Message Importance="high" Condition="'$(RhuProgramMemory)' == 'external'" Text="Lamella RHU: the program's half of this image lies in the board's external flash, which the lamella tool of this release does not write; the two halves are one image, written together by a debugger that programs that flash" />
+    <Message Importance="high" Condition="'$(RhuProgramMemory)' == 'external'" Text="Lamella RHU: the program's half of this image lies in the board's external flash; the two halves are one image, written together by the lamella tool, or by a debugger that programs that flash" />
   </Target>
 
   <!-- The image's manifest, written beside the image after the link and
        carried into the publish directory with it: the flash-image record
        (schema 1): the board, the artifact's identity as shipped, the
-       header's words read from the image's own bytes, the runtime build
+       header's words read from the image's own bytes, how the image was
+       compiled (codegen_profile for the framework's and every package's
+       code and program_codegen for the program's own, each optimized with
+       the code optimization on and unoptimized without it, as the target
+       RhuCodeOptimization states them), the runtime build
        and whether it is the tested one, and the two streams' effective
        channels, so a tool that writes the image knows which console the
        program's output comes back on without reading the board table. The
        task asserts the header before it writes (the magic, the layout, the
        stated load address against the lowest loadable segment); a failed
        write fails the publish, so an image never ships without its record. -->
-  <Target Name="RhuImageManifest" AfterTargets="LinkNative" DependsOnTargets="RhuResolveBoard">
+  <Target Name="RhuImageManifest" AfterTargets="LinkNative" DependsOnTargets="RhuResolveBoard;RhuCodeOptimization">
     <PropertyGroup>
       <_RhuManifest>$(_RhuElf).manifest.json</_RhuManifest>
       <_RhuRuntimeTested>false</_RhuRuntimeTested>
       <_RhuRuntimeTested Condition="'$(RhuRuntimeVersion)' == '$(RhuRuntimeVersionTested)'">true</_RhuRuntimeTested>
     </PropertyGroup>
-    <ImageManifest Image="$(_RhuElf)" Output="$(_RhuManifest)" Board="$(LamellaTargetBoard)" Runtime="$(RhuRuntimeVersion)" RuntimeTested="$(_RhuRuntimeTested)" ConsoleChannel="$(_RhuConsoleChannelEffective)" LogChannel="$(_RhuLogChannelEffective)" />
+    <ImageManifest Image="$(_RhuElf)" Output="$(_RhuManifest)" Board="$(LamellaTargetBoard)" Runtime="$(RhuRuntimeVersion)" RuntimeTested="$(_RhuRuntimeTested)" CodegenProfile="$(_RhuCodegenProfile)" ProgramCodegen="$(_RhuProgramCodegen)" ConsoleChannel="$(_RhuConsoleChannelEffective)" LogChannel="$(_RhuLogChannelEffective)" />
     <ItemGroup>
       <ResolvedFileToPublish Include="$(_RhuManifest)">
         <RelativePath>$(TargetName).elf.manifest.json</RelativePath>
@@ -611,6 +870,41 @@
       <FileWrites Include="$(_RhuManifest)" />
     </ItemGroup>
     <Message Importance="high" Text="Lamella RHU: the image's manifest written beside it ($(TargetName).elf.manifest.json: console $(_RhuConsoleChannelEffective), log $(_RhuLogChannelEffective))" />
+  </Target>
+
+  <!-- The row's flash regions. A region is one packed file for a fixed place
+       in the board's flash outside the program, such as a radio's firmware.
+       The board package carries it with its record (the file's name with
+       .manifest.json) and its notices, all in one folder, and the board
+       table names the packed file (FlashRegions). A flash tool writes the
+       region at a deploy from the file and its record, so this target
+       declares the item LamellaFlashRegion with the packed file's full path
+       for the shell that writes the board; the shell puts the file, its
+       record and its notices beside a published image. The target needs the
+       board and the package roots resolved and nothing of a build, so the
+       shell can call it before a publish lists its files and before a run
+       on a board: the property LamellaFlashRegionsDependsOn names it for
+       both. The package's own record holds each of these bytes (the
+       frozen-file check before the link); a region the row's table names
+       and the package does not carry with its record is refused here by
+       name, and the link depends on this target, so a publish refuses
+       before it links. A row whose table names no region gets none of
+       this. -->
+  <PropertyGroup>
+    <LamellaFlashRegionsDependsOn>$(LamellaFlashRegionsDependsOn);RhuFlashRegions</LamellaFlashRegionsDependsOn>
+  </PropertyGroup>
+  <Target Name="RhuFlashRegions" BeforeTargets="ComputeResolvedFilesToPublishList" DependsOnTargets="RhuResolveBoard;RhuResolveRoots">
+    <ItemGroup Condition="'$(RhuFlashRegions)' != ''">
+      <_RhuRegion Include="$(RhuFlashRegions.Split(' '))" />
+      <_RhuRegionFile Include="$(RhuBoardRoot)%(_RhuRegion.Identity)" Rel="%(_RhuRegion.Identity)" />
+      <_RhuRegionRecord Include="%(_RhuRegionFile.Identity).manifest.json" Rel="%(_RhuRegionFile.Rel).manifest.json" />
+      <_RhuRegionAbsent Include="@(_RhuRegionFile);@(_RhuRegionRecord)" Condition="!Exists('%(Identity)')" />
+    </ItemGroup>
+    <Error Condition="'@(_RhuRegionAbsent)' != ''" Code="RHU4015" Text="REFUSE: the board table names a flash region for $(LamellaTargetBoard) that the board package does not carry with its record: @(_RhuRegionAbsent->'%(Rel)', ', ') missing under $(RhuBoardRoot)" />
+    <ItemGroup Condition="'$(RhuFlashRegions)' != ''">
+      <LamellaFlashRegion Include="@(_RhuRegionFile)" RemoveMetadata="Rel" />
+    </ItemGroup>
+    <Message Importance="high" Condition="'$(RhuFlashRegions)' != ''" Text="Lamella RHU: the board's flash region for a deploy: @(_RhuRegionFile->'%(Rel)', ', ') of the board package" />
   </Target>
 
   <!-- The emulator, for the two emulator rows: qemu-system-arm in the folder
@@ -650,7 +944,7 @@
       <_RhuRouteProbeRow Include="@(_RhuRouteRow)" Condition="'%(_RhuRouteRow.Machine)' == ''" />
       <_RhuRouteEmulatorRow Include="@(_RhuRouteRow)" Condition="'%(_RhuRouteRow.Machine)' != ''" />
       <_RhuRoute Include="probe" Condition="'%(_RhuRouteProbeRow.Identity)' != ''" Board="%(_RhuRouteProbeRow.Identity)" />
-      <_RhuRoute Include="emulator" Condition="'%(_RhuRouteEmulatorRow.Identity)' != ''" Board="%(_RhuRouteEmulatorRow.Identity)" Machine="%(_RhuRouteEmulatorRow.Machine)" Available="$(_RhuQemuAvailable)" Description="Arm MPS2+ $([System.String]::Copy('%(_RhuRouteEmulatorRow.Machine)').Replace('mps2-', '').ToUpperInvariant()) reference board under QEMU, for testing the runtime -- not your board" />
+      <_RhuRoute Include="emulator" Condition="'%(_RhuRouteEmulatorRow.Identity)' != ''" Board="%(_RhuRouteEmulatorRow.Identity)" Machine="%(_RhuRouteEmulatorRow.Machine)" Available="$(_RhuQemuAvailable)" Description="Arm MPS2+ $([System.String]::Copy('%(_RhuRouteEmulatorRow.Machine)').Replace('mps2-', '').ToUpperInvariant()) reference board under QEMU" />
     </ItemGroup>
   </Target>
 

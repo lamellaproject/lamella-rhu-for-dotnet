@@ -21,7 +21,7 @@
          ILCompiler pack, the runtime pack and the reference assemblies'
          package at it from the release manifest, whose runtime entry is this
          string; the targets record the build an image was compiled against. -->
-    <RhuRuntimeVersionTested>11.0.0-rc.3.26522.148</RhuRuntimeVersionTested>
+    <RhuRuntimeVersionTested>11.0.0</RhuRuntimeVersionTested>
     <RhuHostRid Condition="'$(RhuHostRid)' == ''">$(NETCoreSdkPortableRuntimeIdentifier)</RhuHostRid>
   </PropertyGroup>
 
@@ -32,7 +32,7 @@
        board over its debug probe is the Lamella SDK's own tool, which the shell
        runs; nothing here names it. -->
 
-  <!-- The ten knobs of an RHU image and their mapping to the runtime's
+  <!-- The eleven knobs of an RHU image and their mapping to the runtime's
        own build properties, so a value in a build log says what it means:
 
          knob                values                         default    underlying
@@ -45,7 +45,10 @@
                                                                        only when the project sets it
          RhuExternalRamInit  boot | first-use | background  boot       the row's prebuilt kernel built for the mode
          RhuManagedMemory    external | internal            external   the row's payload map, its second map for internal
-         RhuProgramMemory    internal | external            internal   the row's payload map, its external-flash map for external
+         RhuProgramMemory    internal | external            the row's  the row's payload map, its external-flash map for external
+                                                            default
+         RhuNetwork          on | off                       the row's  the row's prebuilt kernel set: built with the
+                                                            kernel     network, or the second set built without it
          RhuLogLevel         silent | quiet | verbose       quiet      the absolute symbol __rhu_log_level
          RhuLogChannel       memory | probe | uart0 |       the row's  the absolute symbol __rhu_log_channel,
                              uart1 | off                    default    defined only when the project sets it
@@ -88,17 +91,23 @@
        default) places both in the external RAM, internal keeps both in
        the chip's own RAM. The targets link the image under the row's
        payload map for external and under the row's second map for
-       internal; the map alone moves (the same kernel is linked under
-       either, and the hosting layer finds the heap's home by the map's
-       brackets), so the compiled object is the same with or without it.
+       internal; on a row with one kernel set the map alone moves (the
+       same kernel is linked under either, and the hosting layer finds the
+       heap's home by the map's brackets), and on a row with two the
+       internal value also takes the kernel without the network
+       (RhuNetwork below); the compiled object is the same with or without
+       it.
        A row that carries an external RAM range names its second map in
        the board table, and the internal value on any other row, or a
        value outside the two, is refused before anything is compiled.
        RhuProgramMemory says where a board's memory-mapped external flash
        puts the hosted program's managed code and read-only data: internal
-       (the default) keeps them in the chip's own flash, external places
+       keeps them in the chip's own flash, external places
        them, with the managed code's unwind tables, in the board's external
-       flash, and the program executes in place from it. The targets rename
+       flash, and the program executes in place from it. A project that
+       names neither has the row's default home: external on a row whose
+       table says so (ProgramMemoryDefault), internal on every other row
+       and wherever RhuManagedMemory is internal. The targets rename
        the program object's read-only data and unwind-table sections before
        the merge with the runtime archives, so the row's external-flash map
        places them in the flash window, and link the image under that map;
@@ -108,6 +117,19 @@
        value together with RhuManagedMemory=internal (the external-flash
        map keeps the managed heap in the external RAM) are refused before
        anything is compiled.
+       RhuNetwork says whether the image links a kernel with the board's
+       network, on a row whose table names two kernel sets: the row's
+       kernels, built with the network, and a second set built without it
+       (KernelNoNetwork and its two lazy archives). A project that names
+       nothing gets the kernel with the network, and the kernel without it
+       where RhuManagedMemory is internal, because the network's buffers
+       and the managed heap do not both fit the chip's own RAM; off takes
+       the kernel without the network under every map and gives the
+       program the memory the network holds. A value outside the two, on
+       together with RhuManagedMemory=internal, and either value on a row
+       with one kernel are refused before anything is compiled; an image
+       whose data leaves the chip's own RAM too little beside the network
+       is refused at the link in words that name this knob.
        RhuLogLevel says how loud the kernel's own diagnostic stream is:
        silent prints nothing but a fatal error's last words, quiet (the
        default) one line naming the version, the board and its clock,
@@ -135,7 +157,6 @@
     <RhuReflection Condition="'$(RhuReflection)' == ''">on</RhuReflection>
     <RhuExternalRamInit Condition="'$(RhuExternalRamInit)' == ''">boot</RhuExternalRamInit>
     <RhuManagedMemory Condition="'$(RhuManagedMemory)' == ''">external</RhuManagedMemory>
-    <RhuProgramMemory Condition="'$(RhuProgramMemory)' == ''">internal</RhuProgramMemory>
     <RhuLogLevel Condition="'$(RhuLogLevel)' == ''">quiet</RhuLogLevel>
     <InvariantGlobalization>true</InvariantGlobalization>
     <InvariantTimezone>true</InvariantTimezone>
@@ -161,27 +182,29 @@
     <CppCompilerAndLinker Condition="'$(CppCompilerAndLinker)' == ''">sh</CppCompilerAndLinker>
   </PropertyGroup>
 
-  <!-- Every configuration compiles with the code optimization on. The .NET
-       SDK's own default turns it off for the Debug configuration, which a
-       plain dotnet run builds, and the compiler pack then hands the native
+  <!-- The code optimization, by whose code it is. The .NET SDK's own
+       default turns it off for the Debug configuration, which a plain
+       dotnet run builds, and the compiler pack then hands the native
        compiler no optimization switch at all (its -O switch and its size
-       switch follow the Optimize property), so a Debug image carries every method it compiles
-       unoptimized, the framework's included: measured on the Raspberry Pi
-       Pico 2 row, the board class's program and the app template's program
-       then compile to larger code and more zero-filled statics than the
-       row's RAM holds beside the arena window its map guarantees, and the
-       link refuses each (RHU5001) where the same program's Release image
-       links with room. The .NET SDK's default is set before the project's
-       body and this file is read after it (the shell's dispatch), so the
-       value is set here for every configuration that did not set it on; the
+       switch follow the Optimize property), so that image carries every
+       method it compiles unoptimized, the framework's included: it is the
+       larger image by far, and a board whose memory does not hold it says
+       so in the board table (the row's RequiresOptimization). So the
+       targets compile the two apart (RhuCodeOptimization and
+       RhuOwnCodeUnoptimized in Sdk.targets). The framework's and every
+       package's code is compiled with the optimization on in every
+       configuration. The Optimize property keeps its .NET meaning for the
+       program's own code alone, the project's assembly and the class
+       libraries it references by project: with it off, as the Debug
+       configuration has it, the C# compiler runs unoptimized and every
+       method of the program's own assemblies reaches the native compiler
+       marked not to be optimized and not to be inlined, so a breakpoint
+       binds on every statement of the program that carries code and every
+       local stays in view for the whole of its method, on every row; with
+       it on (the Release configuration, or -p:Optimize=true) nothing is
+       marked and the program's own code is optimized with the rest. The
        configuration's debug information (DebugType, DebugSymbols, the
-       compiler's -g) is its own and stays. A build that wants the
-       unoptimized code gives Optimize=false as a global property
-       (-p:Optimize=false), which no project assignment overrides; its image
-       links only where it fits, and the link's refusal names this. -->
-  <PropertyGroup Condition="'$(Optimize)' != 'true'">
-    <Optimize>true</Optimize>
-  </PropertyGroup>
+       compiler's -g) is its own and stays on every row. -->
 
   <!-- The build is deterministic and the project's directory is mapped to
        one fixed string, the same on every host, so a program's assembly,

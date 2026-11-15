@@ -1,0 +1,26 @@
+<Project Sdk="Lamella.Sdk">
+
+  <!-- The gate's program for a class library reached through another: it
+       references the class library dbgvialib by project, and that library
+       references dbgownlib by project, so this program reaches dbgownlib
+       only through dbgvialib. Kept.cs holds two methods the program marks
+       AggressiveOptimization. The verification chain publishes a copy of
+       the three projects in the Debug configuration, reads the image as a
+       debugger reads it (tools/rt-publish/debug-readings.py) at the far
+       library's lines and at the two marked methods, publishes again with
+       nothing changed, and once more with one statement of Program.cs
+       changed. The sources carry no comment: the readings name their
+       statements by line number. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../dbgvialib/dbgvialib.csproj" />
+  </ItemGroup>
+
+</Project>

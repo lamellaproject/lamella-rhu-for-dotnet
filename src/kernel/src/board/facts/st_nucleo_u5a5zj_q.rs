@@ -162,6 +162,12 @@ pub const I2C_BUSES: &[crate::bus_math::I2cBus] = &[crate::bus_math::I2cBus {
         crate::bus_math::Pad { line: 16 + 9, alternate: 4, role: crate::bus_math::PadRole::I2cData },
     ],
 }];
+/// Fast mode plus on I2C1: from the bus's own kernel clock (the manual's
+/// clock requirement holds at the internal oscillator, RM0456 65.4.3, and
+/// DS13543 states no least clock for the mode), with the drive bit of the
+/// block's control register 1 (RM0456 65.9.1): PB8 and PB9 are FT_f pads,
+/// the kind that sinks the mode's 20 mA (DS13543's pin table and 5.3.15).
+pub const I2C_FAST_PLUS: Option<crate::bus_math::I2cFastPlus> = Some(crate::bus_math::I2cFastPlus { mux_value: I2C_BUSES[0].mux_value, kernel_hz: I2C_BUSES[0].kernel_hz, drive: true });
 pub const SPI_BUSES: &[crate::bus_math::SpiBus] = &[crate::bus_math::SpiBus {
     number: 1,
     base: 0x4001_3000,
@@ -183,16 +189,124 @@ pub const SPI_BUSES: &[crate::bus_math::SpiBus] = &[crate::bus_math::SpiBus {
 }];
 const _: () = assert!(populated(16 + 8) && populated(16 + 9) && populated(5) && populated(6) && populated(7) && populated(3 * 16 + 14) && populated(3 * 16 + 15), "a bus pad is not a pin of the package");
 
-/// The PWM and ADC tables of this row: empty, so the
-/// count functions answer 0, the enumeration functions refuse every index, and
-/// every other function of the two families answers RHU_ENODEV. The tables
-/// are shaped for a board's every timer output and every converter
-/// channel (one entry per line and per channel, the blocks named by the
-/// chip's own numbers).
-pub const PWM_TIMERS: &[crate::pwm_math::PwmTimer] = &[];
-pub const PWM_LINES: &[crate::pwm_math::PwmLine] = &[];
-pub const ADC_BLOCKS: &[crate::adc_math::AdcBlock] = &[];
-pub const ADC_CHANNELS: &[crate::adc_math::AdcChannel] = &[];
+/// The second I/O supply of this chip (RM0456): the power controller's
+/// clock enable RCC_AHB3ENR (11.8.32, offset 0x094) with PWREN at bit 2;
+/// the monitoring control register PWR_SVMCR (10.10.5: the power controller
+/// at 0x4602_0800, offset 0x10) with the supply monitor's enable IO2VMEN at
+/// bit 25 and the valid bit IO2SV at bit 29; the monitoring status register
+/// PWR_SVMSR (10.10.16, offset 0x3C) with VDDIO2RDY at bit 25. The supply
+/// feeds PG2 to PG15 (10.4.5), the lines 98 to 111: the board's third LED
+/// (PG2) and the connector's D1 and D0 (PG7, PG8) are among them. The
+/// board feeds the supply from the main one through a solder bridge that is
+/// closed as built (UM2861, the solder bridge table: SB30).
+pub const IO2_SUPPLY: crate::stm32u5_supply_math::SupplyFacts = crate::stm32u5_supply_math::SupplyFacts { clock_reg: 0x4602_0C94, clock_bit: 2, control_reg: 0x4602_0810, monitor_bit: 25, valid_bit: 29, status_reg: 0x4602_083C, ready_bit: 25, first_line: 98, last_line: 111 };
+const _: () = assert!(LED2_LINE == 6 * 16 + 2 && crate::stm32u5_supply_math::feeds(&IO2_SUPPLY, LED2_LINE) && crate::stm32u5_supply_math::feeds(&IO2_SUPPLY, 6 * 16 + 7) && crate::stm32u5_supply_math::feeds(&IO2_SUPPLY, 6 * 16 + 8) && !crate::stm32u5_supply_math::feeds(&IO2_SUPPLY, 6 * 16 + 1) && !crate::stm32u5_supply_math::feeds(&IO2_SUPPLY, 7 * 16), "the second I/O supply's line range is not PG2 to PG15, or the third LED is not on PG2");
+
+/// The PWM tables of this row: the six PWM pins of the board's Arduino-style
+/// connector (UM2861 Table 15), each a channel of one of the chip's timers at
+/// the alternate function the chip's datasheet states (DS13543 Table 28) --
+/// D3 on PE13 (TIM1 channel 3, AF1), D5 on PE11 (TIM1 channel 2, AF1), D6 on
+/// PE9 (TIM1 channel 1, AF1), D9 on PD15 (TIM4 channel 4, AF2), D10 on PD14
+/// (TIM4 channel 3, AF2) and D11 on PA7 (TIM3 channel 2, AF2). D3, D5 and D6
+/// are three channels of TIM1 and share its period; D9 and D10 share TIM4's.
+/// D10 and D9 are also the two chip selects of SPI1 above and D11 its output:
+/// a line serves one function at a time, and the first claim holds it. The
+/// blocks (RM0456: Table 6 for the bases, the non-secure alias; 11.8.33
+/// RCC_APB1ENR1 at 0x4602_0C9C with TIM3EN at bit 1 and TIM4EN at bit 2;
+/// 11.8.35 RCC_APB2ENR at 0x4602_0CA4 with TIM1EN at bit 11): TIM1 is an
+/// advanced timer, TIM3 and TIM4 general-purpose ones with four channels.
+/// Their counters are 32 bits wide; the tables give every timer a 16-bit
+/// reach. A timer's clock follows its bus by the manual's rule (11.4.15: the
+/// bus clock at a bus prescaler of 1, twice it otherwise): every bus
+/// prescaler is 1 at both clock configurations, so each timer runs at the
+/// system clock. The chip has no selector for the timers' clock. A line's
+/// number is its port and pin (PA0 is 0, sixteen a port), written as a plain
+/// number in the table and tied to the port and pin below.
+pub const PWM_BLOCKS: &[crate::stm32_tim_math::TimBlock] = &[
+    crate::stm32_tim_math::TimBlock { number: 1, base: 0x4001_2C00, enable_reg: 0x4602_0CA4, enable_bit: 11, apb: 2, advanced: true, channels: 4 },
+    crate::stm32_tim_math::TimBlock { number: 3, base: 0x4000_0400, enable_reg: 0x4602_0C9C, enable_bit: 1, apb: 1, advanced: false, channels: 4 },
+    crate::stm32_tim_math::TimBlock { number: 4, base: 0x4000_0800, enable_reg: 0x4602_0C9C, enable_bit: 2, apb: 1, advanced: false, channels: 4 },
+];
+pub const PWM_TIMERS: &[crate::pwm_math::PwmTimer] = &crate::stm32_tim_math::timers::<{ PWM_BLOCKS.len() }>(PWM_BLOCKS, crate::board::SYSCLK_HZ, crate::board::SYSCLK_HZ, crate::board::SYSCLK_HZ);
+pub const PWM_LINES: &[crate::pwm_math::PwmLine] = &[
+    crate::pwm_math::PwmLine { line: 77, timer: 0, channel: 2, alternate: 1 },
+    crate::pwm_math::PwmLine { line: 75, timer: 0, channel: 1, alternate: 1 },
+    crate::pwm_math::PwmLine { line: 73, timer: 0, channel: 0, alternate: 1 },
+    crate::pwm_math::PwmLine { line: 63, timer: 2, channel: 3, alternate: 2 },
+    crate::pwm_math::PwmLine { line: 62, timer: 2, channel: 2, alternate: 2 },
+    crate::pwm_math::PwmLine { line: 7, timer: 1, channel: 1, alternate: 2 },
+];
+/// The timer prescaler selector's register and bit, on a chip that has one.
+pub const PWM_SELECTOR: Option<(usize, u32)> = None;
+const _: () = assert!(PWM_LINES[0].line as u32 == 4 * 16 + 13 && PWM_LINES[1].line as u32 == 4 * 16 + 11 && PWM_LINES[2].line as u32 == 4 * 16 + 9 && PWM_LINES[3].line as u32 == 3 * 16 + 15 && PWM_LINES[4].line as u32 == 3 * 16 + 14 && PWM_LINES[5].line as u32 == 7, "a PWM line's number is not its port and pin");
+const _: () = assert!(populated(4 * 16 + 13) && populated(4 * 16 + 11) && populated(4 * 16 + 9) && populated(3 * 16 + 15) && populated(3 * 16 + 14) && populated(7) && populated(4 * 16 + 13), "a PWM line, or the flight check's input line, is not a pin of the package");
+/// The lines of the flight check's jumper wire: the PWM line whose edges the wire
+/// carries, and the plain input that counts them -- D5 (PE11) to D3 (PE13), itself a PWM line of this table that the check holds as a plain input for the wire.
+#[allow(dead_code)]
+pub const PWM_WIRE_OUT: u32 = 4 * 16 + 11;
+#[allow(dead_code)]
+pub const PWM_WIRE_IN: u32 = 4 * 16 + 13;
+
+/// The ADC tables of this row: the six analog pins of the board's
+/// Arduino-style connector (UM2861 Table 15) and the chip's internal
+/// reference as a seventh channel, a channel without a pin, all on the
+/// 14-bit converter ADC1 (DS13543 Table 27: PA3 channel 8, PA2 channel 7,
+/// PC3 channel 4, PB0 channel 15, PC1 channel 2, PC0 channel 1; RM0456
+/// Table 306: the internal reference on channel 0). 14 bits; the reference
+/// voltage the board's 3.3 V supply (UM2861 7.4.4: VDD at 3.3 V by default,
+/// the reference pin fed from the analog supply through SB2); the
+/// converter's clock the 16 MHz internal oscillator as its kernel clock,
+/// which both clock configurations of the row keep running (inside DS13543
+/// Table 97's 5 to 55 MHz); a conversion 831 cycles, the longest sampling
+/// time of 814 and the conversion's 17 at 14 bits (RM0456 33.4.13). A
+/// line's number is its port and pin (PA0 is 0, sixteen a port), written as
+/// a plain number in the table and tied to the port and pin below.
+pub const ADC_BLOCKS: &[crate::adc_math::AdcBlock] = &[crate::adc_math::AdcBlock { number: 1, clock_hz: ADC_KERNEL_HZ, bits: 14, reference_mv: 3300, conversion_cycles: 831 }];
+pub const ADC_CHANNELS: &[crate::adc_math::AdcChannel] = &[
+    crate::adc_math::AdcChannel { block: 0, channel: 8, line: 3 },
+    crate::adc_math::AdcChannel { block: 0, channel: 7, line: 2 },
+    crate::adc_math::AdcChannel { block: 0, channel: 4, line: 35 },
+    crate::adc_math::AdcChannel { block: 0, channel: 15, line: 16 },
+    crate::adc_math::AdcChannel { block: 0, channel: 2, line: 33 },
+    crate::adc_math::AdcChannel { block: 0, channel: 1, line: 32 },
+    crate::adc_math::AdcChannel { block: 0, channel: 0, line: crate::adc_math::NO_LINE },
+];
+/// The converter's kernel clock: the 16 MHz internal oscillator.
+pub const ADC_KERNEL_HZ: u32 = 16_000_000;
+/// The converter for the backend (RM0456 Table 6: the 14-bit converters'
+/// window at 0x4202_8000, ADC1 at its start; 33.7: the common registers at
+/// 0x300 of it; 11.8.30 RCC_AHB2ENR1 at 0x4602_0C8C with ADC12EN at bit 10;
+/// 11.8.48 RCC_CCIPR3 at 0x4602_0CE8 with the converters' kernel clock
+/// selector ADCDACSEL at bits 14:12, 100 the 16 MHz internal oscillator).
+pub const ADC_FACTS: crate::stm32_adc_math::u5::Facts = crate::stm32_adc_math::u5::Facts {
+    unit: crate::stm32_adc_math::AdcUnit { base: 0x4202_8000, enable_reg: 0x4602_0C8C, enable_bit: 10 },
+    common: 0x4202_8300,
+    clock_sel_reg: 0x4602_0CE8,
+    clock_sel_shift: 12,
+    clock_sel_mask: 0b111,
+    clock_sel_code: 0b100,
+};
+/// The analog supply (RM0456 10.4.4: the analog blocks are isolated after a
+/// reset until the supply is declared valid): the second I/O supply's
+/// facts shape with the analog supply's bits in the same registers --
+/// PWR_SVMCR at 0x4602_0810 with the first analog monitor's enable AVM1EN
+/// at bit 26 and the valid bit ASV at bit 30 (10.10.5), PWR_SVMSR at
+/// 0x4602_083C with VDDA1RDY at bit 26 (10.10.16). The supply feeds no
+/// line of its own: the line range names the no-line value alone.
+pub const ANALOG_SUPPLY: crate::stm32u5_supply_math::SupplyFacts = crate::stm32u5_supply_math::SupplyFacts { clock_reg: 0x4602_0C94, clock_bit: 2, control_reg: 0x4602_0810, monitor_bit: 26, valid_bit: 30, status_reg: 0x4602_083C, ready_bit: 26, first_line: 65535, last_line: 65535 };
+const _: () = assert!(ADC_CHANNELS[0].line as u32 == 3 && ADC_CHANNELS[1].line as u32 == 2 && ADC_CHANNELS[2].line as u32 == 2 * 16 + 3 && ADC_CHANNELS[3].line as u32 == 16 && ADC_CHANNELS[4].line as u32 == 2 * 16 + 1 && ADC_CHANNELS[5].line as u32 == 2 * 16, "an analog channel's line is not its port and pin");
+const _: () = assert!(populated(3) && populated(2) && populated(2 * 16 + 3) && populated(16) && populated(2 * 16 + 1) && populated(2 * 16), "an analog pin is not a pin of the package");
+/// The flight check's own list of the channels it may claim, by table
+/// position: every channel of the table.
+#[allow(dead_code)]
+pub const ADC_FLIGHT: &[usize] = &[0, 1, 2, 3, 4, 5, 6];
+const _: () = assert!(crate::stm32_adc_math::positions_fit(ADC_FLIGHT, ADC_CHANNELS.len()), "the flight check's list names a position outside the channel table, or one twice");
+/// The flight check's jumper wire: the PWM line that holds it, D6 (PE9),
+/// and the table position of the channel that reads it, A0.
+#[allow(dead_code)]
+pub const ADC_WIRE_OUT: u32 = 4 * 16 + 9;
+#[allow(dead_code)]
+pub const ADC_WIRE_IN: usize = 0;
 
 /// The RAM ranges of this row (the hosted runtime learns them
 /// through the `rhu_ram_count` and `rhu_ram_range` functions): the physical
@@ -210,18 +324,47 @@ pub const RAM_RANGES: &[crate::ram::RamFacts] =
 /// (`crate::console`: 1 off, 2 memory, 3 probe, 0x10 + n uart n).
 pub const CHANNELS: crate::console::ChannelFacts = crate::console::ChannelFacts { log: crate::console::CH_PROBE, console: crate::console::CH_PROBE, legal: &[crate::console::CH_PROBE, crate::console::CH_MEMORY, crate::console::CH_OFF] };
 /// The pre-defined UART rows of this row (the SDK's `uart` member), by the
-/// chip's own block number with their pins (none on a row whose UARTs have
-/// no pins); the kernel's UART API and the console's wire read them.
-pub const UART_ROWS: &[crate::console::UartRow] = &[];
+/// chip's own block number with their pins: one port, the low-power UART
+/// LPUART1 on the Arduino-style connector's D1 (PG7, transmit) and D0
+/// (PG8, receive), as the board is built (UM2861 Table 11), where a seated
+/// shield puts a click's serial lines. Both pins are fed by the second I/O
+/// supply, which the boot declares valid. The kernel's UART API reads the
+/// table. The console keeps its own block, USART1 on the lines to the
+/// board's probe: it is not a row here and is never a program's port. A
+/// line's number is its port and pin, written as a plain number in the
+/// table and tied to the port and pin below.
+pub const UART_ROWS: &[crate::console::UartRow] = &[crate::console::UartRow { block: 1, tx: 103, rx: 104 }];
 /// The gpio banner's line when the kernel holds a UART of this row as its
 /// console wire, by block (empty on a row with no UART row).
 pub const BANNER_UART: &[&str] = &[];
 /// The UART rows' names for the boot banner's console clause, by block.
 #[allow(dead_code)] // the Pico rows' banner clause reads it
 pub const UART_NAMES: &[&str] = &[];
-/// No pin override on this row (the UART rows have no pins, or there are
-/// none): the SDK's `uartPairs` member is empty.
-#[allow(dead_code)] // no row of this board reads it: the kernel's UART API answers ENODEV here
+/// No pin override on this row (the port's pair is fixed by the board's
+/// connector): the SDK's `uartPairs` member is empty.
 pub const UART_PAIRS: &[crate::console::UartPairs] = &[];
 /// No both-held banner line on this row.
 pub const BANNER_UART_BOTH: &str = "";
+/// The serial block behind each row of `UART_ROWS`, by the table's
+/// position, for the backend. LPUART1 at 0x4600_2400 (RM0456 Rev 7 page
+/// 145), a low-power UART with its prescaler; its bit 6 in the clock
+/// controller's three APB3 registers (the reset register at 0x080, the
+/// clock enable at 0x0A8, the clock while the core sleeps at 0x0D0; pages
+/// 552, 568 and 585); its kernel clock selector at bits 2:0 of the third
+/// independent clock configuration register at 0x0E8, the code 010 the
+/// 16 MHz internal oscillator (page 597); FIFOs, 8 deep each (Table 686);
+/// both pins at alternate function 8 (DS13543 Table 29); the interrupt
+/// line 66 (RM0456 Table 186). The block's kind -- a USART or a low-power
+/// UART -- is stated by its row's `law` field.
+pub const UART_BLOCKS: &[crate::stm32_usart_math::Block] = &[crate::stm32_usart_math::Block { base: 0x4600_2400, law: crate::stm32_usart_math::Law::LowPower, enable_reg: 0x4602_0CA8, reset_reg: 0x4602_0C80, sleep_reg: 0x4602_0CD0, bus_bit: 6, select_reg: 0x4602_0CE8, select_shift: 0, select_mask: 0x7, select_code: 0x2, fifo: true, alternate: 8, irq: 66 }];
+/// The two rings of a port, in bytes. This row offers no port as a console
+/// wire, the use the larger transmit ring of the other serial rows is
+/// sized for: a program's write copies what fits and its blocking write
+/// waits for room, so a smaller ring loses nothing. The receive ring holds
+/// 89 ms of a 115200 Bd wire.
+pub const UART_RX_BYTES: usize = 1024;
+pub const UART_TX_BYTES: usize = 1024;
+const _: () = assert!(UART_ROWS.len() == 1 && UART_ROWS[0].block == 1 && UART_ROWS[0].tx as u32 == 6 * 16 + 7 && UART_ROWS[0].rx as u32 == 6 * 16 + 8, "the serial port's row is not LPUART1 on D1 (PG7) and D0 (PG8)");
+const _: () = assert!(populated(6 * 16 + 7) && populated(6 * 16 + 8) && crate::stm32_usart_math::pair_sound(UART_ROWS[0].tx as u32, UART_ROWS[0].rx as u32), "a serial line is not a pin of the package, or the port's two lines are one");
+const _: () = assert!(crate::stm32_usart_math::lines_free(&BOARD_CLAIM_BITS, UART_ROWS[0].tx as u32, UART_ROWS[0].rx as u32), "a serial line is among the board's own claims");
+const _: () = assert!(crate::stm32u5_supply_math::feeds(&IO2_SUPPLY, UART_ROWS[0].tx as u32) && crate::stm32u5_supply_math::feeds(&IO2_SUPPLY, UART_ROWS[0].rx as u32), "the serial lines are not fed by the second I/O supply the boot declares valid");

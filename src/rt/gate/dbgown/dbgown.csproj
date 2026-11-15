@@ -1,0 +1,23 @@
+<Project Sdk="Lamella.Sdk">
+
+  <!-- The gate's program for a program's own code: a class library it
+       references by project and two local functions of one body, in the
+       project shape of the app template. The verification chain publishes
+       it in the Debug configuration and reads its image as a debugger
+       reads it (tools/rt-publish/debug-readings.py): the program's lines,
+       the two functions of one body and the library's lines. Program.cs
+       carries no comment: the readings name its statements by line
+       number. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../dbgownlib/dbgownlib.csproj" />
+  </ItemGroup>
+
+</Project>

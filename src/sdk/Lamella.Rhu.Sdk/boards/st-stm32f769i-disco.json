@@ -11,13 +11,88 @@
   "functions": "gpio",
   "pwm": {
     "chip": 0,
-    "lines": []
+    "lines": [
+      86,
+      40,
+      87,
+      118,
+      11,
+      31
+    ]
   },
   "adc": {
-    "converters": []
+    "converters": [
+      {
+        "number": 0,
+        "bits": 12,
+        "referenceMillivolts": 3300,
+        "channels": [
+          {
+            "number": 6,
+            "pin": 6
+          },
+          {
+            "number": 4,
+            "pin": 4
+          },
+          {
+            "number": 12,
+            "pin": 34
+          },
+          {
+            "number": 17,
+            "pin": null
+          }
+        ]
+      },
+      {
+        "number": 1,
+        "bits": 12,
+        "referenceMillivolts": 3300,
+        "channels": [
+          {
+            "number": 8,
+            "pin": 90
+          },
+          {
+            "number": 6,
+            "pin": 88
+          },
+          {
+            "number": 7,
+            "pin": 89
+          }
+        ]
+      }
+    ]
   },
-  "i2c": [],
-  "spi": [],
+  "i2c": [
+    {
+      "block": 1,
+      "sda": 25,
+      "scl": 24,
+      "rates": [
+        100000,
+        400000,
+        1000000
+      ]
+    }
+  ],
+  "spi": [
+    {
+      "block": 2,
+      "sck": 12,
+      "mosi": 31,
+      "miso": 30,
+      "cs": [
+        11,
+        118,
+        148
+      ],
+      "min": 210937,
+      "max": 27000000
+    }
+  ],
   "ram": [
     {
       "name": "SRAM",
@@ -52,7 +127,7 @@
       "executable": true
     }
   ],
-  "uart": [],
+  "uart": [{"block": 6, "tx": 38, "rx": 39}],
   "uartPairs": [],
   "channels": {
     "log": "probe",
@@ -62,5 +137,14 @@
       "memory",
       "off"
     ]
+  },
+  "net": {
+    "medium": "wired",
+    "streams": 4,
+    "datagrams": 2,
+    "streamRx": 4096,
+    "streamTx": 2048,
+    "datagramBuf": 1536,
+    "resolveSlots": 4
   }
 }

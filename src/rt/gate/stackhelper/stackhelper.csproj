@@ -1,0 +1,21 @@
+<Project Sdk="Lamella.Sdk">
+
+  <!-- The gate's program for the runtime's stack helper: a record's
+       ToString() on the thread that runs Main and on a spawned thread, a
+       continuation asked to run synchronously, and a descent that asks the
+       helper at each frame. The verification chain publishes it for its own
+       emulator row, boots it and reads its lines; for its control it links
+       the same program once more with the hosting layer's unit that reports
+       a thread's true stack bounds, on which the helper says no at once. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+    <!-- The kernel's own lines are on the console beside the program's:
+         the chain reads the kernel's return line after the program's end. -->
+    <RhuLogLevel>verbose</RhuLogLevel>
+  </PropertyGroup>
+
+</Project>

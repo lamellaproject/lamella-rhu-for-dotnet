@@ -69,10 +69,10 @@ public sealed class TargetBoard
     public BoardPins Pins { get; }
 
     /// <summary>The I2C buses the image serves, with their rates.</summary>
-    public IReadOnlyList<I2cBusInfo> I2cBuses => _f.I2cBuses;
+    public IReadOnlyList<BoardI2cBus> I2cBuses => _f.I2cBuses;
 
     /// <summary>The SPI buses the image serves, with their rate ladders.</summary>
-    public IReadOnlyList<SpiBusInfo> SpiBuses => _f.SpiBuses;
+    public IReadOnlyList<BoardSpiBus> SpiBuses => _f.SpiBuses;
 
     /// <summary>The serial ports: the chip's UART blocks, each with the device file a program opens, its pins in this image and the image's own use of it.</summary>
     public IReadOnlyList<UartInfo> SerialPorts => _f.SerialPorts;
@@ -119,7 +119,7 @@ public sealed class TargetBoard
     public I2cDevice CreateI2cDevice(I2cConnectionSettings connectionSettings, int clockFrequency)
     {
         ArgumentNullException.ThrowIfNull(connectionSettings);
-        I2cBusInfo bus = FindI2c(connectionSettings.BusId);
+        BoardI2cBus bus = FindI2c(connectionSettings.BusId);
         bool served = false;
         foreach (int r in bus.Frequencies)
         {
@@ -156,8 +156,8 @@ public sealed class TargetBoard
 
     /// <summary>
     /// A device on an SPI bus; the clock number is passed to the image as is and served at the
-    /// nearest rate the block's ladder makes, as a Raspberry Pi serves it. A bus the board does
-    /// not have is refused with <see cref="NotSupportedException"/>.
+    /// fastest rate the block's ladder makes at or below it, as a Raspberry Pi serves it. A bus
+    /// the board does not have is refused with <see cref="NotSupportedException"/>.
     /// </summary>
     public SpiDevice CreateSpiDevice(SpiConnectionSettings connectionSettings)
     {
@@ -250,7 +250,7 @@ public sealed class TargetBoard
     private const int ErrnoNotTty = 25;
     private const int ErrnoNotSupported = 95;
 
-    private void ClaimRate(I2cBusInfo bus, int clockFrequency)
+    private void ClaimRate(BoardI2cBus bus, int clockFrequency)
     {
         string node = "/dev/i2c-" + bus.Number;
         int fd = Native.open(node, OpenReadWrite);
@@ -299,16 +299,16 @@ public sealed class TargetBoard
         }
     }
 
-    private string BusAlreadyRuns(I2cBusInfo bus, int running, int asked) =>
+    private string BusAlreadyRuns(BoardI2cBus bus, int running, int asked) =>
         Board() + ": I2C bus " + bus.Number + " already runs at " + running + " Hz for this program's run; a bus has one rate per run, set by the first device created on it, and " + asked + " Hz was asked.";
 
-    private string BusPinHeld(I2cBusInfo bus) =>
+    private string BusPinHeld(BoardI2cBus bus) =>
         Board() + ": I2C bus " + bus.Number + " could not be claimed: a program holds one of its pins (" + Label(bus.Sda) + ", " + Label(bus.Scl) + ") as a GPIO line.";
 
-    private string RateRefusedByImage(I2cBusInfo bus, int asked) =>
+    private string RateRefusedByImage(BoardI2cBus bus, int asked) =>
         Board() + ": an I2C rate of " + asked + " Hz on bus " + bus.Number + " is listed by the board's facts but refused by the image (the image's clock does not serve it).";
 
-    private string NoRateRequest(I2cBusInfo bus, int asked) =>
+    private string NoRateRequest(BoardI2cBus bus, int asked) =>
         Board() + ": this image's I2C node takes no clock-frequency request, so bus " + bus.Number + " runs at its default rate and " + asked + " Hz cannot be set.";
 
     private string NodeNotOpened(string node, int errno) =>
@@ -336,9 +336,9 @@ public sealed class TargetBoard
 
     private string Board() => Maker + " " + Product + " (" + Name + ")";
 
-    private I2cBusInfo FindI2c(int number)
+    private BoardI2cBus FindI2c(int number)
     {
-        foreach (I2cBusInfo bus in I2cBuses)
+        foreach (BoardI2cBus bus in I2cBuses)
         {
             if (bus.Number == number)
             {
@@ -349,9 +349,9 @@ public sealed class TargetBoard
         throw new NotSupportedException(Missing("I2C", number, I2cBuses.Count, i => I2cBuses[i].Number));
     }
 
-    private SpiBusInfo FindSpi(int number)
+    private BoardSpiBus FindSpi(int number)
     {
-        foreach (SpiBusInfo bus in SpiBuses)
+        foreach (BoardSpiBus bus in SpiBuses)
         {
             if (bus.Number == number)
             {

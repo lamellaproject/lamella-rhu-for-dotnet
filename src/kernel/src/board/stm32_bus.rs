@@ -11,10 +11,10 @@
 //! speed and pull registers and the alternate-function pair at the same
 //! offsets on the families this kernel serves): a pad's electrical setup
 //! follows its ROLE in the board's facts. The two I2C pads are open-drain
-//! with the pad's own pull-up at the low speed setting; the SPI clock and
-//! output are push-pull at the high speed setting (the datasheets' I/O
-//! tables rate the medium setting below the fastest rate the SPI ladder can
-//! ask); the SPI input is pulled up. The pads' own pull-ups define an EMPTY
+//! with the pad's own pull-up at the low speed setting; the SPI clock, the
+//! SPI output and the chip selects are push-pull at the speed setting at
+//! which the chip's data sheet states its SPI table (`SPEED_SPI`, with its
+//! sources); the SPI input is pulled up. The pads' own pull-ups define an EMPTY
 //! bus's answers only -- a bus with nothing fitted idles released, an
 //! address nobody answers reads as not acknowledged, a transfer with no
 //! device reads ones -- so the kernel's answers are the same with and
@@ -71,7 +71,15 @@ const OSPEEDR: usize = 0x08;
 const AFRL: usize = 0x20;
 const MODE_ALTERNATE: u32 = 0b10;
 const SPEED_LOW: u32 = 0b00;
-const SPEED_HIGH: u32 = 0b10;
+/// The speed setting of every SPI line the kernel drives -- the clock, the
+/// data out and the chip selects: the setting at which the chip's data
+/// sheet states its SPI table. The STM32F769: OSPEEDRy[1:0] = 11 (DS11532,
+/// the SPI interface characteristics before table 86). The STM32U5A5:
+/// OSPEEDRy[1:0] = 10 (DS13543, section 5.3.42).
+#[cfg(feature = "board-st-stm32f769i-disco")]
+const SPEED_SPI: u32 = 0b11;
+#[cfg(not(feature = "board-st-stm32f769i-disco"))]
+const SPEED_SPI: u32 = 0b10;
 
 /// A released line settles through the pad's own pull-up before it is read.
 const SETTLE_NS: u64 = 100_000;
@@ -101,7 +109,7 @@ fn line_of(d: &I2cBus, role: PadRole) -> Option<u32> {
 pub fn pad_take(p: &Pad) {
     let (open_drain, pull, speed) = match p.role {
         PadRole::I2cClock | PadRole::I2cData => (true, g::PULL_UP, SPEED_LOW),
-        PadRole::SpiClock | PadRole::SpiOut => (false, g::PULL_NONE, SPEED_HIGH),
+        PadRole::SpiClock | PadRole::SpiOut => (false, g::PULL_NONE, SPEED_SPI),
         PadRole::SpiIn => (false, g::PULL_UP, SPEED_LOW),
     };
     pad_take_as(p.line as u32, p.alternate, open_drain, pull, speed);
@@ -179,10 +187,17 @@ pub fn i2c_stop(d: &I2cBus) {
     spin(HALF_BIT_NS);
 }
 
-/// A chip select taken: a push-pull output at its released level.
+/// A chip select taken: a push-pull output at its released level (the
+/// family GPIO driver enables the port's clock first), then the SPI lines'
+/// speed setting in the select's two bits of OSPEEDR.
 pub fn select_take(d: &SpiBus, index: u32) {
     if let Some(&line) = d.selects.get(index as usize) {
         pins::configure(line as u32, g::MODE_OUTPUT, g::PULL_NONE, true);
+        let (_, bit) = g::st_split(line as u32);
+        with_cs(|| {
+            let ospeedr = port_reg(line as u32, OSPEEDR);
+            wr(ospeedr, (rd(ospeedr) & !(0b11 << (2 * bit))) | (SPEED_SPI << (2 * bit)));
+        });
     }
 }
 

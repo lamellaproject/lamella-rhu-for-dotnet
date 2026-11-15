@@ -1,0 +1,12 @@
+shimtest-sockport: the socket event port over a scripted kernel, from a native caller's side
+PASS shim-sock-port-create (a port's handle outside every descriptor band, a bad descriptor to the descriptor layer's close; a second port beside it; the event buffer made; a null pointer EFAULT)
+PASS shim-sock-port-table (four ports stand together; a fifth is refused with EMFILE and -1 for its handle; a closed port's place is given again)
+PASS shim-sock-port-register (an event bit outside the five EINVAL; the same events twice a success that changes nothing; a descriptor outside the band ENOTSOCK, a slot not open and a port not open EBADF; a socket registered twice EEXIST; a removal with no registration ENOENT)
+PASS shim-sock-port-level-once (a socket readable before its registration is reported at the first wait with its data word: its level, read and write)
+PASS shim-sock-port-risen-once (with that level standing the second wait sleeps and reports the next socket's arrival alone; bytes that arrive after a receive emptied the queue are reported once)
+PASS shim-sock-port-several (three sockets in one wait, each once with its own data word: a handshake's end as write, the peer's close as read and write, a handshake that did not succeed as read, write and error)
+PASS shim-sock-port-buffer-bound (three sockets risen and room for two: two reported, no record written past them, the third at the next wait; room for none EINVAL; a null buffer EFAULT)
+PASS shim-sock-port-registration-under-waiter (a socket registered while a wait sleeps wakes it: the wait reports that socket's level)
+PASS shim-sock-port-close-under-waiter (a registered socket closed while a wait sleeps ends its registration: a new socket at its descriptor is not reported, the waiter sleeps again with no event and reports the next arrival alone)
+PASS shim-sock-port-close (the port closed: its handle then EBADF to a registration and to a wait; the buffer freed; the sockets closed through the kernel once each)
+SHIMTEST-SOCKPORT: ALL GOOD (the socket event port over a scripted kernel, from a native caller's side)

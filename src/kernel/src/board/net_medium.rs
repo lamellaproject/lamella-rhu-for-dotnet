@@ -1,6 +1,6 @@
 //! The medium seam: the
 //! one small contract between the kernel's network stack and a medium
-//! driver -- the emulator rows' virtual medium. A medium
+//! driver -- the emulator rows' virtual medium, the STM32F7's Ethernet controller. A medium
 //! tells its hardware address and its link state, hands received frames to
 //! the stack IN PLACE, takes the stack's frames into a slot of its own,
 //! names the word its interrupt (or its timer) bumps when something
@@ -23,7 +23,7 @@ use smoltcp::time::Instant;
 /// state.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Link {
-    #[allow(dead_code)] // the wired medium reads it from its PHY; the virtual medium is always up
+    #[allow(dead_code)] // the wired medium reads it from its PHY; the virtual medium's link moves under the link check's feature alone
     Down,
     Up,
 }

@@ -36,7 +36,7 @@ See [how a program is hosted](BUILDING.md) and [where the hosted runtime comes f
 `dotnet run --list-devices` lists the devices a program can run on: each attached debug probe (`probe:<serial>`) and, for an emulator row, the emulator machine (`emulator:<machine>`) where `qemu-system-arm` is installed (the SDK never installs it); a project that names no board lists each probe with each board it reaches, and the chosen device names the board.
 `dotnet run --device <id>` publishes the image, writes it to the board over that probe (or starts the emulator), prints the run's execution model, shows the program's output on your terminal and returns the program's exit code unchanged.
 The tool that writes the image and reads the program's output is the Lamella SDK's own, restored with it; nothing else is installed.
-A plain `dotnet run` builds the Debug configuration, as everywhere in .NET; the SDK compiles every configuration with the code optimization on and keeps the configuration's debug information, so the Debug image is optimized too, and `dotnet run -c Release --device <id>` writes the Release configuration's image.
+A plain `dotnet run` builds the Debug configuration, as everywhere in .NET: on every board the SDK leaves the program's own code unoptimized, for a debugger, and compiles the framework and every package with the code optimization on (docs/BUILDING.md); `dotnet run -c Release --device <id>` writes the Release configuration's optimized image.
 `dotnet run --no-build --device <id>` runs the image of the last publish as it stands and publishes nothing, whatever changed since (a source, a knob); with no image published yet it is refused naming the image. A run without the option builds, publishes and runs.
 A program on a board takes no arguments yet: arguments after `--` are refused with one sentence.
 A single-file program builds and publishes an image; `dotnet run` reaches a device from a project.
@@ -52,15 +52,15 @@ A deliberately modified test control is one build of a test with one thing broke
 | Kernel startup | Boot and console on QEMU mps2-an500, Cortex-M7. A common fault handler decodes and reports CFSR/HFSR state. | base gate |
 | Preemptive scheduler | BASEPRI-based critical sections and a reserved, unmasked zero-latency interrupt band. Context switching handles lazy floating-point state. | scheduler gate |
 | Payload hosting | NativeAOT test payloads link into the kernel image. Their output is compared with golden transcripts. | payload gate |
-| Hosting API | Futexes, nanosecond time, a zero-initialized memory arena, and a heap. Threads have per-module TLS. A module registry and suspend/resume and activation primitives support garbage collection. | hosting-api gate on the emulator; host gate for the arithmetic modules |
+| Hosting API | Futexes, nanosecond time, a zero-initialized memory arena, and a heap. Threads have per-module thread-local storage. A module registry and suspend/resume and activation primitives support garbage collection. | hosting-api gate on the emulator; host gate for the arithmetic modules |
 | Garbage collector | Uses the .NET runtime's GC interface. Supports allocation, stop-the-world mark and sweep, finalization, and per-board memory configurations. | garbage-collector gate; its re-derivation leg rebuilds the frozen objects from `src/gc` |
 
 The host gate runs the kernel's arithmetic modules through Rust's own test runner on your machine, compiled from their own source files, with no emulator.
-Those modules are the arena, the heap, the wake clock, the calendar, the double-precision emulation, the pure halves of the kernel's GPIO, bus, PWM and ADC APIs, the SD card layer over a scripted host, the network checksum matcher, the scripted peer of the kernel's network API, and the UART pin words.
+Those modules are the arena, the heap, the wake clock, the calendar, the double-precision emulation, the pure halves of the kernel's GPIO, bus, PWM and ADC APIs, the SD card layer over a scripted host, the network checksum matcher, the scripted peer of the kernel's network API, the UART pin words, the ST timers' arithmetic, the STM32U5's second I/O supply sequence, the ST converters' register sequences, and the ST serial blocks' rate rules and register sequences.
 
 The hosted-runtime gates link a real NativeAOT .NET program, the runtime, the compatibility layer, and the collector into one image.
 They boot that image on the emulator, with one gate per processor class.
-Their two test programs are a hello program and a seventeen-section runtime suite.
+Their two test programs are a hello program and a runtime suite in numbered sections.
 
 | Suite area | Covered behavior |
 | --- | --- |
@@ -68,8 +68,10 @@ Their two test programs are a hello program and a seventeen-section runtime suit
 | Thread synchronization | Threads contend on a lock. A 64-bit counter is shared with a worker through the interlocked family. |
 | Collection and threads | Threads suspend for collection. A worker remains parked on a monitor across collections. |
 | Math | The C library's math functions are reached through the runtime's imports. |
-| Peripherals | The standard GPIO, I2C, SPI and PWM packages run over the emulator's virtual lines, bus models and virtual timers; see [PERIPHERALS](PERIPHERALS.md). |
+| Peripherals | The standard GPIO, I2C, SPI, PWM and serial-port packages and the standard analog classes run over the emulator's virtual lines, bus models, virtual timers, second UART and converter model; see [PERIPHERALS](PERIPHERALS.md). |
 | Managed faults | A null reference is caught as the managed exception. |
+| Secure randomness | Secure random bytes come from the kernel's entropy call, and a hash call throws the cryptographic exception. |
+| Named mutexes | Threads take and release a mutex by its name. |
 
 ## Inspect image metadata
 

@@ -261,3 +261,19 @@ pub const UART_PAIRS: &[crate::console::UartPairs] = &[
 ];
 /// The gpio banner's line when the kernel holds BOTH UART rows as wires.
 pub const BANNER_UART_BOTH: &str = "30 lines, 8 claimed by the board (the console UART0 on GPIO 0/1, UART1 on the project's pins, the wireless module on GPIO 23, 24, 25 and 29)";
+
+/// The radio's corner of the flash, as the lamella tool's row of this board
+/// states it: the memory, the offset of the corner's first byte in it, the
+/// room for the radio's firmware behind its directory, and the erase unit.
+/// The two units after the room end the device and hold the network a
+/// developer stores on the board. The flash tool writes the corner; the
+/// kernel reads it in place and never writes or erases it, and the row's
+/// maps keep every image and the app slot below it.
+#[allow(dead_code)] // a kernel built with the radio reads the rows
+pub const RADIO_CORNER_MEMORY: &str = "flash";
+#[allow(dead_code)] // a kernel built with the radio reads the rows
+pub const RADIO_CORNER_OFFSET: usize = 0x3C0000;
+#[allow(dead_code)] // a kernel built with the radio reads the rows
+pub const RADIO_CORNER_BYTES: usize = 253952;
+#[allow(dead_code)] // a kernel built with the radio reads the rows
+pub const RADIO_CORNER_UNIT: usize = 4096;

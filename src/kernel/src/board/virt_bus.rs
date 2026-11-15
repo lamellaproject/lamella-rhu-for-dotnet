@@ -260,9 +260,14 @@ pub fn probe_i2c_resets() -> u32 {
 
 // ---------------- the I2C block model and the sensor behind it ----------------
 
-/// The bits' time of one byte with its acknowledge at 100 kHz.
-const I2C_BYTE_NS: u64 = 90_000;
-const TIMING_100K_AT_16M: u32 = 0x3042_0F13;
+/// The bits' time of one byte with its acknowledge at the rate whose timing
+/// word the block holds -- nine bit times of the rate, 90 microseconds at
+/// 100 kHz -- or None for a word that the bus arithmetic does not make at
+/// the bus's kernel clock.
+fn i2c_byte_ns(timingr: u32) -> Option<u64> {
+    let clock = facts::I2C_BUSES[0].kernel_hz;
+    crate::bus_math::I2C_RATES_HZ.iter().find(|&&rate| crate::bus_math::i2c_timing(clock, rate) == Some(timingr)).map(|&rate| 9_000_000_000 / rate as u64)
+}
 const I2C_CR1: usize = 0x00;
 const I2C_CR2: usize = 0x04;
 const I2C_TIMINGR: usize = 0x10;
@@ -325,6 +330,7 @@ struct I2cModel {
     resets: u32,
     cr2: u32,
     timingr: u32,
+    byte_ns: u64,
     txis: bool,
     rxne: bool,
     nackf: bool,
@@ -347,6 +353,7 @@ static mut I2C: I2cModel = I2cModel {
     resets: 0,
     cr2: 0,
     timingr: 0,
+    byte_ns: 0,
     txis: false,
     rxne: false,
     nackf: false,
@@ -373,7 +380,7 @@ impl I2cModel {
     fn schedule(&mut self, what: Pending, bytes: u64) {
         let stretch = if core::mem::take(&mut wire().stretch) { STRETCH_NS } else { 0 };
         self.pending = what;
-        self.due_ns = sched::now_ns() + bytes * I2C_BYTE_NS + stretch;
+        self.due_ns = sched::now_ns() + bytes * self.byte_ns + stretch;
     }
 
     /// The message's end: a stop where the automatic end was asked, else
@@ -459,7 +466,10 @@ impl I2cModel {
             I2C_CR1 => {
                 let pe = v & 1 != 0;
                 if pe && !self.pe {
-                    assert!(self.timingr == TIMING_100K_AT_16M, "[bus model] the I2C timing word {:#010x} is not the 16 MHz standard-mode row", self.timingr);
+                    self.byte_ns = match i2c_byte_ns(self.timingr) {
+                        Some(ns) => ns,
+                        None => panic!("[bus model] the I2C timing word {:#010x} is no word of the bus arithmetic at the bus's kernel clock", self.timingr),
+                    };
                     if self.ever_enabled {
                         self.resets += 1;
                     }

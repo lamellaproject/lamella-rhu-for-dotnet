@@ -502,3 +502,11 @@ fn decode_cfsr(cfsr: u32) {
         }
     }
 }
+
+/// Whether a terminal report is under way. The radio's end asks: inside a
+/// report the scheduler is not relied on, and the radio's power is cut by
+/// register writes alone.
+#[cfg(rhu_net_wireless)]
+pub fn terminal_report() -> bool {
+    TERMINAL_DEPTH.load(Ordering::SeqCst) != 0
+}

@@ -22,7 +22,7 @@
        serial section drives its class over the host's serial device
        files; the rt tiers' manifests record the package's identity. -->
   <ItemGroup>
-    <PackageReference Include="System.IO.Ports" Version="11.0.0-rc.3.26522.148" />
+    <PackageReference Include="System.IO.Ports" Version="11.0.0" />
   </ItemGroup>
 
   <!-- The board package: the analog section drives the standard analog

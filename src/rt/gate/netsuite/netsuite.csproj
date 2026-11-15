@@ -1,0 +1,17 @@
+<Project Sdk="Lamella.Sdk">
+
+  <!-- The network suite's program: the standard socket, name and interface
+       classes over the board's network. The verification chain publishes
+       it for an emulator row and boots its image. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <AssemblyName>netsuite</AssemblyName>
+    <RootNamespace>Rhu.Hosted</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- The gate's posture: the kernel's whole boot report. -->
+    <RhuLogLevel>verbose</RhuLogLevel>
+  </PropertyGroup>
+
+</Project>

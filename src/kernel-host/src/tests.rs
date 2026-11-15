@@ -688,11 +688,68 @@ fn bus_math_i2c_wait_covers_the_clock_low_limit() {
 }
 
 #[test]
+fn bus_math_i2c_timing_serves_the_faster_rates_by_clock() {
+    assert_eq!(bus_math::i2c_timing(16_000_000, 400_000), Some(0x0062_0C17), "fast mode at the 16 MHz clock");
+    assert_eq!(bus_math::i2c_timing(16_000_000, 1_000_000), Some(0x0020_0408), "fast mode plus at the 16 MHz clock");
+    assert_eq!(bus_math::i2c_timing(54_000_000, 1_000_000), Some(0x0091_101E), "fast mode plus at a 54 MHz clock");
+    for (clock, rate) in [(16_000_000, 50_000), (54_000_000, 400_000), (64_000_000, 1_000_000), (12_000_000, 400_000)] {
+        assert_eq!(bus_math::i2c_timing(clock, rate), None, "{clock} Hz at {rate} Hz has no word");
+    }
+}
+
+#[test]
+fn bus_math_i2c_timing_words_keep_the_rule() {
+    for (clock, rate) in [(16_000_000u32, 100_000u32), (16_000_000, 400_000), (16_000_000, 1_000_000), (54_000_000, 1_000_000)] {
+        let word = bus_math::i2c_timing(clock, rate).expect("a served pair");
+        assert!(bus_math::i2c_timing_sound(word, clock, rate), "{word:#010x} at {clock} Hz does not keep the rule for {rate} Hz");
+        // One count less in a field and the rule refuses the word: the low count, the high count, the setup, the hold.
+        for (shift, mask) in [(0u32, 0xFFu32), (8, 0xFF), (20, 0xF), (16, 0xF)] {
+            if (word >> shift) & mask != 0 {
+                let less = word - (1 << shift);
+                assert!(!bus_math::i2c_timing_sound(less, clock, rate), "{less:#010x}, one count less at bit {shift} of {word:#010x}, passes");
+            }
+        }
+        assert!(!bus_math::i2c_timing_sound(word | 1 << 24, clock, rate), "a reserved bit passes");
+        assert!(!bus_math::i2c_timing_sound(word, clock, 50_000), "a rate outside the set passes");
+    }
+    // The manuals' example rows for 16 MHz count on the bus's edges for their rate: the rule refuses all three.
+    assert!(!bus_math::i2c_timing_sound(0x3042_0F13, 16_000_000, 100_000), "the manuals' 100 kHz row passes");
+    assert!(!bus_math::i2c_timing_sound(0x1032_0309, 16_000_000, 400_000), "the manuals' 400 kHz row passes");
+    assert!(!bus_math::i2c_timing_sound(0x0020_0204, 16_000_000, 1_000_000), "the manuals' 1 MHz row passes");
+    // A word is its clock's: the 16 MHz word of fast mode plus is refused at 54 MHz.
+    assert!(!bus_math::i2c_timing_sound(0x0020_0408, 54_000_000, 1_000_000), "the 16 MHz word passes at 54 MHz");
+}
+
+#[test]
+fn bus_math_i2c_setup_takes_the_rows_fast_plus_fact() {
+    use bus_math::{i2c_setup, I2cFastPlus, I2cSetup};
+    // Two facts: a block that takes another clock for fast mode plus and has no drive bit; one that keeps its bus's
+    // clock and has the bit.
+    let other_clock = Some(I2cFastPlus { mux_value: 0b00, kernel_hz: 54_000_000, drive: false });
+    let own_clock = Some(I2cFastPlus { mux_value: 0b10, kernel_hz: 16_000_000, drive: true });
+    assert_eq!(i2c_setup(0b10, 16_000_000, other_clock, 1_000_000), Some(I2cSetup { mux_value: 0b00, timing: 0x0091_101E, drive: false }));
+    assert_eq!(i2c_setup(0b10, 16_000_000, own_clock, 1_000_000), Some(I2cSetup { mux_value: 0b10, timing: 0x0020_0408, drive: true }));
+    // The other rates stay at the bus's own clock and never set the drive, whatever the fact.
+    for fact in [other_clock, own_clock, None] {
+        assert_eq!(i2c_setup(0b10, 16_000_000, fact, 400_000), Some(I2cSetup { mux_value: 0b10, timing: 0x0062_0C17, drive: false }));
+        assert_eq!(i2c_setup(0b10, 16_000_000, fact, 100_000), Some(I2cSetup { mux_value: 0b10, timing: 0x10A1_2828, drive: false }));
+        assert_eq!(i2c_setup(0b10, 16_000_000, fact, 50_000), None);
+    }
+    // No fact: no fast mode plus, whatever the bus's clock. A fact whose clock has no word: none either.
+    assert_eq!(i2c_setup(0b10, 16_000_000, None, 1_000_000), None);
+    assert_eq!(i2c_setup(0b10, 16_000_000, Some(I2cFastPlus { mux_value: 0b00, kernel_hz: 16_000_001, drive: false }), 1_000_000), None);
+    // A 64 MHz bus serves standard mode alone.
+    assert_eq!(i2c_setup(0b10, 64_000_000, None, 100_000), Some(I2cSetup { mux_value: 0b10, timing: 0xF042_0F13, drive: false }));
+    assert_eq!(i2c_setup(0b10, 64_000_000, None, 400_000), None);
+    assert_eq!(i2c_setup(0b10, 64_000_000, None, 1_000_000), None);
+}
+
+#[test]
 fn bus_math_budget_divisor_and_messages() {
-    assert_eq!(bus_math::i2c_timing(16_000_000, 100_000), Some(0x3042_0F13));
-    assert_eq!(bus_math::i2c_timing(16_000_000, 400_000), None);
+    assert_eq!(bus_math::i2c_timing(16_000_000, 100_000), Some(0x10A1_2828), "standard mode at the 16 MHz clock: the rule's word");
+    assert_eq!(bus_math::i2c_timing(16_000_000, 400_000), Some(0x0062_0C17), "fast mode at the 16 MHz clock: the rule's word");
     assert_eq!(bus_math::i2c_timing(54_000_000, 100_000), None);
-    assert_eq!(bus_math::i2c_timing(64_000_000, 100_000), Some(0xF042_0F13), "the H7's 64 MHz kernel clock: prescaler 15 is the 16 MHz row's 250 ns tick");
+    assert_eq!(bus_math::i2c_timing(64_000_000, 100_000), Some(0xF042_0F13), "the H7's 64 MHz kernel clock: prescaler 15 is the 250 ns tick of the manuals' 16 MHz row");
     assert_eq!(bus_math::i2c_timing(64_000_000, 400_000), None);
     assert_eq!(bus_math::spi_divisor(16_000_000, 1_000_000), Some((3, 1_000_000)), "16 MHz over 16");
     assert_eq!(bus_math::spi_divisor(54_000_000, 1_000_000), Some((5, 843_750)), "54 MHz over 64: the largest divisor at or below the request");
@@ -3492,6 +3549,48 @@ fn net_peer_dns_answer_and_name_error_parsed_by_the_stack() {
 }
 
 #[test]
+fn net_peer_dns_answer_with_two_records_parsed_by_the_stack() {
+    let mut out = [0u8; net_peer::MAX_REPLY];
+    let mut peer = Peer::new(false);
+    let query = udp_frame(net_peer::PEER_MAC, net_peer::LEASE_IP, net_peer::PEER_IP, 40003, 53, &dns_query(0x2A2A, "PAIR.rhu.Test"));
+    let Verdict::Reply(n) = peer.answer(&query, &mut out) else { panic!("the query for the name with two records was not answered") };
+    let (payload, src, dst, sp, dp, mac) = parse_udp_reply(&out[..n]);
+    assert_eq!((src, dst, sp, dp, mac), (peer_v4(net_peer::PEER_IP), peer_v4(net_peer::LEASE_IP), 53, 40003, EthernetAddress(net_peer::OUR_MAC)));
+    let packet = DnsPacket::new_checked(&payload[..]).expect("a well-formed DNS message");
+    assert_eq!(packet.transaction_id(), 0x2A2A);
+    assert!(packet.flags().contains(DnsFlags::RESPONSE | DnsFlags::RECURSION_AVAILABLE));
+    assert_eq!(packet.rcode(), DnsRcode::NoError);
+    assert_eq!((packet.question_count(), packet.answer_record_count()), (1, 2));
+    let (mut rest, question) = DnsQuestion::parse(packet.payload()).expect("the question copied back");
+    assert_eq!(labels(&packet, question.name), ["PAIR", "rhu", "Test"]);
+    assert_eq!(question.type_, DnsQueryType::A);
+    for (i, addr) in net_peer::PAIR_IPS.iter().enumerate() {
+        let (after, record) = DnsRecord::parse(rest).unwrap_or_else(|_| panic!("the answer record {i} does not parse"));
+        assert_eq!(labels(&packet, record.name), ["PAIR", "rhu", "Test"], "the name of record {i} is a pointer to the question's");
+        assert_eq!(record.ttl, net_peer::DNS_TTL);
+        assert_eq!(record.data, DnsRecordData::A(peer_v4(*addr)), "record {i} in the table's order");
+        rest = after;
+    }
+    assert!(rest.is_empty(), "the message ends at the second record's end ({} bytes follow)", rest.len());
+    assert_eq!((peer.dns_answered, peer.dns_refused), (1, 0), "one query answered, whatever its records");
+    // The deliberately wrong version: the same reply claiming a third record fails the walk at that record.
+    let mut wrong = payload.clone();
+    wrong[7] = 3;
+    let claimed = DnsPacket::new_checked(&wrong[..]).expect("the header is still well-formed");
+    assert_eq!(claimed.answer_record_count(), 3);
+    let (mut walk, _) = DnsQuestion::parse(claimed.payload()).expect("the question of the doctored reply");
+    for _ in 0..2 {
+        walk = DnsRecord::parse(walk).expect("the two records the reply does carry").0;
+    }
+    assert!(DnsRecord::parse(walk).is_err(), "a third record was parsed from a reply that carries two");
+    // A name with one record still carries one.
+    let q = udp_frame(net_peer::PEER_MAC, net_peer::LEASE_IP, net_peer::PEER_IP, 40004, 53, &dns_query(8, net_peer::NAMES[0].0));
+    let Verdict::Reply(n) = peer.answer(&q, &mut out) else { panic!("the name with one record was not answered") };
+    let (single, ..) = parse_udp_reply(&out[..n]);
+    assert_eq!(DnsPacket::new_checked(&single[..]).unwrap().answer_record_count(), 1);
+}
+
+#[test]
 fn net_peer_icmp_echo_reply_parsed_by_the_stack() {
     let mut f = Vec::new();
     f.extend_from_slice(&net_peer::PEER_MAC);
@@ -4322,4 +4421,3465 @@ fn fs_doors_no_volume_shape() {
     assert_eq!(t.pread(0, &mut buf, -5), fs::ERR_INVAL, "a bad offset is judged before the handle");
     // The records' sizes are the header's.
     assert_eq!((std::mem::size_of::<MountDesc>(), std::mem::size_of::<StatDesc>(), std::mem::size_of::<Dirent>(), std::mem::size_of::<StatfsDesc>()), (76, 40, 264, 16));
+}
+
+// ---------------- the wired medium's arithmetic (eth_math.rs) and the transceiver's decisions (board/phy_lan8742.rs) ----------------
+use crate::eth_math::{self, MdcDivider, RxVerdict};
+use crate::phy_lan8742::{self as phy, Decision, Mdio, MdioTimeout, Readings, Resolution};
+
+/// A unique identifier as it stands in memory: three little-endian words.
+fn unique_id(words: [u32; 3]) -> [u8; 12] {
+    let mut id = [0u8; 12];
+    for (i, w) in words.iter().enumerate() {
+        id[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    id
+}
+
+#[test]
+fn eth_math_address_is_a_digest_of_the_unique_id() {
+    let a = unique_id([0x0123_4567, 0x89AB_CDEF, 0x0F1E_2D3C]);
+    let b = unique_id([0x0123_4567, 0x89AB_CDEF, 0x0F1E_2D3D]);
+    let first = eth_math::address_from_unique_id(&a);
+    // The same twelve bytes give the same six.
+    assert_eq!(first, eth_math::address_from_unique_id(&a));
+    // Locally administered (bit 1 of the first byte set) and unicast (bit 0 clear), whatever the identifier.
+    for id in [a, b, [0u8; 12], [0xFF; 12]] {
+        let m = eth_math::address_from_unique_id(&id);
+        assert_eq!(m[0] & 0b11, 0b10, "the first byte of {m:02x?}");
+    }
+    // The fold by hand for the all-zero identifier: twelve rounds of FNV-1a from the offset basis.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for _ in 0..12 {
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let z = h.to_be_bytes();
+    assert_eq!(eth_math::address_from_unique_id(&[0u8; 12]), [(z[0] & 0xFC) | 0x02, z[1], z[2], z[3], z[4], z[5]]);
+    // Two identifiers one bit apart, in the last word and in the first, give different addresses.
+    assert_ne!(first, eth_math::address_from_unique_id(&b));
+    assert_ne!(first, eth_math::address_from_unique_id(&unique_id([0x0123_4566, 0x89AB_CDEF, 0x0F1E_2D3C])));
+    // The address in the controller's two registers: the first byte on the wire is the low register's lowest byte,
+    // the fifth and the sixth are the high register's low sixteen bits.
+    assert_eq!(eth_math::address_words(&[0x02, 0x11, 0x22, 0x33, 0x44, 0x55]), (0x0000_5544, 0x3322_1102));
+    // The control: a digest that drops the last word cannot tell the first pair apart.
+    let doctored = |id: &[u8; 12]| {
+        let mut cut = *id;
+        cut[8..].fill(0);
+        eth_math::address_from_unique_id(&cut)
+    };
+    assert_eq!(doctored(&a), doctored(&b), "the doctored digest is refused by the assertion on the last word");
+}
+
+#[test]
+fn eth_math_mdc_divider_follows_the_manual_and_refuses_under_20_mhz() {
+    // RM0410's five rows, each at its two ends.
+    let rows = [(20_000_000, 34_999_999, 0b010, 16), (35_000_000, 59_999_999, 0b011, 26), (60_000_000, 99_999_999, 0b000, 42), (100_000_000, 149_999_999, 0b001, 62), (150_000_000, 216_000_000, 0b100, 102)];
+    for (lo, hi, code, divisor) in rows {
+        assert_eq!(eth_math::mdc_divider(lo), Some(MdcDivider { code, divisor }), "{lo} Hz");
+        assert_eq!(eth_math::mdc_divider(hi), Some(MdcDivider { code, divisor }), "{hi} Hz");
+        // The management clock the row gives never passes the 2.5 MHz of clause 22.
+        assert!(hi / divisor <= 2_500_000, "{hi} Hz over {divisor}");
+    }
+    // The STM32F769 row's two clocks: the PLL's 216 MHz has its row, the internal oscillator's 16 MHz has none.
+    assert_eq!(eth_math::mdc_divider(216_000_000), Some(MdcDivider { code: 0b100, divisor: 102 }));
+    assert_eq!(eth_math::mdc_divider(16_000_000), None);
+    assert_eq!(eth_math::mdc_divider(19_999_999), None);
+    assert_eq!(eth_math::mdc_divider(216_000_001), None);
+    assert_eq!(eth_math::mdc_divider(0), None);
+    // The control: a table whose first row starts at 16 MHz clocks the wire from a clock the manual gives no row;
+    // the refusal above is what tells the two apart.
+    let doctored = |hz: u32| if (16_000_000..20_000_000).contains(&hz) { Some(MdcDivider { code: 0b010, divisor: 16 }) } else { eth_math::mdc_divider(hz) };
+    assert_ne!(doctored(16_000_000), eth_math::mdc_divider(16_000_000));
+}
+
+/// A receive status word: the frame length field with the marks given.
+fn rdes0(length: u32, marks: u32) -> u32 {
+    (length << eth_math::RDES0_FL_SHIFT) | marks
+}
+
+#[test]
+fn eth_math_receive_descriptor_whole_frame() {
+    let whole = eth_math::RDES0_FS | eth_math::RDES0_LS;
+    // A 64-byte frame on the wire is 60 bytes for the stack; the largest untagged frame, 1518, is 1514.
+    assert_eq!(eth_math::rx_judge(rdes0(64, whole), 1536), RxVerdict::Frame(60));
+    assert_eq!(eth_math::rx_judge(rdes0(1518, whole), 1536), RxVerdict::Frame(1514));
+    assert_eq!(eth_math::rx_judge(rdes0(1536, whole), 1536), RxVerdict::Frame(1532));
+    // The header alone with its check sequence is the shortest frame handed up.
+    assert_eq!(eth_math::rx_judge(rdes0(18, whole), 1536), RxVerdict::Frame(14));
+    // The field's fourteen bits and their place, bits 29 to 16: 05EEh is 1518.
+    assert_eq!(eth_math::rx_judge(0x05EE_0300, 1536), RxVerdict::Frame(1514));
+    // The control: a judgement that forgets the check sequence hands the stack four bytes that are not the frame's.
+    let doctored = |w: u32| ((w >> 16) & 0x3FFF) as usize;
+    assert_ne!(RxVerdict::Frame(doctored(rdes0(64, whole))), eth_math::rx_judge(rdes0(64, whole), 1536));
+}
+
+#[test]
+fn eth_math_receive_descriptor_errored_is_refused() {
+    let whole = eth_math::RDES0_FS | eth_math::RDES0_LS;
+    // The error summary set on a whole frame.
+    assert_eq!(eth_math::rx_judge(rdes0(64, whole | eth_math::RDES0_ES), 1536), RxVerdict::Errored);
+    // A length no frame in the buffer can have: under the header and its check sequence, or over the buffer.
+    assert_eq!(eth_math::rx_judge(rdes0(17, whole), 1536), RxVerdict::Errored);
+    assert_eq!(eth_math::rx_judge(rdes0(0, whole), 1536), RxVerdict::Errored);
+    assert_eq!(eth_math::rx_judge(rdes0(1537, whole), 1536), RxVerdict::Errored);
+    // The error summary is bit 15 and no other: every other bit of the low half leaves a whole frame whole.
+    for bit in (0..15).filter(|b| *b != 8 && *b != 9) {
+        assert_eq!(eth_math::rx_judge(rdes0(64, whole | 1 << bit), 1536), RxVerdict::Frame(60), "bit {bit}");
+    }
+    // The control: a judgement blind to the summary hands an errored frame up.
+    let doctored = |w: u32| eth_math::rx_judge(w & !eth_math::RDES0_ES, 1536);
+    assert_ne!(doctored(rdes0(64, whole | eth_math::RDES0_ES)), RxVerdict::Errored);
+}
+
+#[test]
+fn eth_math_receive_descriptor_fragment_is_refused() {
+    // A first part without the last, a last part without the first, a middle part: none is a frame.
+    assert_eq!(eth_math::rx_judge(rdes0(1536, eth_math::RDES0_FS), 1536), RxVerdict::Fragment);
+    assert_eq!(eth_math::rx_judge(rdes0(200, eth_math::RDES0_LS), 1536), RxVerdict::Fragment);
+    assert_eq!(eth_math::rx_judge(rdes0(1536, 0), 1536), RxVerdict::Fragment);
+    // A part is a fragment whatever its error summary says (the summary is the last part's to carry).
+    assert_eq!(eth_math::rx_judge(rdes0(1536, eth_math::RDES0_FS | eth_math::RDES0_ES), 1536), RxVerdict::Fragment);
+    // The control: a judgement that asks for the last mark alone takes a giant frame's tail for a frame.
+    let doctored = |w: u32| if w & eth_math::RDES0_LS != 0 { eth_math::rx_judge(w | eth_math::RDES0_FS, 1536) } else { RxVerdict::Fragment };
+    assert_eq!(doctored(rdes0(200, eth_math::RDES0_LS)), RxVerdict::Frame(196));
+}
+
+#[test]
+fn eth_math_transmit_descriptor_words() {
+    // One whole frame handed to the DMA: the owner bit 31, the completion interrupt 30, the last segment 29, the
+    // first segment 28, the chained mark 20; the length in the low thirteen bits of the second word.
+    assert_eq!(eth_math::tx_commit(60), (0xF010_0000, 60));
+    assert_eq!(eth_math::tx_commit(1514), (0xF010_0000, 1514));
+    assert_eq!(eth_math::tx_commit(1536).1, 1536);
+    // At rest the descriptor is the host's: the chained mark alone, the owner bit clear.
+    assert_eq!(eth_math::TDES0_IDLE, 0x0010_0000);
+    assert_eq!(eth_math::TDES0_IDLE & eth_math::TDES0_OWN, 0);
+    // The error summary the DMA writes back is bit 15, outside every bit a commit sets.
+    assert_eq!(eth_math::TDES0_ES, 0x0000_8000);
+    assert_eq!(eth_math::tx_commit(60).0 & eth_math::TDES0_ES, 0);
+    // A receive descriptor armed: the DMA's, chained, its buffer's size.
+    assert_eq!(eth_math::rx_arm(1536), (0x8000_0000, 0x4000 | 1536));
+    // The control: a commit without the owner bit never leaves the ring -- its word is not the one above.
+    let doctored = |len: usize| (eth_math::tx_commit(len).0 & !eth_math::TDES0_OWN, len as u32);
+    assert_ne!(doctored(60), eth_math::tx_commit(60));
+}
+
+/// The datasheet's register values: the status register's abilities (100 and 10 Mbit, both duplexes, negotiation
+/// able, extended capabilities) with the link and the negotiation's bits as given; register 31 with its reserved
+/// field as the part reads it (0000010b in bits 11 to 5).
+const BMSR_ABILITIES: u16 = 0x7809;
+const SCSR_BASE: u16 = 0x0040;
+
+fn readings(bmcr: u16, first: u16, second: u16, scsr: u16) -> Readings {
+    Readings { bmcr, bmsr_first: BMSR_ABILITIES | first, bmsr_second: BMSR_ABILITIES | second, scsr: SCSR_BASE | scsr }
+}
+
+/// A management interface that answers a script: each read must name the next register of the script.
+struct Scripted {
+    phy: u8,
+    script: &'static [(u8, u16)],
+    at: usize,
+    written: Option<(u8, u16)>,
+}
+
+impl Mdio for Scripted {
+    fn read(&mut self, phy: u8, reg: u8) -> Result<u16, MdioTimeout> {
+        assert_eq!(phy, self.phy, "the transceiver's address");
+        let Some(&(want, value)) = self.script.get(self.at) else { return Err(MdioTimeout) };
+        assert_eq!(reg, want, "the register of read {}", self.at);
+        self.at += 1;
+        Ok(value)
+    }
+    fn write(&mut self, phy: u8, reg: u8, value: u16) -> Result<(), MdioTimeout> {
+        assert_eq!(phy, self.phy, "the transceiver's address");
+        self.written = Some((reg, value));
+        Ok(())
+    }
+}
+
+#[test]
+fn phy_lan8742_decision_has_four_outcomes() {
+    let up = phy::BMSR_LINK;
+    let done = phy::BMSR_ANEG_DONE;
+    let hundred_full = phy::SCSR_AUTODONE | 0b110 << 2;
+    // Keep: the link up and the negotiation done by both registers; the first status reading low is the kept drop of
+    // a cold part and changes nothing.
+    assert_eq!(readings(0x3100, up | done, up | done, hundred_full).decide(), Decision::Keep);
+    assert_eq!(readings(0x1000, 0, up | done, hundred_full).decide(), Decision::Keep);
+    // Wait: the link up, the negotiation enabled and still running.
+    assert_eq!(readings(0x1000, up, up, 0).decide(), Decision::Wait);
+    // The status register says done and register 31 does not yet: still a wait.
+    assert_eq!(readings(0x1000, up, up | done, 0b110 << 2).decide(), Decision::Wait);
+    // Restart: the link up with the negotiation disabled -- a forced link (the control register 2100h, and 0000h).
+    assert_eq!(readings(0x2100, up, up, 0b110 << 2).decide(), Decision::Restart);
+    assert_eq!(readings(0x0000, up, up, 0b001 << 2).decide(), Decision::Restart);
+    // Down: no link at the second reading, whatever the rest says.
+    assert_eq!(readings(0x1000, up | done, done, hundred_full).decide(), Decision::Down);
+    assert_eq!(readings(0x1000, 0, 0, 0).decide(), Decision::Down);
+    // A link that went away and came back since the reading before: the first reading low, the second high.
+    assert!(readings(0x1000, 0, up | done, hundred_full).dropped_since());
+    assert!(!readings(0x1000, up | done, up | done, hundred_full).dropped_since());
+    assert!(!readings(0x1000, 0, 0, 0).dropped_since());
+    // The words are read in their order through the management interface: control, status, status, register 31.
+    let mut wire = Scripted { phy: 0, script: &[(phy::REG_BMCR, 0x1000), (phy::REG_BMSR, BMSR_ABILITIES), (phy::REG_BMSR, BMSR_ABILITIES | 0x0024), (phy::REG_SCSR, 0x1058)], at: 0, written: None };
+    let r = phy::read_state(&mut wire, 0).unwrap();
+    assert_eq!((r.decide(), r.dropped_since(), wire.at), (Decision::Keep, true, 4));
+    // The control: a decision that trusts the first status reading takes a healthy link for a dead one on every cold boot.
+    let doctored = |r: &Readings| if r.bmsr_first & phy::BMSR_LINK == 0 { Decision::Down } else { r.decide() };
+    assert_ne!(doctored(&readings(0x1000, 0, up | done, hundred_full)), Decision::Keep);
+}
+
+#[test]
+fn phy_lan8742_resolution_is_read_twice_and_stable() {
+    let done = phy::SCSR_AUTODONE | SCSR_BASE;
+    // The datasheet's four codes of the speed indication, bits 4 to 2.
+    assert_eq!(phy::resolution(done | 0b001 << 2), Resolution { hundred: false, full: false });
+    assert_eq!(phy::resolution(done | 0b101 << 2), Resolution { hundred: false, full: true });
+    assert_eq!(phy::resolution(done | 0b010 << 2), Resolution { hundred: true, full: false });
+    assert_eq!(phy::resolution(done | 0b110 << 2), Resolution { hundred: true, full: true });
+    // A code the datasheet does not list is the floor, 10 Mbit half duplex.
+    for code in [0b000, 0b011, 0b100, 0b111] {
+        assert_eq!(phy::resolution(done | code << 2), phy::FLOOR, "the code {code:03b}");
+    }
+    // Two equal readings stand; two that differ in the speed indication are refused; the other bits may move.
+    assert_eq!(phy::resolve(done | 0b110 << 2, done | 0b110 << 2), Some(Resolution { hundred: true, full: true }));
+    assert_eq!(phy::resolve(done | 0b010 << 2, done | 0b110 << 2), None);
+    assert_eq!(phy::resolve(SCSR_BASE | 0b110 << 2, done | 0b110 << 2), Some(Resolution { hundred: true, full: true }));
+    // Read back through the management interface: register 31, twice.
+    let mut wire = Scripted { phy: 0, script: &[(phy::REG_SCSR, 0x1058), (phy::REG_SCSR, 0x1058)], at: 0, written: None };
+    assert_eq!(phy::read_resolution(&mut wire, 0), Ok(Some(Resolution { hundred: true, full: true })));
+    let mut moving = Scripted { phy: 0, script: &[(phy::REG_SCSR, 0x1048), (phy::REG_SCSR, 0x1058)], at: 0, written: None };
+    assert_eq!(phy::read_resolution(&mut moving, 0), Ok(None));
+    // A wire that stops answering is a timeout, not a resolution.
+    let mut dead = Scripted { phy: 0, script: &[(phy::REG_SCSR, 0x1058)], at: 0, written: None };
+    assert_eq!(phy::read_resolution(&mut dead, 0), Err(MdioTimeout));
+    // The control: a read-back that takes the second reading alone programs full duplex from a negotiation still moving.
+    let doctored = |_first: u16, second: u16| Some(phy::resolution(second));
+    assert_ne!(doctored(done | 0b010 << 2, done | 0b110 << 2), phy::resolve(done | 0b010 << 2, done | 0b110 << 2));
+}
+
+#[test]
+fn phy_lan8742_identity_matches_the_datasheet() {
+    // Registers 2 and 3 as the datasheet prints their defaults, and with every revision the low four bits can hold.
+    assert!(phy::identity(0x0007, 0xC130));
+    for revision in 0..16 {
+        assert!(phy::identity(0x0007, 0xC130 | revision), "revision {revision}");
+    }
+    // What a dead wire reads (all ones, all zeros) and a neighbouring model number are not the part.
+    assert!(!phy::identity(0xFFFF, 0xFFFF));
+    assert!(!phy::identity(0x0000, 0x0000));
+    assert!(!phy::identity(0x0007, 0xC0F1));
+    assert!(!phy::identity(0x0007, 0xC120));
+    assert!(!phy::identity(0x0006, 0xC130));
+    // The identity is read first, at the address the board's strap gives, register 2 then register 3; nothing is written.
+    let mut wire = Scripted { phy: 0, script: &[(phy::REG_ID1, 0x0007), (phy::REG_ID2, 0xC131)], at: 0, written: None };
+    let (id1, id2) = phy::read_identity(&mut wire, 0).unwrap();
+    assert!(phy::identity(id1, id2));
+    assert_eq!(wire.written, None);
+    // The two writes the decisions ask for are the control register's: the restart is not a reset.
+    phy::restart(&mut wire, 0).unwrap();
+    assert_eq!(wire.written, Some((phy::REG_BMCR, 0x1200)));
+    phy::reset(&mut wire, 0).unwrap();
+    assert_eq!(wire.written, Some((phy::REG_BMCR, 0x8000)));
+    // The control: an identity that masks the model number away takes a neighbouring part for this one.
+    let doctored = |id1: u16, id2: u16| id1 == 0x0007 && id2 & 0xFC00 == 0xC000;
+    assert_ne!(doctored(0x0007, 0xC0F1), phy::identity(0x0007, 0xC0F1));
+}
+
+/// A declaration of a facts file read as text, from `pub const <name>:` to its first semicolon: the bytes the kernel compiles.
+fn facts_decl<'a>(text: &'a str, name: &str) -> &'a str {
+    let key = format!("pub const {name}: ");
+    let start = text.find(&key).unwrap_or_else(|| panic!("no declaration of {name}"));
+    let end = text[start..].find(';').unwrap_or_else(|| panic!("the declaration of {name} does not end")) + start;
+    &text[start..end]
+}
+
+/// The number after a field's name in a row of such a declaration: decimal or hexadecimal, underscores allowed.
+fn facts_field(row: &str, key: &str) -> u64 {
+    let i = row.find(key).unwrap_or_else(|| panic!("no field {key} in the row {row}")) + key.len();
+    let t: String = row[i..].trim_start().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    let t = t.replace('_', "");
+    let n = match t.strip_prefix("0x") {
+        Some(h) => u64::from_str_radix(h, 16),
+        None => t.parse(),
+    };
+    n.unwrap_or_else(|_| panic!("the field {key} does not read as a number: {t}"))
+}
+
+/// The second I/O supply's registers, scripted: the status register shows the ready bit from one read to another
+/// (counted from 1; 0 = never) beside a bit the sequence does not ask for, and every write is logged in order.
+struct SupplyScript {
+    facts: crate::stm32u5_supply_math::SupplyFacts,
+    clock: u32,
+    control: u32,
+    status_reads: u32,
+    ready_from: u32,
+    ready_until: u32,
+    log: Vec<(usize, u32)>,
+}
+
+impl crate::stm32u5_supply_math::Regs for SupplyScript {
+    fn rd(&mut self, addr: usize) -> u32 {
+        if addr == self.facts.clock_reg {
+            self.clock
+        } else if addr == self.facts.control_reg {
+            self.control
+        } else if addr == self.facts.status_reg {
+            self.status_reads += 1;
+            let ready = self.ready_from != 0 && self.status_reads >= self.ready_from && self.status_reads <= self.ready_until;
+            (1 << 26) | if ready { 1 << self.facts.ready_bit } else { 0 }
+        } else {
+            panic!("the sequence read an address that is none of its three registers: {addr:#x}")
+        }
+    }
+    fn wr(&mut self, addr: usize, value: u32) {
+        self.log.push((addr, value));
+        if addr == self.facts.clock_reg {
+            self.clock = value;
+        } else if addr == self.facts.control_reg {
+            self.control = value;
+        } else {
+            panic!("the sequence wrote an address that is neither the clock enable nor the control register: {addr:#x}")
+        }
+    }
+}
+
+#[test]
+fn stm32u5_supply_sequence_by_the_manual_and_its_refusals() {
+    use crate::stm32u5_supply_math as m;
+    // The row's facts as the kernel compiles them, against the reference manual's numbers (RM0456 Rev 7: RCC_AHB3ENR at
+    // offset 0x094 of the RCC at 0x4602_0C00 with PWREN at bit 2, pages 561 and 562; PWR_SVMCR at offset 0x10 of the
+    // power controller at 0x4602_0800 with IO2VMEN at bit 25 and IO2SV at bit 29, pages 451 and 452; PWR_SVMSR at
+    // offset 0x3C with VDDIO2RDY at bit 25, page 462; the supply feeds PG2 to PG15, page 407).
+    let row = facts_decl(include_str!("../../kernel/src/board/facts/st_nucleo_u5a5zj_q.rs"), "IO2_SUPPLY");
+    let f = m::SupplyFacts {
+        clock_reg: facts_field(row, "clock_reg:") as usize,
+        clock_bit: facts_field(row, "clock_bit:") as u32,
+        control_reg: facts_field(row, "control_reg:") as usize,
+        monitor_bit: facts_field(row, "monitor_bit:") as u32,
+        valid_bit: facts_field(row, "valid_bit:") as u32,
+        status_reg: facts_field(row, "status_reg:") as usize,
+        ready_bit: facts_field(row, "ready_bit:") as u32,
+        first_line: facts_field(row, "first_line:") as u16,
+        last_line: facts_field(row, "last_line:") as u16,
+    };
+    assert_eq!((f.clock_reg, f.clock_bit), (0x4602_0C00 + 0x094, 2), "the power controller's clock enable");
+    assert_eq!((f.control_reg, f.monitor_bit, f.valid_bit), (0x4602_0800 + 0x10, 25, 29), "the monitoring control register, the monitor's enable and the valid bit");
+    assert_eq!((f.status_reg, f.ready_bit), (0x4602_0800 + 0x3C, 25), "the monitoring status register and the ready bit");
+    assert_eq!((f.first_line, f.last_line), (6 * 16 + 2, 6 * 16 + 15), "PG2 to PG15");
+    assert!(m::facts_sound(&f));
+    assert!(!m::feeds(&f, 6 * 16 + 1) && m::feeds(&f, 6 * 16 + 2) && m::feeds(&f, 6 * 16 + 15) && !m::feeds(&f, 7 * 16), "the supply feeds PG2 to PG15 alone");
+    for doctored in [
+        m::SupplyFacts { valid_bit: 32, ..f },
+        m::SupplyFacts { ready_bit: 32, ..f },
+        m::SupplyFacts { control_reg: f.control_reg + 1, ..f },
+        m::SupplyFacts { status_reg: f.control_reg, ..f },
+        m::SupplyFacts { monitor_bit: f.valid_bit, ..f },
+        m::SupplyFacts { first_line: f.last_line + 1, ..f },
+        m::SupplyFacts { clock_reg: 0, ..f },
+    ] {
+        assert!(!m::facts_sound(&doctored), "a doctored facts row passed as sound: {doctored:?}");
+    }
+    // The other bits of the two registers, which every write must keep: the analog supply's valid bit and its
+    // monitor's enable in the control register, another block's enable in the clock register.
+    let kept = (1 << 30) | (1 << 26);
+    let script = |control: u32, ready_from: u32, ready_until: u32| SupplyScript { facts: f, clock: 1 << 9, control, status_reads: 0, ready_from, ready_until, log: Vec::new() };
+    let monitor = 1u32 << f.monitor_bit;
+    let valid = 1u32 << f.valid_bit;
+
+    // The supply reads ready at the third read after a settle of four: the writes in the manual's order.
+    let mut s = script(kept, 7, u32::MAX);
+    assert_eq!(m::bring_up(&mut s, &f, 4, 10), m::Outcome { valid: true, polls: 3, control_at_entry: kept });
+    assert_eq!(
+        s.log,
+        vec![(f.clock_reg, (1 << 9) | (1 << f.clock_bit)), (f.control_reg, kept | monitor), (f.control_reg, kept), (f.control_reg, kept | valid)],
+        "the clock enabled; the monitor enabled; the monitor disabled; the valid bit set -- the other bits kept in each"
+    );
+    assert_eq!(s.status_reads, 7, "four reads discarded and three counted");
+
+    // Ready at the first counted read, and at the last one the bound allows.
+    let mut s = script(0, 5, u32::MAX);
+    assert_eq!(m::bring_up(&mut s, &f, 4, 10), m::Outcome { valid: true, polls: 1, control_at_entry: 0 });
+    let mut s = script(0, 14, u32::MAX);
+    assert_eq!(m::bring_up(&mut s, &f, 4, 10), m::Outcome { valid: true, polls: 10, control_at_entry: 0 });
+    assert_eq!(s.control, valid);
+
+    // THE REFUSALS. A supply that never reads ready: the valid bit is never written, the monitor is left disabled,
+    // the polls are the bound.
+    let mut s = script(kept, 0, 0);
+    assert_eq!(m::bring_up(&mut s, &f, 4, 10), m::Outcome { valid: false, polls: 10, control_at_entry: kept });
+    assert!(s.log.iter().all(|&(a, v)| a != f.control_reg || v & valid == 0), "the valid bit was written without a ready verdict: {:x?}", s.log);
+    assert_eq!(s.control, kept, "the monitor disabled, the other bits kept");
+    // One read past the bound is not waited for.
+    let mut s = script(0, 15, u32::MAX);
+    assert_eq!(m::bring_up(&mut s, &f, 4, 10), m::Outcome { valid: false, polls: 10, control_at_entry: 0 });
+    assert_eq!(s.control, 0);
+    // A ready that shows inside the settle alone is not counted.
+    let mut s = script(0, 1, 4);
+    assert_eq!(m::bring_up(&mut s, &f, 4, 10), m::Outcome { valid: false, polls: 10, control_at_entry: 0 });
+    assert_eq!(s.control, 0);
+    // A valid bit found set (left by an earlier program) over a supply that does not read ready is cleared.
+    let mut s = script(kept | valid, 0, 0);
+    assert_eq!(m::bring_up(&mut s, &f, 4, 10), m::Outcome { valid: false, polls: 10, control_at_entry: kept | valid });
+    assert_eq!(s.control, kept, "the valid bit cleared, the other bits kept");
+    assert_eq!(s.log.last(), Some(&(f.control_reg, kept)));
+    // A valid bit found set over a supply that reads ready stays set.
+    let mut s = script(kept | valid, 5, u32::MAX);
+    assert_eq!(m::bring_up(&mut s, &f, 4, 10), m::Outcome { valid: true, polls: 1, control_at_entry: kept | valid });
+    assert_eq!(s.control, kept | valid);
+    // No bound, no verdict.
+    let mut s = script(0, 1, u32::MAX);
+    assert_eq!(m::bring_up(&mut s, &f, 0, 0), m::Outcome { valid: false, polls: 0, control_at_entry: 0 });
+    assert_eq!(s.control, 0);
+}
+
+#[test]
+fn stm32_tim_math_clock_rule_and_channel_fields() {
+    use crate::stm32_tim_math as m;
+    // The clock rule at the two ST rows' bus shapes (RM0410 5.2, RM0456 11.4.15): the bus clock at a bus prescaler of 1,
+    // twice the bus clock otherwise.
+    assert_eq!(m::timer_clock_hz(54_000_000, 216_000_000), 108_000_000, "the F7's APB1 at a prescaler of 4");
+    assert_eq!(m::timer_clock_hz(108_000_000, 216_000_000), 216_000_000, "the F7's APB2 at a prescaler of 2");
+    assert_eq!(m::timer_clock_hz(16_000_000, 16_000_000), 16_000_000, "a prescaler of 1 at the internal oscillator's clock");
+    assert_eq!(m::timer_clock_hz(160_000_000, 160_000_000), 160_000_000, "the U5 at a prescaler of 1");
+    // The registers' offsets and bits (RM0410 Rev 5 pages 914 to 940; RM0456 Rev 7 pages 2183 to 2339).
+    assert_eq!((m::CR1, m::EGR, m::CCMR1, m::CCMR2, m::CCER, m::CNT, m::PSC, m::ARR, m::CCR1, m::BDTR), (0x00, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x28, 0x2C, 0x34, 0x44));
+    assert_eq!((m::CR1_CEN, m::CR1_ARPE, m::EGR_UG, m::BDTR_MOE), (1 << 0, 1 << 7, 1 << 0, 1 << 15));
+    assert_eq!((m::MODE_FORCED_INACTIVE, m::MODE_PWM1), (0b100, 0b110));
+    assert_eq!((m::REACH_PRESCALER, m::REACH_PERIOD), (65536, 65535));
+    // The fields of the four channels: the mode register, the select mask, the preload bit, the mode mask, PWM mode 1
+    // and the forced inactive mode in the field, the mode's fourth bit, the enable bit, the polarity bit, the compare
+    // register.
+    let want: [(usize, u32, u32, u32, u32, u32, u32, u32, u32, usize); 4] = [
+        (0x18, 0x0000_0003, 1 << 3, 0x0000_0070, 0x0000_0060, 0x0000_0040, 1 << 16, 1 << 0, 1 << 1, 0x34),
+        (0x18, 0x0000_0300, 1 << 11, 0x0000_7000, 0x0000_6000, 0x0000_4000, 1 << 24, 1 << 4, 1 << 5, 0x38),
+        (0x1C, 0x0000_0003, 1 << 3, 0x0000_0070, 0x0000_0060, 0x0000_0040, 1 << 16, 1 << 8, 1 << 9, 0x3C),
+        (0x1C, 0x0000_0300, 1 << 11, 0x0000_7000, 0x0000_6000, 0x0000_4000, 1 << 24, 1 << 12, 1 << 13, 0x40),
+    ];
+    for (ch, w) in want.iter().enumerate() {
+        let ch = ch as u32;
+        let got = (m::ccmr(ch).0, m::select_mask(ch), m::preload_bit(ch), m::mode_mask(ch), m::mode_bits(ch, m::MODE_PWM1), m::mode_bits(ch, m::MODE_FORCED_INACTIVE), m::mode_high_bit(ch), m::enable_bit(ch), m::polarity_bit(ch), m::ccr(ch));
+        assert_eq!(got, *w, "the fields of channel {}", ch + 1);
+    }
+    // The timer rows from block rows and a clock configuration's bus clocks, with the two reaches.
+    let blocks = [
+        m::TimBlock { number: 1, base: 0x4001_0000, enable_reg: 0x4002_3844, enable_bit: 0, apb: 2, advanced: true, channels: 4 },
+        m::TimBlock { number: 12, base: 0x4000_1800, enable_reg: 0x4002_3840, enable_bit: 6, apb: 1, advanced: false, channels: 2 },
+    ];
+    let t: [pwm_math::PwmTimer; 2] = m::timers(&blocks, 54_000_000, 108_000_000, 216_000_000);
+    assert_eq!((t[0].number, t[0].clock_hz, t[0].channels, t[0].prescaler_max, t[0].period_max), (1, 216_000_000, 4, 65536, 65535));
+    assert_eq!((t[1].number, t[1].clock_hz, t[1].channels, t[1].prescaler_max, t[1].period_max), (12, 108_000_000, 2, 65536, 65535));
+    // A duty equal to the period is a compare equal to the period's value -- one past the auto-reload register -- and at
+    // the longest period the table allows that compare still fits sixteen bits.
+    assert_eq!(pwm_math::compare(1_000_000, 216_000_000, 4, 54_000), 54_000);
+    assert!(m::REACH_PERIOD <= u16::MAX as u32);
+    assert!(pwm_math::table_sound(&[pwm_math::PwmLine { line: 11, timer: 0, channel: 3, alternate: 1 }, pwm_math::PwmLine { line: 31, timer: 1, channel: 1, alternate: 9 }], &t));
+    // THE REFUSALS: a block table that is not sound, and a line its block cannot serve.
+    assert!(m::blocks_sound(&blocks));
+    let b0 = blocks[0];
+    for doctored in [
+        m::TimBlock { apb: 3, ..b0 },
+        m::TimBlock { apb: 0, ..b0 },
+        m::TimBlock { channels: 0, ..b0 },
+        m::TimBlock { channels: 5, ..b0 },
+        m::TimBlock { base: 0, ..b0 },
+        m::TimBlock { base: b0.base + 2, ..b0 },
+        m::TimBlock { enable_reg: 0, ..b0 },
+        m::TimBlock { enable_bit: 32, ..b0 },
+        m::TimBlock { number: 0, ..b0 },
+    ] {
+        assert!(!m::blocks_sound(&[doctored, blocks[1]]), "a doctored block passed as sound: {doctored:?}");
+    }
+    assert!(!m::blocks_sound(&[b0, m::TimBlock { number: 1, ..blocks[1] }]), "two blocks of one number");
+    assert!(!m::blocks_sound(&[b0, m::TimBlock { base: b0.base, ..blocks[1] }]), "two blocks of one base");
+    let fit = |timer: u8, channel: u8| m::lines_fit(&[pwm_math::PwmLine { line: 1, timer, channel, alternate: 1 }], &blocks);
+    assert!(fit(0, 3) && fit(1, 1), "the last channel of each block");
+    assert!(!fit(1, 2), "a third channel on a block of two");
+    assert!(!fit(0, 4), "a fifth channel");
+    assert!(!fit(2, 0), "a timer past the block table");
+}
+
+/// What an ST row's PWM tables must read, from the board's connector table, the chip's alternate-function table and the
+/// reference manual: the file as the kernel compiles it; the block rows (the timer's number, its base, its clock enable's
+/// register and bit, its bus, whether it is an advanced timer, its channels); the line rows (the line, its timer's
+/// number, its channel as the manual counts it, its alternate function); each timer's clock at the row's two clock
+/// configurations, the bus clocks those configurations state (APB1, APB2 and the clock they divide), and the arguments
+/// the file hands the timer table's constructor.
+struct TimRowWant {
+    file: &'static str,
+    text: &'static str,
+    blocks: &'static [(u32, usize, usize, u32, u8, bool, u32)],
+    lines: &'static [(u16, u32, u8, u8)],
+    clocks: &'static [(u32, u32)],
+    buses: [(u32, u32, u32); 2],
+    timers_args: &'static str,
+}
+
+const TIM_ROWS: [TimRowWant; 2] = [
+    TimRowWant {
+        file: "st_stm32f769i_disco.rs",
+        text: include_str!("../../kernel/src/board/facts/st_stm32f769i_disco.rs"),
+        blocks: &[(1, 0x4001_0000, 0x4002_3844, 0, 2, true, 4), (3, 0x4000_0400, 0x4002_3840, 1, 1, false, 4), (10, 0x4001_4400, 0x4002_3844, 17, 2, false, 1), (11, 0x4001_4800, 0x4002_3844, 18, 2, false, 1), (12, 0x4000_1800, 0x4002_3840, 6, 1, false, 2)],
+        lines: &[(86, 10, 1, 3), (40, 3, 3, 2), (87, 11, 1, 3), (118, 12, 1, 9), (11, 1, 4, 1), (31, 12, 2, 9)],
+        clocks: &[(216000000, 16000000), (108000000, 16000000), (216000000, 16000000), (216000000, 16000000), (108000000, 16000000)],
+        buses: [(54000000, 108000000, 216000000), (16000000, 16000000, 16000000)],
+        timers_args: "(PWM_BLOCKS, crate::board::PCLK1_HZ, crate::board::PCLK2_HZ, crate::board::SYSCLK_HZ)",
+    },
+    TimRowWant {
+        file: "st_nucleo_u5a5zj_q.rs",
+        text: include_str!("../../kernel/src/board/facts/st_nucleo_u5a5zj_q.rs"),
+        blocks: &[(1, 0x4001_2C00, 0x4602_0CA4, 11, 2, true, 4), (3, 0x4000_0400, 0x4602_0C9C, 1, 1, false, 4), (4, 0x4000_0800, 0x4602_0C9C, 2, 1, false, 4)],
+        lines: &[(77, 1, 3, 1), (75, 1, 2, 1), (73, 1, 1, 1), (63, 4, 4, 2), (62, 4, 3, 2), (7, 3, 2, 2)],
+        clocks: &[(160000000, 16000000), (160000000, 16000000), (160000000, 16000000)],
+        buses: [(160000000, 160000000, 160000000), (16000000, 16000000, 16000000)],
+        timers_args: "(PWM_BLOCKS, crate::board::SYSCLK_HZ, crate::board::SYSCLK_HZ, crate::board::SYSCLK_HZ)",
+    },
+];
+
+/// A facts file's block rows and line rows, read from its text.
+fn tim_rows(text: &str) -> (Vec<crate::stm32_tim_math::TimBlock>, Vec<pwm_math::PwmLine>) {
+    let blocks = facts_decl(text, "PWM_BLOCKS")
+        .split("TimBlock {")
+        .skip(1)
+        .map(|r| crate::stm32_tim_math::TimBlock {
+            number: facts_field(r, "number:") as u32,
+            base: facts_field(r, "base:") as usize,
+            enable_reg: facts_field(r, "enable_reg:") as usize,
+            enable_bit: facts_field(r, "enable_bit:") as u32,
+            apb: facts_field(r, "apb:") as u8,
+            advanced: r.contains("advanced: true"),
+            channels: facts_field(r, "channels:") as u32,
+        })
+        .collect();
+    let lines = facts_decl(text, "PWM_LINES")
+        .split("PwmLine {")
+        .skip(1)
+        .map(|r| pwm_math::PwmLine { line: facts_field(r, "line:") as u16, timer: facts_field(r, "timer:") as u8, channel: facts_field(r, "channel:") as u8, alternate: facts_field(r, "alternate:") as u8 })
+        .collect();
+    (blocks, lines)
+}
+
+/// A facts file's text against what its row must read: the first disagreement in words, or none.
+fn tim_row_fault(text: &str, w: &TimRowWant) -> Option<String> {
+    use crate::stm32_tim_math as m;
+    let (blocks, lines) = tim_rows(text);
+    if blocks.len() != w.blocks.len() || lines.len() != w.lines.len() {
+        return Some(format!("{} blocks and {} lines, {} and {} wanted", blocks.len(), lines.len(), w.blocks.len(), w.lines.len()));
+    }
+    for (i, (b, e)) in blocks.iter().zip(w.blocks).enumerate() {
+        if (b.number, b.base, b.enable_reg, b.enable_bit, b.apb, b.advanced, b.channels) != *e {
+            return Some(format!("block {i} reads {b:?}"));
+        }
+    }
+    if !m::blocks_sound(&blocks) || !m::lines_fit(&lines, &blocks) {
+        return Some("the block table is not sound, or a line names a channel its block does not have".to_string());
+    }
+    for (i, (l, e)) in lines.iter().zip(w.lines).enumerate() {
+        if (l.line, blocks[l.timer as usize].number, l.channel + 1, l.alternate) != *e {
+            return Some(format!("line row {i} reads line {} on timer {} channel {} at alternate function {}", l.line, blocks[l.timer as usize].number, l.channel + 1, l.alternate));
+        }
+    }
+    for (k, (pclk1, pclk2, hclk)) in w.buses.iter().enumerate() {
+        let timers: Vec<pwm_math::PwmTimer> = blocks
+            .iter()
+            .map(|b| pwm_math::PwmTimer { number: b.number, clock_hz: m::timer_clock_hz(if b.apb == 1 { *pclk1 } else { *pclk2 }, *hclk), channels: b.channels, prescaler_max: m::REACH_PRESCALER, period_max: m::REACH_PERIOD })
+            .collect();
+        for (i, t) in timers.iter().enumerate() {
+            let want = if k == 0 { w.clocks[i].0 } else { w.clocks[i].1 };
+            if t.clock_hz != want {
+                return Some(format!("timer {} runs {} Hz at clock configuration {k}, {want} wanted", t.number, t.clock_hz));
+            }
+        }
+        if !pwm_math::table_sound(&lines, &timers) {
+            return Some("the line and timer tables are not sound".to_string());
+        }
+    }
+    if !facts_decl(text, "PWM_TIMERS").ends_with(w.timers_args) {
+        return Some(format!("the timer table is not built from {}", w.timers_args));
+    }
+    None
+}
+
+#[test]
+fn stm32_tim_rows_tables_tied_to_the_connector_tables() {
+    for w in &TIM_ROWS {
+        assert_eq!(tim_row_fault(w.text, w), None, "{}", w.file);
+        // THE REFUSALS: the same comparison over doctored copies of the file's text, each with one row changed.
+        let (blocks, lines) = tim_rows(w.text);
+        let l0 = &lines[0];
+        let row = format!("PwmLine {{ line: {}, timer: {}, channel: {}, alternate: {} }}", l0.line, l0.timer, l0.channel, l0.alternate);
+        let b0 = &blocks[0];
+        let base = format!("base: 0x{:04X}_{:04X}", b0.base >> 16, b0.base & 0xFFFF);
+        let moved = format!("base: 0x{:04X}_{:04X}", (b0.base + 0x400) >> 16, (b0.base + 0x400) & 0xFFFF);
+        let doctored = [
+            ("a line moved to its timer's next channel", w.text.replacen(&row, &format!("PwmLine {{ line: {}, timer: {}, channel: {}, alternate: {} }}", l0.line, l0.timer, l0.channel + 1, l0.alternate), 1)),
+            ("a line's number changed", w.text.replacen(&row, &format!("PwmLine {{ line: {}, timer: {}, channel: {}, alternate: {} }}", l0.line + 1, l0.timer, l0.channel, l0.alternate), 1)),
+            ("a line's alternate function changed", w.text.replacen(&row, &format!("PwmLine {{ line: {}, timer: {}, channel: {}, alternate: {} }}", l0.line, l0.timer, l0.channel, l0.alternate + 1), 1)),
+            ("a block's base moved", w.text.replacen(&base, &moved, 1)),
+            ("the timer table built from other bus clocks", w.text.replacen(w.timers_args, "(PWM_BLOCKS, crate::board::SYSCLK_HZ, crate::board::PCLK1_HZ, crate::board::SYSCLK_HZ)", 1)),
+        ];
+        for (what, text) in &doctored {
+            assert_ne!(text.as_str(), w.text, "{}: the doctored copy is the file itself ({what})", w.file);
+            assert!(tim_row_fault(text, w).is_some(), "{}: a doctored copy passed ({what})", w.file);
+        }
+    }
+}
+
+#[test]
+fn stm32_adc_math_fields_times_and_bands() {
+    use crate::stm32_adc_math::{self as m, f7, u5};
+    // The STM32F7's converter as RM0410 Rev 5 states it: the registers' offsets (pages 468 to 479), the status and
+    // control bits (pages 468, 471 and 472), the common control register's fields (page 480), the longest sampling
+    // code 111 in every field (page 473: nine channels in the first sample time register, ten in the second), and a
+    // conversion of the sampling time plus 12 cycles (page 450).
+    assert_eq!((f7::SR, f7::CR1, f7::CR2, f7::SMPR1, f7::SMPR2, f7::SQR1, f7::SQR3, f7::DR, f7::CCR), (0x00, 0x04, 0x08, 0x0C, 0x10, 0x2C, 0x34, 0x4C, 0x04));
+    assert_eq!((f7::SR_EOC, f7::SR_OVR, f7::CR2_ADON, f7::CR2_EOCS, f7::CR2_SWSTART), (1 << 1, 1 << 5, 1, 1 << 10, 1 << 30));
+    assert_eq!((f7::CCR_ADCPRE, f7::CCR_ADCPRE_4, f7::CCR_TSVREFE), (0b11 << 16, 0b01 << 16, 1 << 23));
+    assert_eq!(f7::SMPR1_ALL_480, (0..9).fold(0, |w, i| w | (0b111 << (3 * i))));
+    assert_eq!(f7::SMPR2_ALL_480, (0..10).fold(0, |w, i| w | (0b111 << (3 * i))));
+    assert_eq!((f7::SAMPLE_CYCLES, f7::CONVERSION_CYCLES, f7::BITS, f7::PRESCALER), (480, 492, 12, 4));
+    // The STM32U5's 14-bit converter as RM0456 Rev 7 states it: the offsets (pages 1341 to 1359 and 1371), the status
+    // bits (pages 1342 and 1343), the control register's commands and plain bits (pages 1345 to 1348), the longest
+    // sampling code in every field, and a conversion of the sampling time plus 17 cycles at 14 bits (page 1285).
+    assert_eq!((u5::ISR, u5::CR, u5::CFGR1, u5::SMPR1, u5::SMPR2, u5::PCSEL, u5::SQR1, u5::DR, u5::CCR), (0x00, 0x08, 0x0C, 0x14, 0x18, 0x1C, 0x30, 0x40, 0x08));
+    assert_eq!((u5::ISR_ADRDY, u5::ISR_EOC, u5::ISR_EOS, u5::ISR_OVR, u5::ISR_LDORDY), (1, 1 << 2, 1 << 3, 1 << 4, 1 << 12));
+    assert_eq!((u5::CR_ADEN, u5::CR_ADDIS, u5::CR_ADSTART, u5::CR_ADSTP, u5::CR_ADCALLIN, u5::CR_ADVREGEN, u5::CR_DEEPPWD, u5::CR_ADCAL), (1, 1 << 1, 1 << 2, 1 << 4, 1 << 16, 1 << 28, 1 << 29, 1 << 31));
+    assert_eq!(u5::CR_COMMANDS, 0x8000_003F, "the seven bits of the control register that act on a 1 written");
+    assert_eq!(u5::CFGR1_SINGLE_14, 0b11 | (0b11 << 2) | (0b11 << 10) | (1 << 12) | (1 << 13));
+    assert_eq!((u5::CCR_DUAL, u5::CCR_PRESC, u5::CCR_VREFEN), (0x1F, 0xF << 18, 1 << 22));
+    assert_eq!(u5::SMPR_ALL_814, (0..10).fold(0, |w, i| w | (0b111 << (3 * i))));
+    assert_eq!((u5::SAMPLE_CYCLES, u5::CONVERSION_CYCLES, u5::BITS), (814, 831, 14));
+    // The clocks the two rows give their converters (the STM32F769's APB2 clock over the prescaler at its two clock
+    // configurations; the U5A5's 16 MHz kernel clock): inside the datasheets' ranges, the internal reference sampled
+    // for at least its minimum; a conversion's time and the wait budget the seam computes from it at a 1 kHz tick.
+    for (hz, ns) in [(108_000_000 / f7::PRESCALER, 18_223), (16_000_000 / f7::PRESCALER, 123_000)] {
+        assert!(m::clock_ok(hz, f7::CLOCK_MIN_HZ, f7::CLOCK_MAX_HZ) && m::sampling_ok(f7::SAMPLE_CYCLES, hz, f7::REFERENCE_SAMPLE_MIN_NS), "{hz} Hz");
+        assert_eq!((adc_math::conversion_ns(f7::CONVERSION_CYCLES, hz), adc_math::budget_ticks(ns, 1000)), (ns, 4), "{hz} Hz");
+    }
+    assert!(m::clock_ok(16_000_000, u5::CLOCK_MIN_HZ, u5::CLOCK_MAX_HZ) && m::sampling_ok(u5::SAMPLE_CYCLES, 16_000_000, u5::REFERENCE_SAMPLE_MIN_NS));
+    assert_eq!((adc_math::conversion_ns(u5::CONVERSION_CYCLES, 16_000_000), adc_math::budget_ticks(51_938, 1000)), (51_938, 4));
+    assert_eq!((adc_math::full_scale(f7::BITS), adc_math::full_scale(u5::BITS)), (4095, 16383));
+    // THE REFUSALS: a clock one hertz outside either end of each range; a sampling time under the reference's minimum
+    // (480 cycles last 10000 ns at 48 MHz and less one hertz above it; 814 cycles last 12650 ns at 64347826 Hz).
+    assert!(!m::clock_ok(f7::CLOCK_MIN_HZ - 1, f7::CLOCK_MIN_HZ, f7::CLOCK_MAX_HZ) && !m::clock_ok(f7::CLOCK_MAX_HZ + 1, f7::CLOCK_MIN_HZ, f7::CLOCK_MAX_HZ));
+    assert!(!m::clock_ok(u5::CLOCK_MIN_HZ - 1, u5::CLOCK_MIN_HZ, u5::CLOCK_MAX_HZ) && !m::clock_ok(u5::CLOCK_MAX_HZ + 1, u5::CLOCK_MIN_HZ, u5::CLOCK_MAX_HZ));
+    assert!(m::sampling_ok(480, 48_000_000, f7::REFERENCE_SAMPLE_MIN_NS) && !m::sampling_ok(480, 48_000_001, f7::REFERENCE_SAMPLE_MIN_NS));
+    assert!(m::sampling_ok(814, 64_347_826, u5::REFERENCE_SAMPLE_MIN_NS) && !m::sampling_ok(814, 64_347_827, u5::REFERENCE_SAMPLE_MIN_NS));
+    assert!(!m::sampling_ok(480, 0, 1));
+    // THE BANDS the two rows' flight checks judge by, each from a data sheet's limits at the nominal 3300 mV reference:
+    // the internal reference, the wire held low and the wire held high, on each row.
+    assert_eq!(m::band(1_180_000, 1_240_000, 3300, 12, 7), (1457, 1546));
+    assert_eq!(m::band(0, 550_000, 3300, 12, 7), (0, 690));
+    assert_eq!(m::band(2_211_000, 3_300_000, 3300, 12, 7), (2736, 4095));
+    assert_eq!(m::band(1_175_000, 1_255_000, 3300, 14, 12), (5821, 6243));
+    assert_eq!(m::band(0, 400_000, 3300, 14, 12), (0, 1998));
+    assert_eq!(m::band(2_900_000, 3_300_000, 3300, 14, 12), (14385, 16383));
+    // A band asked at another reference voltage, or at another width, is another band.
+    assert_ne!(m::band(1_180_000, 1_240_000, 3000, 12, 7), (1457, 1546));
+    assert_ne!(m::band(1_180_000, 1_240_000, 3300, 14, 7), (1457, 1546));
+}
+
+/// What a row's analog tables must read: its facts file, the block rows (the chip's number, the width, the reference
+/// in millivolts, a conversion's cycles), the channel rows (the block's position, the channel, the line or none), the
+/// declaration that carries the converter units with its rows (base, clock enable register and bit), and the flight
+/// check's list. The rows are each board's connector pins as its manual tables them, with the chip's channel of each.
+struct AdcRowWant {
+    file: &'static str,
+    text: &'static str,
+    blocks: &'static [(u32, u32, u32, u32)],
+    channels: &'static [(u8, u8, Option<u16>)],
+    units_decl: &'static str,
+    units: &'static [(usize, usize, u32)],
+    flight: &'static [usize],
+}
+
+const ADC_ROWS: [AdcRowWant; 2] = [
+    AdcRowWant {
+        file: "st_stm32f769i_disco.rs",
+        text: include_str!("../../kernel/src/board/facts/st_stm32f769i_disco.rs"),
+        blocks: &[(1, 12, 3300, 492), (3, 12, 3300, 492)],
+        channels: &[(0, 6, Some(6)), (0, 4, Some(4)), (0, 12, Some(34)), (1, 8, Some(90)), (1, 6, Some(88)), (1, 7, Some(89)), (0, 17, None)],
+        units_decl: "ADC_UNITS",
+        units: &[(0x4001_2000, 0x4002_3844, 8), (0x4001_2200, 0x4002_3844, 10)],
+        flight: &[0, 1, 4, 5, 6],
+    },
+    AdcRowWant {
+        file: "st_nucleo_u5a5zj_q.rs",
+        text: include_str!("../../kernel/src/board/facts/st_nucleo_u5a5zj_q.rs"),
+        blocks: &[(1, 14, 3300, 831)],
+        channels: &[(0, 8, Some(3)), (0, 7, Some(2)), (0, 4, Some(35)), (0, 15, Some(16)), (0, 2, Some(33)), (0, 1, Some(32)), (0, 0, None)],
+        units_decl: "ADC_FACTS",
+        units: &[(0x4202_8000, 0x4602_0C8C, 10)],
+        flight: &[0, 1, 2, 3, 4, 5, 6],
+    },
+];
+
+/// A facts file's analog tables as its text states them: the block rows as the kernel's block type (the clock, an
+/// expression the tables' readers do not need, written 1), the channel rows, the unit rows and the flight list.
+fn adc_rows(text: &str, units_decl: &str) -> (Vec<adc_math::AdcBlock>, Vec<adc_math::AdcChannel>, Vec<crate::stm32_adc_math::AdcUnit>, Vec<usize>) {
+    let blocks = facts_decl(text, "ADC_BLOCKS")
+        .split("AdcBlock {")
+        .skip(1)
+        .map(|r| adc_math::AdcBlock { number: facts_field(r, "number:") as u32, clock_hz: 1, bits: facts_field(r, "bits:") as u32, reference_mv: facts_field(r, "reference_mv:") as u32, conversion_cycles: facts_field(r, "conversion_cycles:") as u32 })
+        .collect();
+    let channels = facts_decl(text, "ADC_CHANNELS")
+        .split("AdcChannel {")
+        .skip(1)
+        .map(|r| adc_math::AdcChannel { block: facts_field(r, "block:") as u8, channel: facts_field(r, "channel:") as u8, line: if r.contains("line: crate::adc_math::NO_LINE") { adc_math::NO_LINE } else { facts_field(r, "line:") as u16 } })
+        .collect();
+    let units = facts_decl(text, units_decl)
+        .split("AdcUnit {")
+        .skip(1)
+        .map(|r| crate::stm32_adc_math::AdcUnit { base: facts_field(r, "base:") as usize, enable_reg: facts_field(r, "enable_reg:") as usize, enable_bit: facts_field(r, "enable_bit:") as u32 })
+        .collect();
+    let list = facts_decl(text, "ADC_FLIGHT");
+    let flight = list[list.rfind('[').expect("the flight list has no bracket") + 1..].trim_end_matches(']').split(',').map(|n| n.trim().parse().expect("a flight position is not a number")).collect();
+    (blocks, channels, units, flight)
+}
+
+/// A facts file's text against what its row must read: the first disagreement in words, or none.
+fn adc_row_fault(text: &str, w: &AdcRowWant) -> Option<String> {
+    use crate::stm32_adc_math as m;
+    let (blocks, channels, units, flight) = adc_rows(text, w.units_decl);
+    let got_blocks: Vec<(u32, u32, u32, u32)> = blocks.iter().map(|b| (b.number, b.bits, b.reference_mv, b.conversion_cycles)).collect();
+    if got_blocks != w.blocks {
+        return Some(format!("the block rows read {got_blocks:?}"));
+    }
+    let got_channels: Vec<(u8, u8, Option<u16>)> = channels.iter().map(|c| (c.block, c.channel, if c.line == adc_math::NO_LINE { None } else { Some(c.line) })).collect();
+    if got_channels != w.channels {
+        return Some(format!("the channel rows read {got_channels:?}"));
+    }
+    let got_units: Vec<(usize, usize, u32)> = units.iter().map(|u| (u.base, u.enable_reg, u.enable_bit)).collect();
+    if got_units != w.units {
+        return Some(format!("the unit rows read {got_units:x?}"));
+    }
+    if flight != w.flight {
+        return Some(format!("the flight list reads {flight:?}"));
+    }
+    if !adc_math::table_sound(&channels, &blocks) || !m::units_fit(&units, blocks.len(), &channels) || !m::positions_fit(&flight, channels.len()) {
+        return Some("the tables are not sound, a block has no unit, or the flight list does not fit the table".to_string());
+    }
+    None
+}
+
+#[test]
+fn stm32_adc_rows_tables_tied_to_the_connector_tables() {
+    use crate::stm32_adc_math as m;
+    for w in &ADC_ROWS {
+        assert_eq!(adc_row_fault(w.text, w), None, "{}", w.file);
+        // THE REFUSALS: the same comparison over doctored copies of the file's text, each with one row changed.
+        let (blocks, channels, units, _) = adc_rows(w.text, w.units_decl);
+        let (c0, c1) = (&channels[0], &channels[1]);
+        let row0 = format!("AdcChannel {{ block: {}, channel: {}, line: {} }}", c0.block, c0.channel, c0.line);
+        let row1 = format!("AdcChannel {{ block: {}, channel: {}, line: {} }}", c1.block, c1.channel, c1.line);
+        let bits = format!("bits: {}, reference_mv", blocks[0].bits);
+        let enable = format!("enable_bit: {} }}", units[0].enable_bit);
+        let doctored = [
+            ("a channel's line changed", w.text.replacen(&row0, &format!("AdcChannel {{ block: {}, channel: {}, line: {} }}", c0.block, c0.channel, c0.line + 1), 1)),
+            ("a channel named twice", w.text.replacen(&row1, &format!("AdcChannel {{ block: {}, channel: {}, line: {} }}", c0.block, c0.channel, c1.line), 1)),
+            ("a channel moved to a block the row does not have", w.text.replacen(&row0, &format!("AdcChannel {{ block: {}, channel: {}, line: {} }}", blocks.len(), c0.channel, c0.line), 1)),
+            ("a block's width changed", w.text.replacen(&bits, &format!("bits: {}, reference_mv", blocks[0].bits + 2), 1)),
+            ("a unit's clock enable bit changed", w.text.replacen(&enable, &format!("enable_bit: {} }}", units[0].enable_bit + 1), 1)),
+            ("the flight list names a position past the table", w.text.replacen("pub const ADC_FLIGHT: &[usize] = &[0, 1, ", "pub const ADC_FLIGHT: &[usize] = &[0, 7, ", 1)),
+        ];
+        for (what, text) in &doctored {
+            assert_ne!(text.as_str(), w.text, "{}: the doctored copy is the file itself ({what})", w.file);
+            assert!(adc_row_fault(text, w).is_some(), "{}: a doctored copy passed ({what})", w.file);
+        }
+        // The soundness rules by themselves, on the parsed tables with one row changed.
+        let mut twice = channels.clone();
+        twice[1].channel = twice[0].channel;
+        twice[1].block = twice[0].block;
+        assert!(!adc_math::table_sound(&twice, &blocks), "{}: a channel named twice passed as sound", w.file);
+        let mut stray = channels.clone();
+        stray[0].block = units.len() as u8;
+        assert!(!m::units_fit(&units, blocks.len(), &stray), "{}: a channel on a block without a unit passed", w.file);
+        assert!(!m::units_fit(&units[1..], blocks.len(), &channels), "{}: a block without a unit passed", w.file);
+        assert!(!m::positions_fit(&[0, channels.len()], channels.len()) && !m::positions_fit(&[1, 1], channels.len()), "{}: a flight list past the table, or with a position twice, passed", w.file);
+    }
+    // The STM32F769's flight list leaves out the positions of A2 and A3 (the pins a seated shield holds at 5 V).
+    assert!(!ADC_ROWS[0].flight.contains(&2) && !ADC_ROWS[0].flight.contains(&3));
+}
+
+/// An STM32F7 converter block and its clock and common registers, scripted: every write is logged in order; a flag
+/// of the status register clears on a 0 written and keeps on a 1; a start makes the end flag appear at a scripted
+/// read of the status register, with the scripted sample in the data register and, when asked, the overrun flag;
+/// a read of the data register clears the end flag.
+struct F7Script {
+    base: usize,
+    mem: std::collections::BTreeMap<usize, u32>,
+    log: Vec<(usize, u32)>,
+    eoc_at: u32,
+    status_reads: u32,
+    converting: bool,
+    sample: u32,
+    overrun: bool,
+}
+
+impl F7Script {
+    fn new(base: usize) -> Self {
+        F7Script { base, mem: Default::default(), log: Vec::new(), eoc_at: 3, status_reads: 0, converting: false, sample: 0, overrun: false }
+    }
+    fn at(&self, addr: usize) -> u32 {
+        *self.mem.get(&addr).unwrap_or(&0)
+    }
+}
+
+impl crate::stm32_adc_math::Regs for F7Script {
+    fn rd(&mut self, addr: usize) -> u32 {
+        use crate::stm32_adc_math::f7;
+        if addr == self.base + f7::SR && self.converting {
+            self.status_reads += 1;
+            if self.eoc_at != 0 && self.status_reads >= self.eoc_at {
+                self.converting = false;
+                let sr = self.at(addr) | f7::SR_EOC | if self.overrun { f7::SR_OVR } else { 0 };
+                self.mem.insert(addr, sr);
+                self.mem.insert(self.base + f7::DR, self.sample);
+            }
+        }
+        if addr == self.base + f7::DR {
+            let sr = self.at(self.base + f7::SR) & !f7::SR_EOC;
+            self.mem.insert(self.base + f7::SR, sr);
+        }
+        self.at(addr)
+    }
+    fn wr(&mut self, addr: usize, value: u32) {
+        use crate::stm32_adc_math::f7;
+        self.log.push((addr, value));
+        if addr == self.base + f7::SR {
+            let kept = self.at(addr) & value;
+            self.mem.insert(addr, kept);
+        } else if addr == self.base + f7::CR2 && value & f7::CR2_SWSTART != 0 {
+            self.converting = true;
+            self.status_reads = 0;
+            self.mem.insert(addr, value & !f7::CR2_SWSTART);
+        } else {
+            self.mem.insert(addr, value);
+        }
+    }
+}
+
+#[test]
+fn stm32f7_adc_sequences_over_a_scripted_block() {
+    use crate::stm32_adc_math::{f7, AdcUnit};
+    let (enable_reg, common) = (0x4002_3844, 0x4001_2300);
+    let u1 = AdcUnit { base: 0x4001_2000, enable_reg, enable_bit: 8 };
+    let u3 = AdcUnit { base: 0x4001_2200, enable_reg, enable_bit: 10 };
+    let idle = f7::CR2_ADON | f7::CR2_EOCS;
+    // THE BRING-UP, in its order, the other bits of the shared registers kept: another block's clock enable (bit 14),
+    // and in the common control register the battery channel's enable (bit 22) beside a prescaler found at over 8.
+    let mut s = F7Script::new(u1.base);
+    s.mem.insert(enable_reg, 1 << 14);
+    s.mem.insert(common + f7::CCR, (1 << 22) | (0b11 << 16));
+    f7::bring_up(&mut s, &u1, common, true);
+    assert_eq!(
+        s.log,
+        vec![
+            (enable_reg, (1 << 14) | (1 << 8)),
+            (common + f7::CCR, (1 << 22) | f7::CCR_ADCPRE_4 | f7::CCR_TSVREFE),
+            (u1.base + f7::CR1, 0),
+            (u1.base + f7::SMPR1, f7::SMPR1_ALL_480),
+            (u1.base + f7::SMPR2, f7::SMPR2_ALL_480),
+            (u1.base + f7::SQR1, 0),
+            (u1.base + f7::CR2, idle),
+        ],
+        "the clock; the common prescaler and the reference's enable; 12 bits; the sampling times; a sequence of one; the converter on with the end flag after each conversion"
+    );
+    assert!(f7::is_on(&mut s, u1.base));
+    // The second block's bring-up enables its own clock and does not write the common control register again.
+    s.log.clear();
+    f7::bring_up(&mut s, &u3, common, true);
+    assert_eq!(s.log[0], (enable_reg, (1 << 14) | (1 << 8) | (1 << 10)));
+    assert!(s.log.iter().all(|(a, _)| *a != common + f7::CCR), "the common control register written under another block: {:x?}", s.log);
+    assert_eq!(s.log.last(), Some(&(u3.base + f7::CR2, idle)));
+    // A row that does not read the internal reference leaves its enable clear.
+    let mut plain = F7Script::new(u1.base);
+    f7::bring_up(&mut plain, &u1, common, false);
+    assert_eq!(plain.at(common + f7::CCR), f7::CCR_ADCPRE_4);
+
+    // A CONVERSION: the channel the sequence's first, every flag cleared, the start; no end before the scripted
+    // read; the sample masked to 12 bits; the end flag gone once the data register is read.
+    s.base = u1.base;
+    s.log.clear();
+    s.sample = 0xF123;
+    f7::kick(&mut s, u1.base, 17);
+    assert_eq!(s.log, vec![(u1.base + f7::SQR3, 17), (u1.base + f7::SR, 0), (u1.base + f7::CR2, idle | f7::CR2_SWSTART)]);
+    assert!(!f7::done(&mut s, u1.base) && !f7::done(&mut s, u1.base), "an end before the conversion's");
+    assert!(f7::done(&mut s, u1.base));
+    assert_eq!(f7::take(&mut s, u1.base), Some(0x123));
+    assert!(!f7::done(&mut s, u1.base), "the end flag outlived the data register's read");
+
+    // THE REFUSALS. An overrun flagged conversion answers no sample and clears the overrun flag alone; the next
+    // start, the manual's recovery, converts.
+    s.overrun = true;
+    f7::kick(&mut s, u1.base, 6);
+    while !f7::done(&mut s, u1.base) {}
+    s.log.clear();
+    assert_eq!(f7::take(&mut s, u1.base), None, "a flagged conversion answered a sample");
+    assert_eq!(s.log, vec![(u1.base + f7::SR, !f7::SR_OVR)]);
+    assert_eq!(s.at(u1.base + f7::SR) & f7::SR_OVR, 0);
+    s.overrun = false;
+    s.sample = 0x0ABC;
+    f7::kick(&mut s, u1.base, 6);
+    while !f7::done(&mut s, u1.base) {}
+    assert_eq!(f7::take(&mut s, u1.base), Some(0xABC));
+    // A start on a block that is not on writes nothing.
+    let mut off = F7Script::new(u1.base);
+    f7::kick(&mut off, u1.base, 6);
+    assert!(off.log.is_empty(), "a start wrote to a block that is not on: {:x?}", off.log);
+    // The reset's two halves: off with the flags cleared, on again.
+    s.log.clear();
+    f7::off(&mut s, u1.base);
+    assert!(!f7::is_on(&mut s, u1.base));
+    f7::on(&mut s, u1.base);
+    assert_eq!(s.log, vec![(u1.base + f7::CR2, 0), (u1.base + f7::SR, 0), (u1.base + f7::CR2, idle)]);
+}
+
+/// The STM32U5's 14-bit converter with its clock and common registers, scripted: every write is logged in order.
+/// The status register's flags clear on a 1 written; the regulator's ready flag reads set from a scripted read of
+/// the status register after the regulator is enabled (0 = never); the calibration command reads set until a
+/// scripted read of the control register (0 = for ever); the enable takes, and the ready flag sets, at a scripted
+/// enable write (0 = never); a start makes the end flag appear at a scripted status read with the scripted sample
+/// and, when asked, the overrun flag; a stop ends a conversion; a disable clears the enable.
+struct U5Script {
+    base: usize,
+    mem: std::collections::BTreeMap<usize, u32>,
+    log: Vec<(usize, u32)>,
+    ldo_at: u32,
+    ldo_reads: u32,
+    cal_until: u32,
+    cal_reads: u32,
+    ready_at: u32,
+    enables: u32,
+    eoc_at: u32,
+    status_reads: u32,
+    converting: bool,
+    sample: u32,
+    overrun: bool,
+}
+
+impl U5Script {
+    fn new(base: usize, ldo_at: u32, cal_until: u32, ready_at: u32) -> Self {
+        let mut s = U5Script { base, mem: Default::default(), log: Vec::new(), ldo_at, ldo_reads: 0, cal_until, cal_reads: 0, ready_at, enables: 0, eoc_at: 2, status_reads: 0, converting: false, sample: 0, overrun: false };
+        s.mem.insert(base + crate::stm32_adc_math::u5::CR, crate::stm32_adc_math::u5::CR_DEEPPWD);
+        s
+    }
+    fn at(&self, addr: usize) -> u32 {
+        *self.mem.get(&addr).unwrap_or(&0)
+    }
+}
+
+impl crate::stm32_adc_math::Regs for U5Script {
+    fn rd(&mut self, addr: usize) -> u32 {
+        use crate::stm32_adc_math::u5;
+        let cr = self.at(self.base + u5::CR);
+        if addr == self.base + u5::ISR {
+            let mut v = self.at(addr);
+            if cr & u5::CR_ADVREGEN != 0 {
+                self.ldo_reads += 1;
+                if self.ldo_at != 0 && self.ldo_reads >= self.ldo_at {
+                    v |= u5::ISR_LDORDY;
+                }
+            }
+            if self.converting {
+                self.status_reads += 1;
+                if self.eoc_at != 0 && self.status_reads >= self.eoc_at {
+                    self.converting = false;
+                    let flags = self.at(addr) | u5::ISR_EOC | u5::ISR_EOS | if self.overrun { u5::ISR_OVR } else { 0 };
+                    self.mem.insert(addr, flags);
+                    self.mem.insert(self.base + u5::DR, self.sample);
+                    self.mem.insert(self.base + u5::CR, cr & !u5::CR_ADSTART);
+                    v |= flags;
+                }
+            }
+            return v;
+        }
+        if addr == self.base + u5::CR && cr & u5::CR_ADCAL != 0 {
+            self.cal_reads += 1;
+            if self.cal_until != 0 && self.cal_reads >= self.cal_until {
+                self.mem.insert(addr, cr & !u5::CR_ADCAL);
+            }
+        }
+        if addr == self.base + u5::DR {
+            let isr = self.at(self.base + u5::ISR) & !u5::ISR_EOC;
+            self.mem.insert(self.base + u5::ISR, isr);
+        }
+        self.at(addr)
+    }
+    fn wr(&mut self, addr: usize, value: u32) {
+        use crate::stm32_adc_math::u5;
+        self.log.push((addr, value));
+        if addr == self.base + u5::ISR {
+            let kept = self.at(addr) & !value;
+            self.mem.insert(addr, kept);
+        } else if addr == self.base + u5::CR {
+            let old = self.at(addr);
+            let mut v = (value & !u5::CR_COMMANDS) | (old & (u5::CR_ADEN | u5::CR_ADCAL | u5::CR_ADSTART));
+            if value & u5::CR_ADVREGEN != 0 && old & u5::CR_ADVREGEN == 0 {
+                self.ldo_reads = 0;
+            }
+            if value & u5::CR_ADCAL != 0 {
+                v |= u5::CR_ADCAL;
+                self.cal_reads = 0;
+            }
+            if value & u5::CR_ADEN != 0 {
+                self.enables += 1;
+                if self.ready_at != 0 && self.enables >= self.ready_at && v & u5::CR_ADCAL == 0 {
+                    v |= u5::CR_ADEN;
+                    let isr = self.at(self.base + u5::ISR) | u5::ISR_ADRDY;
+                    self.mem.insert(self.base + u5::ISR, isr);
+                }
+            }
+            if value & u5::CR_ADSTART != 0 {
+                self.converting = true;
+                self.status_reads = 0;
+                v |= u5::CR_ADSTART;
+            }
+            if value & u5::CR_ADSTP != 0 {
+                self.converting = false;
+                v &= !u5::CR_ADSTART;
+            }
+            if value & u5::CR_ADDIS != 0 {
+                v &= !u5::CR_ADEN;
+            }
+            self.mem.insert(addr, v);
+        } else {
+            self.mem.insert(addr, value);
+        }
+    }
+}
+
+#[test]
+fn stm32u5_adc_power_up_by_the_manual_and_its_refusals() {
+    use crate::stm32_adc_math::{u5, AdcUnit};
+    use crate::stm32u5_supply_math as supply;
+    // THE ANALOG SUPPLY. The row's facts as the kernel compiles them, against the reference manual's numbers (RM0456
+    // Rev 7: PWR_SVMCR at offset 0x10 of the power controller at 0x4602_0800 with AVM1EN at bit 26 and ASV at bit
+    // 30, pages 451 and 452; PWR_SVMSR at offset 0x3C with VDDA1RDY at bit 26, page 462), and the manual's sequence
+    // for it (page 414) by the second I/O supply's own function: the monitor enabled, the verdict awaited, the
+    // monitor disabled, the valid bit set -- the second I/O supply's valid bit (bit 29) and its monitor's enable
+    // (bit 25) kept in every write.
+    let text = include_str!("../../kernel/src/board/facts/st_nucleo_u5a5zj_q.rs");
+    let row = facts_decl(text, "ANALOG_SUPPLY");
+    let a = supply::SupplyFacts {
+        clock_reg: facts_field(row, "clock_reg:") as usize,
+        clock_bit: facts_field(row, "clock_bit:") as u32,
+        control_reg: facts_field(row, "control_reg:") as usize,
+        monitor_bit: facts_field(row, "monitor_bit:") as u32,
+        valid_bit: facts_field(row, "valid_bit:") as u32,
+        status_reg: facts_field(row, "status_reg:") as usize,
+        ready_bit: facts_field(row, "ready_bit:") as u32,
+        first_line: facts_field(row, "first_line:") as u16,
+        last_line: facts_field(row, "last_line:") as u16,
+    };
+    assert_eq!((a.clock_reg, a.clock_bit), (0x4602_0C00 + 0x094, 2), "the power controller's clock enable");
+    assert_eq!((a.control_reg, a.monitor_bit, a.valid_bit), (0x4602_0800 + 0x10, 26, 30), "the monitoring control register, the analog monitor's enable and the analog supply's valid bit");
+    assert_eq!((a.status_reg, a.ready_bit), (0x4602_0800 + 0x3C, 26), "the monitoring status register and the analog supply's ready bit");
+    assert!(supply::facts_sound(&a) && !supply::feeds(&a, 0) && !supply::feeds(&a, 3), "the analog supply feeds no line");
+    // The supply's three registers, scripted: the status register shows the analog supply's ready bit from a scripted
+    // read on (counted from 1; 0 = never) beside the second I/O supply's ready bit, which this sequence does not ask
+    // for; every write is logged in order.
+    struct Analog {
+        f: supply::SupplyFacts,
+        clock: u32,
+        control: u32,
+        status_reads: u32,
+        ready_from: u32,
+        log: Vec<(usize, u32)>,
+    }
+    impl supply::Regs for Analog {
+        fn rd(&mut self, addr: usize) -> u32 {
+            if addr == self.f.clock_reg {
+                self.clock
+            } else if addr == self.f.control_reg {
+                self.control
+            } else {
+                assert_eq!(addr, self.f.status_reg, "the sequence read an address that is none of its three registers");
+                self.status_reads += 1;
+                (1 << 25) | if self.ready_from != 0 && self.status_reads >= self.ready_from { 1 << self.f.ready_bit } else { 0 }
+            }
+        }
+        fn wr(&mut self, addr: usize, value: u32) {
+            self.log.push((addr, value));
+            if addr == self.f.clock_reg {
+                self.clock = value;
+            } else {
+                assert_eq!(addr, self.f.control_reg, "the sequence wrote an address that is neither the clock enable nor the control register");
+                self.control = value;
+            }
+        }
+    }
+    let kept = (1 << 29) | (1 << 25);
+    let mut s = Analog { f: a, clock: 1 << 9, control: kept, status_reads: 0, ready_from: 7, log: Vec::new() };
+    assert_eq!(supply::bring_up(&mut s, &a, 4, 10), supply::Outcome { valid: true, polls: 3, control_at_entry: kept });
+    assert_eq!(s.log, vec![(a.clock_reg, (1 << 9) | (1 << 2)), (a.control_reg, kept | (1 << 26)), (a.control_reg, kept), (a.control_reg, kept | (1 << 30))]);
+    let mut s = Analog { f: a, clock: 0, control: kept, status_reads: 0, ready_from: 0, log: Vec::new() };
+    assert_eq!(supply::bring_up(&mut s, &a, 4, 10), supply::Outcome { valid: false, polls: 10, control_at_entry: kept });
+    assert_eq!(s.control, kept, "a supply that never read ready was declared valid");
+
+    // THE CONVERTER. The row's facts as the kernel compiles them (RM0456 Rev 7: the converters' window at 0x4202_8000,
+    // page 146; RCC_AHB2ENR1 at offset 0x08C with ADC12EN at bit 10, pages 556 and 558; RCC_CCIPR3 at offset 0x0E8
+    // with ADCDACSEL at bits 14:12, 100 the 16 MHz internal oscillator, pages 595 and 596).
+    let row = facts_decl(text, "ADC_FACTS");
+    let f = u5::Facts {
+        unit: AdcUnit { base: facts_field(row, "base:") as usize, enable_reg: facts_field(row, "enable_reg:") as usize, enable_bit: facts_field(row, "enable_bit:") as u32 },
+        common: facts_field(row, "common:") as usize,
+        clock_sel_reg: facts_field(row, "clock_sel_reg:") as usize,
+        clock_sel_shift: facts_field(row, "clock_sel_shift:") as u32,
+        clock_sel_mask: 0b111,
+        clock_sel_code: 0b100,
+    };
+    assert!(row.contains("clock_sel_mask: 0b111,") && row.contains("clock_sel_code: 0b100,"), "the kernel clock selector's field and code");
+    assert_eq!((f.unit.base, f.unit.enable_reg, f.unit.enable_bit, f.common), (0x4202_8000, 0x4602_0C00 + 0x08C, 10, 0x4202_8000 + 0x300));
+    assert_eq!((f.clock_sel_reg, f.clock_sel_shift), (0x4602_0C00 + 0x0E8, 12));
+    assert!(u5::facts_sound(&f) && !u5::facts_sound(&u5::Facts { clock_sel_code: 0b1000, ..f }) && !u5::facts_sound(&u5::Facts { common: f.common + 2, ..f }));
+    let base = f.unit.base;
+    let preselect = 0b1000_0001_1001_0111; // the row's seven channels: 0, 1, 2, 4, 7, 8 and 15
+    let plain = u5::CR_ADVREGEN | u5::CR_ADCALLIN;
+    let fresh = |ldo_at: u32, cal_until: u32, ready_at: u32| {
+        let mut s = U5Script::new(base, ldo_at, cal_until, ready_at);
+        s.mem.insert(f.unit.enable_reg, 1); // a port's clock enable, kept
+        s.mem.insert(f.clock_sel_reg, (0b101 << 12) | 0x7); // another source selected, and a neighbour's field, kept
+        s.mem.insert(f.common + u5::CCR, (1 << 24) | (0x3 << 18)); // the battery channel's enable, kept; a prescaler found set
+        s.mem.insert(base + u5::CFGR1, 0x8000_0000 | (1 << 13) | (0b01 << 2)); // the reset value's bit 31, kept; continuous and 12 bits found set
+        s
+    };
+
+    // THE CLOCKS, THEN THE POWER-UP, in the manual's order: the regulator ready at the third read, the calibration
+    // over at the fifth, the enable taking at the second write.
+    let mut s = fresh(3, 5, 2);
+    u5::clocks(&mut s, &f);
+    assert_eq!(s.log, vec![(f.unit.enable_reg, 1 | (1 << 10)), (f.clock_sel_reg, (0b100 << 12) | 0x7)]);
+    s.log.clear();
+    assert_eq!(u5::power_up(&mut s, &f, true, preselect, 10), u5::Outcome { stage: u5::STAGE_UP, regulator_polls: 3, calibration_polls: 5, enables: 2 });
+    assert_eq!(
+        s.log,
+        vec![
+            (base + u5::CR, 0),
+            (base + u5::CR, u5::CR_ADVREGEN),
+            (f.common + u5::CCR, (1 << 24) | u5::CCR_VREFEN),
+            (base + u5::CR, plain),
+            (base + u5::CR, plain | u5::CR_ADCAL),
+            (base + u5::ISR, u5::ISR_ADRDY),
+            (base + u5::CR, plain | u5::CR_ADEN),
+            (base + u5::CR, plain | u5::CR_ADEN),
+            (base + u5::CFGR1, 0x8000_0000),
+            (base + u5::SMPR1, u5::SMPR_ALL_814),
+            (base + u5::SMPR2, u5::SMPR_ALL_814),
+            (base + u5::PCSEL, preselect),
+        ],
+        "deep power-down left, then the regulator; the common register and the calibration while disabled; the ready flag cleared and the enable until it answers; the configuration and the preselection after it"
+    );
+    assert!(u5::is_up(&mut s, base));
+
+    // A CONVERSION: the channel the sequence's one conversion, the flags cleared, the start; the sample masked to 14
+    // bits; then an overrun flagged conversion, which answers no sample and clears its flag.
+    s.log.clear();
+    s.sample = 0xFFFF_7ABC;
+    u5::kick(&mut s, base, 8);
+    assert_eq!(s.log, vec![(base + u5::SQR1, 8 << 6), (base + u5::ISR, u5::ISR_EOC | u5::ISR_EOS | u5::ISR_OVR), (base + u5::CR, plain | u5::CR_ADSTART)]);
+    assert!(!u5::done(&mut s, base), "an end before the conversion's");
+    assert!(u5::done(&mut s, base));
+    assert_eq!(u5::take(&mut s, base), Some(0x3ABC));
+    assert!(!u5::done(&mut s, base), "the end flag outlived the data register's read");
+    s.overrun = true;
+    u5::kick(&mut s, base, 0);
+    while !u5::done(&mut s, base) {}
+    s.log.clear();
+    assert_eq!(u5::take(&mut s, base), None, "a flagged conversion answered a sample");
+    assert_eq!(s.log, vec![(base + u5::ISR, u5::ISR_OVR)]);
+    assert_eq!(s.at(base + u5::ISR) & u5::ISR_OVR, 0);
+
+    // THE POWER-DOWN: a running conversion stopped, the converter disabled; deep, the regulator off and deep
+    // power-down entered.
+    s.overrun = false;
+    s.eoc_at = 0;
+    u5::kick(&mut s, base, 1);
+    s.log.clear();
+    assert!(u5::power_down(&mut s, &f, true, 10));
+    assert_eq!(s.log, vec![(base + u5::CR, plain | u5::CR_ADSTP), (base + u5::CR, plain | u5::CR_ADDIS), (base + u5::CR, u5::CR_ADCALLIN), (base + u5::CR, u5::CR_ADCALLIN | u5::CR_DEEPPWD)]);
+    assert!(!u5::is_up(&mut s, base));
+
+    // THE REFUSALS, each naming its stage, with nothing written after it. The regulator never ready.
+    let mut s = fresh(0, 5, 2);
+    assert_eq!(u5::power_up(&mut s, &f, true, preselect, 10), u5::Outcome { stage: u5::STAGE_REGULATOR, regulator_polls: 10, calibration_polls: 0, enables: 0 });
+    assert_eq!(s.log, vec![(base + u5::CR, 0), (base + u5::CR, u5::CR_ADVREGEN)]);
+    // A calibration that never ends: no enable is written.
+    let mut s = fresh(1, 0, 2);
+    assert_eq!(u5::power_up(&mut s, &f, true, preselect, 10), u5::Outcome { stage: u5::STAGE_CALIBRATION, regulator_polls: 1, calibration_polls: 10, enables: 0 });
+    assert_eq!(s.log.last(), Some(&(base + u5::CR, plain | u5::CR_ADCAL)));
+    // An enable that never answers: no configuration register and no preselection is written.
+    let mut s = fresh(1, 1, 0);
+    assert_eq!(u5::power_up(&mut s, &f, false, preselect, 10), u5::Outcome { stage: u5::STAGE_ENABLE, regulator_polls: 1, calibration_polls: 1, enables: 10 });
+    assert!(s.log.iter().all(|(a, _)| ![base + u5::CFGR1, base + u5::SMPR1, base + u5::SMPR2, base + u5::PCSEL].contains(a)), "a configuration register written to a converter that is not enabled: {:x?}", s.log);
+    assert_eq!(s.at(f.common + u5::CCR), 1 << 24, "a row that does not read the internal reference leaves its buffer off");
+    // A start on a converter that is not up writes nothing.
+    s.log.clear();
+    u5::kick(&mut s, base, 8);
+    assert!(s.log.is_empty(), "a start wrote to a converter that is not up: {:x?}", s.log);
+}
+
+#[test]
+fn stm32_adc_turns_one_conversion_a_block() {
+    use crate::stm32_adc_math::Turns;
+    // Two blocks and seven channels: the positions 0, 1, 2 and 6 on block 0, the positions 3, 4 and 5 on block 1.
+    let t: Turns<2, 7> = Turns::new();
+    let of_block_0 = |i: usize| i < 3 || i == 6;
+    // A free block is taken; a second channel of the same block queues and is not promoted while the block is held.
+    assert!(t.start(0, 0) && t.owns(0, 0));
+    assert!(!t.start(0, 1) && !t.owns(0, 1) && !t.promote(0, 1));
+    // The other block is independent.
+    assert!(t.start(1, 3) && t.owns(1, 3) && t.owns(0, 0));
+    // The block given back: the queued channel takes it, once.
+    t.give(0, 0);
+    assert!(!t.owns(0, 0) && t.promote(0, 1) && t.owns(0, 1) && !t.promote(0, 1));
+    // THE REFUSALS. A channel that is neither owner nor queued never starts by a promotion, even on a free block.
+    t.give(0, 1);
+    assert!(!t.promote(0, 2) && !t.owns(0, 2));
+    // A give by a channel that does not own the block changes nothing.
+    assert!(t.start(0, 2));
+    t.give(0, 6);
+    t.give(0, 0);
+    assert!(t.owns(0, 2));
+    // A reset clears its block's turn and the queue of its channels, and no other block's.
+    assert!(!t.start(0, 0) && !t.start(1, 4));
+    t.clear(0, of_block_0);
+    assert!(!t.owns(0, 2) && !t.promote(0, 0), "a reset left its block held, or a channel queued");
+    assert!(t.owns(1, 3), "a reset cleared another block's turn");
+    t.give(1, 3);
+    assert!(t.promote(1, 4) && t.owns(1, 4), "a reset dropped another block's queued channel");
+    // A released channel leaves the queue and gives its block back.
+    assert!(!t.start(1, 5));
+    t.forget(1, 5);
+    t.forget(1, 4);
+    assert!(!t.owns(1, 4) && !t.promote(1, 5));
+    assert!(t.start(1, 5) && t.start(0, 6));
+}
+
+#[test]
+fn stm32_usart_math_divisor_laws_and_frames() {
+    use crate::stm32_usart_math as m;
+    use m::Law::{LowPower, Usart16};
+    // THE USART's LAW at 16 MHz, oversampling by 16 (RM0410 pages 1248 and 1287): the divisor to nearest, 16 to 65535.
+    assert_eq!(m::CLOCK_HZ, 16_000_000);
+    assert_eq!(m::LOW_POWER_FIFO, 8, "the low-power block's FIFOs are 8 deep (RM0456 Table 686 on page 2847)");
+    assert_eq!(m::divisor(Usart16, 9_600), Some((1667, 9_598)));
+    assert_eq!(m::divisor(Usart16, 57_600), Some((278, 57_553)));
+    assert_eq!(m::divisor(Usart16, 115_200), Some((139, 115_107)));
+    assert_eq!(m::divisor(Usart16, 460_800), Some((35, 457_142)));
+    assert_eq!(m::divisor(Usart16, 1_000_000), Some((16, 1_000_000)));
+    assert_eq!(m::divisor(Usart16, 921_600), None, "the nearest divisor, 17, lands 2.1 percent high");
+    assert_eq!(m::divisor(Usart16, 245), Some((65_306, 245)), "the floor");
+    assert_eq!(m::divisor(Usart16, 244), None, "one step under the floor: the divisor would pass 65535");
+    assert_eq!(m::divisor(Usart16, 1_020_408), Some((16, 1_000_000)), "the ceiling: the shortest divisor, 2 percent low");
+    assert_eq!(m::divisor(Usart16, 1_020_409), None, "one step over the ceiling");
+    assert_eq!(m::divisor(Usart16, 0), None);
+    assert_eq!(m::divisor_usart16(16_000_000, 2_000_000), None, "a divisor under 16");
+    // THE LOW-POWER BLOCK's LAW (RM0456 pages 2861, 2887 and 2898): 256 times the clock after the prescaler over the
+    // rate, 0x300 to 0xFFFFF, the smallest prescaler that fits; the word carries the prescaler's code above the divisor.
+    assert_eq!(m::PRESCALERS, [1, 2, 4, 6, 8, 10, 12, 16, 32, 64, 128, 256]);
+    assert_eq!(m::divisor(LowPower, 9_600), Some((426_667, 9_599)));
+    assert_eq!(m::divisor(LowPower, 57_600), Some((71_111, 57_600)));
+    assert_eq!(m::divisor(LowPower, 115_200), Some((35_556, 115_198)));
+    assert_eq!(m::divisor(LowPower, 921_600), Some((4_444, 921_692)), "the rate the USART's law refuses");
+    assert_eq!(m::divisor(LowPower, 1_000_000), Some((4_096, 1_000_000)));
+    assert_eq!(m::divisor(LowPower, 3_907), Some((1_048_375, 3_906)), "the lowest rate without a prescaler");
+    assert_eq!(m::divisor(LowPower, 3_906), Some(((1 << 20) | 524_322, 3_905)), "one step lower: the clock over 2");
+    assert_eq!(m::divisor(LowPower, 2_400), Some(((1 << 20) | 853_333, 2_400)));
+    assert_eq!(m::divisor(LowPower, 300), Some(((7 << 20) | 853_333, 300)), "the clock over 16");
+    assert_eq!(m::divisor(LowPower, 244), Some(((8 << 20) | 524_590, 244)), "the clock over 32");
+    assert_eq!(m::divisor(LowPower, 16), Some(((11 << 20) | 1_000_000, 16)), "the floor: the clock over 256");
+    assert_eq!(m::divisor(LowPower, 15), None, "one step under the floor");
+    assert_eq!(m::divisor(LowPower, 5_333_333), Some((0x300, 5_333_333)), "the ceiling: the shortest divisor, a third of the clock");
+    assert_eq!(m::divisor(LowPower, 5_333_334), None, "one step over the ceiling: the clock under three times the rate");
+    assert_eq!(m::divisor(LowPower, 0), None);
+    // Every word keeps its two parts inside their fields, and a divisor twice as long (the flight's doctored control)
+    // still fits both registers at the three rates the flight times.
+    for baud in [9_600, 115_200, 1_000_000] {
+        let (u, _) = m::divisor(Usart16, baud).unwrap();
+        let (l, _) = m::divisor(LowPower, baud).unwrap();
+        assert!(u * 2 <= 65_535 && (l & 0xF_FFFF) * 2 <= 0xF_FFFF && l >> 20 == 0, "{baud}");
+    }
+    assert!(m::within_2_percent(100, 102) && m::within_2_percent(100, 98) && !m::within_2_percent(100, 103) && !m::within_2_percent(100, 97));
+    // THE FRAME SET: 7 or 8 data bits, no parity or odd or even, 1 or 2 stop bits; the rest of the functions' vocabulary refused.
+    for (d, p, s) in [(8, m::PARITY_NONE, 1), (8, m::PARITY_ODD, 2), (8, m::PARITY_EVEN, 1), (7, m::PARITY_NONE, 2), (7, m::PARITY_EVEN, 1), (7, m::PARITY_ODD, 1)] {
+        assert!(m::frame_ok(d, p, s), "{d} {p} {s}");
+    }
+    for (d, p, s) in [(5, 0, 1), (6, 0, 1), (9, 0, 1), (8, 3, 1), (8, 4, 1), (8, 0, 0), (8, 0, 3)] {
+        assert!(!m::frame_ok(d, p, s), "{d} {p} {s}");
+    }
+    // The word length counts the parity bit (RM0410 page 1276: its two bits read 00 for eight bits, 01 for nine, 10 for seven).
+    assert_eq!(m::cr1_frame(8, m::PARITY_NONE), 0);
+    assert_eq!(m::cr1_frame(8, m::PARITY_EVEN), m::CR1_M0 | m::CR1_PCE);
+    assert_eq!(m::cr1_frame(8, m::PARITY_ODD), m::CR1_M0 | m::CR1_PCE | m::CR1_PS);
+    assert_eq!(m::cr1_frame(7, m::PARITY_NONE), m::CR1_M1);
+    assert_eq!(m::cr1_frame(7, m::PARITY_EVEN), m::CR1_PCE);
+    assert_eq!(m::cr1_frame(7, m::PARITY_ODD), m::CR1_PCE | m::CR1_PS);
+    assert_eq!((m::cr2_stop(1), m::cr2_stop(2)), (0, 0b10 << 12));
+    assert_eq!((m::rx_mask(7), m::rx_mask(8)), (0x7F, 0xFF));
+    // The registers and their bits as the two manuals state them (one layout for both blocks).
+    assert_eq!((m::CR1, m::CR2, m::CR3, m::BRR, m::RQR, m::ISR, m::ICR, m::RDR, m::TDR, m::PRESC), (0x00, 0x04, 0x08, 0x0C, 0x18, 0x1C, 0x20, 0x24, 0x28, 0x2C));
+    assert_eq!((m::CR1_UE, m::CR1_RE, m::CR1_TE, m::CR1_RXNEIE, m::CR1_TXEIE, m::CR1_PS, m::CR1_PCE, m::CR1_M0, m::CR1_M1, m::CR1_FIFOEN), (1, 1 << 2, 1 << 3, 1 << 5, 1 << 7, 1 << 9, 1 << 10, 1 << 12, 1 << 28, 1 << 29));
+    assert_eq!((m::CR3_HDSEL, m::RQR_RXFRQ), (1 << 3, 1 << 3));
+    assert_eq!((m::ISR_PE, m::ISR_FE, m::ISR_NF, m::ISR_ORE, m::ISR_RXNE, m::ISR_TC, m::ISR_TXE, m::ISR_TEACK, m::ISR_REACK), (1, 1 << 1, 1 << 2, 1 << 3, 1 << 5, 1 << 6, 1 << 7, 1 << 21, 1 << 22));
+}
+
+/// What a row's serial tables must read: its facts file, the port's row (the chip's own block number, the transmit
+/// line, the receive line), the block's record as the manuals place it, and the two ring sizes in bytes. The lines are
+/// each board's connector pins D1 and D0 as its manual tables them; a line's number is its port and pin.
+struct UsartRowWant {
+    file: &'static str,
+    text: &'static str,
+    port: (u64, u64, u64),
+    block: crate::stm32_usart_math::Block,
+    rings: (u64, u64),
+}
+
+const USART_ROWS: [UsartRowWant; 2] = [
+    UsartRowWant {
+        file: "st_stm32f769i_disco.rs",
+        text: include_str!("../../kernel/src/board/facts/st_stm32f769i_disco.rs"),
+        port: (6, 38, 39),
+        block: crate::stm32_usart_math::Block { base: 0x4001_1400, law: crate::stm32_usart_math::Law::Usart16, enable_reg: 0x4002_3844, reset_reg: 0x4002_3824, sleep_reg: 0x4002_3864, bus_bit: 5, select_reg: 0x4002_3890, select_shift: 10, select_mask: 0b11, select_code: 0b10, fifo: false, alternate: 8, irq: 71 },
+        rings: (1024, 1024),
+    },
+    UsartRowWant {
+        file: "st_nucleo_u5a5zj_q.rs",
+        text: include_str!("../../kernel/src/board/facts/st_nucleo_u5a5zj_q.rs"),
+        port: (1, 103, 104),
+        block: crate::stm32_usart_math::Block { base: 0x4600_2400, law: crate::stm32_usart_math::Law::LowPower, enable_reg: 0x4602_0CA8, reset_reg: 0x4602_0C80, sleep_reg: 0x4602_0CD0, bus_bit: 6, select_reg: 0x4602_0CE8, select_shift: 0, select_mask: 0b111, select_code: 0b010, fifo: true, alternate: 8, irq: 66 },
+        rings: (1024, 1024),
+    },
+];
+
+/// A facts file's serial tables as its text states them, against what its row must read: the first disagreement in
+/// words, or none. The block's kind is the rate rule its row names.
+fn usart_row_fault(text: &str, w: &UsartRowWant) -> Option<String> {
+    use crate::stm32_usart_math as m;
+    let ports: Vec<(u64, u64, u64)> = facts_decl(text, "UART_ROWS").split("UartRow {").skip(1).map(|r| (facts_field(r, "block:"), facts_field(r, "tx:"), facts_field(r, "rx:"))).collect();
+    if ports != [w.port] {
+        return Some(format!("the port rows read {ports:?}"));
+    }
+    let blocks: Vec<m::Block> = facts_decl(text, "UART_BLOCKS")
+        .split("Block {")
+        .skip(1)
+        .map(|r| m::Block {
+            base: facts_field(r, "base:") as usize,
+            law: match (r.contains("law: crate::stm32_usart_math::Law::Usart16"), r.contains("law: crate::stm32_usart_math::Law::LowPower")) {
+                (true, false) => m::Law::Usart16,
+                (false, true) => m::Law::LowPower,
+                _ => panic!("a block's row does not name one rate rule"),
+            },
+            enable_reg: facts_field(r, "enable_reg:") as usize,
+            reset_reg: facts_field(r, "reset_reg:") as usize,
+            sleep_reg: facts_field(r, "sleep_reg:") as usize,
+            bus_bit: facts_field(r, "bus_bit:") as u32,
+            select_reg: facts_field(r, "select_reg:") as usize,
+            select_shift: facts_field(r, "select_shift:") as u32,
+            select_mask: facts_field(r, "select_mask:") as u32,
+            select_code: facts_field(r, "select_code:") as u32,
+            fifo: r.contains("fifo: true"),
+            alternate: facts_field(r, "alternate:") as u8,
+            irq: facts_field(r, "irq:") as usize,
+        })
+        .collect();
+    if blocks != [w.block] {
+        return Some(format!("the block rows read {blocks:x?}"));
+    }
+    let rings = (facts_field(facts_decl(text, "UART_RX_BYTES"), "usize ="), facts_field(facts_decl(text, "UART_TX_BYTES"), "usize ="));
+    if rings != w.rings {
+        return Some(format!("the ring sizes read {rings:?}"));
+    }
+    if !m::blocks_fit(ports.len(), &blocks) || !m::pair_sound(ports[0].1 as u32, ports[0].2 as u32) {
+        return Some("the block table does not fit the port table, or the port's two lines are one".to_string());
+    }
+    None
+}
+
+#[test]
+fn stm32_usart_rows_tables_tied_to_the_connector_tables() {
+    use crate::stm32_usart_math as m;
+    for w in &USART_ROWS {
+        assert_eq!(usart_row_fault(w.text, w), None, "{}", w.file);
+        let (block, tx, rx) = w.port;
+        // THE REFUSALS: the same comparison over doctored copies of the file's text, each with one fact changed.
+        let row = format!("UartRow {{ block: {block}, tx: {tx}, rx: {rx} }}");
+        let doctored = [
+            ("the port's block number changed", w.text.replacen(&row, &format!("UartRow {{ block: {}, tx: {tx}, rx: {rx} }}", block + 1), 1)),
+            ("the transmit line moved a port over", w.text.replacen(&row, &format!("UartRow {{ block: {block}, tx: {}, rx: {rx} }}", tx + 16), 1)),
+            ("the transmit and receive lines one line", w.text.replacen(&row, &format!("UartRow {{ block: {block}, tx: {rx}, rx: {rx} }}"), 1)),
+            ("no port", w.text.replacen(&row, "", 1)),
+            ("the block's interrupt line changed", w.text.replacen(&format!("irq: {} }}", w.block.irq), &format!("irq: {} }}", w.block.irq + 1), 1)),
+            ("the block's bit in the clock controller changed", w.text.replacen(&format!("bus_bit: {},", w.block.bus_bit), &format!("bus_bit: {},", w.block.bus_bit + 1), 1)),
+            ("the selector's code changed to another clock's", w.text.replacen("select_code: 0x2,", "select_code: 0x1,", 1)),
+            ("the alternate function changed", w.text.replacen("fifo: false, alternate: 8,", "fifo: false, alternate: 7,", 1).replacen("fifo: true, alternate: 8,", "fifo: true, alternate: 7,", 1)),
+            ("the transmit ring at the size of a row with a console wire", w.text.replacen("pub const UART_TX_BYTES: usize = 1024;", "pub const UART_TX_BYTES: usize = 4096;", 1)),
+        ];
+        for (what, text) in &doctored {
+            assert_ne!(text.as_str(), w.text, "{}: the doctored copy is the file itself ({what})", w.file);
+            assert!(usart_row_fault(text, w).is_some(), "{}: a doctored copy passed ({what})", w.file);
+        }
+        // The soundness rules by themselves, on the block's record with one fact changed.
+        assert!(m::block_sound(&w.block) && m::blocks_fit(1, &[w.block]));
+        assert!(!m::blocks_fit(2, &[w.block]) && !m::blocks_fit(2, &[w.block, w.block]) && !m::blocks_fit(0, &[w.block]), "{}: a port without a block, or two ports on one block, passed", w.file);
+        let mut b = w.block;
+        b.select_code = b.select_mask + 1;
+        assert!(!m::block_sound(&b), "{}: a selector code outside its field passed", w.file);
+        b = w.block;
+        b.base += 2;
+        assert!(!m::block_sound(&b), "{}: a base that is not a word's passed", w.file);
+        b = w.block;
+        b.fifo = true;
+        assert_eq!(m::block_sound(&b), w.block.law == m::Law::LowPower, "{}: FIFOs are the low-power block's alone", w.file);
+        assert_eq!(m::fifo_depth(&w.block), if w.block.fifo { 8 } else { 1 });
+        let (tx, rx) = (tx as u32, rx as u32);
+        assert!(m::pair_sound(tx, rx) && !m::pair_sound(tx, tx));
+        // THE BOARD's OWN CLAIMS: the rule each facts file asserts refuses a port whose line the board holds.
+        let free = crate::claims::fold_board(&[13, 14]);
+        assert!(m::lines_free(&free, tx, rx));
+        assert!(!m::lines_free(&crate::claims::fold_board(&[13, 14, rx as u16]), tx, rx) && !m::lines_free(&crate::claims::fold_board(&[tx as u16]), tx, rx), "{}: a port on a line the board holds passed", w.file);
+        // THE FUNCTIONS' PIN RULE on a row whose pair is fixed and whose chip lists no legal pins for an override:
+        // legal with the project's words unset; with a word named, not legal, and the facts' pair is the answer.
+        assert_eq!(crate::uart_math::effective_pair((tx, rx), None, 0, 0), (tx, rx, true), "{}", w.file);
+        assert_eq!(crate::uart_math::effective_pair((tx, rx), None, 0x100 | 40, 0), (tx, rx, false), "{}", w.file);
+        assert_eq!(crate::uart_math::effective_pair((tx, rx), None, 0x100 | 40, 0x100 | 41), (tx, rx, false), "{}", w.file);
+    }
+    // The connector's D1 and D0 by port and pin: PC6 and PC7 on the STM32F769 Discovery, PG7 and PG8 on the NUCLEO-U5A5ZJ-Q.
+    assert_eq!((USART_ROWS[0].port.1, USART_ROWS[0].port.2), (2 * 16 + 6, 2 * 16 + 7));
+    assert_eq!((USART_ROWS[1].port.1, USART_ROWS[1].port.2), (6 * 16 + 7, 6 * 16 + 8));
+    // The block's kind is the rate rule its row names: a USART on the first row, a low-power UART on the second.
+    assert!(USART_ROWS[0].block.law == m::Law::Usart16 && USART_ROWS[1].block.law == m::Law::LowPower);
+}
+
+/// A scripted serial block for the ST serial module's sequences: the registers kept in a table, every write logged; the
+/// two acknowledge flags show in the status register `acks_after` reads after an enable (never when it is 0); a byte
+/// waiting shows the receive flag with its own error flags and leaves at a read of the data register; a write to the
+/// clear register clears the standing flags it names AND the same flags of the byte waiting in the data register (an
+/// error flag belongs to the byte in that register: RM0456 page 2892), so a decode that cleared a byte's flags after
+/// taking it would clear those of the byte behind it; the receive flush empties the queue.
+struct UsartScript {
+    base: usize,
+    mem: std::collections::BTreeMap<usize, u32>,
+    log: Vec<(usize, u32)>,
+    acks_after: u32,
+    status_reads: u32,
+    rx: std::collections::VecDeque<(u32, u32)>,
+}
+
+impl UsartScript {
+    fn new(base: usize, acks_after: u32) -> Self {
+        UsartScript { base, mem: Default::default(), log: Vec::new(), acks_after, status_reads: 0, rx: Default::default() }
+    }
+    fn at(&self, addr: usize) -> u32 {
+        *self.mem.get(&addr).unwrap_or(&0)
+    }
+}
+
+impl crate::stm32_usart_math::Regs for UsartScript {
+    fn rd(&mut self, addr: usize) -> u32 {
+        use crate::stm32_usart_math as m;
+        if addr == self.base + m::ISR {
+            let mut v = self.at(addr);
+            if self.at(self.base + m::CR1) & m::CR1_UE != 0 {
+                self.status_reads += 1;
+                if self.acks_after != 0 && self.status_reads >= self.acks_after {
+                    v |= m::ISR_TEACK | m::ISR_REACK;
+                }
+            }
+            if let Some(&(_, flags)) = self.rx.front() {
+                v |= m::ISR_RXNE | flags;
+            }
+            return v;
+        }
+        if addr == self.base + m::RDR {
+            return self.rx.pop_front().map(|(d, _)| d).unwrap_or(0);
+        }
+        self.at(addr)
+    }
+    fn wr(&mut self, addr: usize, value: u32) {
+        use crate::stm32_usart_math as m;
+        self.log.push((addr, value));
+        if addr == self.base + m::ICR {
+            let kept = self.at(self.base + m::ISR) & !value;
+            self.mem.insert(self.base + m::ISR, kept);
+            if let Some(front) = self.rx.front_mut() {
+                front.1 &= !value;
+            }
+        } else if addr == self.base + m::RQR {
+            if value & m::RQR_RXFRQ != 0 {
+                self.rx.clear();
+            }
+        } else {
+            if addr == self.base + m::CR1 && value & m::CR1_UE == 0 {
+                self.status_reads = 0;
+            }
+            self.mem.insert(addr, value);
+        }
+    }
+}
+
+#[test]
+fn stm32_usart_sequences_over_a_scripted_block() {
+    use crate::stm32_usart_math as m;
+    // The two blocks as the manuals place them: USART6 on the STM32F7 (its bit 5 in the three APB2 registers, its
+    // selector at bits 11:10 of the dedicated clocks register, code 10 for the internal oscillator) and LPUART1 on the
+    // STM32U5 (its bit 6 in the three APB3 registers, its selector at bits 2:0, code 010).
+    let f7 = m::Block { base: 0x4001_1400, law: m::Law::Usart16, enable_reg: 0x4002_3844, reset_reg: 0x4002_3824, sleep_reg: 0x4002_3864, bus_bit: 5, select_reg: 0x4002_3890, select_shift: 10, select_mask: 0b11, select_code: 0b10, fifo: false, alternate: 8, irq: 71 };
+    let u5 = m::Block { base: 0x4600_2400, law: m::Law::LowPower, enable_reg: 0x4602_0CA8, reset_reg: 0x4602_0C80, sleep_reg: 0x4602_0CD0, bus_bit: 6, select_reg: 0x4602_0CE8, select_shift: 0, select_mask: 0b111, select_code: 0b010, fifo: true, alternate: 8, irq: 66 };
+    // THE BRING-UP on the STM32F7, every other bit of the shared registers kept: the console's own block is enabled
+    // in the same enable register (bit 4) and has its own selector in the same selector register (bits 1:0), beside
+    // another block's at bits 13:12 and a stale code in this block's own field.
+    let mut s = UsartScript::new(f7.base, 3);
+    s.mem.insert(f7.enable_reg, 1 << 4);
+    s.mem.insert(f7.reset_reg, 0);
+    s.mem.insert(f7.select_reg, (0b11 << 12) | (0b01 << 10) | 0b01);
+    s.mem.insert(f7.sleep_reg, 0x06F7_7F93);
+    assert!(!m::selected(&mut s, &f7));
+    m::bring_up(&mut s, &f7);
+    assert_eq!(
+        s.log,
+        vec![
+            (f7.enable_reg, (1 << 4) | (1 << 5)),
+            (f7.reset_reg, 1 << 5),
+            (f7.reset_reg, 0),
+            (f7.select_reg, (0b11 << 12) | (0b10 << 10) | 0b01),
+            (f7.sleep_reg, 0x06F7_7FB3),
+        ],
+        "the bus clock; the reset set and cleared; the selector's own field alone; the clock while the core sleeps"
+    );
+    assert!(m::selected(&mut s, &f7) && s.at(f7.select_reg) & 0b11 == 0b01, "the console's selector is as it was");
+    assert_ne!(s.at(f7.select_reg), 0b10 << 10, "a write of the code alone would have cleared the neighbouring fields");
+    // The same on the STM32U5, where the selector register carries the converter's clock choice at bits 14:12.
+    let mut t = UsartScript::new(u5.base, 2);
+    t.mem.insert(u5.select_reg, (0b101 << 12) | 0b100);
+    m::bring_up(&mut t, &u5);
+    assert_eq!(t.at(u5.select_reg), (0b101 << 12) | 0b010);
+    assert_eq!((t.at(u5.enable_reg), t.at(u5.reset_reg), t.at(u5.sleep_reg)), (1 << 6, 0, 1 << 6));
+    // CONFIGURE on the STM32F7 at 115200 Bd, 8 data bits, no parity, 1 stop bit: the block disabled, the divisor, the
+    // stop field, no loop, the frame with the transmitter, the receiver and the receive interrupt, the enable, and
+    // both acknowledges at the third read of the status register. No prescaler register is written on this block.
+    s.log.clear();
+    let (word, _) = m::divisor(f7.law, 115_200).unwrap();
+    let on = m::CR1_TE | m::CR1_RE | m::CR1_RXNEIE;
+    assert!(m::configure(&mut s, &f7, word, 8, m::PARITY_NONE, 1, false, 50));
+    assert_eq!(s.log, vec![(f7.base + m::CR1, 0), (f7.base + m::BRR, 139), (f7.base + m::CR2, 0), (f7.base + m::CR3, 0), (f7.base + m::CR1, on), (f7.base + m::CR1, on | m::CR1_UE)]);
+    assert!(m::is_up(&mut s, &f7) && s.status_reads == 3);
+    // On the STM32U5 at 2400 Bd, 7 data bits, even parity, 2 stop bits, the loop on: the prescaler's code beside the
+    // divisor, the single-wire mode, and the FIFO bit written before the enable.
+    let (word, got) = m::divisor(u5.law, 2_400).unwrap();
+    let on5 = m::CR1_PCE | m::CR1_TE | m::CR1_RE | m::CR1_RXNEIE | m::CR1_FIFOEN;
+    t.log.clear();
+    assert!(got == 2_400 && m::configure(&mut t, &u5, word, 7, m::PARITY_EVEN, 2, true, 50));
+    assert_eq!(t.log, vec![(u5.base + m::CR1, 0), (u5.base + m::BRR, 853_333), (u5.base + m::PRESC, 1), (u5.base + m::CR2, m::CR2_STOP_2), (u5.base + m::CR3, m::CR3_HDSEL), (u5.base + m::CR1, on5), (u5.base + m::CR1, on5 | m::CR1_UE)]);
+    // A BLOCK THAT NEVER ACKNOWLEDGES: the bound runs out, the block is disabled again, the answer is false.
+    let mut dead = UsartScript::new(f7.base, 0);
+    assert!(!m::configure(&mut dead, &f7, 139, 8, m::PARITY_NONE, 1, false, 50));
+    assert_eq!(dead.log.last(), Some(&(f7.base + m::CR1, 0)));
+    assert!(!m::is_up(&mut dead, &f7) && dead.status_reads == 0);
+    // A DIVISOR TWICE AS LONG AS THE RULE GIVES (the flight's doctored control) is seen by a read-back of the divisor register.
+    let mut twice = UsartScript::new(f7.base, 1);
+    assert!(m::configure(&mut twice, &f7, 2 * 139, 8, m::PARITY_NONE, 1, false, 50));
+    assert_ne!(twice.at(f7.base + m::BRR), m::divisor(f7.law, 115_200).unwrap().0);
+    // THE TRANSMIT INTERRUPT IS A LEVEL: a byte put writes the data register and turns it on; the acknowledge turns it
+    // off, clears a standing overrun and answers it once.
+    s.log.clear();
+    m::tx_put(&mut s, &f7, 0x55);
+    assert_eq!(s.log, vec![(f7.base + m::TDR, 0x55), (f7.base + m::CR1, on | m::CR1_UE | m::CR1_TXEIE)]);
+    s.mem.insert(f7.base + m::ISR, m::ISR_ORE | m::ISR_TXE | m::ISR_TC);
+    s.log.clear();
+    assert_eq!(m::ack(&mut s, &f7), m::ACK_OVERRUN);
+    assert_eq!(s.log, vec![(f7.base + m::CR1, on | m::CR1_UE), (f7.base + m::ICR, m::ISR_ORE)]);
+    assert_eq!(m::ack(&mut s, &f7), 0, "the overrun was cleared");
+    assert!(m::tx_room(&mut s, &f7) && m::tx_idle(&mut s, &f7));
+    // A BYTE WAITS AND THE DATA REGISTER IS FULL: the answer is no room, and the transmit interrupt is turned on, so that
+    // the pass which could not send is followed by one when room is made (the acknowledge alone would leave the ring's
+    // bytes waiting for the next byte received). With room, no register is written.
+    s.mem.insert(f7.base + m::ISR, 0);
+    s.log.clear();
+    assert!(!m::tx_room(&mut s, &f7) && !m::tx_idle(&mut s, &f7));
+    assert_eq!(s.log, vec![(f7.base + m::CR1, on | m::CR1_UE | m::CR1_TXEIE)]);
+    assert_eq!(m::ack(&mut s, &f7), 0);
+    assert_eq!(s.at(f7.base + m::CR1), on | m::CR1_UE, "the acknowledge turned it off again");
+    s.mem.insert(f7.base + m::ISR, m::ISR_TXE);
+    s.log.clear();
+    assert!(m::tx_room(&mut s, &f7) && s.log.is_empty(), "with room, no register is written");
+    s.mem.insert(f7.base + m::ISR, 0);
+    // THE RECEIVE DECODE: a sound byte; a framing error with a zero byte is a break; with another byte a framing
+    // error; a parity error; the byte masked to the frame's data bits; an overrun is not the byte's fault.
+    s.rx.extend([(0x41, 0), (0x00, m::ISR_FE), (0x42, m::ISR_FE | m::ISR_NF), (0x1C3, m::ISR_PE), (0x43, m::ISR_ORE)]);
+    s.log.clear();
+    assert_eq!(m::rx_get(&mut s, &f7, 0xFF), Some((0x41, 0)));
+    assert_eq!(m::rx_get(&mut s, &f7, 0xFF), Some((0x00, m::ERR_BREAK)));
+    assert_eq!(m::rx_get(&mut s, &f7, 0xFF), Some((0x42, m::ERR_FRAMING)));
+    assert_eq!(m::rx_get(&mut s, &f7, 0xFF), Some((0xC3, m::ERR_PARITY)));
+    assert_eq!(m::rx_get(&mut s, &f7, 0x7F), Some((0x43, 0)));
+    assert_eq!(m::rx_get(&mut s, &f7, 0xFF), None);
+    assert_eq!(s.log, vec![(f7.base + m::ICR, m::ISR_FE), (f7.base + m::ICR, m::ISR_FE | m::ISR_NF), (f7.base + m::ICR, m::ISR_PE)], "each byte's own flags cleared, the overrun left to the acknowledge");
+    // THE FLUSH discards what waits and clears every error flag.
+    s.rx.extend([(0x44, 0), (0x45, 0)]);
+    s.log.clear();
+    m::rx_flush(&mut s, &f7);
+    assert_eq!(s.log, vec![(f7.base + m::RQR, m::RQR_RXFRQ), (f7.base + m::ICR, m::ISR_PE | m::ISR_FE | m::ISR_NF | m::ISR_ORE)]);
+    assert_eq!(m::rx_get(&mut s, &f7, 0xFF), None);
+    // THE LOOP turned on a configured block: disabled for the write, put back as it was.
+    s.log.clear();
+    m::set_loop(&mut s, &f7, true);
+    assert_eq!(s.log, vec![(f7.base + m::CR1, on), (f7.base + m::CR3, m::CR3_HDSEL), (f7.base + m::CR1, on | m::CR1_UE)]);
+    m::set_loop(&mut s, &f7, false);
+    assert_eq!(s.at(f7.base + m::CR3), 0);
+    // THE RELEASE: the block disabled with its interrupts off.
+    m::release(&mut s, &f7);
+    assert!(!m::is_up(&mut s, &f7) && s.at(f7.base + m::CR1) == 0);
+}
+
+// ---------------- the wireless rows: the digest, the radio's images, the stored network ----------------
+
+fn digest_hex(digest: [u8; 32]) -> String {
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn digest_whole(data: &[u8]) -> String {
+    let mut h = crate::digest::Sha256::new();
+    h.update(data);
+    digest_hex(h.finish())
+}
+
+/// The stream digest against the standard's own answers, against the gates'
+/// one-shot implementation at every length around a block's and the
+/// padding's edges, and fed in slices of every awkward size.
+#[test]
+fn digest_sha256_known_answers_whole_and_in_slices() {
+    assert_eq!(digest_whole(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    assert_eq!(digest_whole(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    assert_eq!(digest_whole(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    let million = vec![b'a'; 1_000_000];
+    assert_eq!(digest_whole(&million), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    let data: Vec<u8> = (0..300u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+    for n in 0..=data.len() {
+        assert_eq!(digest_whole(&data[..n]), sha256_hex(&data[..n]), "a message of {n} bytes");
+    }
+    let whole = digest_whole(&data);
+    for slice in [1usize, 3, 7, 55, 56, 57, 63, 64, 65, 119, 120, 127, 128, 129, 299] {
+        let mut h = crate::digest::Sha256::new();
+        for part in data.chunks(slice) {
+            h.update(part);
+        }
+        assert_eq!(digest_hex(h.finish()), whole, "fed in slices of {slice} bytes");
+    }
+    // An empty slice between two others changes nothing.
+    let mut h = crate::digest::Sha256::new();
+    h.update(&data[..100]);
+    h.update(&[]);
+    h.update(&data[100..]);
+    assert_eq!(digest_hex(h.finish()), whole);
+    // A digest in the characters a pin is published in.
+    let mut h = crate::digest::Sha256::new();
+    h.update(b"abc");
+    assert_eq!(&crate::digest::hex(&h.finish())[..], b"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+}
+
+/// The digest of `data` as bytes, by the gates' own implementation.
+fn wifi_sum(data: &[u8]) -> [u8; 32] {
+    wifi_unhex(&sha256_hex(data))
+}
+
+fn wifi_unhex(text: &str) -> [u8; 32] {
+    let mut sum = [0u8; 32];
+    for (i, byte) in sum.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).unwrap();
+    }
+    sum
+}
+
+/// The directory of the radio's corner built from its fields: the kind,
+/// the offset, the length and the digest of each entry.
+fn wifi_directory(entries: &[(u8, u32, u32, [u8; 32])]) -> Vec<u8> {
+    let mut d = b"LWFD".to_vec();
+    d.push(1);
+    d.extend_from_slice(&((12 + 44 * entries.len()) as u16).to_le_bytes());
+    d.push(entries.len() as u8);
+    for (kind, offset, len, sum) in entries {
+        d.push(*kind);
+        d.extend_from_slice(&[0; 3]);
+        d.extend_from_slice(&offset.to_le_bytes());
+        d.extend_from_slice(&len.to_le_bytes());
+        d.extend_from_slice(sum);
+    }
+    d.extend_from_slice(&[0; 4]);
+    wifi_directory_reseal(&mut d);
+    d
+}
+
+/// The directory's CRC-32 written anew after an edit of its fields.
+fn wifi_directory_reseal(d: &mut [u8]) {
+    let n = d.len();
+    let crc = crate::wifi_stored::crc32(&d[..n - 4]);
+    d[n - 4..].copy_from_slice(&crc.to_le_bytes());
+}
+
+/// The corner's first unit: the directory, then erased bytes.
+fn wifi_unit(directory: &[u8]) -> Vec<u8> {
+    let mut unit = vec![0xFFu8; crate::wifi_images::UNIT];
+    unit[..directory.len()].copy_from_slice(directory);
+    unit
+}
+
+/// The room of a corner staged by the test: the directory of the images
+/// at their offsets, the images, and every other byte erased.
+fn wifi_corner(images: &[(u8, usize, &[u8])]) -> Vec<u8> {
+    let entries: Vec<(u8, u32, u32, [u8; 32])> = images.iter().map(|(kind, offset, bytes)| (*kind, *offset as u32, bytes.len() as u32, wifi_sum(bytes))).collect();
+    let directory = wifi_directory(&entries);
+    let mut room = vec![0xFFu8; crate::wifi_images::ROOM];
+    room[..directory.len()].copy_from_slice(&directory);
+    for (_, offset, bytes) in images {
+        room[*offset..*offset + bytes.len()].copy_from_slice(bytes);
+    }
+    room
+}
+
+/// The pins of three images of the test's own.
+fn wifi_pins(firmware: &[u8], regulatory: &[u8], settings: &[u8], version: &'static [u8]) -> &'static crate::wifi_images::Pins {
+    let pin = |bytes: &[u8]| crate::wifi_images::Pin { len: bytes.len(), sha256: Box::leak(sha256_hex(bytes).into_boxed_str()) };
+    Box::leak(Box::new(crate::wifi_images::Pins { firmware: pin(firmware), regulatory: pin(regulatory), settings: pin(settings), version }))
+}
+
+/// The check of the radio's corner over a corner the test stages itself:
+/// the directory read, the three images digested where they lie. CONTROL:
+/// one flipped bit in each image is refused by the image's name, bytes
+/// that are no image's are not read, and a corner written for another set
+/// of pins gives this kernel nothing.
+#[test]
+fn wifi_images_corner_check_accepts_a_staged_corner() {
+    use crate::wifi_images as g;
+    assert_eq!((g::PINS.firmware.len, g::PINS.regulatory.len, g::PINS.settings.len), (224_190, 984, 741));
+    assert_eq!(g::PINS.version, b"7.95.49");
+    for pin in [&g::PINS.firmware, &g::PINS.regulatory, &g::PINS.settings] {
+        assert_eq!(pin.sha256.len(), 64);
+        assert!(pin.sha256.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)), "a pin is written in lowercase hexadecimal");
+    }
+    assert_eq!((g::UNIT, g::CORNER, g::ROOM), (4096, 262_144, 253_952));
+    // Three images of the test's own, of the pinned images' lengths, at the
+    // layout's places, and their pins.
+    let image = |n: u32, salt: u32| -> Vec<u8> { (0..n).map(|i| (i.wrapping_mul(0x9E37_79B1).wrapping_add(salt) >> 13) as u8).collect() };
+    let (firmware, regulatory, settings) = (image(224_190, 1), image(984, 2), image(741, 3));
+    let pins = wifi_pins(&firmware, &regulatory, &settings, b"0.0.0");
+    let room = wifi_corner(&[(1, 0x1000, &firmware[..]), (2, 0x3A000, &regulatory[..]), (3, 0x3B000, &settings[..])]);
+    let want = g::Places { firmware: (0x1000, 224_190), regulatory: (0x3A000, 984), settings: (0x3B000, 741) };
+    assert_eq!(g::check(&room, pins), Ok(want));
+    // CONTROL: one flipped bit in each image, at its first byte, its middle
+    // and its last, is refused by the image's name.
+    for (image, (offset, len)) in [(g::Image::Firmware, want.firmware), (g::Image::Regulatory, want.regulatory), (g::Image::Settings, want.settings)] {
+        for at in [offset, offset + len / 2, offset + len - 1] {
+            let mut bad = room.clone();
+            bad[at] ^= 0x04;
+            assert_eq!(g::check(&bad, pins), Err(g::Fault::Content(image)), "a flipped bit at {at}");
+        }
+    }
+    // Bytes that are no image's are not read: the byte after an image, a
+    // unit no image lies in, the directory's unit after the directory.
+    let mut padded = room.clone();
+    padded[0x1000 + 224_190] ^= 1;
+    padded[0x3C000] = 0;
+    padded[200] = 0;
+    assert_eq!(g::check(&padded, pins), Ok(want));
+    // The directory's own fault comes first.
+    let mut bad = room.clone();
+    bad[20] ^= 1;
+    assert_eq!(g::check(&bad, pins), Err(g::Fault::Crc));
+    assert_eq!(g::check(&room[..4095], pins), Err(g::Fault::Unit));
+    // A corner written for another set of pins gives this kernel nothing.
+    assert_eq!(g::check(&room, &g::PINS), Err(g::Fault::Missing(g::Image::Firmware)));
+    // In steps of one unit: 55 for the firmware, one for each of the other
+    // two; the verdict at the last step, and repeated after it.
+    let mut check = g::Check::new(want);
+    for step in 1..57 {
+        assert_eq!(check.step(&room, pins, g::UNIT), g::Step::More, "step {step}");
+    }
+    assert_eq!(check.step(&room, pins, g::UNIT), g::Step::Good);
+    assert_eq!(check.step(&room, pins, g::UNIT), g::Step::Good);
+    let mut bad = room.clone();
+    bad[0x3A000 + 500] ^= 0x80;
+    let mut check = g::Check::new(want);
+    for step in 1..56 {
+        assert_eq!(check.step(&bad, pins, g::UNIT), g::Step::More, "step {step}");
+    }
+    assert_eq!(check.step(&bad, pins, g::UNIT), g::Step::Bad(g::Image::Regulatory));
+    assert_eq!(check.step(&bad, pins, g::UNIT), g::Step::Bad(g::Image::Regulatory));
+    // A slice shorter than the places say is not the room.
+    let mut check = g::Check::new(want);
+    assert_eq!(check.step(&room[..0x1000 + 1000], pins, g::UNIT), g::Step::Bad(g::Image::Firmware));
+}
+
+/// The directory of the radio's corner, read by its rules: the directory
+/// a packager writes for the three pinned images is the published one
+/// byte for byte, and its three places are read. CONTROL: every single
+/// flipped bit of it is refused; a wrong magic, format, length or CRC-32,
+/// an entry off a unit boundary, inside the directory's unit or past the
+/// room, and a pin with no entry are each refused by name; another
+/// reader's entries and the reserved bytes are passed over.
+#[test]
+fn wifi_images_directory_is_read_by_its_rules() {
+    use crate::wifi_images as g;
+    let today = [
+        (1u8, 0x1000u32, 224_190u32, wifi_unhex(g::PINS.firmware.sha256)),
+        (2, 0x3A000, 984, wifi_unhex(g::PINS.regulatory.sha256)),
+        (3, 0x3B000, 741, wifi_unhex(g::PINS.settings.sha256)),
+    ];
+    let d = wifi_directory(&today);
+    assert_eq!(d.len(), 144);
+    assert_eq!(sha256_hex(&d), "7df597c60f85a18144dcb158bc328f5bccc27a6b0a1e6f5f306c417211e25465", "the directory as it was published with the corner's shape");
+    let want = g::Places { firmware: (0x1000, 224_190), regulatory: (0x3A000, 984), settings: (0x3B000, 741) };
+    assert_eq!(g::places(&wifi_unit(&d), &g::PINS), Ok(want));
+    for bit in 0..d.len() * 8 {
+        let mut bad = d.clone();
+        bad[bit / 8] ^= 1 << (bit % 8);
+        assert!(g::places(&wifi_unit(&bad), &g::PINS).is_err(), "bit {bit} flipped");
+    }
+    assert_eq!(g::places(&[0xFF; 4096], &g::PINS), Err(g::Fault::Magic), "an erased unit");
+    assert_eq!(g::places(&[0; 4096], &g::PINS), Err(g::Fault::Magic), "a zeroed unit");
+    assert_eq!(g::places(&wifi_unit(&d)[..4095], &g::PINS), Err(g::Fault::Unit));
+    let edited = |edit: &dyn Fn(&mut Vec<u8>), reseal: bool| {
+        let mut bad = d.clone();
+        edit(&mut bad);
+        if reseal {
+            wifi_directory_reseal(&mut bad);
+        }
+        g::places(&wifi_unit(&bad), &g::PINS)
+    };
+    assert_eq!(edited(&|b| b[0] = b'M', true), Err(g::Fault::Magic));
+    assert_eq!(edited(&|b| b[4] = 2, true), Err(g::Fault::Format));
+    assert_eq!(edited(&|b| b[5] = 143, true), Err(g::Fault::Length), "a length that is not the entries'");
+    assert_eq!(edited(&|b| b[7] = 4, true), Err(g::Fault::Length), "a count the length does not carry");
+    assert_eq!(edited(&|b| b[7] = 0, true), Err(g::Fault::Length), "no entry");
+    assert_eq!(edited(&|b| b[60] ^= 1, false), Err(g::Fault::Crc), "a digest edited under the old CRC-32");
+    assert_eq!(edited(&|b| b[143] ^= 0x80, false), Err(g::Fault::Crc));
+    // Under a matching CRC-32, an entry outside its bounds, by its index.
+    let entry = |i: usize, offset: u32, len: u32| {
+        edited(
+            &move |b: &mut Vec<u8>| {
+                b[8 + 44 * i + 4..8 + 44 * i + 8].copy_from_slice(&offset.to_le_bytes());
+                b[8 + 44 * i + 8..8 + 44 * i + 12].copy_from_slice(&len.to_le_bytes());
+            },
+            true,
+        )
+    };
+    assert_eq!(entry(0, 0x1001, 224_190), Err(g::Fault::Entry(0)), "off a unit boundary");
+    assert_eq!(entry(1, 0, 984), Err(g::Fault::Entry(1)), "inside the directory's unit");
+    assert_eq!(entry(2, 0x3E000, 741), Err(g::Fault::Entry(2)), "past the room");
+    assert_eq!(entry(2, 0x3D000, 4097), Err(g::Fault::Entry(2)), "ending past the room");
+    assert_eq!(entry(1, 0x3A000, 0), Err(g::Fault::Entry(1)), "an empty image");
+    assert_eq!(entry(0, 0xFFFF_F000, 0x2000), Err(g::Fault::Entry(0)), "an end that wraps");
+    assert_eq!(entry(2, 0x3D000, 4096), Err(g::Fault::Missing(g::Image::Settings)), "the room's last unit is inside it, and the entry is not the pin's any more");
+    // A pin with no entry: its kind not listed, another digest, another
+    // length, its digest under another kind.
+    assert_eq!(g::places(&wifi_unit(&wifi_directory(&today[..2])), &g::PINS), Err(g::Fault::Missing(g::Image::Settings)));
+    assert_eq!(g::places(&wifi_unit(&wifi_directory(&today[1..])), &g::PINS), Err(g::Fault::Missing(g::Image::Firmware)));
+    let mut other = today;
+    other[1].3[0] ^= 1;
+    assert_eq!(g::places(&wifi_unit(&wifi_directory(&other)), &g::PINS), Err(g::Fault::Missing(g::Image::Regulatory)), "another digest");
+    let mut other = today;
+    other[0].2 -= 1;
+    assert_eq!(g::places(&wifi_unit(&wifi_directory(&other)), &g::PINS), Err(g::Fault::Missing(g::Image::Firmware)), "another length");
+    let mut other = today;
+    other[2].0 = 4;
+    assert_eq!(g::places(&wifi_unit(&wifi_directory(&other)), &g::PINS), Err(g::Fault::Missing(g::Image::Settings)), "the digest under another kind");
+    // Passed over: another reader's entries listed before this kernel's (a
+    // second firmware of another digest, a Bluetooth patch), and the
+    // reserved bytes.
+    let mut more = vec![(1u8, 0x1000u32, 224_190u32, [0x5A; 32]), (4, 0x3C000, 6970, [0xA5; 32])];
+    more.extend_from_slice(&today);
+    let mut d5 = wifi_directory(&more);
+    assert_eq!(d5.len(), 12 + 44 * 5);
+    assert_eq!(g::places(&wifi_unit(&d5), &g::PINS), Ok(want));
+    d5[8 + 44 * 2 + 1] = 0x77;
+    wifi_directory_reseal(&mut d5);
+    assert_eq!(g::places(&wifi_unit(&d5), &g::PINS), Ok(want), "the reserved bytes are not read");
+    // The largest directory a unit holds: 92 entries.
+    let many: Vec<(u8, u32, u32, [u8; 32])> = (0..89u32).map(|i| (9u8, 0x1000 + 0x1000 * (i % 60), 1u32, [i as u8; 32])).chain(today).collect();
+    let big = wifi_directory(&many);
+    assert_eq!((many.len(), big.len()), (92, 4060));
+    assert_eq!(g::places(&wifi_unit(&big), &g::PINS), Ok(want));
+}
+
+/// One slot of the stored network's format built from its fields: the
+/// first record at the unit's start, erased bytes after it.
+fn wifi_slot(kinds: u8, name: &[u8], secret: &[u8], sequence: u32, reconnect: u8, boot: u8) -> Vec<u8> {
+    let mut unit = vec![0xFFu8; crate::wifi_stored::UNIT];
+    unit[..192].fill(0);
+    unit[..4].copy_from_slice(b"LWFR");
+    unit[4] = 1;
+    unit[5] = kinds;
+    unit[6] = name.len() as u8;
+    unit[7] = secret.len() as u8;
+    unit[8..12].copy_from_slice(&sequence.to_le_bytes());
+    unit[12..12 + name.len()].copy_from_slice(name);
+    unit[44..44 + secret.len()].copy_from_slice(secret);
+    unit[172] = reconnect;
+    unit[173] = boot;
+    wifi_reseal(&mut unit);
+    unit
+}
+
+/// The first record's CRC-32 written anew after an edit of its fields.
+fn wifi_reseal(unit: &mut [u8]) {
+    let crc = crate::wifi_stored::crc32(&unit[..188]);
+    unit[188..192].copy_from_slice(&crc.to_le_bytes());
+}
+
+/// A later record written at `at`; answers the offset after it.
+fn wifi_later(unit: &mut [u8], at: usize, magic: &[u8; 4], body: &[u8]) -> usize {
+    let len = 11 + body.len();
+    unit[at..at + 4].copy_from_slice(magic);
+    unit[at + 4] = 1;
+    unit[at + 5..at + 7].copy_from_slice(&(len as u16).to_le_bytes());
+    unit[at + 7..at + 7 + body.len()].copy_from_slice(body);
+    let crc = crate::wifi_stored::crc32(&unit[at..at + len - 4]);
+    unit[at + len - 4..at + len].copy_from_slice(&crc.to_le_bytes());
+    at + len
+}
+
+/// The four sample slots published with the format for its readers (test
+/// values, never a real network), rebuilt here from their fields; each is
+/// proven to be the published file byte for byte by the file's SHA-256.
+fn wifi_sample(n: u8) -> Vec<u8> {
+    const NAME: &[u8] = b"LamellaTest";
+    const SECRET: &[u8] = b"lamella-test-passphrase";
+    let (unit, sha256) = match n {
+        1 => (wifi_slot(6, NAME, SECRET, 1, 0, 0), "895d1985867765b4d2e396af30a922a0fdcff302dad47f681abcdd771cbbc564"),
+        2 => (wifi_slot(6, NAME, SECRET, 2, 0, 1), "353fbd1700e3bc434533cd1de88adddb48acd619d24ded88ddb5d230ceca4e50"),
+        3 => (wifi_slot(1, b"Lamella Caf\xc3\xa9", b"", 1, 0, 0), "0123a397802b09a63e3555bedf059e6d96e37c1fc25eb6377d63233d56831862"),
+        _ => {
+            // Sample 2's record, then one later record of a test kind no
+            // reader knows: 131 bytes from offset 192, across the first
+            // page's end.
+            let mut unit = wifi_slot(6, NAME, SECRET, 2, 0, 1);
+            let body: Vec<u8> = b"A later record of a kind this writer does not know. ".iter().copied().cycle().take(120).collect();
+            assert_eq!(wifi_later(&mut unit, 192, b"LTST", &body), 323);
+            (unit, "2570e6067ebada9361d9432854766f0a3a7ef3c2edba10fc372bc30b9adf2e5f")
+        }
+    };
+    assert_eq!(sha256_hex(&unit), sha256, "sample {n} rebuilt from its fields is not the published slot");
+    unit
+}
+
+#[test]
+fn wifi_stored_sample_one_is_read() {
+    use crate::wifi_stored as w;
+    let unit = wifi_sample(1);
+    let r = w::read(&unit).expect("sample 1 is a valid slot");
+    assert_eq!(r.name, b"LamellaTest");
+    assert_eq!(r.secret, b"lamella-test-passphrase");
+    assert_eq!((r.sequence, r.kinds, r.reconnect, r.boot, r.later), (1, w::KIND_WPA2 | w::KIND_WPA3, w::RECONNECT_AUTOMATIC, w::BOOT_BACKGROUND, 0));
+    // In place: the slices lie inside the unit at the format's offsets.
+    assert_eq!(r.name.as_ptr() as usize - unit.as_ptr() as usize, 12);
+    assert_eq!(r.secret.as_ptr() as usize - unit.as_ptr() as usize, 44);
+    // Alone, beside an erased slot, it is current in either place.
+    let erased = vec![0xFFu8; w::UNIT];
+    assert_eq!(w::current(&unit, &erased), Ok(r));
+    assert_eq!(w::current(&erased, &unit), Ok(r));
+    assert_eq!(w::current(&erased, &erased), Err(w::Absent::Nothing));
+}
+
+#[test]
+fn wifi_stored_newer_sequence_is_current_across_a_wrap() {
+    use crate::wifi_stored as w;
+    // Samples 1 and 2 together are the state a power cut leaves between a
+    // write and the erase that follows it: two valid slots.
+    let (one, two) = (wifi_sample(1), wifi_sample(2));
+    for (a, b) in [(&one, &two), (&two, &one)] {
+        let c = w::current(a, b).expect("two valid slots");
+        assert_eq!((c.sequence, c.boot), (2, w::BOOT_BEFORE_PROGRAM));
+    }
+    assert!(w::newer(2, 1) && !w::newer(1, 2) && !w::newer(7, 7));
+    assert!(w::newer(0, u32::MAX) && !w::newer(u32::MAX, 0), "across the wrap");
+    assert!(w::newer(0x8000_0000, 1) && !w::newer(0x8000_0001, 1), "half the number space is the horizon");
+    let before = wifi_slot(6, b"LamellaTest", b"lamella-test-passphrase", u32::MAX, 0, 0);
+    let after = wifi_slot(6, b"LamellaTest", b"lamella-test-passphrase", 0, 0, 1);
+    assert_eq!(w::current(&before, &after).map(|r| r.sequence), Ok(0));
+    assert_eq!(w::current(&after, &before).map(|r| r.sequence), Ok(0));
+    // Equal numbers: the first slot.
+    let twin = wifi_slot(6, b"LamellaTest", b"lamella-test-passphrase", 2, 0, 0);
+    assert_eq!(w::current(&twin, &two).map(|r| r.boot), Ok(w::BOOT_BACKGROUND));
+    assert_eq!(w::current(&two, &twin).map(|r| r.boot), Ok(w::BOOT_BEFORE_PROGRAM));
+}
+
+#[test]
+fn wifi_stored_name_is_counted_in_bytes() {
+    use crate::wifi_stored as w;
+    // Sample 3: an open network whose name is 12 characters and 13 bytes.
+    let unit = wifi_sample(3);
+    let r = w::read(&unit).expect("sample 3 is a valid slot");
+    assert_eq!(r.name.len(), 13);
+    assert_eq!(r.name, b"Lamella Caf\xc3\xa9");
+    assert_eq!(r.secret, b"");
+    assert_eq!((r.kinds, r.sequence, r.later), (w::KIND_OPEN, 1, 0));
+}
+
+#[test]
+fn wifi_stored_later_record_is_skipped_by_its_length() {
+    use crate::wifi_stored as w;
+    let unit = wifi_sample(4);
+    let r = w::read(&unit).expect("sample 4 is a valid slot");
+    let two = wifi_sample(2);
+    let r2 = w::read(&two).expect("sample 2 is a valid slot");
+    assert_eq!(r.later, 1);
+    assert_eq!((r.name, r.secret, r.sequence, r.kinds, r.reconnect, r.boot), (r2.name, r2.secret, r2.sequence, r2.kinds, r2.reconnect, r2.boot), "the network reads exactly as in sample 2");
+    assert_eq!(&unit[192..196], b"LTST");
+    assert_eq!(unit[323..327], [0xFF; 4], "the list ends at offset 323");
+    assert_eq!(w::current(&wifi_sample(1), &unit).map(|r| (r.sequence, r.later)), Ok((2, 1)));
+    // Two later records, the second ending exactly at the unit's end.
+    let mut full = wifi_sample(2);
+    let at = wifi_later(&mut full, 192, b"LTST", &[0x55; 100]);
+    let body = vec![0xAA; w::UNIT - at - 11];
+    assert_eq!(wifi_later(&mut full, at, b"MORE", &body), w::UNIT);
+    assert_eq!(w::read(&full).map(|r| r.later), Ok(2));
+    // A list that leaves three erased bytes ends at the unit's end too.
+    let mut near = wifi_sample(2);
+    let body = vec![0x33; w::UNIT - 192 - 11 - 3];
+    assert_eq!(wifi_later(&mut near, 192, b"LTST", &body), w::UNIT - 3);
+    assert_eq!(w::read(&near).map(|r| r.later), Ok(1));
+    // CONTROL: those three bytes not erased.
+    near[w::UNIT - 1] = 0;
+    assert_eq!(w::read(&near), Err(w::Fault::LaterEnd));
+}
+
+/// CONTROL: a slot that holds no undamaged copy is never taken, each
+/// refused by its named reason, and the undamaged older copy beside it
+/// stays current. A format byte edited under the old CRC-32 is damage like
+/// any other: the CRC-32 is judged before the format.
+#[test]
+fn wifi_stored_cut_slots_are_never_current() {
+    use crate::wifi_stored as w;
+    let older = wifi_sample(1);
+    let kept = w::read(&older).expect("sample 1 is a valid slot");
+    let good = wifi_sample(4);
+    type Cut = (&'static str, w::Fault, fn(&mut Vec<u8>));
+    let cuts: [Cut; 12] = [
+        ("an erased slot", w::Fault::Magic, |u| u.fill(0xFF)),
+        ("a zeroed slot", w::Fault::Magic, |u| u.fill(0)),
+        ("one bit of the magic", w::Fault::Magic, |u| u[3] ^= 0x01),
+        ("the format byte edited under the old CRC-32", w::Fault::Crc, |u| u[4] = 2),
+        ("one bit of the first record", w::Fault::Crc, |u| u[100] ^= 0x01),
+        ("one bit of the first record's CRC", w::Fault::Crc, |u| u[188] ^= 0x01),
+        ("a later record's length under 11", w::Fault::LaterLength, |u| u[197..199].copy_from_slice(&10u16.to_le_bytes())),
+        ("a later record's length past the unit", w::Fault::LaterLength, |u| u[197..199].copy_from_slice(&3905u16.to_le_bytes())),
+        ("one bit of a later record", w::Fault::LaterCrc, |u| u[250] ^= 0x80),
+        ("a later record cut at the first page's end", w::Fault::LaterCrc, |u| u[256..].fill(0xFF)),
+        ("bytes after the list that are not erased", w::Fault::LaterLength, |u| u[323] = 0),
+        ("a slice that is not one whole unit", w::Fault::Unit, |u| u.truncate(256)),
+    ];
+    for (name, fault, cut) in cuts {
+        let mut slot = good.clone();
+        cut(&mut slot);
+        assert_eq!(w::read(&slot), Err(fault), "{name}");
+        assert!(!fault.is_undamaged(), "{name}: no undamaged copy");
+        assert_eq!(w::current(&older, &slot), Ok(kept), "{name}: the older slot stays current");
+        assert_eq!(w::current(&slot, &older), Ok(kept), "{name}: in either place");
+        assert_eq!(w::current(&slot, &slot), Err(w::Absent::Nothing), "{name}: alone it is no network");
+    }
+}
+
+/// CONTROL: a value outside the known set under a good CRC is refused by
+/// the value's name, and the copy that holds it is undamaged: newest, it
+/// rules, so the usable older copy beside it is NOT taken and no network
+/// is stored for this kernel; alone it reads the same. A secret whose
+/// length does not fit its kind is no fault of the copy.
+#[test]
+fn wifi_stored_values_outside_their_range_are_refused() {
+    use crate::wifi_stored as w;
+    let older = wifi_sample(1);
+    assert!(w::read(&older).is_ok(), "sample 1 is a usable copy");
+    let pass = [0x61u8; 128];
+    let slot = |kinds: u8, secret: &[u8], reconnect: u8, boot: u8| wifi_slot(kinds, b"LamellaTest", secret, 5, reconnect, boot);
+    let mut refused: Vec<(&str, w::Fault, Vec<u8>)> = vec![
+        ("no accepted kind", w::Fault::Kinds, slot(0, &pass[..10], 0, 0)),
+        ("open beside WPA2", w::Fault::Kinds, slot(3, &pass[..10], 0, 0)),
+        ("open beside WPA3", w::Fault::Kinds, slot(5, &pass[..10], 0, 0)),
+        ("open beside both", w::Fault::Kinds, slot(7, &pass[..10], 0, 0)),
+        ("a bit beyond the three kinds", w::Fault::Kinds, slot(8, &pass[..10], 0, 0)),
+        ("a bit beyond them beside two kinds", w::Fault::Kinds, slot(14, &pass[..10], 0, 0)),
+        ("a boot setting the format does not state", w::Fault::Boot, slot(6, &pass[..10], 0, 3)),
+        ("a reconnection kind the format does not state", w::Fault::Reconnect, slot(6, &pass[..10], 2, 0)),
+    ];
+    for (name, at, value) in [("a name of no bytes", 6usize, 0u8), ("a name longer than its field", 6, 33), ("a secret longer than its field", 7, 129)] {
+        let mut unit = slot(6, &pass[..10], 0, 0);
+        unit[at] = value;
+        wifi_reseal(&mut unit);
+        refused.push((name, w::Fault::Lengths, unit));
+    }
+    for (name, fault, unit) in &refused {
+        assert_eq!(w::crc32(&unit[..188]).to_le_bytes(), unit[188..192], "{name}: the CRC holds");
+        assert_eq!(w::read(unit), Err(*fault), "{name}");
+        assert!(fault.is_undamaged(), "{name}: an undamaged copy this reader cannot use");
+        assert_eq!(w::current(&older, unit), Err(w::Absent::Unknown), "{name}: newest, it rules, and the usable older copy is not taken");
+        assert_eq!(w::current(unit, &older), Err(w::Absent::Unknown), "{name}: in either place");
+        assert_eq!(w::current(unit, unit), Err(w::Absent::Unknown), "{name}: alone it is a setting this reader does not know");
+        assert_eq!(w::current(unit, &vec![0xFFu8; w::UNIT]), Err(w::Absent::Unknown), "{name}: beside an erased slot too");
+    }
+    for damage in [w::Fault::Unit, w::Fault::Magic, w::Fault::Crc, w::Fault::LaterLength, w::Fault::LaterCrc, w::Fault::LaterEnd] {
+        assert!(!damage.is_undamaged(), "{damage:?} is damage or no copy");
+    }
+    assert!(w::Fault::Format.is_undamaged(), "a format this reader does not know stands under a matching CRC-32");
+    // Inside the ranges: the four kinds, the three boot settings, the two
+    // reconnection kinds.
+    for kinds in [w::KIND_OPEN, w::KIND_WPA2, w::KIND_WPA3, w::KIND_WPA2_OR_WPA3] {
+        for boot in [w::BOOT_BACKGROUND, w::BOOT_BEFORE_PROGRAM, w::BOOT_ON_REQUEST] {
+            for reconnect in [w::RECONNECT_AUTOMATIC, w::RECONNECT_MANUAL] {
+                let unit = slot(kinds, &pass[..20], reconnect, boot);
+                let r = w::read(&unit).expect("every stated value is valid");
+                assert_eq!((r.kinds, r.boot, r.reconnect), (kinds, boot, reconnect));
+            }
+        }
+    }
+    // A secret that does not fit its kind is valid: the join fails at the
+    // network, not here.
+    for (kinds, secret) in [(w::KIND_OPEN, &pass[..10]), (w::KIND_WPA2, &pass[..3]), (w::KIND_WPA2, &pass[..65]), (w::KIND_WPA3, &pass[..0]), (w::KIND_WPA2_OR_WPA3, &pass[..0])] {
+        let unit = slot(kinds, secret, 0, 0);
+        assert_eq!(w::read(&unit).map(|r| r.secret.len()), Ok(secret.len()), "kinds {kinds} with a secret of {} bytes", secret.len());
+    }
+}
+
+/// The newest undamaged copy rules whatever it holds, and nothing falls
+/// back to the older one: two boards must not end on different networks
+/// because one of them took an old copy. A copy this reader cannot use --
+/// a value outside the known set, or a format it does not know -- takes
+/// part in the choice by its sequence number, which stands at the same
+/// place in every format. CONTROLS: the same copy with the lower number
+/// loses to a usable newer one, and a damaged newer copy is no copy.
+#[test]
+fn wifi_stored_newest_undamaged_copy_rules_whatever_it_holds() {
+    use crate::wifi_stored as w;
+    let erased = vec![0xFFu8; w::UNIT];
+    // A usable copy with sequence number `n`.
+    let usable = |n: u32| wifi_slot(6, b"LamellaTest", b"lamella-test-passphrase", n, 0, 0);
+    let middle = usable(5);
+    let kept = w::read(&middle).expect("a usable copy");
+    assert_eq!(kept.sequence, 5);
+    // The copies this reader cannot use, each made from a usable one by
+    // one edit under a CRC-32 written anew: every value outside the known
+    // set in turn, then a format this reader does not know -- once with
+    // the known format's bytes, once with other bytes between the frame's
+    // fields, which a later format is free to change.
+    type Edit = (&'static str, w::Fault, fn(&mut Vec<u8>));
+    let edits: [Edit; 10] = [
+        ("no accepted kind", w::Fault::Kinds, |u| u[5] = 0),
+        ("an accepted kind beyond the three", w::Fault::Kinds, |u| u[5] = 8),
+        ("an open kind beside a secured one", w::Fault::Kinds, |u| u[5] = 3),
+        ("a boot setting above 2", w::Fault::Boot, |u| u[173] = 3),
+        ("a reconnection kind above 1", w::Fault::Reconnect, |u| u[172] = 2),
+        ("a name of no bytes", w::Fault::Lengths, |u| u[6] = 0),
+        ("a name of more than 32 bytes", w::Fault::Lengths, |u| u[6] = 33),
+        ("a secret of more than 128 bytes", w::Fault::Lengths, |u| u[7] = 129),
+        ("a format this reader does not know", w::Fault::Format, |u| u[4] = 2),
+        ("a later format with other bytes between the frame's fields", w::Fault::Format, |u| {
+            u[4] = 9;
+            u[5..8].fill(0xEE);
+            u[12..188].fill(0x5A);
+        }),
+    ];
+    for (name, fault, edit) in edits {
+        let odd = |n: u32| {
+            let mut unit = usable(n);
+            edit(&mut unit);
+            wifi_reseal(&mut unit);
+            unit
+        };
+        let (newest, oldest) = (odd(8), odd(2));
+        assert_eq!(w::read(&newest), Err(fault), "{name}");
+        assert_eq!(w::read(&oldest), Err(fault), "{name}");
+        assert!(fault.is_undamaged(), "{name}: the frame's CRC-32 holds");
+        // Newest, it rules: no record, and the usable older copy is NOT
+        // taken.
+        assert_eq!(w::current(&middle, &newest), Err(w::Absent::Unknown), "{name}: newest, beside a usable older copy");
+        assert_eq!(w::current(&newest, &middle), Err(w::Absent::Unknown), "{name}: newest, in either place");
+        // CONTROL: the same copy with the lower number loses to the usable
+        // newer one.
+        assert_eq!(w::current(&oldest, &middle), Ok(kept), "{name}: older, beside a usable newer copy");
+        assert_eq!(w::current(&middle, &oldest), Ok(kept), "{name}: older, in either place");
+        // Without a usable copy beside it: an erased slot, or its own
+        // older twin.
+        assert_eq!(w::current(&newest, &erased), Err(w::Absent::Unknown), "{name}: beside an erased slot");
+        assert_eq!(w::current(&erased, &newest), Err(w::Absent::Unknown), "{name}: beside an erased slot, in either place");
+        assert_eq!(w::current(&newest, &oldest), Err(w::Absent::Unknown), "{name}: two copies this reader cannot use");
+        // Equal numbers: the first slot, whatever it holds.
+        let twin = odd(5);
+        assert_eq!(w::current(&twin, &middle), Err(w::Absent::Unknown), "{name}: equal numbers, the first slot rules");
+        assert_eq!(w::current(&middle, &twin), Ok(kept), "{name}: equal numbers, the first slot rules");
+        // Across the wrap of the number, 0 is newer than the highest.
+        assert_eq!(w::current(&usable(u32::MAX), &odd(0)), Err(w::Absent::Unknown), "{name}: newest across the wrap");
+        assert_eq!(w::current(&odd(u32::MAX), &usable(0)).map(|r| r.sequence), Ok(0), "{name}: older across the wrap");
+    }
+    // A damaged newer copy is no copy, whatever else it holds: the
+    // undamaged older copy beside it is current. Each kind of damage, then
+    // the two that the order of the reading decides -- a format byte this
+    // reader does not know under a CRC-32 that does not match, and a value
+    // outside the known set beside a later record that does not hold.
+    let good = {
+        let mut unit = usable(8);
+        assert_eq!(wifi_later(&mut unit, 192, b"LTST", &[0x55; 120]), 323);
+        unit
+    };
+    assert_eq!(w::current(&middle, &good).map(|r| (r.sequence, r.later)), Ok((8, 1)), "undamaged and usable, the newer copy rules");
+    type Damage = (&'static str, w::Fault, fn(&mut Vec<u8>));
+    let damages: [Damage; 7] = [
+        ("one bit of the first record", w::Fault::Crc, |u| u[100] ^= 0x01),
+        ("a later record's length under 11", w::Fault::LaterLength, |u| u[197..199].copy_from_slice(&10u16.to_le_bytes())),
+        ("one bit of a later record", w::Fault::LaterCrc, |u| u[250] ^= 0x80),
+        ("a list that does not end as said", w::Fault::LaterEnd, |u| {
+            let body = vec![0x33; w::UNIT - 323 - 11 - 3];
+            assert_eq!(wifi_later(u, 323, b"MORE", &body), w::UNIT - 3);
+            u[w::UNIT - 1] = 0;
+        }),
+        ("no first record", w::Fault::Magic, |u| u[..4].fill(0xFF)),
+        ("a format this reader does not know under a CRC-32 that does not match", w::Fault::Crc, |u| u[4] = 2),
+        ("a value outside the known set beside a later record that does not hold", w::Fault::LaterCrc, |u| {
+            u[173] = 3;
+            wifi_reseal(u);
+            u[250] ^= 0x80;
+        }),
+    ];
+    // An undamaged older copy this reader cannot use, for the last leg.
+    let odd_older = {
+        let mut unit = usable(5);
+        unit[4] = 2;
+        wifi_reseal(&mut unit);
+        unit
+    };
+    for (name, fault, damage) in damages {
+        let mut slot = good.clone();
+        damage(&mut slot);
+        assert_eq!(w::read(&slot), Err(fault), "{name}");
+        assert!(!fault.is_undamaged(), "{name}: damage, or no copy");
+        assert_eq!(w::current(&middle, &slot), Ok(kept), "{name}: the undamaged older copy is current");
+        assert_eq!(w::current(&slot, &middle), Ok(kept), "{name}: in either place");
+        assert_eq!(w::current(&slot, &erased), Err(w::Absent::Nothing), "{name}: alone it is no network");
+        // The damage hides nothing: an undamaged older copy this reader
+        // cannot use still rules.
+        assert_eq!(w::current(&slot, &odd_older), Err(w::Absent::Unknown), "{name}: beside an undamaged copy this reader cannot use");
+    }
+}
+
+#[test]
+fn wifi_stored_crc32_is_the_ieee_one() {
+    use crate::wifi_stored as w;
+    assert_eq!(w::crc32(b"123456789"), 0xCBF4_3926, "the check value");
+    assert_eq!(w::crc32(b""), 0);
+    assert_eq!(w::crc32(&[0u8; 32]), 0x190A_55AD);
+    assert_eq!(w::crc32(&[0xFFu8; 32]), 0xFF6C_AB0B);
+    // The three CRC-32 values published with the sample slots.
+    for (n, crc) in [(1u8, 0x2E1B_0440u32), (2, 0x2F42_37C8), (3, 0x72B8_045C)] {
+        let unit = wifi_sample(n);
+        assert_eq!(u32::from_le_bytes([unit[188], unit[189], unit[190], unit[191]]), crc, "sample {n}");
+        assert_eq!(w::crc32(&unit[..188]), crc, "sample {n}");
+    }
+    // A record's CRC-32 covers its own bytes alone, so a later record
+    // copied to another offset stays valid.
+    let mut a = wifi_sample(2);
+    let mut b = wifi_sample(2);
+    let end = wifi_later(&mut a, 192, b"LTST", &[7; 20]);
+    wifi_later(&mut b, 192, b"PADS", &[1; 40]);
+    let moved = a[192..end].to_vec();
+    b[192 + 51..192 + 51 + moved.len()].copy_from_slice(&moved);
+    assert_eq!(w::read(&b).map(|r| r.later), Ok(2));
+}
+
+// ---------------- the wireless medium's pure half, over the wifi driver's scripted transport ----------------
+
+/// The medium's clock in a test: a cell the test sets, read as the
+/// driver's scripted clock is read. With a step it moves at every reading.
+struct WifiClock {
+    now: &'static std::cell::Cell<u64>,
+    step: u64,
+}
+
+impl lamella_wifi_cyw4343x::Clock for WifiClock {
+    fn now_us(&mut self) -> u64 {
+        let now = self.now.get();
+        self.now.set(now + self.step);
+        now
+    }
+    fn delay_us(&mut self, us: u32) {
+        self.now.set(self.now.get() + u64::from(us));
+    }
+}
+
+type WifiScript = lamella_wifi_cyw4343x::fixture::Op;
+type WifiStored = Result<crate::wifi_stored::Record<'static>, crate::wifi_stored::Absent>;
+type WifiCorner = (&'static [u8], &'static crate::wifi_images::Pins);
+
+static WIFI_WAKE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// The medium over a recorded exchange, with what a test reads of it.
+struct WifiRig {
+    medium: crate::wifi_medium::Wifi<'static, lamella_wifi_cyw4343x::fixture::FakeTransport<'static>, WifiClock>,
+    clock: &'static std::cell::Cell<u64>,
+    notes: Vec<crate::wifi_medium::Note>,
+    rows: usize,
+}
+
+/// The exchanges' corner: their synthetic images at the layout's places,
+/// with the pins of those images.
+fn wifi_exchange_corner() -> WifiCorner {
+    use crate::wifi_exchange as x;
+    let room = wifi_corner(&[(1, 0x1000, &x::FIRMWARE[..]), (2, 0x3A000, &x::REGULATORY[..]), (3, 0x3B000, &x::SETTINGS[..])]);
+    (Box::leak(room.into_boxed_slice()), wifi_pins(&x::FIRMWARE, &x::REGULATORY, &x::SETTINGS, &x::VERSION))
+}
+
+/// The exchanges' network as a stored record, the other slot erased.
+fn wifi_exchange_record(kinds: u8, reconnect: u8, boot: u8) -> WifiStored {
+    use crate::wifi_exchange as x;
+    let first: &'static [u8] = Box::leak(wifi_slot(kinds, &x::NAME, &x::SECRET, 7, reconnect, boot).into_boxed_slice());
+    let second: &'static [u8] = Box::leak(vec![0xFFu8; crate::wifi_stored::UNIT].into_boxed_slice());
+    crate::wifi_stored::current(first, second)
+}
+
+fn wifi_rig(tables: &[&[WifiScript]], stored: WifiStored, corner: WifiCorner, step: u64) -> WifiRig {
+    let script: &'static [WifiScript] = Box::leak(tables.concat().into_boxed_slice());
+    let clock: &'static std::cell::Cell<u64> = Box::leak(Box::new(std::cell::Cell::new(0)));
+    let bus = lamella_wifi_cyw4343x::fixture::FakeTransport::new(script, lamella_wifi_cyw4343x::Part::Cyw43439);
+    let medium = crate::wifi_medium::Wifi::new(bus, WifiClock { now: clock, step }, &WIFI_WAKE, stored, corner.0, corner.1);
+    WifiRig { medium, clock, notes: Vec::new(), rows: script.len() }
+}
+
+impl WifiRig {
+    /// One service call, the notes it left taken.
+    fn service(&mut self) {
+        use crate::board::net_medium::Medium;
+        self.medium.service(0);
+        while let Some(note) = self.medium.take_note() {
+            self.notes.push(note);
+        }
+    }
+
+    /// Service calls until `done` holds, the clock moved to each instant
+    /// the medium names and never further; answers the number of waits.
+    /// Before the clock moves, a service call must poll nothing: the
+    /// driver is never polled before the instant it named.
+    fn drive(&mut self, what: &str, mut done: impl FnMut(&mut WifiRig) -> bool) -> u32 {
+        let mut waits = 0;
+        for _ in 0..200_000 {
+            if done(self) {
+                return waits;
+            }
+            self.service();
+            if done(self) {
+                return waits;
+            }
+            match self.medium.wait_us() {
+                None => panic!("{what}: the medium stopped first, at {:?} with {:?}; the transport's fault {:?}", self.medium.stage(), self.notes, self.medium.bus().fault()),
+                Some(0) => {}
+                Some(wait) => {
+                    let polls = self.medium.counts().polls;
+                    self.service();
+                    assert_eq!(self.medium.counts().polls, polls, "{what}: a poll before the instant the driver named");
+                    self.clock.set(self.clock.get() + wait);
+                    waits += 1;
+                }
+            }
+        }
+        panic!("{what}: not reached; the medium at {:?} with {:?}, {} rows left", self.medium.stage(), self.notes, self.left());
+    }
+
+    /// Service calls at the driver's cadence whatever the medium says, for
+    /// a medium that is expected to do nothing.
+    fn idle(&mut self, calls: u32) {
+        for _ in 0..calls {
+            self.service();
+            self.clock.set(self.clock.get() + 10_000);
+        }
+    }
+
+    /// The rows of the exchange not yet asked for.
+    fn left(&self) -> usize {
+        self.medium.bus().remaining()
+    }
+
+    /// The frame in the hold, as the stack would read it.
+    fn held(&mut self) -> Option<Vec<u8>> {
+        use crate::board::net_medium::Medium;
+        self.medium.split().0.peek().map(|frame| frame.to_vec())
+    }
+
+    /// The held frame taken, as the stack takes it.
+    fn take(&mut self) {
+        use crate::board::net_medium::Medium;
+        self.medium.split().0.consume();
+    }
+
+    /// A frame staged and committed through the transmit side, as the
+    /// stack does it; answers whether a slot was free.
+    fn send(&mut self, frame: &[u8]) -> bool {
+        use crate::board::net_medium::Medium;
+        let (_, tx) = self.medium.split();
+        if !tx.room() {
+            return false;
+        }
+        tx.slot(frame.len()).expect("a slot, with room").copy_from_slice(frame);
+        tx.commit(frame.len());
+        true
+    }
+
+    fn room(&mut self) -> bool {
+        use crate::board::net_medium::Medium;
+        self.medium.split().1.room()
+    }
+
+    /// Whether the medium reads its link up.
+    fn up(&self) -> bool {
+        use crate::board::net_medium::{Link, Medium};
+        self.medium.link() == Link::Up
+    }
+
+    /// The console's lines of the notes so far.
+    fn lines(&self) -> Vec<String> {
+        self.notes.iter().map(wifi_line).collect()
+    }
+}
+
+fn wifi_line(note: &crate::wifi_medium::Note) -> String {
+    let mut line = String::new();
+    note.write_line(&mut line).unwrap();
+    line
+}
+
+/// The ladder joins and the link rises with the address: under the record
+/// the tool writes by default (WPA2 or WPA3, join while the program runs)
+/// the corner is checked first, the firmware is asked whether it runs the
+/// WPA3 exchange, the scan hears the stored name offering WPA3 and the
+/// join is WPA3, the recorded exchange consumed to its last row. The same
+/// record joins as WPA2 where the network offers WPA2 alone, where the
+/// scan does not hear the name, and on a firmware without the WPA3
+/// exchange; a join asked as the wrong kind would not match its exchange.
+#[test]
+fn wifi_medium_ladder_joins_and_the_link_rises_with_the_address() {
+    use crate::board::net_medium::Medium;
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2_OR_WPA3, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let record = wifi_exchange_record(KIND_WPA2_OR_WPA3, RECONNECT_AUTOMATIC, BOOT_BACKGROUND);
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::EITHER_WPA3[..]], record, corner, 0);
+    assert_eq!((rig.medium.stage(), rig.up(), rig.medium.hardware_address()), (Stage::Corner, false, None));
+    assert_eq!(rig.medium.wait_us(), Some(0));
+    // The corner first: the directory in one service call, the three
+    // images in three, and nothing on the transport meanwhile.
+    for stage in [Stage::Checking, Stage::Checking, Stage::Checking, Stage::Attaching] {
+        assert!(rig.notes.is_empty());
+        rig.service();
+        assert_eq!((rig.medium.stage(), rig.medium.wait_us(), rig.medium.counts().polls, rig.left()), (stage, Some(0), 0, rig.rows));
+    }
+    assert_eq!(rig.notes, [Note::Starting]);
+    // The radio up: the chip's address is known, the link still down.
+    rig.drive("the radio up", |r| r.medium.hardware_address().is_some());
+    assert_eq!((rig.medium.hardware_address(), rig.up()), (Some(x::STATION), false));
+    assert!(!rig.room(), "no slot for the stack before the link is up");
+    rig.drive("the join", |r| r.up());
+    assert_eq!(rig.medium.stage(), Stage::Joining);
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined]);
+    assert_eq!(rig.lines(), ["[wifi] starting; joining the stored network", "[wifi] joined"]);
+    // The exchange's last rows: a frame in, read in the hold, and a frame
+    // out through the transmit side.
+    rig.drive("a frame in", |r| r.held().is_some());
+    assert_eq!(rig.held(), Some(x::ARP_REQUEST_IN.to_vec()));
+    rig.take();
+    assert!(rig.send(&x::ARP_REPLY_OUT));
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!((rig.medium.bus().fault(), rig.medium.wait_us(), rig.medium.counts().dropped), (None, Some(10_000), 0), "consumed to its last row; the driver's next instant is the medium's");
+    // A refusal later in a run -- here the transport's own, at an operation
+    // past the exchange's end -- parks the medium with the link down.
+    rig.clock.set(rig.clock.get() + 10_000);
+    rig.service();
+    assert_eq!((rig.medium.stage(), rig.up(), rig.room(), rig.medium.wait_us()), (Stage::Parked, false, false, None));
+    assert!(matches!(rig.notes[..], [Note::Starting, Note::Joined, Note::Refused(_)]), "{:?}", rig.notes);
+    for (what, table) in [("heard offering WPA2 alone", &x::EITHER_WPA2_HEARD[..]), ("not heard", &x::EITHER_WPA2_UNHEARD[..]), ("a firmware without the WPA3 exchange", &x::EITHER_NO_WPA3[..])] {
+        let mut rig = wifi_rig(&[&x::OPENING[..], table], record, corner, 0);
+        rig.drive(what, |r| r.left() == 0);
+        assert_eq!((rig.up(), rig.medium.bus().fault(), &rig.notes[..]), (true, None, &[Note::Starting, Note::Joined][..]), "{what}");
+    }
+    // No line of the medium's carries a name, an address or a secret, and
+    // each is a short statement of the state behind the same first word,
+    // with no full stop at its end.
+    let refusal = lamella_wifi_cyw4343x::Refusal::new("a stage", 0x1234);
+    let every = [
+        Note::Starting,
+        Note::StartingOlderSetting,
+        Note::OnRequest,
+        Note::NothingStored,
+        Note::UnknownSetting,
+        Note::FirmwareNotFound(crate::wifi_images::Fault::Magic),
+        Note::NotFound,
+        Note::FirstTryFailed,
+        Note::Joined,
+        Note::SecretRefused { again_s: 5 },
+        Note::AuthenticationFailed { again_s: 360 },
+        Note::SecretUnusable,
+        Note::NoAcceptedKind,
+        Note::LinkLost,
+        Note::Refused(refusal),
+    ];
+    for note in &every {
+        let line = wifi_line(note);
+        assert!(line.starts_with("[wifi] ") && !line.ends_with('.') && line.is_ascii() && !line.contains('\n'), "{line}");
+        for secret in [&x::NAME[..], &x::SECRET[..]] {
+            assert!(!line.contains(std::str::from_utf8(secret).unwrap()), "{line}");
+        }
+    }
+    assert_eq!(wifi_line(&Note::NoAcceptedKind), "[wifi] stored network found, security type does not match; still looking");
+    assert_eq!(wifi_line(&Note::SecretRefused { again_s: 5 }), "[wifi] passphrase not accepted; retrying in 5 s");
+    assert_eq!(wifi_line(&Note::AuthenticationFailed { again_s: 360 }), "[wifi] authentication failed; retrying in 360 s");
+    assert_eq!(wifi_line(&Note::LinkLost), "[wifi] link lost; rejoining");
+    assert_eq!(wifi_line(&Note::Refused(refusal)), "[wifi] off: radio did not start (stage a stage, status 0x00001234)");
+}
+
+/// A frame passes each way through the kernel's own adapter and a stack
+/// interface: the access point's ARP request is read by the stack in the
+/// medium's hold, and the stack's reply is the exchange's next row byte
+/// for byte; a datagram with an unset checksum is taken and answered with
+/// nothing.
+#[test]
+fn wifi_medium_frame_passes_each_way_through_the_adapter() {
+    use crate::board::net_medium::{Adapter, Medium};
+    use crate::wifi_exchange as x;
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    use smoltcp::iface::{Config, Interface, SocketSet, SocketStorage};
+    use smoltcp::time::Instant;
+    use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr};
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), wifi_exchange_corner(), 0);
+    rig.drive("the join", |r| r.up());
+    // The stack's interface over the adapter, with the chip's address as
+    // the medium tells it and the exchange's address on its network.
+    let hw = rig.medium.hardware_address().expect("the address, with the radio up");
+    assert_eq!(rig.medium.frame_unit(), 1514);
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(hw)));
+    config.random_seed = 1;
+    let mut iface = Interface::new(config, &mut Adapter { medium: &mut rig.medium }, Instant::from_millis(0));
+    iface.update_ip_addrs(|addrs| addrs.push(IpCidr::new(IpAddress::v4(x::OUR_IP[0], x::OUR_IP[1], x::OUR_IP[2], x::OUR_IP[3]), 24)).unwrap());
+    let mut storage: [SocketStorage; 0] = [];
+    let mut sockets = SocketSet::new(&mut storage[..]);
+    rig.drive("the request", |r| r.held().is_some());
+    assert_eq!(rig.held(), Some(x::ARP_REQUEST_IN.to_vec()));
+    let before = rig.left();
+    let _ = iface.poll(Instant::from_millis(0), &mut Adapter { medium: &mut rig.medium }, &mut sockets);
+    assert_eq!((rig.held(), rig.left(), rig.medium.bus().fault()), (None, before - 1, None), "the stack took the request, and the one row asked for is its reply's write");
+    let frames = rig.medium.driver().frames();
+    assert_eq!((frames.data_received, frames.data_sent), (1, 1));
+    rig.drive("the datagram", |r| r.held().is_some());
+    assert_eq!(rig.held(), Some(x::DATAGRAM_IN.to_vec()));
+    let before = rig.left();
+    let _ = iface.poll(Instant::from_millis(0), &mut Adapter { medium: &mut rig.medium }, &mut sockets);
+    assert_eq!((rig.held(), rig.left(), rig.medium.bus().fault()), (None, before, None), "taken, and nothing written for it");
+    assert_eq!(rig.medium.counts().dropped, 0);
+}
+
+/// CONTROL: without a valid record the radio stays off -- not one
+/// operation reaches the transport -- and the same for a record that says
+/// to join on request; each with its own line.
+#[test]
+fn wifi_medium_radio_stays_off_without_a_record_or_on_request() {
+    use crate::board::net_medium::Medium;
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{Absent, BOOT_BACKGROUND, BOOT_ON_REQUEST, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let erased: &'static [u8] = Box::leak(vec![0xFFu8; crate::wifi_stored::UNIT].into_boxed_slice());
+    let nothing = crate::wifi_stored::current(erased, erased);
+    assert_eq!(nothing, Err(Absent::Nothing));
+    // The newest copy holds a setting this kernel does not know, and a
+    // usable older copy lies beside it: the older one is not taken.
+    let mut odd = wifi_slot(KIND_WPA2, &x::NAME, &x::SECRET, 7, RECONNECT_AUTOMATIC, BOOT_BACKGROUND);
+    odd[173] = 3;
+    wifi_reseal(&mut odd);
+    let older: &'static [u8] = Box::leak(wifi_slot(KIND_WPA2, &x::NAME, &x::SECRET, 6, RECONNECT_AUTOMATIC, BOOT_BACKGROUND).into_boxed_slice());
+    assert!(crate::wifi_stored::read(older).is_ok(), "the older copy is one this kernel can use");
+    let unknown = crate::wifi_stored::current(Box::leak(odd.into_boxed_slice()), older);
+    assert_eq!(unknown, Err(Absent::Unknown));
+    let on_request = wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_ON_REQUEST);
+    assert!(on_request.is_ok(), "a record that says to join on request is a valid record");
+    let cases = [
+        (nothing, Note::NothingStored, "[wifi] off: no network stored"),
+        (unknown, Note::UnknownSetting, "[wifi] off: stored network has an unknown setting"),
+        (on_request, Note::OnRequest, "[wifi] off: stored network is not set to join at start"),
+    ];
+    for (stored, note, line) in cases {
+        let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2[..]], stored, corner, 0);
+        rig.idle(200);
+        assert_eq!(rig.medium.stage(), Stage::Off, "{note:?}");
+        assert_eq!((rig.left(), rig.medium.bus().fault(), rig.medium.counts().polls), (rig.rows, None, 0), "{note:?}: not one operation reached the transport");
+        assert_eq!((rig.up(), rig.medium.hardware_address(), rig.medium.wait_us()), (false, None, None), "{note:?}");
+        assert_eq!(rig.notes, [note]);
+        assert_eq!(rig.lines(), [line]);
+        assert!(rig.held().is_none() && !rig.room(), "{note:?}: nothing to take and no slot to fill");
+    }
+}
+
+/// CONTROL: a corner that fails its check leaves the radio off, not one
+/// operation reaching the transport: an erased corner, one flipped bit in
+/// each image, an image the directory does not list, and a write that was
+/// cut short behind a whole directory.
+#[test]
+fn wifi_medium_radio_stays_off_when_the_corner_fails_its_check() {
+    use crate::board::net_medium::Medium;
+    use crate::wifi_exchange as x;
+    use crate::wifi_images::{Fault, Image, ROOM};
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let (room, pins) = wifi_exchange_corner();
+    let mut cases: Vec<(&str, Vec<u8>, Fault)> = vec![("an erased corner", vec![0xFFu8; ROOM], Fault::Magic)];
+    for (image, at) in [(Image::Firmware, 0x1000 + 100), (Image::Regulatory, 0x3A000 + 1499), (Image::Settings, 0x3B000)] {
+        let mut bad = room.to_vec();
+        bad[at] ^= 1;
+        cases.push(("one flipped bit in an image", bad, Fault::Content(image)));
+    }
+    cases.push(("no settings image listed", wifi_corner(&[(1, 0x1000, &x::FIRMWARE[..]), (2, 0x3A000, &x::REGULATORY[..])]), Fault::Missing(Image::Settings)));
+    let mut cut = room.to_vec();
+    cut[0x1000 + 100..0x1000 + 200].fill(0xFF);
+    cases.push(("a write cut short behind a whole directory", cut, Fault::Content(Image::Firmware)));
+    for (what, bad, fault) in cases {
+        let bad: &'static [u8] = Box::leak(bad.into_boxed_slice());
+        let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), (bad, pins), 0);
+        rig.idle(200);
+        assert_eq!(rig.medium.stage(), Stage::Off, "{what}");
+        assert_eq!((rig.left(), rig.medium.bus().fault(), rig.medium.counts().polls), (rig.rows, None, 0), "{what}: not one operation reached the transport");
+        assert_eq!((rig.up(), rig.medium.hardware_address(), rig.medium.wait_us()), (false, None, None), "{what}");
+        assert_eq!(rig.notes, [Note::FirmwareNotFound(fault)], "{what}");
+        assert_eq!(rig.lines(), ["[wifi] off: radio firmware not found"]);
+    }
+}
+
+/// CONTROL: a doctored exchange -- the firmware's version reply without
+/// the pinned string -- ends in the driver's refusal by name: the medium
+/// parked, the link down, the driver not polled again.
+#[test]
+fn wifi_medium_doctored_version_reply_parks_the_medium() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let mut opening = x::OPENING.to_vec();
+    let mut edits = 0;
+    for op in opening.iter_mut() {
+        if let WifiScript::F2Read { data } = *op {
+            if let Some(at) = data.windows(15).position(|w| w == b"version 7.95.49") {
+                let mut doctored = data.to_vec();
+                doctored[at + 14] = b'8';
+                *op = WifiScript::F2Read { data: Box::leak(doctored.into_boxed_slice()) };
+                edits += 1;
+            }
+        }
+    }
+    assert_eq!(edits, 1, "the version reply is one row of the opening");
+    let mut rig = wifi_rig(&[&opening[..], &x::WPA2[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), wifi_exchange_corner(), 0);
+    for _ in 0..200_000 {
+        rig.service();
+        match rig.medium.wait_us() {
+            Some(wait) => rig.clock.set(rig.clock.get() + wait),
+            None => break,
+        }
+    }
+    assert_eq!((rig.medium.stage(), rig.up(), rig.medium.wait_us()), (Stage::Parked, false, None));
+    let refusal = match rig.notes[..] {
+        [Note::Starting, Note::Refused(refusal)] => refusal,
+        _ => panic!("the notes {:?}", rig.notes),
+    };
+    assert_eq!(refusal.stage, lamella_wifi_cyw4343x::control::STAGE_VERSION_MISMATCH);
+    assert_eq!(
+        rig.lines()[1],
+        format!("[wifi] off: radio did not start (stage firmware version mismatch, status 0x{:08X})", refusal.status)
+    );
+    assert_eq!(rig.medium.bus().fault(), None, "the driver refused; the transport saw nothing it did not expect");
+    let (left, polls) = (rig.left(), rig.medium.counts().polls);
+    assert!(left > x::WPA2.len(), "the opening's last rows were never asked for");
+    rig.idle(50);
+    assert_eq!((rig.left(), rig.medium.counts().polls, rig.notes.len()), (left, polls, 2), "parked: not polled again");
+    assert!(rig.held().is_none() && !rig.room());
+}
+
+/// A lost link recovers by the driver -- it rests, scans and joins again by
+/// itself, and frames pass again -- and a refused secret is rested and
+/// tried again, whatever the record says of reconnection: under a record
+/// set to reconnect on request both go as they go under one that says to
+/// rejoin, by the same polls at the same instants with the same lines.
+#[test]
+fn wifi_medium_lost_link_and_refusal_go_the_same_way_whatever_the_record_says_of_reconnection() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC, RECONNECT_MANUAL};
+    let corner = wifi_exchange_corner();
+    assert_eq!(wifi_exchange_record(KIND_WPA2, RECONNECT_MANUAL, BOOT_BACKGROUND).expect("a slot that reads the other setting is valid").reconnect, 1, "the reader still reads the setting");
+    let lost = |reconnect: u8| {
+        let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2[..]], wifi_exchange_record(KIND_WPA2, reconnect, BOOT_BACKGROUND), corner, 0);
+        rig.drive("the join", |r| r.up());
+        rig.drive("the request", |r| r.held().is_some());
+        rig.take();
+        assert!(rig.send(&x::ARP_REPLY_OUT));
+        rig.drive("the datagram", |r| r.held().is_some());
+        rig.take();
+        rig.drive("the loss", |r| !r.up());
+        assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost]);
+        assert_eq!(rig.medium.stage(), Stage::Joining, "the driver keeps the network");
+        assert!(!rig.send(&x::ARP_REPLY_OUT), "no slot for the stack while the link is down");
+        let waits = rig.drive("the join again", |r| r.up());
+        assert!(waits >= 100, "the driver's rest of a second, at its own cadence ({waits} waits)");
+        assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost, Note::Joined]);
+        assert_eq!((rig.medium.counts().joined, rig.medium.counts().lost), (2, 1));
+        rig.drive("the request again", |r| r.held().is_some());
+        assert_eq!(rig.held(), Some(x::ARP_REQUEST_IN.to_vec()));
+        rig.take();
+        assert!(rig.send(&x::ARP_REPLY_OUT));
+        rig.drive("the exchange's end", |r| r.left() == 0);
+        assert_eq!((rig.medium.bus().fault(), rig.up(), rig.medium.counts().dropped), (None, true, 0));
+        (rig.medium.counts().polls, rig.clock.get(), rig.lines())
+    };
+    assert_eq!(lost(RECONNECT_AUTOMATIC), lost(RECONNECT_MANUAL), "a lost link: the same polls, the same instants, the same lines");
+    let refused = |reconnect: u8| {
+        let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2_REFUSED[..]], wifi_exchange_record(KIND_WPA2, reconnect, BOOT_BACKGROUND), corner, 0);
+        rig.drive("the exchange's end", |r| r.left() == 0);
+        assert_eq!((rig.medium.bus().fault(), rig.up(), rig.medium.counts().joined, rig.medium.counts().lost), (None, true, 2, 1));
+        (rig.medium.counts().polls, rig.clock.get(), rig.lines())
+    };
+    assert_eq!(refused(RECONNECT_AUTOMATIC), refused(RECONNECT_MANUAL), "a refused secret: the same polls, the same instants, the same lines");
+}
+
+/// One line for a change of state, never one for a try: the stored network
+/// is not there at the start, the first failed try says so once, the
+/// driver's next try says nothing, and the join is said when it comes. The
+/// other wording is chosen by what the driver's failure says.
+#[test]
+fn wifi_medium_first_failed_try_says_one_line() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    use lamella_wifi_cyw4343x::JoinFailure;
+    let corner = wifi_exchange_corner();
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2_NOT_FOUND[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), corner, 0);
+    rig.drive("the first failed try", |r| r.medium.counts().retried == 1);
+    assert_eq!(rig.notes, [Note::Starting, Note::NotFound]);
+    assert_eq!(rig.lines()[1], "[wifi] stored network not found; still looking");
+    assert_eq!((rig.medium.stage(), rig.up()), (Stage::Joining, false), "the driver keeps the network");
+    rig.drive("the second failed try", |r| r.medium.counts().retried == 2);
+    assert_eq!(rig.notes, [Note::Starting, Note::NotFound], "a later try says nothing");
+    rig.drive("the join", |r| r.up());
+    assert_eq!(rig.notes, [Note::Starting, Note::NotFound, Note::Joined]);
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!((rig.medium.bus().fault(), rig.up()), (None, true));
+    assert_eq!((rig.medium.counts().retried, rig.medium.counts().joined, rig.medium.counts().lost), (2, 1, 0));
+    // After a join the loss's line has said that the radio is looking: a
+    // failed try behind it says nothing.
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2_LOST_UNSEEN[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), corner, 0);
+    // In this exchange the loss follows the join with no wait between
+    // them, so one service call sees both: the counters tell them.
+    rig.drive("the join and the loss", |r| r.medium.counts().lost == 1);
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost]);
+    rig.drive("the failed try behind the loss", |r| r.medium.counts().retried == 1);
+    assert_eq!((rig.notes.as_slice(), rig.up()), (&[Note::Starting, Note::Joined, Note::LinkLost][..], false), "a failed try behind a loss says nothing");
+    rig.drive("the join again", |r| r.up());
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost, Note::Joined]);
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!((rig.medium.bus().fault(), rig.medium.counts().retried, rig.medium.counts().joined, rig.medium.counts().lost), (None, 1, 2, 1));
+    // The wording by the failure: the firmware's own scan found no network
+    // of the name, or the driver's scan did not see it; anything else the
+    // driver tries again after is a try that did not complete.
+    assert_eq!(Note::first_try(JoinFailure::Association { status: 3, assoc_status: 0, auth_status: 0 }), Note::NotFound);
+    assert_eq!(Note::first_try(JoinFailure::NotFound), Note::NotFound);
+    assert_eq!(Note::first_try(JoinFailure::Association { status: 1, assoc_status: 5, auth_status: 0 }), Note::FirstTryFailed);
+    assert_eq!(Note::first_try(JoinFailure::Lost { number: 12, reason: 2 }), Note::FirstTryFailed);
+    assert_eq!(Note::first_try(JoinFailure::Timeout), Note::FirstTryFailed);
+    assert_eq!(wifi_line(&Note::FirstTryFailed), "[wifi] join did not complete; retrying");
+}
+
+/// A network that does not broadcast its name is asked for by its name.
+/// Under the record the tool writes by default, the scan before the first
+/// join hears other networks alone, the scan that carries the stored name
+/// hears it offering WPA3, and the join is WPA3 at the first try: the
+/// exchange consumed to its last row, and no line but the two of a start.
+/// A scan that did not carry the name, or a join asked as WPA2, would not
+/// match its exchange.
+#[test]
+fn wifi_medium_hidden_network_offering_wpa3_is_joined_as_wpa3_at_the_first_try() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2_OR_WPA3, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let record = wifi_exchange_record(KIND_WPA2_OR_WPA3, RECONNECT_AUTOMATIC, BOOT_BACKGROUND);
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::HIDDEN_WPA3[..]], record, corner, 0);
+    rig.drive("the join", |r| r.up());
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined]);
+    assert_eq!((rig.medium.stage(), rig.medium.counts().joined, rig.medium.counts().retried), (Stage::Joining, 1, 0), "joined at the first try");
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!((rig.medium.bus().fault(), rig.up(), rig.medium.counts().retried), (None, true, 0));
+}
+
+/// A network that does not broadcast its name is found again after a lost
+/// link: the driver's own scan does not hear it, its scan that asks for
+/// the name does, and the join is entered again in the same cycle -- no
+/// failed try between the loss and the join, and no line but theirs.
+#[test]
+fn wifi_medium_hidden_network_is_found_again_after_a_lost_link() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::HIDDEN_LOST[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), corner, 0);
+    // In this exchange the loss follows the join with no wait between
+    // them, so one service call sees both: the counters tell them.
+    rig.drive("the join and the loss", |r| r.medium.counts().lost == 1);
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost]);
+    let waits = rig.drive("the join again", |r| r.up());
+    assert!(waits >= 100, "the driver's rest of a second, at its own cadence ({waits} waits)");
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost, Note::Joined]);
+    assert_eq!((rig.medium.stage(), rig.medium.counts().retried, rig.medium.counts().joined, rig.medium.counts().lost), (Stage::Joining, 0, 2, 1), "found in the first cycle: no failed try");
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!((rig.medium.bus().fault(), rig.up()), (None, true));
+}
+
+/// The second choice: under a record that accepts WPA2 or WPA3, a network
+/// that was joined with one kind and is found, after a lost link, offering
+/// only the other, is joined with the other kind -- in both directions,
+/// by a whole join, and with no line between the loss's and the join's.
+#[test]
+fn wifi_medium_network_found_offering_only_the_other_kind_is_joined_with_it() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2_OR_WPA3, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let record = wifi_exchange_record(KIND_WPA2_OR_WPA3, RECONNECT_AUTOMATIC, BOOT_BACKGROUND);
+    for (what, table) in [("joined as WPA2, found offering WPA3 alone", &x::OTHER_TO_WPA3[..]), ("joined as WPA3, found offering WPA2 alone", &x::OTHER_TO_WPA2[..])] {
+        let mut rig = wifi_rig(&[&x::OPENING[..], table], record, corner, 0);
+        rig.drive(what, |r| r.medium.counts().lost == 1);
+        assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost], "{what}");
+        rig.drive(what, |r| r.up());
+        assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost, Note::Joined], "{what}: no line between the loss's and the join's");
+        assert_eq!((rig.medium.stage(), rig.medium.counts().joined, rig.medium.counts().lost, rig.medium.counts().retried), (Stage::Joining, 2, 1, 0), "{what}");
+        rig.drive(what, |r| r.left() == 0);
+        assert_eq!((rig.medium.bus().fault(), rig.up()), (None, true), "{what}: a join asked as the first kind again would not match its exchange");
+    }
+}
+
+/// The three ends that are ends no more. Where the network found after a
+/// lost link offers no kind that the record can use -- neither kind; the
+/// other kind under a record that accepts one alone; WPA3 alone on a
+/// firmware that does not run the WPA3 exchange -- the other kind is not
+/// taken, the line is said once, and the medium asks the same join again:
+/// the driver looks for the network as it does for one it does not see,
+/// and joins it when it offers a kind the record can use.
+#[test]
+fn wifi_medium_network_that_offers_no_usable_kind_is_looked_for_and_joined_when_it_offers_one() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2_OR_WPA3, KIND_WPA3, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let line = "[wifi] stored network found, security type does not match; still looking";
+    let both = wifi_exchange_record(KIND_WPA2_OR_WPA3, RECONNECT_AUTOMATIC, BOOT_BACKGROUND);
+    let one = wifi_exchange_record(KIND_WPA3, RECONNECT_AUTOMATIC, BOOT_BACKGROUND);
+    // Two rounds of the looking, then a network that offers WPA2: the line
+    // once, the same join asked twice, and the join that the driver enters.
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::END_NEITHER[..]], both, corner, 0);
+    rig.drive("the first round's end", |r| r.medium.counts().retried == 1);
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost, Note::NoAcceptedKind]);
+    assert_eq!(rig.lines()[3], line);
+    assert_eq!((rig.medium.stage(), rig.up(), rig.medium.counts().failed), (Stage::Joining, false, [1, 3, 0, 0]), "the same join was asked again, and the firmware found no network it can join");
+    rig.drive("the second round's end", |r| r.medium.counts().retried == 2);
+    assert_eq!(rig.notes.len(), 4, "a later round says nothing");
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost, Note::NoAcceptedKind, Note::Joined]);
+    assert_eq!((rig.medium.bus().fault(), rig.up(), rig.medium.counts().joined, rig.medium.counts().lost, rig.medium.counts().retried), (None, true, 2, 1, 2));
+    // The two other ends, through one round each.
+    for (what, table, record) in [
+        ("a record that accepts WPA3 alone, the network offering WPA2 alone", &x::END_ONE_KIND[..], one),
+        ("WPA3 alone on a firmware without the exchange", &x::END_NO_EXCHANGE[..], both),
+    ] {
+        let mut rig = wifi_rig(&[&x::OPENING[..], table], record, corner, 0);
+        rig.drive(what, |r| r.left() == 0);
+        assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost, Note::NoAcceptedKind], "{what}");
+        assert_eq!(rig.lines()[3], line, "{what}");
+        assert_eq!((rig.medium.stage(), rig.up(), rig.medium.bus().fault(), rig.medium.wait_us()), (Stage::Joining, false, None, Some(10_000)), "{what}: the join is asked again, and the driver rests at its own cadence");
+        assert_eq!((rig.medium.counts().joined, rig.medium.counts().lost, rig.medium.counts().retried, rig.medium.counts().failed), (1, 1, 1, [1, 3, 0, 0]), "{what}");
+    }
+}
+
+/// The fourth end, which is an end no more either. A record that accepts
+/// WPA2 or WPA3 with a secret of five bytes -- a WPA3 password, and too
+/// short to be a WPA2 passphrase -- is joined as WPA3; after a lost link
+/// the network is found offering WPA2 alone, which the stored secret
+/// cannot join. The other kind is not asked; the line of a network that
+/// offers no usable kind is said, and the WPA3 join is asked again with
+/// the same secret.
+#[test]
+fn wifi_medium_other_kind_is_not_taken_with_a_secret_that_cannot_be_its_credential() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2_OR_WPA3, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let line = "[wifi] stored network found, security type does not match; still looking";
+    assert!(lamella_wifi_cyw4343x::SaePassword::new(&x::SECRET_SHORT).is_some() && lamella_wifi_cyw4343x::Passphrase::new(&x::SECRET_SHORT).is_none(), "the short secret is a WPA3 password and no WPA2 passphrase");
+    let slot: &'static [u8] = Box::leak(wifi_slot(KIND_WPA2_OR_WPA3, &x::NAME, &x::SECRET_SHORT, 7, RECONNECT_AUTOMATIC, BOOT_BACKGROUND).into_boxed_slice());
+    let erased: &'static [u8] = Box::leak(vec![0xFFu8; crate::wifi_stored::UNIT].into_boxed_slice());
+    let stored = crate::wifi_stored::current(slot, erased);
+    assert!(stored.is_ok(), "a secret that fits one of the record's two kinds is no fault of the slot");
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::END_NO_PASSPHRASE[..]], stored, corner, 0);
+    rig.drive("the lost link", |r| r.medium.counts().lost == 1);
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost], "joined as WPA3 with the short secret, then lost");
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::LinkLost, Note::NoAcceptedKind], "the other kind is not tried: the secret cannot be its credential");
+    assert_eq!(rig.lines()[3], line);
+    assert_eq!((rig.medium.stage(), rig.up(), rig.medium.bus().fault(), rig.medium.wait_us()), (Stage::Joining, false, None, Some(10_000)), "the WPA3 join is asked again with the same secret, and the driver rests at its own cadence");
+    assert_eq!((rig.medium.counts().joined, rig.medium.counts().lost, rig.medium.counts().retried), (1, 1, 1));
+}
+
+/// A record that reads the older setting, join before the program starts,
+/// starts as one that reads the default: the same rows asked for by the
+/// same polls at the same instants, nothing held, and the same line.
+#[test]
+fn wifi_medium_older_boot_setting_starts_as_the_default() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, BOOT_BEFORE_PROGRAM, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let stored = wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BEFORE_PROGRAM).expect("a slot that reads the older setting is valid");
+    assert_eq!(stored.boot, 1);
+    let run = |boot: u8| {
+        let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, boot), corner, 0);
+        assert_eq!((rig.medium.stage(), rig.medium.wait_us()), (Stage::Corner, Some(0)), "the medium starts at its first service call");
+        rig.drive("the join", |r| r.up());
+        (rig.left(), rig.medium.counts().polls, rig.clock.get(), rig.notes.clone(), rig.lines())
+    };
+    let (default, older) = (run(BOOT_BACKGROUND), run(BOOT_BEFORE_PROGRAM));
+    assert_eq!((default.0, default.1, default.2), (older.0, older.1, older.2), "the same rows, the same polls, the same instants");
+    assert_eq!(default.3, [Note::Starting, Note::Joined]);
+    assert_eq!(older.3, [Note::StartingOlderSetting, Note::Joined]);
+    assert_eq!(older.4[0], "[wifi] starting; joining the stored network");
+    assert_eq!(default.4[0], "[wifi] starting; joining the stored network");
+}
+
+/// A secret that the network refuses is tried again behind a rest that
+/// doubles, with one line at each refusal that says when the next try
+/// comes; nothing stops. Three handshakes time out in a row -- 5 s, 10 s
+/// and 20 s -- and the fourth join completes; behind a lost link the
+/// handshake times out again, and the rest is 5 s again.
+#[test]
+fn wifi_medium_refused_passphrase_is_tried_again_after_a_rest_that_doubles() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2_REFUSED[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), corner, 0);
+    let mut began = Vec::new();
+    for (round, again_s) in [5u32, 10, 20].into_iter().enumerate() {
+        rig.drive("a refusal", |r| r.medium.counts().retried == round as u32 + 1);
+        began.push(rig.clock.get());
+        assert_eq!(rig.notes.last(), Some(&Note::SecretRefused { again_s }), "the refusal {}", round + 1);
+        assert_eq!(rig.notes.len(), round + 2, "one line at each refusal, and no other");
+        assert_eq!((rig.medium.stage(), rig.up(), rig.medium.counts().failed), (Stage::Joining, false, [2, 15, 0, 0]), "the driver keeps the network");
+    }
+    assert_eq!(rig.lines()[1], "[wifi] passphrase not accepted; retrying in 5 s");
+    assert_eq!(rig.lines()[3], "[wifi] passphrase not accepted; retrying in 20 s");
+    assert!(began[1] - began[0] >= 5_000_000 && began[2] - began[1] >= 10_000_000, "each try comes behind its rest");
+    // In this exchange the loss follows the join with no wait between
+    // them, so one service call sees both: the counters tell them.
+    rig.drive("the join and the loss behind it", |r| r.medium.counts().lost == 1);
+    assert!(rig.clock.get() - began[2] >= 20_000_000);
+    assert_eq!((rig.notes[4], rig.notes[5], rig.medium.counts().joined), (Note::Joined, Note::LinkLost, 1));
+    rig.drive("the refusal behind the lost link", |r| r.medium.counts().retried == 4);
+    assert_eq!(
+        rig.notes,
+        [Note::Starting, Note::SecretRefused { again_s: 5 }, Note::SecretRefused { again_s: 10 }, Note::SecretRefused { again_s: 20 }, Note::Joined, Note::LinkLost, Note::SecretRefused { again_s: 5 }],
+        "the join put the rest back"
+    );
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!((rig.medium.bus().fault(), rig.up(), rig.medium.stage()), (None, true, Stage::Joining));
+    assert_eq!((rig.medium.counts().joined, rig.medium.counts().lost, rig.medium.counts().retried), (2, 1, 4));
+    assert_eq!(rig.notes.last(), Some(&Note::Joined));
+}
+
+/// A WPA3 join that fails at its authentication is rested as a refused
+/// secret is, under a line of its own that does not call it a refusal: no
+/// sign of the driver tells a password that does not match from another
+/// failed authentication. A failed attempt of another kind between two of
+/// them says nothing and does not move the rests. The counters keep the
+/// last failed attempt as four words for a row's witness.
+#[test]
+fn wifi_medium_failed_authentication_of_a_wpa3_join_says_a_line_of_its_own() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{failed_words, Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA3, RECONNECT_AUTOMATIC};
+    use lamella_wifi_cyw4343x::JoinFailure;
+    let corner = wifi_exchange_corner();
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA3_REFUSED[..]], wifi_exchange_record(KIND_WPA3, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), corner, 0);
+    rig.drive("the first failed authentication", |r| r.medium.counts().retried == 1);
+    assert_eq!(rig.notes, [Note::Starting, Note::AuthenticationFailed { again_s: 5 }]);
+    assert_eq!(rig.lines()[1], "[wifi] authentication failed; retrying in 5 s");
+    assert_eq!((rig.medium.stage(), rig.up(), rig.medium.counts().failed), (Stage::Joining, false, [1, 1, 0, 1]), "an association failure: its status, no association status, the authentication's status");
+    rig.drive("the association that is not acknowledged", |r| r.medium.counts().retried == 2);
+    assert_eq!(rig.notes.len(), 2, "a failed attempt that is no failed authentication says nothing behind the first line");
+    assert_eq!(rig.medium.counts().failed, [1, 1, 5, 0], "the last failed attempt, not the first");
+    rig.drive("the second failed authentication", |r| r.medium.counts().retried == 3);
+    assert_eq!(rig.notes, [Note::Starting, Note::AuthenticationFailed { again_s: 5 }, Note::AuthenticationFailed { again_s: 10 }], "the second in the row");
+    assert_eq!(rig.medium.counts().failed, [1, 1, 0, 1]);
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!(rig.notes.last(), Some(&Note::Joined));
+    assert_eq!((rig.medium.bus().fault(), rig.up(), rig.medium.counts().joined, rig.medium.counts().retried), (None, true, 1, 3));
+    // The four words by the failure's class.
+    assert_eq!(failed_words(JoinFailure::Association { status: 3, assoc_status: 0, auth_status: 0 }), [1, 3, 0, 0]);
+    assert_eq!(failed_words(JoinFailure::Supplicant { reason: 15 }), [2, 15, 0, 0]);
+    assert_eq!(failed_words(JoinFailure::Lost { number: 6, reason: 2 }), [3, 6, 2, 0]);
+    assert_eq!(failed_words(JoinFailure::Timeout), [4, 0, 0, 0]);
+    assert_eq!(failed_words(JoinFailure::NotFound), [5, 0, 0, 0]);
+    assert_eq!(failed_words(JoinFailure::Mismatch { advertised: lamella_wifi_cyw4343x::Advertised::default() }), [6, 0, 0, 0]);
+}
+
+/// A network that is not seen between two refusals keeps its own rest and
+/// says nothing, and the second refusal's rest is the second in the row.
+#[test]
+fn wifi_medium_network_not_seen_between_two_refusals_keeps_its_rest_and_says_nothing() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2_REFUSED_UNSEEN[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), corner, 0);
+    rig.drive("the first refusal", |r| r.medium.counts().retried == 1);
+    let refused_at = rig.clock.get();
+    assert_eq!(rig.notes, [Note::Starting, Note::SecretRefused { again_s: 5 }]);
+    rig.drive("the network not seen", |r| r.medium.counts().retried == 2);
+    let unseen_at = rig.clock.get();
+    assert_eq!(rig.notes.len(), 2, "a network not seen behind a refusal says nothing");
+    assert_eq!((rig.medium.stage(), rig.up(), rig.medium.counts().failed), (Stage::Joining, false, [5, 0, 0, 0]));
+    rig.drive("the second refusal", |r| r.medium.counts().retried == 3);
+    let again_at = rig.clock.get();
+    assert_eq!(rig.notes, [Note::Starting, Note::SecretRefused { again_s: 5 }, Note::SecretRefused { again_s: 10 }], "the count stood across the network not seen");
+    assert!(unseen_at - refused_at >= 5_000_000 && again_at - unseen_at >= 5_000_000 && again_at - unseen_at < 10_000_000, "the network not seen rested its own five seconds");
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!(rig.notes.last(), Some(&Note::Joined));
+    assert_eq!((rig.medium.bus().fault(), rig.up(), rig.medium.counts().joined, rig.medium.counts().retried), (None, true, 1, 3));
+}
+
+/// The row's seed spreads the rests: under a seed the driver's rests are
+/// longer by under a fifth, the line says each rounded up to a second, and
+/// the next try comes at the first pass behind the spread rest.
+#[test]
+fn wifi_medium_seed_spreads_the_rests_and_the_line_says_them_rounded_up() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2_REFUSED_SPREAD[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), corner, 0);
+    // The row gives the seed at the service call in which the radio
+    // starts, behind the attach request.
+    rig.drive("the radio's start", |r| r.medium.stage() == Stage::Attaching);
+    rig.medium.seed(0x9E37_79B9);
+    rig.drive("the first refusal", |r| r.medium.counts().retried == 1);
+    let first = rig.clock.get();
+    rig.drive("the second refusal", |r| r.medium.counts().retried == 2);
+    let second = rig.clock.get();
+    assert_eq!(rig.notes, [Note::Starting, Note::SecretRefused { again_s: 6 }, Note::SecretRefused { again_s: 12 }], "rests of 5316593 and 11751413 microseconds, each said rounded up");
+    assert_eq!(second - first, 5_320_000, "the next try came at the first pass behind the first rest");
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!(rig.notes.last(), Some(&Note::Joined));
+    assert_eq!((rig.medium.bus().fault(), rig.up(), rig.medium.counts().joined), (None, true, 1));
+}
+
+/// A stored secret whose length the join's kind does not take ends the
+/// trying before any join is asked, with a line of its own: the radio
+/// stays up with no network, the link down. Five bytes under a record
+/// that accepts WPA2 alone can be no passphrase.
+#[test]
+fn wifi_medium_secret_outside_its_kinds_bounds_ends_the_trying_with_a_line_of_its_own() {
+    use crate::board::net_medium::Medium;
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Note, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let short: &'static [u8] = Box::leak(wifi_slot(KIND_WPA2, &x::NAME, b"short", 7, RECONNECT_AUTOMATIC, BOOT_BACKGROUND).into_boxed_slice());
+    let erased: &'static [u8] = Box::leak(vec![0xFFu8; crate::wifi_stored::UNIT].into_boxed_slice());
+    let stored = crate::wifi_stored::current(short, erased);
+    assert!(stored.is_ok(), "a secret that does not fit its kind is no fault of the slot");
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::UP_ALONE[..]], stored, corner, 0);
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!(rig.notes, [Note::Starting, Note::SecretUnusable]);
+    assert_eq!(rig.lines()[1], "[wifi] stopped: stored passphrase has an invalid length");
+    assert_eq!((rig.medium.stage(), rig.up(), rig.medium.bus().fault(), rig.medium.hardware_address(), rig.medium.wait_us()), (Stage::Stopped, false, None, Some(x::STATION), Some(10_000)));
+    assert_eq!((rig.medium.counts().retried, rig.medium.counts().failed), (0, [0; 4]), "no join was asked");
+}
+
+/// The service call stays inside its budget: on a clock that moves at
+/// every reading, no call makes more polls than its 4 ms hold, the upload
+/// spends a whole budget at least once and goes on at the next call; and
+/// on the exact clock the driver is never polled before the instant it
+/// named.
+#[test]
+fn wifi_medium_service_stays_inside_its_budget() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Stage, BUDGET_US};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let record = wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND);
+    // Half a millisecond at every reading: a poll reads the clock twice
+    // (the driver once, the medium once), so four polls spend the budget.
+    let step = 500;
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2[..]], record, corner, step);
+    let (mut calls, mut spent, mut most) = (0u32, 0u32, 0u32);
+    for _ in 0..100_000 {
+        if !matches!(rig.medium.stage(), Stage::Corner | Stage::Checking | Stage::Attaching | Stage::Uploading | Stage::Opening) {
+            break;
+        }
+        let (polls, began) = (rig.medium.counts().polls, rig.clock.get());
+        rig.service();
+        let (made, took) = (rig.medium.counts().polls - polls, rig.clock.get() - began);
+        assert!(made <= 4, "a service call of {made} polls");
+        assert!(took <= BUDGET_US + 2 * step + 1_000, "a service call of {took} us on the medium's clock");
+        calls += 1;
+        most = most.max(made);
+        let wait = rig.medium.wait_us().expect("a medium on its ladder has a deadline");
+        if made == 4 && wait == 0 {
+            spent += 1;
+        }
+        rig.clock.set(rig.clock.get() + wait);
+    }
+    assert_eq!(rig.medium.bus().fault(), None);
+    assert!(matches!(rig.medium.stage(), Stage::RadioUp | Stage::Joining), "the opening ended: {:?}", rig.medium.stage());
+    assert!(spent >= 1 && most == 4, "the upload spends a whole budget ({spent} calls of {calls} did; the most polls in one {most})");
+    assert!(u64::from(rig.medium.counts().service_max_us) <= BUDGET_US + 2 * step + 1_000);
+    // On the exact clock: every wait of the ladder is the driver's own
+    // instant, and a service call before it polls nothing.
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2[..]], record, corner, 0);
+    let waits = rig.drive("the join", |r| r.up());
+    assert_eq!(waits, 18, "the ladder's waits to the join, each checked");
+}
+
+/// The hold keeps one frame and counts a drop: by itself, and through the
+/// medium -- while a frame of the stack's stays staged the stack cannot
+/// take the held frame, the medium polls on to get the staged frame
+/// written, and a second frame that arrives meanwhile is dropped and
+/// counted; once the chip took the staged frame the medium waits for the
+/// stack to take the held one.
+#[test]
+fn wifi_medium_hold_keeps_one_frame_and_counts_a_drop() {
+    use crate::board::net_medium::RxSide;
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{Hold, HOLD};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let mut hold = Hold::new();
+    assert!(hold.peek().is_none() && !hold.is_full());
+    assert!(hold.offer(&[1; 60]));
+    assert!(!hold.offer(&[2; 60]), "a second frame finds the hold full");
+    assert_eq!((hold.dropped(), hold.peek().map(|frame| frame.to_vec())), (1, Some(vec![1u8; 60])));
+    hold.consume();
+    assert!(hold.peek().is_none());
+    assert!(hold.offer(&[3; 1514]), "the frame unit");
+    hold.consume();
+    assert!(hold.offer(&[4; HOLD]));
+    hold.consume();
+    assert!(!hold.offer(&[5; HOLD + 1]) && !hold.offer(&[]) && hold.peek().is_none());
+    assert_eq!(hold.dropped(), 3);
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2_HELD[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), wifi_exchange_corner(), 0);
+    rig.drive("the join", |r| r.up());
+    // The stack's frame, which the chip does not take at its commit.
+    assert!(rig.send(&x::ARP_REPLY_OUT));
+    assert!(!rig.room(), "the frame stays staged");
+    rig.drive("the first frame", |r| r.held().is_some());
+    assert_eq!(rig.held(), Some(x::ARP_REQUEST_IN.to_vec()));
+    assert!(!rig.room());
+    rig.drive("the drop", |r| r.medium.counts().dropped != 0);
+    assert_eq!((rig.medium.counts().dropped, rig.held()), (1, Some(x::ARP_REQUEST_IN.to_vec())), "the held frame is the first");
+    rig.drive("the staged frame's write", |r| r.left() == 0);
+    assert!(rig.room(), "the chip took the staged frame");
+    let polls = rig.medium.counts().polls;
+    rig.service();
+    rig.service();
+    assert_eq!((rig.medium.counts().polls, rig.medium.bus().fault()), (polls, None), "the stack takes the held frame first");
+    rig.take();
+    assert_eq!(rig.held(), None);
+}
+
+/// The program's end leaves the network and lowers the power line: joined,
+/// the end asks the disassociation, its request and its reply are
+/// consumed, and the row's closure is called once, behind the reply and
+/// inside the bound. From there the medium is down -- the link down, no
+/// room to send, nothing asked of the transport by any later service call
+/// -- and the console's line says so. A second end does nothing.
+#[test]
+fn wifi_medium_program_end_leaves_the_network_and_lowers_the_power_line() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{End, Note, Stage, END_BOUND_US};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2_LEFT[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), wifi_exchange_corner(), 0);
+    rig.drive("the join", |r| r.up());
+    assert!(rig.room(), "joined, with room to send");
+    assert!(rig.left() > 0, "the disassociation's rows are not asked for before the end");
+    let (began, clock) = (rig.clock.get(), rig.clock);
+    let mut lowered = Vec::new();
+    let end = rig.medium.end(|bus| lowered.push((bus.remaining(), clock.get())));
+    assert_eq!(lowered.len(), 1, "the power line is lowered once");
+    let (left, at) = lowered[0];
+    assert_eq!(left, 0, "the line is lowered behind the disassociation's request and its reply");
+    assert!(at - began < END_BOUND_US, "the line is lowered inside the bound ({} us after the end began)", at - began);
+    assert_eq!((rig.left(), rig.medium.bus().fault()), (0, None));
+    assert_eq!(end, Some(End::Answered));
+    assert_eq!((rig.medium.stage(), rig.up(), rig.room(), rig.medium.wait_us()), (Stage::Down, false, false, None));
+    assert!(!rig.send(&x::ARP_REPLY_OUT), "no slot for the stack once the medium is down");
+    let polls = rig.medium.counts().polls;
+    rig.idle(50);
+    assert_eq!((rig.medium.counts().polls, rig.left(), rig.medium.bus().fault(), rig.medium.stage()), (polls, 0, None, Stage::Down), "later service calls ask nothing of the transport");
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::Ended]);
+    assert_eq!(rig.lines()[2], "[wifi] program ended; radio off");
+    let mut again = 0;
+    assert_eq!(rig.medium.end(|_| again += 1), None, "a second end finds the medium down");
+    rig.idle(1);
+    assert_eq!((again, rig.notes.len()), (0, 3), "and lowers nothing and says nothing");
+}
+
+/// The program's end lowers the power line at its bound when the
+/// disconnect is not answered: the request is written, no reply comes, and
+/// the row's closure is called once, not before the bound of 250 ms and no
+/// later than one of the driver's cadences behind it. The medium is down
+/// all the same and says its line.
+#[test]
+fn wifi_medium_program_end_lowers_the_power_line_at_its_bound_when_the_disconnect_is_not_answered() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{End, Note, Stage, END_BOUND_US};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    assert_eq!(END_BOUND_US, 250_000, "25 of the driver's service cadences of 10 ms");
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2_LEFT_UNANSWERED[..]], wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND), wifi_exchange_corner(), 0);
+    rig.drive("the join", |r| r.up());
+    let (began, clock, before) = (rig.clock.get(), rig.clock, rig.left());
+    let mut lowered = Vec::new();
+    let end = rig.medium.end(|bus| lowered.push((bus.remaining(), clock.get())));
+    assert_eq!(end, Some(End::Unanswered));
+    assert_eq!(lowered.len(), 1, "the power line is lowered once, whatever the disconnect answered");
+    let (left, at) = lowered[0];
+    assert!(left < before && rig.medium.bus().fault().is_none(), "the disassociation's request was written and the driver waited for its reply ({left} rows left of {before})");
+    assert!(at - began >= END_BOUND_US && at - began <= END_BOUND_US + 10_000, "the line is lowered at the bound, no later than one cadence behind it ({} us after the end began)", at - began);
+    assert!(left > 0 && rig.left() == left, "the empty passes beyond the bound are never asked for");
+    assert_eq!((rig.medium.stage(), rig.up(), rig.room(), rig.medium.wait_us()), (Stage::Down, false, false, None));
+    let polls = rig.medium.counts().polls;
+    rig.idle(50);
+    assert_eq!((rig.medium.counts().polls, rig.left(), rig.medium.bus().fault(), rig.medium.stage()), (polls, left, None, Stage::Down), "later service calls ask nothing of the transport");
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined, Note::Ended]);
+    assert_eq!(rig.lines()[2], "[wifi] program ended; radio off");
+}
+
+/// The program's end asks no disconnect where no network is held. A medium
+/// that stopped trying, and a parked one, are lowered at once with nothing
+/// asked of the transport. One whose radio was never powered -- no record,
+/// or an end during the corner's check -- lowers nothing, says no line and
+/// powers nothing afterwards. And a medium that the row cut asks nothing of
+/// the transport at its next service call, nor does an end behind the cut.
+#[test]
+fn wifi_medium_program_end_asks_no_disconnect_where_no_network_is_held() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{End, Note, Stage};
+    use crate::wifi_stored::{Absent, BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    assert_eq!((End::Answered as u32, End::Unanswered as u32, End::NotAsked as u32, End::Cut as u32, Stage::Down as u32), (1, 2, 3, 4, 12), "the words a row's witness reads");
+    let corner = wifi_exchange_corner();
+    let record = wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND);
+    // Stopped: the stored secret cannot be the passphrase of its kind, the
+    // radio is up and holds no network.
+    let short: &'static [u8] = Box::leak(wifi_slot(KIND_WPA2, &x::NAME, b"short", 7, RECONNECT_AUTOMATIC, BOOT_BACKGROUND).into_boxed_slice());
+    let erased: &'static [u8] = Box::leak(vec![0xFFu8; crate::wifi_stored::UNIT].into_boxed_slice());
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::UP_ALONE[..]], crate::wifi_stored::current(short, erased), corner, 0);
+    rig.drive("the exchange's end", |r| r.left() == 0);
+    assert_eq!(rig.medium.stage(), Stage::Stopped);
+    let (began, clock) = (rig.clock.get(), rig.clock);
+    let mut lowered = Vec::new();
+    assert_eq!(rig.medium.end(|bus| lowered.push((bus.remaining(), clock.get()))), Some(End::NotAsked));
+    assert_eq!(lowered, [(0usize, began)], "stopped: the line is lowered once and at once");
+    rig.idle(50);
+    assert_eq!((rig.medium.stage(), rig.up(), rig.medium.bus().fault(), rig.medium.wait_us()), (Stage::Down, false, None, None));
+    assert_eq!(rig.notes, [Note::Starting, Note::SecretUnusable, Note::Ended]);
+    // Parked: the driver refused at the firmware's version reply.
+    let mut opening = x::OPENING.to_vec();
+    let mut edits = 0;
+    for op in opening.iter_mut() {
+        if let WifiScript::F2Read { data } = *op {
+            if let Some(at) = data.windows(15).position(|w| w == b"version 7.95.49") {
+                let mut doctored = data.to_vec();
+                doctored[at + 14] = b'8';
+                *op = WifiScript::F2Read { data: Box::leak(doctored.into_boxed_slice()) };
+                edits += 1;
+            }
+        }
+    }
+    assert_eq!(edits, 1, "the version reply is one row of the opening");
+    let mut rig = wifi_rig(&[&opening[..], &x::WPA2[..]], record, corner, 0);
+    for _ in 0..200_000 {
+        rig.service();
+        match rig.medium.wait_us() {
+            Some(wait) => rig.clock.set(rig.clock.get() + wait),
+            None => break,
+        }
+    }
+    assert_eq!(rig.medium.stage(), Stage::Parked);
+    let (began, clock, rows, polls) = (rig.clock.get(), rig.clock, rig.left(), rig.medium.counts().polls);
+    let mut lowered = Vec::new();
+    assert_eq!(rig.medium.end(|bus| lowered.push((bus.remaining(), clock.get()))), Some(End::NotAsked));
+    assert_eq!(lowered, [(rows, began)], "parked: the line is lowered once and at once, with nothing asked of the transport");
+    rig.idle(50);
+    assert_eq!((rig.medium.stage(), rig.left(), rig.medium.counts().polls, rig.medium.bus().fault()), (Stage::Down, rows, polls, None));
+    assert!(matches!(rig.notes[..], [Note::Starting, Note::Refused(_), Note::Ended]), "the notes {:?}", rig.notes);
+    // Never powered: no network is stored.
+    let erased: &'static [u8] = Box::leak(vec![0xFFu8; crate::wifi_stored::UNIT].into_boxed_slice());
+    let nothing = crate::wifi_stored::current(erased, erased);
+    assert_eq!(nothing, Err(Absent::Nothing));
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2[..]], nothing, corner, 0);
+    rig.idle(3);
+    assert_eq!(rig.medium.stage(), Stage::Off);
+    let mut calls = 0;
+    assert_eq!(rig.medium.end(|_| calls += 1), Some(End::NotAsked));
+    rig.idle(200);
+    assert_eq!((calls, rig.medium.stage(), rig.left(), rig.medium.counts().polls, rig.medium.bus().fault()), (0, Stage::Down, rig.rows, 0, None), "no record: nothing is lowered and nothing reaches the transport");
+    assert_eq!(rig.notes, [Note::NothingStored], "and no line is said for the end");
+    // Never powered: the end comes while the corner is checked.
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2[..]], record, corner, 0);
+    rig.service();
+    rig.service();
+    assert_eq!(rig.medium.stage(), Stage::Checking);
+    let mut calls = 0;
+    assert_eq!(rig.medium.end(|_| calls += 1), Some(End::NotAsked));
+    rig.idle(200);
+    assert_eq!((calls, rig.medium.stage(), rig.left(), rig.medium.counts().polls, rig.medium.bus().fault()), (0, Stage::Down, rig.rows, 0, None), "an end during the check: nothing is lowered, and the check does not go on to power the radio");
+    assert!(rig.notes.is_empty(), "and no line is said: {:?}", rig.notes);
+    // Cut: joined, the row lowers the power by itself and tells the medium.
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2_LEFT[..]], record, corner, 0);
+    rig.drive("the join", |r| r.up());
+    let (rows, polls) = (rig.left(), rig.medium.counts().polls);
+    assert!(rows > 0 && rig.room());
+    rig.medium.cut();
+    assert_eq!((rig.medium.stage(), rig.up(), rig.room(), rig.medium.wait_us()), (Stage::Down, false, false, None));
+    assert!(!rig.send(&x::ARP_REPLY_OUT), "no slot for the stack once the medium is cut");
+    rig.idle(50);
+    let mut calls = 0;
+    assert_eq!(rig.medium.end(|_| calls += 1), None, "an end behind the cut finds the medium down");
+    rig.idle(1);
+    assert_eq!((calls, rig.left(), rig.medium.counts().polls, rig.medium.bus().fault()), (0, rows, polls, None), "cut: nothing is asked of the transport, by a service call or by an end");
+    assert_eq!(rig.notes, [Note::Starting, Note::Joined], "and no line is said by the medium");
+}
+
+/// The chip's interrupt line polls the driver before its instant behind a
+/// wait that named the line, and behind no other. Joined and waiting, with
+/// a frame in the chip: a service call before the instant polls nothing by
+/// itself, and with the line read high the frame is in the hold at that
+/// call. A line read low asks nothing. A line read high with nothing to
+/// read costs one poll, and behind that poll the row does not arm the line
+/// again before the driver's instant, so a line that stays high cannot
+/// keep the thread awake. Along a whole ladder the line is neither read
+/// nor armed at a wait at an instant alone, and no such wait is cut short;
+/// at every other wait the row arms the line. Where the driver is not
+/// polled -- during the corner's check, behind a cut, behind the program's
+/// end -- the line is neither read nor armed. And the service calls'
+/// summed time holds every poll's.
+#[test]
+fn wifi_medium_interrupt_polls_before_the_instant_of_an_interrupt_wake_alone() {
+    use crate::wifi_exchange as x;
+    use crate::wifi_medium::{End, Stage};
+    use crate::wifi_stored::{BOOT_BACKGROUND, KIND_WPA2, RECONNECT_AUTOMATIC};
+    let corner = wifi_exchange_corner();
+    let record = wifi_exchange_record(KIND_WPA2, RECONNECT_AUTOMATIC, BOOT_BACKGROUND);
+    // The exchange, of today's rows: the WPA2 join, an empty pass, the ARP
+    // request's arrival, three empty passes.
+    let wpa2 = &x::WPA2[..];
+    let read = wpa2
+        .iter()
+        .position(|op| matches!(op, WifiScript::F2Read { data } if data.windows(x::ARP_REQUEST_IN.len()).any(|w| w == &x::ARP_REQUEST_IN[..])))
+        .expect("the request's read is a row of the exchange");
+    let (join, arrival, empty) = (&wpa2[..read - 4], &wpa2[read - 4..=read], &wpa2[wpa2.len() - 2..]);
+    assert!(matches!(arrival[0], WifiScript::TakeInterrupt { value: 0x0020 }), "the arrival begins at the chip's word that a frame is there");
+    assert!(matches!(empty, [WifiScript::TakeInterrupt { value: 0x0000 }, WifiScript::F2Available { len: None }]), "an empty pass is the chip's word that none is");
+    let mut rig = wifi_rig(&[&x::OPENING[..], join, empty, arrival, empty, empty, empty], record, corner, 0);
+    let (mut reads, mut arms) = (0u32, 0u32);
+    // During the corner's check the line is not read and not armed.
+    rig.service();
+    assert_eq!(rig.medium.stage(), Stage::Checking);
+    assert_eq!((rig.medium.sample(|_| { reads += 1; true }), rig.medium.arm(|_| arms += 1), reads, arms), (None, false, 0, 0), "the radio is not powered yet");
+    rig.drive("the join", |r| r.up());
+    rig.drive("the wait in front of the arrival", |r| r.left() == arrival.len() + 3 * empty.len());
+    assert_eq!((rig.medium.wait_us(), rig.held()), (Some(10_000), None), "joined and waiting for the driver's instant, the frame in the chip");
+    // By itself a service call before the instant polls nothing.
+    let (polls, rows, at) = (rig.medium.counts().polls, rig.left(), rig.clock.get());
+    rig.service();
+    assert_eq!((rig.medium.counts().polls, rig.left(), rig.held()), (polls, rows, None), "no poll before the instant without the line");
+    assert!(rig.medium.arm(|_| arms += 1) && arms == 1, "the driver's last answer named the line: the row arms it across the wait");
+    // With the line read high the frame is in the hold at that call.
+    assert_eq!(rig.medium.sample(|_| { reads += 1; true }), Some(true));
+    rig.service();
+    assert_eq!((rig.held(), rig.left(), reads), (Some(x::ARP_REQUEST_IN.to_vec()), rows - arrival.len(), 1), "the frame is read at the call that found the line high");
+    assert!(rig.clock.get() - at < 10_000, "and before the instant, {} us behind the wait's begin", rig.clock.get() - at);
+    assert_eq!((rig.medium.wait_us(), rig.medium.sample(|_| { reads += 1; true }), rig.medium.arm(|_| arms += 1), reads, arms), (Some(0), None, false, 1, 1), "the stack takes the frame first: no wait, and the line neither read nor armed");
+    // The stack takes the frame; the next call finds nothing more, and the
+    // driver waits on the line again.
+    rig.take();
+    rig.service();
+    let (polls, rows) = (rig.medium.counts().polls, rig.left());
+    assert_eq!((rows, rig.medium.wait_us()), (2 * empty.len(), Some(10_000)));
+    // A line read low asks nothing.
+    assert_eq!(rig.medium.sample(|_| false), Some(false));
+    rig.service();
+    assert_eq!((rig.medium.counts().polls, rig.left()), (polls, rows), "a low line polls nothing before the instant");
+    // A line read high with nothing to read: one poll, the driver's
+    // instant stands, and the line is not armed behind it -- nor does it
+    // ask for a second poll before the instant.
+    assert!(rig.medium.arm(|_| arms += 1) && arms == 2);
+    assert_eq!(rig.medium.sample(|_| true), Some(true));
+    rig.service();
+    assert_eq!((rig.medium.counts().polls, rig.left(), rig.medium.wait_us()), (polls + 1, rows - empty.len(), Some(10_000)), "one poll for the line, which read nothing; the driver's instant stands");
+    assert_eq!((rig.medium.arm(|_| arms += 1), arms), (false, 2), "behind a poll that the line asked for and that read nothing, the line is not armed");
+    assert_eq!((rig.medium.sample(|_| { reads += 1; true }), reads), (None, 1), "nor read again before the instant");
+    rig.service();
+    assert_eq!((rig.medium.counts().polls, rig.left()), (polls + 1, rows - empty.len()), "so a line that stays high gets no second poll before the instant");
+    // At the instant the driver is polled as ever, and the line is armed
+    // again.
+    rig.clock.set(rig.clock.get() + 10_000);
+    rig.service();
+    assert_eq!((rig.medium.counts().polls, rig.left(), rig.medium.bus().fault()), (polls + 2, 0, None));
+    assert!(rig.medium.arm(|_| arms += 1) && arms == 3, "behind the poll at the instant the line is armed again");
+    // Behind a cut the line is neither read nor armed.
+    rig.medium.cut();
+    assert_eq!((rig.medium.sample(|_| { reads += 1; true }), rig.medium.arm(|_| arms += 1), reads, arms), (None, false, 1, 3), "cut: the driver is not polled, whatever its last answer was");
+    // Nor behind the program's end.
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2_LEFT[..]], record, corner, 0);
+    rig.drive("the join", |r| r.up());
+    rig.drive("the wait behind the join", |r| r.medium.wait_us() != Some(0));
+    assert!(rig.medium.arm(|_| arms += 1) && arms == 4, "joined and waiting on the line");
+    assert_eq!(rig.medium.end(|_| {}), Some(End::Answered));
+    assert_eq!((rig.medium.sample(|_| { reads += 1; true }), rig.medium.arm(|_| arms += 1), reads, arms), (None, false, 1, 4), "ended: the line is neither read nor armed");
+    // Along the whole ladder: at a wait the driver named the line and an
+    // instant, or an instant alone. The row arms the line at the first
+    // kind alone, and a high line cuts no wait of the second kind short.
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2[..]], record, corner, 0);
+    let (mut named, mut alone) = (0u32, 0u32);
+    for _ in 0..200_000 {
+        if rig.up() {
+            break;
+        }
+        rig.service();
+        let wait = rig.medium.wait_us().expect("a medium on its ladder has a deadline");
+        if wait == 0 {
+            continue;
+        }
+        if rig.medium.arm(|_| {}) {
+            named += 1;
+        } else {
+            alone += 1;
+            let polls = rig.medium.counts().polls;
+            assert_eq!(rig.medium.sample(|_| true), None, "a wait at an instant alone: the line is not read");
+            rig.service();
+            assert_eq!((rig.medium.counts().polls, rig.medium.wait_us()), (polls, Some(wait)), "a wait at an instant alone, cut short");
+        }
+        rig.clock.set(rig.clock.get() + wait);
+    }
+    assert_eq!((rig.up(), rig.medium.bus().fault()), (true, None));
+    assert!(named > 0 && alone > 0, "the ladder waits both ways: {named} waits on the line, {alone} at an instant alone");
+    // The summed time: on a clock that moves at every reading a poll costs
+    // two readings at least, the driver's and the medium's.
+    let step = 500;
+    let mut rig = wifi_rig(&[&x::OPENING[..], &x::WPA2[..]], record, corner, step);
+    for _ in 0..100_000 {
+        if !matches!(rig.medium.stage(), Stage::Corner | Stage::Checking | Stage::Attaching | Stage::Uploading | Stage::Opening) {
+            break;
+        }
+        rig.service();
+        let wait = rig.medium.wait_us().expect("a medium on its ladder has a deadline");
+        rig.clock.set(rig.clock.get() + wait);
+    }
+    let counts = rig.medium.counts();
+    assert_eq!(rig.medium.bus().fault(), None);
+    assert!(counts.polls > 0 && u64::from(counts.service_us) >= 2 * step * u64::from(counts.polls), "{} us summed over {} polls", counts.service_us, counts.polls);
+    assert!(counts.service_us >= counts.service_max_us && u64::from(counts.service_us) <= rig.clock.get(), "{} us summed, the longest call {} us, the clock at {} us", counts.service_us, counts.service_max_us, rig.clock.get());
 }

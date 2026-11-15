@@ -140,7 +140,7 @@ pub mod rp2350_adc;
 #[cfg(any(feature = "board-adafruit-feather-rp2350-hstx", feature = "board-adafruit-feather-rp2350-hstx-psram", feature = "board-adafruit-metro-rp2350", feature = "board-adafruit-metro-rp2350-psram", feature = "board-pimoroni-pico-lipo-2", feature = "board-pimoroni-pico-lipo-2-xl-w", feature = "board-sparkfun-iot-redboard-rp2350", feature = "board-pimoroni-pico-plus-2", feature = "board-pimoroni-pico-plus-2-w", feature = "board-raspberrypi-pico-2", feature = "board-raspberrypi-pico-2-w"))]
 pub use rp2350_adc as adc_backend;
 // The kernel's UART API's backend: the PL011 blocks on the Pico rows, the
-// CMSDK UARTs on the emulator rows; the ST rows carry no UART table.
+// CMSDK UARTs on the emulator rows; the ST serial blocks' is bound below.
 #[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
 pub mod cmsdk_uart;
 #[cfg(any(feature = "board-mps2-an500", feature = "board-mps2-an505"))]
@@ -655,9 +655,55 @@ pub mod sd {
 compile_error!("feature `test-bus-rp2350` requires `board-mps2-an505`: the RP2350's bus models stand in on the Cortex-M33 emulator row alone");
 
 /// The medium seam: the contract between the network stack and a
-/// medium driver, under the `net` feature; the emulator rows' virtual medium
-/// with its scripted peer on the rows that have one.
-#[cfg(feature = "net")]
-pub mod net_medium;
+/// medium driver, on the rows that have a medium behind it (a row built
+/// with the `net` feature and no medium has no use for the contract: its
+/// network functions count no medium and refuse every other call); the
+/// emulator rows' virtual medium with its scripted peer on the rows that
+/// have one.
 #[cfg(rhu_net_rows)]
+pub mod net_medium;
+#[cfg(rhu_net_virtual)]
 pub mod virt_net;
+/// The STM32F769 row's wired medium under the `net` feature: the LAN8742A
+/// transceiver's module and the family's Ethernet controller.
+#[cfg(rhu_net_wired)]
+pub mod phy_lan8742;
+#[cfg(rhu_net_wired)]
+pub mod stm32f7_eth;
+/// The STM32U5 row's second I/O supply: the manual's sequence at boot, over
+/// the pure module's seam (`crate::stm32u5_supply_math`).
+#[cfg(rhu_io2_supply)]
+pub mod stm32u5_supply;
+/// The ST timer backend behind the PWM functions, on the rows whose PWM
+/// lines are channels of the chip's timers (`crate::stm32_tim_math` states
+/// the block's registers and the timers' clock rule).
+#[cfg(rhu_pwm_st)]
+pub mod stm32_tim_pwm;
+#[cfg(rhu_pwm_st)]
+pub use stm32_tim_pwm as pwm_backend;
+/// The ST converters' backends behind the analog functions, on the rows
+/// whose analog pins are channels of the chip's own converters
+/// (`crate::stm32_adc_math` states the blocks' registers and sequences):
+/// the STM32F7's converter blocks, and the STM32U5's 14-bit converter.
+#[cfg(all(rhu_adc_st, feature = "board-st-stm32f769i-disco"))]
+pub mod stm32f7_adc;
+#[cfg(all(rhu_adc_st, feature = "board-st-stm32f769i-disco"))]
+pub use stm32f7_adc as adc_backend;
+#[cfg(all(rhu_adc_st, feature = "board-st-nucleo-u5a5zj-q"))]
+pub mod stm32u5_adc;
+#[cfg(all(rhu_adc_st, feature = "board-st-nucleo-u5a5zj-q"))]
+pub use stm32u5_adc as adc_backend;
+/// The ST serial backend behind the serial functions, on the rows whose
+/// port is a serial block of the chip (`crate::stm32_usart_math` states the
+/// blocks' registers and sequences): the STM32F7's USART and the STM32U5's
+/// low-power UART.
+#[cfg(rhu_uart_st)]
+pub mod stm32_usart;
+#[cfg(rhu_uart_st)]
+pub use stm32_usart as uart_backend;
+
+/// The radio's tenancy on the GPIO bank's interrupt line, for the kernel's
+/// own wireless medium: the network module's radio half registers the
+/// wireless module's data line there when it makes the medium.
+#[cfg(rhu_net_wireless)]
+pub use rp2350::radio_tenant;

@@ -120,7 +120,15 @@ impl VirtNet {
         self.tx.count > 0
     }
 
-    /// The scripted peer's counters.
+    /// The link set by the api flavor's link check: the cable pulled and
+    /// put back.
+    #[cfg(feature = "test-net-link-drop")]
+    pub fn set_link(&mut self, up: bool) {
+        self.link = if up { Link::Up } else { Link::Down };
+    }
+
+    /// The scripted peer's counters, read by the api flavor's checks.
+    #[cfg(feature = "api-smoke")]
     pub fn peer(&self) -> &Peer {
         &self.peer
     }

@@ -1,6 +1,7 @@
 /* The serial device files over the kernel's UART API: the Linux device
  * files a program's serial port class opens (/dev/ttyS<n>, the chip's own
- * block number, and the alias /dev/ttyAMA<n>), presented here so the
+ * block number, /dev/ttyLP<n> where the block is a low-power UART, and the
+ * alias /dev/ttyAMA<n>), presented here so the
  * standard class (System.IO.Ports.SerialPort at the pinned runtime, its
  * native layer compiled unchanged from the vendored sources under
  * src/vendor/ports/) runs unchanged on this system. The core's C-library
@@ -111,7 +112,7 @@
 #include "rhu_shim.h"
 
 #include "rhu.h"
-#include "rhu_pal_errno_net11_rc3.h"
+#include "rhu_pal_errno_net11.h"
 
 extern int *__errno_location(void);
 void *memcpy(void *dst, const void *src, size_t n);
@@ -171,10 +172,26 @@ static int refuse(int32_t err)
     return -1;
 }
 
-/* The port's name for a line: /dev/ttyS<block>. */
+/* A low-power UART's device file is /dev/ttyLP<n>, as Linux names the port
+ * of such a block; an ordinary UART's or USART's is /dev/ttyS<n>. Which
+ * blocks of the row are low-power ones is a fact of the board table: the
+ * SDK defines the link word __rhu_uart_lowpower_blocks, an absolute symbol
+ * whose address IS a mask, bit n set for block n. With no word the mask is
+ * 0 and every port is a ttyS: the rows without such a block, and every
+ * image linked by another line than the SDK's. */
+extern const char __rhu_uart_lowpower_blocks[] __attribute__((weak));
+
+static int block_is_lowpower(uint32_t block)
+{
+    uintptr_t mask = (uintptr_t)__rhu_uart_lowpower_blocks;
+    return block < 32u && ((mask >> block) & 1u) != 0;
+}
+
+/* The port's name for a line: /dev/ttyLP<block> for a low-power block,
+ * /dev/ttyS<block> for any other. */
 static const char *port_name(uint32_t block, char *buf)
 {
-    static const char prefix[] = "/dev/ttyS";
+    const char *prefix = block_is_lowpower(block) ? "/dev/ttyLP" : "/dev/ttyS";
     size_t i = 0;
     while (prefix[i] != 0) {
         buf[i] = prefix[i];
@@ -226,7 +243,7 @@ static int fd_is_console(int fd)
  * minimal fcntl answers). */
 static int fd_of_other_band(int fd)
 {
-    return (fd >= RHU_SHIM_FD_FILE_LO && fd < RHU_SHIM_FD_FILE_LO + RHU_SHIM_FD_FILE_COUNT)
+    return RHU_SHIM_FD_IN_FILE_BAND(fd)
         || (fd >= RHU_SHIM_FD_DEVICE_LO && fd < RHU_SHIM_FD_DEVICE_LO + RHU_SHIM_FD_DEVICE_COUNT)
         || (fd >= RHU_SHIM_FD_SYSFS_LO && fd < RHU_SHIM_FD_SYSFS_LO + RHU_SHIM_FD_SYSFS_COUNT);
 }
@@ -307,29 +324,39 @@ static int parse_number(const char **p, uint32_t *out)
     return 1;
 }
 
-/* The two prefixes this unit owns. A path that starts with either is this
- * unit's whatever follows (a malformed rest is ENOENT here, as it would
- * be on Linux). */
+/* The three prefixes this unit owns. A path that starts with one of them
+ * is this unit's whatever follows (a malformed rest is ENOENT here, as it
+ * would be on Linux). */
 int rhu_ttydev_owns_path(const char *path)
 {
-    return path != NULL && (strncmp(path, "/dev/ttyS", 9) == 0 || strncmp(path, "/dev/ttyAMA", 11) == 0);
+    return path != NULL && (strncmp(path, "/dev/ttyS", 9) == 0 || strncmp(path, "/dev/ttyLP", 10) == 0 || strncmp(path, "/dev/ttyAMA", 11) == 0);
 }
 
-/* The name's block number: 1 with the number when the path is /dev/ttyS<n>
- * or /dev/ttyAMA<n> with a well-formed <n> and nothing after it; 0 for any
- * other name. */
+/* The name's block number: 1 with the number when the path is the block's
+ * own name -- /dev/ttyLP<n> for a low-power block, /dev/ttyS<n> for any
+ * other -- or the alias /dev/ttyAMA<n>, with a well-formed <n> and nothing
+ * after it; 0 for any other name, the other kind's name of a block among
+ * them (a block has one name, and the other answers ENOENT). */
 static int parse_port_name(const char *path, uint32_t *number)
 {
     const char *p;
+    int lowpower = 0, alias = 0;
     if (path == NULL)
         return 0;
-    if (strncmp(path, "/dev/ttyS", 9) == 0)
+    if (strncmp(path, "/dev/ttyS", 9) == 0) {
         p = path + 9;
-    else if (strncmp(path, "/dev/ttyAMA", 11) == 0)
+    } else if (strncmp(path, "/dev/ttyLP", 10) == 0) {
+        p = path + 10;
+        lowpower = 1;
+    } else if (strncmp(path, "/dev/ttyAMA", 11) == 0) {
         p = path + 11;
-    else
+        alias = 1;
+    } else {
         return 0;
-    return parse_number(&p, number) && *p == 0;
+    }
+    if (!parse_number(&p, number) || *p != 0)
+        return 0;
+    return alias || lowpower == block_is_lowpower(*number);
 }
 
 /* Whether the board has the block, by the enumeration functions: the rows
@@ -346,19 +373,10 @@ static int board_has_block(uint32_t number)
     return 0;
 }
 
-/* The file system's view of a name this unit owns: 1 when the name is a
- * serial port of this board (under either prefix), 0 for a malformed
- * rest or a block no row answers. */
-int rhu_ttydev_exists(const char *path)
-{
-    uint32_t number = 0;
-    return parse_port_name(path, &number) && board_has_block(number);
-}
-
-/* The index-th row's device file as a listing of /dev shows it: the leaf
- * name "ttyS<block>" written to buf, 1; 0 past the last row (the alias is
- * never listed) or when buf cannot hold the name. */
-int rhu_ttydev_name(uint32_t index, char *buf, size_t cap)
+/* The index-th row's leaf name, "ttyLP<block>" for a low-power block and
+ * "ttyS<block>" for any other, written to buf: 1; 0 past the last row (the
+ * alias is never listed) or when buf cannot hold the name. */
+static int row_name(uint32_t index, char *buf, size_t cap)
 {
     uint32_t block, tx, rx, clk;
     int32_t count = rhu_uart_count();
@@ -366,18 +384,101 @@ int rhu_ttydev_name(uint32_t index, char *buf, size_t cap)
         return 0;
     if (rhu_uart_port(index, &block, &tx, &rx, &clk) != 0)
         return 0;
+    size_t lead = block_is_lowpower(block) ? 5u : 4u;
     char digits[11];
     size_t d = 0;
     do {
         digits[d++] = (char)('0' + block % 10u);
         block /= 10u;
     } while (block != 0);
-    if (cap < 4 + d + 1)
+    if (cap < lead + d + 1)
         return 0;
-    memcpy(buf, "ttyS", 4);
+    memcpy(buf, lead == 5u ? "ttyLP" : "ttyS", lead);
     for (size_t i = 0; i < d; i++)
-        buf[4 + i] = digits[d - 1 - i];
-    buf[4 + d] = 0;
+        buf[lead + i] = digits[d - 1 - i];
+    buf[lead + d] = 0;
+    return 1;
+}
+
+/* The folder /sys/class/tty. The standard serial port class searches it
+ * first: it lists the name of an entry there when the entry has the folder
+ * device/tty (a name that does not begin with ttyS) or device/of_node (a
+ * ttyS name) and the file /dev/<name> exists. Only where the folder is
+ * absent does the class fall back to a search of /dev, which keeps the
+ * ttyS names and no ttyLP name. So a row with a low-power block serves the
+ * folder, with one entry for each of its ports and under each entry the
+ * one folder the class asks for; a row without such a block serves no such
+ * folder and keeps the fall-back search. */
+#define TTY_SYS "/sys/class/tty"
+#define TTY_SYS_LEN (sizeof TTY_SYS - 1u)
+
+/* A path under /sys/class/tty on a row that serves the folder: its depth
+ * -- 0 the folder itself, 1 a port's entry, 2 the entry's device folder,
+ * 3 the one folder under that -- with the entry's leaf name in leaf; -1
+ * for any other path, and for every path on a row without the folder. */
+static int sys_depth(const char *path, char *leaf, size_t cap)
+{
+    if (path == NULL || (uintptr_t)__rhu_uart_lowpower_blocks == 0 || strncmp(path, TTY_SYS, TTY_SYS_LEN) != 0)
+        return -1;
+    const char *p = path + TTY_SYS_LEN;
+    if (*p == 0)
+        return 0;
+    if (*p != '/')
+        return -1;
+    p++;
+    for (uint32_t i = 0; row_name(i, leaf, cap); i++) {
+        size_t len = strlen(leaf);
+        if (strncmp(p, leaf, len) != 0)
+            continue;
+        const char *rest = p + len;
+        if (*rest == 0)
+            return 1;
+        if (*rest != '/')
+            continue;
+        rest++;
+        if (strncmp(rest, "device", 7) == 0)
+            return 2;
+        if (strncmp(rest, leaf[3] == 'L' ? "device/tty" : "device/of_node", leaf[3] == 'L' ? 11 : 15) == 0)
+            return 3;
+        return -1;
+    }
+    return -1;
+}
+
+/* The file system's view of a name this unit serves: 1 when the name is a
+ * serial port's device file on this board (the block's own name or the
+ * alias), 2 when it is a folder of the port listing under /sys/class/tty,
+ * 0 for anything else -- a malformed rest, a block no row answers, the
+ * other kind's name of a block. */
+int rhu_ttydev_exists(const char *path)
+{
+    uint32_t number = 0;
+    char leaf[16];
+    if (parse_port_name(path, &number) && board_has_block(number))
+        return 1;
+    return sys_depth(path, leaf, sizeof leaf) >= 0 ? 2 : 0;
+}
+
+/* The index-th entry of a folder this unit lists, its leaf name written to
+ * buf: 1; 0 past the last entry or when buf cannot hold the name. Under
+ * /dev and under /sys/class/tty the entries are the rows' names in the
+ * rows' order (the alias is never listed); a port's entry under
+ * /sys/class/tty holds the folder device, and that folder the one folder
+ * the standard class asks for, tty under a ttyLP entry and of_node under a
+ * ttyS entry. */
+int rhu_ttydev_name(const char *dir, uint32_t index, char *buf, size_t cap)
+{
+    char leaf[16];
+    int depth = dir != NULL && strncmp(dir, "/dev", 5) == 0 ? 0 : sys_depth(dir, leaf, sizeof leaf);
+    if (depth == 0)
+        return row_name(index, buf, cap);
+    if (buf == NULL || index != 0 || (depth != 1 && depth != 2))
+        return 0;
+    const char *name = depth == 1 ? "device" : (leaf[3] == 'L' ? "tty" : "of_node");
+    size_t len = strlen(name);
+    if (cap < len + 1)
+        return 0;
+    memcpy(buf, name, len + 1);
     return 1;
 }
 
@@ -1416,7 +1517,7 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout)
             } else if (fd_is_console(fd)) {
                 if (fd != 0 && (want & (POLLOUT | POLLWRNORM)) != 0)
                     got = (short)(want & (POLLOUT | POLLWRNORM));
-            } else if (fd >= RHU_SHIM_FD_FILE_LO && fd < RHU_SHIM_FD_FILE_LO + RHU_SHIM_FD_FILE_COUNT) {
+            } else if (RHU_SHIM_FD_IN_FILE_BAND(fd)) {
                 got = (short)(want & (POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM));
             } else if (fd_in_band(fd)) {
                 struct tty_node c;

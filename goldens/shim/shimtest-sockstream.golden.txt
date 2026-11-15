@@ -1,0 +1,13 @@
+shimtest-sockstream: a stream socket over a scripted kernel, from a native caller's side
+PASS shim-sock-stream-create (an IPv4 stream socket at descriptor 32, the band's first, its family, type and protocol read back; an IPv6 socket EAFNOSUPPORT and a raw socket EPROTONOSUPPORT, no descriptor taken; a null result pointer EFAULT)
+PASS shim-sock-stream-descriptor (the socket's status a socket's mode; the close-on-exec bit set; the non-blocking flag written and read back)
+PASS shim-sock-stream-connect (a non-blocking connect EINPROGRESS and no pending error at the handshake's end; a blocking connect waits for the handshake's end and answers success; the kernel given the peer's address and the port in the host's order)
+PASS shim-sock-stream-pending-error (a refused connect's code read once as the runtime's connection-refused error, then none; a blocking connect to a peer that refuses answers that error)
+PASS shim-sock-stream-names (the local and the peer address each in a Linux IPv4 record of 16 bytes, the port in network byte order; an unconnected socket's peer ENOTCONN; a buffer shorter than the record EFAULT)
+PASS shim-sock-stream-data (twelve bytes sent and the kernel's partial take of eight reported; the bytes queued received byte for byte and counted as available; 0 at the peer's close; an empty queue EAGAIN on a non-blocking socket; Read and Write on the descriptor move the same bytes and set the platform's errno)
+PASS shim-sock-stream-peek (a peek answers the bytes and leaves them queued; a flag the stack does not serve ENOTSUP)
+PASS shim-sock-stream-blocking (a blocking receive whose bytes arrive during its wait answers them; a blocking send with no room waits for room; the don't-wait flag answers EAGAIN at once on a blocking socket)
+PASS shim-sock-stream-timeout (a blocking receive answers EAGAIN at its receive timeout and not before; a blocking send at its send timeout; a blocking connect with no answer EINPROGRESS at the send timeout; a negative timeout EINVAL)
+PASS shim-sock-stream-shutdown (each of the three directions reaches the kernel as its own; another value EINVAL; a disconnect shuts both)
+PASS shim-sock-stream-close (a zero linger written as a handle's close writes it and read back; the kernel's close called once and the descriptor free for the next socket; a closed descriptor EBADF; the band's sixteen descriptors and the seventeenth socket EMFILE)
+SHIMTEST-SOCKSTREAM: ALL GOOD (a stream socket over a scripted kernel, from a native caller's side)

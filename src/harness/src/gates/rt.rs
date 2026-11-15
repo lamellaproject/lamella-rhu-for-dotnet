@@ -15,6 +15,7 @@
 //! class-bound fact is a field of the world record.
 //!
 
+use crate::debugport::{doctor_event_bkpt, event_run, read_event_image, ArmImage, EventProgram, EventRun};
 use crate::gate::{write_fixture, Selfcheck};
 use crate::objfile::{producer_stamp_of, section_span, section_span_prefixed, sha256_without_stamp};
 use crate::gates::gc::{parse_undefined, parse_vendored_manifest, resolve_ld, run_tool_bounded, ToolCmd};
@@ -81,7 +82,7 @@ pub(crate) struct RtWorld {
     /// the kernel's own target directory; Some((target dir, target,
     /// features)) builds under a directory of the gate's own.
     pub(crate) lib_build: Option<(&'static str, &'static str, &'static str)>,
-    pub(crate) shim_objects: [&'static str; 12],
+    pub(crate) shim_objects: [&'static str; 15],
     /// The suite's markers in the one order the contract allows for this world.
     pub(crate) suite_markers: &'static [&'static str],
     pub(crate) gc_objects: [&'static str; 3],
@@ -133,7 +134,7 @@ pub(crate) const WORLD_M7: RtWorld = RtWorld {
     newlib_env: "RHU_NEWLIB_M7",
     newlib_local: "newlib-m7.local",
     rider: true,
-    cases: "28/28 cases incl. 20 negative controls",
+    cases: "29/29 cases incl. 21 negative controls",
     sdk_board: "arm-mps2-an500",
     sdk_gate: "rt-m7-sdk-parity",
     sdk_display: "RT-M7 SDK PARITY",
@@ -163,15 +164,15 @@ pub(crate) const WORLD_M33: RtWorld = RtWorld {
     tier: "goldens/rt-m33",
     program_tier: "goldens/rt-m7",
     pin: SHA_FROZEN_MANIFEST_M33,
-    archive_set: "net11-rc3-rhu-cortex-m33-sgc-enabled",
-    set_file: "archives-net11-rc3-rhu-cortex-m33-sgc-enabled.txt",
+    archive_set: "net11.0.0-rhu-cortex-m33-sgc-enabled",
+    set_file: "archives-net11.0.0-rhu-cortex-m33-sgc-enabled.txt",
     donor: "attr-donor-v8m.bin",
     cpu_arch: "ARM v8-M Mainline",
     thumb_isa: "Permitted",
     map: "src/kernel/payload-mps2-an505.x",
     machine: "mps2-an505",
     lib: "src/kernel/target/rt-m33-gate/kernel/thumbv8m.main-none-eabihf/release/librhu_kernel.a",
-    lib_build: Some(("src/kernel/target/rt-m33-gate/kernel", "thumbv8m.main-none-eabihf", "qemu-exit,board-mps2-an505,payload,entropy-accept-software,stack-watermark")),
+    lib_build: Some(("src/kernel/target/rt-m33-gate/kernel", "thumbv8m.main-none-eabihf", "qemu-exit,board-mps2-an505,payload,entropy-accept-software,stack-watermark,net")),
     shim_objects: [
         "goldens/shim/shim-core-an505.o",
         "goldens/shim/shim-sysnative-an505.o",
@@ -179,6 +180,9 @@ pub(crate) const WORLD_M33: RtWorld = RtWorld {
         "goldens/shim/shim-stdio-sym-an505.o",
         "goldens/shim/shim-host-an505.o",
         "goldens/shim/shim-pal-surface-an505.o",
+        "goldens/shim/shim-sockaddr-an505.o",
+        "goldens/shim/shim-socket-an505.o",
+        "goldens/shim/shim-netinfo-an505.o",
         "goldens/shim/shim-gpiod-an505.o",
         "goldens/shim/shim-busdev-an505.o",
         "goldens/shim/shim-pwmfs-an505.o",
@@ -193,7 +197,7 @@ pub(crate) const WORLD_M33: RtWorld = RtWorld {
     newlib_env: "RHU_NEWLIB_M33",
     newlib_local: "newlib-m33.local",
     rider: false,
-    cases: "27/27 cases incl. 20 negative controls",
+    cases: "28/28 cases incl. 21 negative controls",
     sdk_board: "arm-mps2-an505",
     sdk_gate: "rt-m33-sdk-parity",
     sdk_display: "RT-M33 SDK PARITY",
@@ -247,17 +251,17 @@ fn resolve_kit_dir(repo: &Path, w: &RtWorld) -> Option<String> {
 
 /// goldens/rt-m7/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest.
-pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "26af45129561e224edae764e9c974a02b930ed5c36791c714232d3f7b8c92f1a";
+pub(crate) const SHA_FROZEN_MANIFEST_M7: &str = "bc6b7469f40310affb5fe9874df34daaebfc4f2ab07c9030f73e210e4c51aebc";
 
 /// goldens/rt-m33/MANIFEST.md's own sha256: the Cortex-M33 world's pin,
 /// beside its manifest the way the Cortex-M7 world's is; a re-freeze of
 /// that tier moves this line and nothing of the other world's.
-pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "bc558252e4d6d3b9a2331ad70716ca1f8b09e2cfb227fdcf3ed979d10f88f40d";
+pub(crate) const SHA_FROZEN_MANIFEST_M33: &str = "a53a5905404ec007e9ec5ae66f91ceaa2891c96fceba0ceabd6cdd4f240e0127";
 
 /// The archive set the frozen merge consumed. The manifest's `archives:`
 /// line and the frozen set file must both name it; a merge recorded under
 /// another set is refused before its bytes are trusted.
-const ARCHIVE_SET: &str = "net11-rc3-rhu-cortex-m7-sgc-enabled";
+const ARCHIVE_SET: &str = "net11.0.0-rhu-cortex-m7-sgc-enabled";
 
 /// The frozen tier: the file names under goldens/rt-m7/ and what each is.
 const FROZEN_FILES: [(&str, &str); 16] = [
@@ -266,7 +270,7 @@ const FROZEN_FILES: [(&str, &str); 16] = [
     ("rthello-merged.o", "the merged object: the program object, the surgery object and the runtime archives, the descriptor rooted, attributes neutralized"),
     ("attr-donor-v7em.bin", "the build-attributes blob the merges apply (a donor compiled at the image ABI)"),
     ("control-attr-a-profile.bin", "the archives' own merged attributes (application profile), the negative control's input"),
-    ("archives-net11-rc3-rhu-cortex-m7-sgc-enabled.txt", "the archive set's identity: what built it, each archive by size and sha256, the set's demand and surface shas"),
+    ("archives-net11.0.0-rhu-cortex-m7-sgc-enabled.txt", "the archive set's identity: what built it, each archive by size and sha256, the set's demand and surface shas"),
     ("rthello-merged.undef.txt", "the merged object's undefined names, sorted: the demand surface pinned exactly"),
     ("rt-libc.o", "the C and math libraries' closure merged into one relocatable, attributes neutralized"),
     ("rt-libc.members.txt", "the closure's member list by archive and name, with the kit's two libraries by size and sha256"),
@@ -283,7 +287,7 @@ const SURGERY: &str = "startup-cookie-copied.o";
 pub(crate) const MERGED: &str = "rthello-merged.o";
 const DONOR: &str = "attr-donor-v7em.bin";
 const CONTROL_ATTRS: &str = "control-attr-a-profile.bin";
-const SET_FILE: &str = "archives-net11-rc3-rhu-cortex-m7-sgc-enabled.txt";
+const SET_FILE: &str = "archives-net11.0.0-rhu-cortex-m7-sgc-enabled.txt";
 pub(crate) const UNDEF_FILE: &str = "rthello-merged.undef.txt";
 const LIBC: &str = "rt-libc.o";
 const LIBC_MEMBERS: &str = "rt-libc.members.txt";
@@ -445,15 +449,21 @@ const SDK_LOG_LEVEL_WORD: &str = "--defsym=__rhu_log_level=3";
 const RT_LINK_WORDS: [&str; 6] = ["-u", "RhInitialize", "-u", "RhRegisterOSModule", "-u", "DotNetRuntimeContractDescriptor"];
 const AN500_MAP: &str = "src/kernel/payload-mps2-an500.x";
 const AN500_LIB: &str = "src/kernel/target/thumbv7em-none-eabihf/release/librhu_kernel.a";
+/// The feature words of the Cortex-M7 world's kernel over the crate's defaults: the payload seam, the software
+/// entropy the emulator row accepts, the stack watermark and the network.
+const AN500_FEATURES: &str = "payload,entropy-accept-software,stack-watermark,net";
 /// The frozen shim objects and collector row objects the image links,
 /// in the order the line takes them.
-const SHIM_OBJECTS: [&str; 12] = [
+const SHIM_OBJECTS: [&str; 15] = [
     "goldens/shim/shim-core.o",
     "goldens/shim/shim-sysnative.o",
     "goldens/shim/shim-libc-glue.o",
     "goldens/shim/shim-stdio-sym.o",
     "goldens/shim/shim-host.o",
     "goldens/shim/shim-pal-surface.o",
+    "goldens/shim/shim-sockaddr.o",
+    "goldens/shim/shim-socket.o",
+    "goldens/shim/shim-netinfo.o",
     "goldens/shim/shim-gpiod.o",
     "goldens/shim/shim-busdev.o",
     "goldens/shim/shim-pwmfs.o",
@@ -497,13 +507,13 @@ const BOOT_MARKERS: [&str; 25] = [
     "[host] ctors run: 0 early, 6 main",
     "[shim] sigaction(11): handler recorded; the kernel's null-fault delivery is armed",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
-    "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
+    "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 4)",
     "[mgc] dlopen(\"rhu-mgc\") -> skeleton costume handle",
     "[mgc] dlsym(\"GC_VersionInfo\")",
     "[mgc] dlsym(\"GC_Initialize\")",
     "[mgc-skel] call IGCHeap::Initialize -> S_OK",
     "[host] runtime: initialized",
-    "[host] runtime: managed code 350646 bytes, unboxing stubs 742 bytes",
+    "[host] runtime: managed code 351298 bytes, unboxing stubs 742 bytes",
     "[host] runtime: module registered, class-library slots: 12",
     "[host] runtime: modules initialized: 1",
     "[host] argv: 1",
@@ -521,16 +531,20 @@ const BOOT_ALL_GOOD: &str = "RTHELLO: ALL GOOD";
 const FORBIDDEN_PATTERNS: [&str; 7] = ["FAIL ", "RTHELLO: FAIL", "KERNEL PANIC", "EXCEPTION:", "REFUSED", "abort()", "unsupported conversion"];
 
 const PENDING: [&str; 0] = [];
+/// The parity legs' cases that stand ahead of the tiers' re-freeze: the
+/// program and its expected lines are in the tree and a desk run is their
+/// proof; a leg prints each as pending and does not count it.
+const SDK_PARITY_PENDING: [&str; 0] = [];
 
 /// The suite's boot: the platform's lines around the program's (the
 /// runtime's own thread spawned at its 16 KB ask, the threading section's
 /// worker and the activation section's worker at the row's default),
 /// every section's verdict line, the summary last.
-const SUITE_MARKERS_M7: [&str; 81] = [
+const SUITE_MARKERS_M7: [&str; 82] = [
     ENTRY_MARKER,
     "[shim] sigaction(11): handler recorded; the kernel's null-fault delivery is armed",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
-    "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
+    "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 4)",
     "[host] entering managed entry",
     "RTSUITE: start",
     "PASS rt-smoke (array sort and string join)",
@@ -540,18 +554,18 @@ const SUITE_MARKERS_M7: [&str; 81] = [
     "PASS rt-gc (4000 dead objects, two collections, weak nulled, strong kept)",
     "PASS rt-time (tick count monotonic across a spin, processor count)",
     "PASS rt-dispatch (interface dispatch, delegate, generic comparison)",
-    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 4)",
-    "PASS rt-threads (one worker thread, 10000 locked increments)",
     "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 5)",
-    "PASS rt-activation (a running worker suspended and resumed across three collections)",
+    "PASS rt-threads (one worker thread, 10000 locked increments)",
     "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 6)",
-    "PASS rt-parked (a worker parked on a held monitor across two collections, released and joined)",
+    "PASS rt-activation (a running worker suspended and resumed across three collections)",
     "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 7)",
+    "PASS rt-parked (a worker parked on a held monitor across two collections, released and joined)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 8)",
     "PASS rt-interlocked (a long compared, exchanged, added and read above 32 bits; two threads, 10000 increments)",
     "PASS rt-math (truncate and round away from zero through the C library; pow, log2, cbrt, remainder)",
-    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 8)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 9)",
     "[shim] pthread_create: stack 256 KB clamped to 24 KB (the row's clamp)",
-    "[shim] pthread_create: stack 262144 B asked, 24576 B spawned (tid 9)",
+    "[shim] pthread_create: stack 262144 B asked, 24576 B spawned (tid 10)",
     "[shim] gpiod: line 4 claim refused (EBUSY: the board or another claim holds it)",
     "[shim] gpiod: line 5 claim refused (EINVAL: past the space, unpopulated, unclaimed or a bad selector)",
     "PASS rt-gpio (the standard class over the doors: six lines, an output looped to an input read back, one edge to a callback and one to a waiter, two collections during the wait, the board's and an unpopulated line refused)",
@@ -600,8 +614,8 @@ const SUITE_MARKERS_M7: [&str; 81] = [
     "[shim] /dev/ttyS1: 250000 8N1 (250000 Bd achieved)",
     "[shim] /dev/ttyS1: 921600 8N1 (925925 Bd achieved)",
     "[shim] /dev/ttyS1: 115200 8N1 (115207 Bd achieved)",
-    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 11)",
     "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 12)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 13)",
     "[shim] /dev/ttyS1: this port has no break control; the break is a no-op",
     "[shim] /dev/ttyS1: DTR and RTS are not wired on this port; the state is kept",
     "PASS rt-serial (the standard serial port class over the device files on the doors: two ports; 115200 8N1; the refusals by their exceptions; a silent read TimeoutException; 8 and 64 bytes echoed with DataReceived; the break a no-op; reopened)",
@@ -613,13 +627,14 @@ const SUITE_MARKERS_M7: [&str; 81] = [
     "[shim] /sys/class/pwm/pwmchip0/export: line 0 exported (timer 1 channel 0, the timer's clock 1000000 Hz)",
     "PASS rt-adc (the standard analog controller over the IIO files: 819 at 12 bits on line 0; the voltage members not supported; a held line refused on both controllers; a held line or channel refuses the other; the disposal gives back; converter 1 by file)",
     "PASS rt-crypto (two draws of 32 secure random bytes served, not all zero and differing; a hash call throws CryptographicException on each call)",
+    "PASS rt-named-mutex (a name is created once, found while a handle stands and gone with the last; two handles of a name are one mutex; a name that is not there is WaitHandleCannotBeOpenedException; a second thread has the mutex after the release; an owner thread that ended leaves it to the next waiter with AbandonedMutexException; a hundred rounds on one name are each created new; a full temporary folder is IOException and the name is made once there is room; Local is the plain name and Global another)",
     "RTSUITE: ALL GOOD",
 ];
-const SUITE_MARKERS_M33: [&str; 81] = [
+const SUITE_MARKERS_M33: [&str; 82] = [
     ENTRY_MARKER,
     "[shim] sigaction(11): handler recorded; the kernel's null-fault delivery is armed",
     "[shim] activation: signal 34 handler recorded; the kernel's activation delivery is armed",
-    "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)",
+    "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 4)",
     "[host] entering managed entry",
     "RTSUITE: start",
     "PASS rt-smoke (array sort and string join)",
@@ -629,19 +644,19 @@ const SUITE_MARKERS_M33: [&str; 81] = [
     "PASS rt-gc (4000 dead objects, two collections, weak nulled, strong kept)",
     "PASS rt-time (tick count monotonic across a spin, processor count)",
     "PASS rt-dispatch (interface dispatch, delegate, generic comparison)",
-    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 4)",
-    "PASS rt-threads (one worker thread, 10000 locked increments)",
     "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 5)",
-    "PASS rt-activation (a running worker suspended and resumed across three collections)",
+    "PASS rt-threads (one worker thread, 10000 locked increments)",
     "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 6)",
-    "PASS rt-parked (a worker parked on a held monitor across two collections, released and joined)",
+    "PASS rt-activation (a running worker suspended and resumed across three collections)",
     "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 7)",
+    "PASS rt-parked (a worker parked on a held monitor across two collections, released and joined)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 8)",
     "PASS rt-interlocked (a long compared, exchanged, added and read above 32 bits; two threads, 10000 increments)",
     "PASS rt-math (truncate and round away from zero through the C library; pow, log2, cbrt, remainder)",
     // The GPIO section's lines as the Cortex-M7 world's freeze measured them (the section's shim lines and its verdict).
-    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 8)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 9)",
     "[shim] pthread_create: stack 256 KB clamped to 24 KB (the row's clamp)",
-    "[shim] pthread_create: stack 262144 B asked, 24576 B spawned (tid 9)",
+    "[shim] pthread_create: stack 262144 B asked, 24576 B spawned (tid 10)",
     "[shim] gpiod: line 4 claim refused (EBUSY: the board or another claim holds it)",
     "[shim] gpiod: line 5 claim refused (EINVAL: past the space, unpopulated, unclaimed or a bad selector)",
     "PASS rt-gpio (the standard class over the doors: six lines, an output looped to an input read back, one edge to a callback and one to a waiter, two collections during the wait, the board's and an unpopulated line refused)",
@@ -690,8 +705,8 @@ const SUITE_MARKERS_M33: [&str; 81] = [
     "[shim] /dev/ttyS1: 250000 8N1 (250000 Bd achieved)",
     "[shim] /dev/ttyS1: 921600 8N1 (909090 Bd achieved)",
     "[shim] /dev/ttyS1: 115200 8N1 (114942 Bd achieved)",
-    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 11)",
     "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 12)",
+    "[shim] pthread_create: stack 0 B asked, 16384 B spawned (tid 13)",
     "[shim] /dev/ttyS1: this port has no break control; the break is a no-op",
     "[shim] /dev/ttyS1: DTR and RTS are not wired on this port; the state is kept",
     "PASS rt-serial (the standard serial port class over the device files on the doors: two ports; 115200 8N1; the refusals by their exceptions; a silent read TimeoutException; 8 and 64 bytes echoed with DataReceived; the break a no-op; reopened)",
@@ -703,6 +718,7 @@ const SUITE_MARKERS_M33: [&str; 81] = [
     "[shim] /sys/class/pwm/pwmchip0/export: line 0 exported (timer 1 channel 0, the timer's clock 1000000 Hz)",
     "PASS rt-adc (the standard analog controller over the IIO files: 819 at 12 bits on line 0; the voltage members not supported; a held line refused on both controllers; a held line or channel refuses the other; the disposal gives back; converter 1 by file)",
     "PASS rt-crypto (two draws of 32 secure random bytes served, not all zero and differing; a hash call throws CryptographicException on each call)",
+    "PASS rt-named-mutex (a name is created once, found while a handle stands and gone with the last; two handles of a name are one mutex; a name that is not there is WaitHandleCannotBeOpenedException; a second thread has the mutex after the release; an owner thread that ended leaves it to the next waiter with AbandonedMutexException; a hundred rounds on one name are each created new; a full temporary folder is IOException and the name is made once there is room; Local is the plain name and Global another)",
     "RTSUITE: ALL GOOD",
 ];
 const SUITE_ALL_GOOD: &str = "RTSUITE: ALL GOOD";
@@ -728,16 +744,21 @@ const ACTIVATIONS_FLOOR: u32 = 3;
 /// rest shared with the an500 line.
 const F769_BOARD: &str = "st-stm32f769i-disco";
 const F769_TARGET: &str = "thumbv7em-none-eabihf";
-const F769_FEATURES: &str = "board-st-stm32f769i-disco,payload";
+/// The row's kernel is the one built with the network (the board table's
+/// Kernel for the row; the second set, built without it, is the SDK's).
+const F769_FEATURES: &str = "board-st-stm32f769i-disco,payload,net";
 const F769_MAP: &str = "src/kernel/payload-st-stm32f769i-disco.x";
 const F769_LIB: &str = "src/kernel/target/payload-gate/rt/st-stm32f769i-disco/thumbv7em-none-eabihf/release/librhu_kernel.a";
-const F769_SHIM_OBJECTS: [&str; 12] = [
+const F769_SHIM_OBJECTS: [&str; 15] = [
     "goldens/shim/shim-core-f769.o",
     "goldens/shim/shim-sysnative-f769.o",
     "goldens/shim/shim-libc-glue.o",
     "goldens/shim/shim-stdio-sym.o",
     "goldens/shim/shim-host.o",
     "goldens/shim/shim-pal-surface.o",
+    "goldens/shim/shim-sockaddr.o",
+    "goldens/shim/shim-socket.o",
+    "goldens/shim/shim-netinfo.o",
     "goldens/shim/shim-gpiod.o",
     "goldens/shim/shim-busdev.o",
     "goldens/shim/shim-pwmfs.o",
@@ -750,7 +771,7 @@ const F769_GC_OBJECTS: [&str; 3] = ["goldens/gc/skel-row.o", "goldens/gc/heap-ro
 /// The section classes the suite's frozen merged object carries at the
 /// merge (the maps' brackets read them exactly).
 // The suite's brackets as the tier's freeze measured them in both worlds (re-stamped at each re-freeze).
-const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 1260118, unbox: 2038, hydrated: 330704, tdata: 152, init_array: 24, modules: 4 };
+const SUITE_BRACKETS: RtBrackets = RtBrackets { managed: 1298926, unbox: 2054, hydrated: 342472, tdata: 152, init_array: 24, modules: 4 };
 fn internal_cases(w: &RtWorld) -> [String; 2] {
     [
         format!("rt.rederive-selector-control -- link-tier; runs under 'rhu-gate {} rederive' when the archive set is resolved: the same merge with the standalone-GC-disabled selector must not tie the frozen object", w.gate),
@@ -1921,7 +1942,7 @@ impl Rt {
     /// of the gate's own.
     fn build_lib(&self, log: &Path) -> Result<bool, String> {
         match self.w.lib_build {
-            None => cargo_build_kernel(&self.repo, &["--lib", "--features", "payload,entropy-accept-software,stack-watermark"], log),
+            None => cargo_build_kernel(&self.repo, &["--lib", "--features", AN500_FEATURES], log),
             Some((dir, target, feats)) => {
                 let target_dir = self.repo.join(dir.replace('/', std::path::MAIN_SEPARATOR_STR));
                 let _ = std::fs::create_dir_all(&target_dir);
@@ -2812,6 +2833,18 @@ impl Rt {
             "the suite image linked with the serial device unit whose close keeps the port's block (the kernel's claim never released: the class's reopen after its close is refused)",
             ld, qemu, &keeps, lib, "ttydev-close-keeps", &["FAIL rt-serial"],
         );
+        // The names control: the suite image linked with the serial unit's low-power word naming block 1, as the SDK's
+        // link line defines it for a row whose board table names a low-power UART, while the suite's board facts name
+        // that port /dev/ttyS1. The unit then names the port /dev/ttyLP1 and serves the folder /sys/class/tty, so the
+        // class's enumeration answers /dev/ttyS0 and /dev/ttyLP1 by its first search, and the section's names case
+        // refuses the board class's /dev/ttyS1 with the enumeration's own names in its line.
+        let mut word: Vec<String> = base.clone();
+        word.push("--defsym=__rhu_uart_lowpower_blocks=2".to_string());
+        self.control_suite_variant(
+            "rt.suite-ttydev-lowpower-word-control",
+            "the suite image linked with the serial unit's low-power word for block 1 under board facts that name the port /dev/ttyS1 (the board class names a device file the enumeration does not return)",
+            ld, qemu, &word, lib, "ttydev-lowpower-word", &["FAIL rt-serial (the board class's port /dev/ttyS1 is not a name of the enumeration: /dev/ttyS0,/dev/ttyLP1)"],
+        );
     }
 
     /// The analog section's control: the IIO device-file unit's variant
@@ -3507,6 +3540,97 @@ pub fn attrs(_repo: &Path, args: &[String]) -> ! {
     }
 }
 
+/// The parity legs' program for the debugger's unhandled-exception event
+/// (src/rt/gate/unhandled), as far as the event's runs read it: one
+/// exception nothing catches, thrown two calls below Main, with a handler
+/// of the program's own on the unhandled-exception event.
+const EVENT_PROGRAM: EventProgram = EventProgram {
+    main_ending: "_Rhu_Hosted_Program__Main",
+    thrower_ending: "_Rhu_Hosted_Program__ThrowIt",
+    type_symbol: "_ZTV44S_P_CoreLib_System_InvalidOperationException",
+    handler_line: "UNHANDLED: 3 the program's own handler ran",
+    unhandled_line: "Unhandled exception. System.InvalidOperationException",
+    before_line: "UNHANDLED: 2 throwing what nothing catches",
+    exit_unhandled: 134,
+    exit_fault: 2,
+};
+
+/// The unhandled event's reading of one image and, when the reading
+/// holds, its four runs through the emulator's debug port: one line per
+/// reading and per run, each `(true, what was seen)` or `(false, what did
+/// not hold)`. A reading that is refused starts no run.
+fn event_lines(qemu: &Path, machine: &str, image: &Path, out: &Path, tag: &str) -> Vec<(String, bool, String)> {
+    let img = match std::fs::read(image).map_err(|e| format!("cannot read {}: {e}", image.display())).and_then(ArmImage::read) {
+        Ok(i) => i,
+        Err(e) => return vec![("READING".to_string(), false, e)],
+    };
+    let facts = match read_event_image(&img) {
+        Ok(f) => f,
+        Err(e) => return vec![("READING".to_string(), false, e)],
+    };
+    let mut lines = vec![(
+        "READING".to_string(),
+        true,
+        format!(
+            "the events word at {:#010x} inside the zero-filled window; the routine at {:#010x}, {} bytes, with an index-table entry of its own that unwinds by the link register; one BKPT #0x60, at {:#010x}",
+            facts.word, facts.routine, facts.routine_size, facts.bkpt
+        ),
+    )];
+    for run in EventRun::ALL {
+        let name = format!("RUN {}", run.name());
+        match event_run(qemu, machine, image, &img, &facts, &EVENT_PROGRAM, run, out, tag) {
+            Ok(seen) => lines.push((name, true, seen)),
+            Err(why) => lines.push((name, false, why)),
+        }
+    }
+    lines
+}
+
+/// `rhu-gate rt debug-event <machine> <image> <out-dir>`: the unhandled
+/// event's reading of one published image of the legs' program and its
+/// four runs through the emulator's debug port, one line each, the
+/// consoles and the packets left in the directory.
+/// `rhu-gate rt debug-event doctor <image> <out-image>`: the control's
+/// doctored copy, the routine's BKPT overwritten by a no-operation.
+pub fn debug_event(repo: &Path, args: &[String]) -> ! {
+    if args.len() != 3 {
+        println!("usage: rhu-gate rt debug-event <machine> <image> <out-dir> | rhu-gate rt debug-event doctor <image> <out-image>");
+        exit(2);
+    }
+    if args[0] == "doctor" {
+        let doctored = std::fs::read(&args[1]).map_err(|e| format!("cannot read {}: {e}", args[1])).and_then(|b| doctor_event_bkpt(&b));
+        match doctored.and_then(|d| std::fs::write(&args[2], &d).map_err(|e| format!("cannot write {}: {e}", args[2])).map(|_| sha256_hex(&d))) {
+            Ok(sha) => {
+                println!("debug-event: {} written -- the routine's BKPT #0x60 overwritten by a no-operation; sha256 {sha}", args[2]);
+                exit(0);
+            }
+            Err(e) => {
+                println!("debug-event: REFUSED -- {e}");
+                exit(1);
+            }
+        }
+    }
+    let (machine, image, out) = (args[0].as_str(), Path::new(&args[1]), Path::new(&args[2]));
+    if std::fs::create_dir_all(out).is_err() {
+        println!("debug-event: REFUSED -- cannot create {}", out.display());
+        exit(1);
+    }
+    let (qemu, qemu_version) = match resolve_qemu(repo) {
+        Ok(q) => q,
+        Err(e) => {
+            println!("debug-event: REFUSED -- {e}");
+            exit(1);
+        }
+    };
+    let lines = event_lines(&qemu, machine, image, out, "debug-event");
+    let held = lines.iter().filter(|l| l.1).count();
+    for (name, ok, text) in &lines {
+        println!("debug-event: {name} {} -- {text}", if *ok { "HOLDS" } else if name == "READING" { "REFUSED" } else { "FAILS" });
+    }
+    println!("debug-event: {held} of {} hold ({machine}; {qemu_version})", 1 + EventRun::ALL.len());
+    exit(if held == 1 + EventRun::ALL.len() { 0 } else { 1 });
+}
+
 /// A frozen input of the selfcheck's own probes, read whole from the rt
 /// tier -- or a loud refusal naming the file. The probes doctor REAL frozen
 /// bytes; an empty default in their place would let a doctored input
@@ -3762,6 +3886,105 @@ pub fn selfcheck(repo: &Path, w: &'static RtWorld) -> ! {
         stamp_at.is_some() && !stamp_base.is_empty() && stamp_sha == stamp_base && sha256_hex(&stamp_moved) != sha256_hex(&surgery_bytes),
     );
 
+    // The board table's stack facts against the kernel's own text: the tie the parity leg's case
+    // rt.sdk-parity-row-facts runs, probed here on the tree itself -- its facts accepted, and the
+    // first row's StackKernel one byte off the kernel's own threads refused.
+    let stack_facts = match read_stack_facts(repo) {
+        Ok(f) => f,
+        Err(e) => {
+            println!("rhu-gate {} selfcheck: the board table's stack facts are unreadable: {e}", w.gate);
+            exit(1);
+        }
+    };
+    sc.accept_probe("stack-facts-genuine", "the board table's stack facts as the tree states them accepted", stack_facts_fault(&stack_facts).is_none());
+    let mut stack_facts_off = stack_facts.clone();
+    stack_facts_off.rows[0].kernel_own += 1;
+    sc.probe("stack-facts-kernel-own", "a row's StackKernel one byte off the kernel's own threads must be refused", stack_facts_fault(&stack_facts_off).is_none());
+
+    // The boards' facts files against the kernel's own text, the board class's half of the same
+    // case, probed here on the tree itself for the net object: the facts files as the tree
+    // states them accepted with a net object among them, and the first such row's stream
+    // receive buffer one byte off the kernel's refused by the net object's own sentence.
+    let board_facts = match read_board_facts(repo) {
+        Ok(f) => f,
+        Err(e) => {
+            println!("rhu-gate {} selfcheck: the boards' facts files are unreadable: {e}", w.gate);
+            exit(1);
+        }
+    };
+    sc.accept_probe("net-facts-genuine", "the boards' facts files as the tree states them accepted, a net object among them", board_facts_fault(&board_facts).is_none() && board_facts.iter().any(|r| r.net.is_some()));
+    let mut net_facts_off = board_facts.clone();
+    if let Some(n) = net_facts_off.iter_mut().find_map(|r| r.net.as_mut()) {
+        n.3 += 1;
+    }
+    sc.probe("net-facts-stream-rx", "a facts file's stream receive buffer one byte off the kernel's must be refused", !board_facts_fault(&net_facts_off).is_some_and(|f| f.contains("the facts file's net object")));
+
+    // The reader of the kernel's network text under that tie, probed on the tree's own text for
+    // the first row whose facts file carries a net object: the text as the tree states it read,
+    // and the same text refused with STREAM_RX, then KIND_WORD, stated for the wired and the
+    // virtual medium alone.
+    let net_build = std::fs::read_to_string(repo.join("src").join("kernel").join("build.rs")).unwrap_or_default();
+    let net_module = std::fs::read_to_string(repo.join("src").join("kernel").join("src").join("net.rs")).unwrap_or_default();
+    let net_feature = board_facts.iter().find(|r| r.net.is_some()).map(|r| format!("board-{}", r.board.strip_prefix("arm-").unwrap_or(&r.board))).unwrap_or_default();
+    let restated = |head: &str, line: &str| -> String { net_module.lines().map(|l| if l.trim().starts_with(head) { line } else { l }).collect::<Vec<&str>>().join("\n") };
+    sc.accept_probe("net-reader-genuine", "the kernel's network text as the tree states it read for a row with a medium", matches!(kernel_net_facts(&net_build, &net_module, &net_feature), Some(Some(_))));
+    let rx_two_media = restated("pub const STREAM_RX: usize = if cfg!(", "pub const STREAM_RX: usize = if cfg!(rhu_net_wired) { 4096 } else { 2048 };");
+    sc.probe("net-reader-rx-two-media", "the stream receive buffer stated for the wired and the virtual medium alone must be refused", kernel_net_facts(&net_build, &rx_two_media, &net_feature).is_some());
+    let word_two_media = restated("pub const KIND_WORD: &str = if cfg!(", "pub const KIND_WORD: &str = if cfg!(rhu_net_wired) { \"wired\" } else { \"virtual\" };");
+    sc.probe("net-reader-word-two-media", "the medium's word stated for the wired and the virtual medium alone must be refused", kernel_net_facts(&net_build, &word_two_media, &net_feature).is_some());
+    // The radio's block under the same reader, probed for the first row whose facts file says
+    // wireless: the tree's own text read with the wireless word and the row's own figures; the
+    // same text with the block's refusal line restated for another board alone, which must leave
+    // the row without a medium; and the row's stream receive buffer one byte off the kernel's
+    // under the tie.
+    let wireless_row = board_facts.iter().position(|r| r.net.as_ref().is_some_and(|n| n.0 == "wireless"));
+    let wireless_feature = wireless_row.map(|i| format!("board-{}", board_facts[i].board.strip_prefix("arm-").unwrap_or(&board_facts[i].board))).unwrap_or_default();
+    sc.accept_probe("net-reader-wireless-genuine", "the kernel's network text as the tree states it read for a row with the radio: the wireless word and the row's own figures", wireless_row.is_some_and(|i| kernel_net_facts(&net_build, &net_module, &wireless_feature).flatten() == board_facts[i].net));
+    let radio_refusal = net_build.lines().enumerate().skip_while(|(_, l)| l.trim() != "if cfg!(feature = \"wifi-cyw43\") {").find(|(_, l)| l.trim().starts_with("if !cfg!(any(")).map(|(i, _)| i);
+    let radio_other_board = net_build.lines().enumerate().map(|(i, l)| if Some(i) == radio_refusal { "        if !cfg!(any(feature = \"board-other\")) {" } else { l }).collect::<Vec<&str>>().join("\n");
+    sc.probe("net-reader-radio-other-board", "the radio's block restated for another board alone must leave the row without a medium", wireless_row.is_none() || !matches!(kernel_net_facts(&radio_other_board, &net_module, &wireless_feature), Some(None)));
+    let mut wireless_facts_off = board_facts.clone();
+    if let Some(n) = wireless_facts_off.iter_mut().find_map(|r| r.net.as_mut().filter(|n| n.0 == "wireless")) {
+        n.3 += 1;
+    }
+    sc.probe("net-facts-wireless-stream-rx", "a wireless row's stream receive buffer one byte off the kernel's must be refused", wireless_row.is_none() || !board_facts_fault(&wireless_facts_off).is_some_and(|f| f.contains("the facts file's net object")));
+    // The flash region's rule under the same tie: the rows as the tree states them, the row with the radio naming
+    // its region and its kernel facts stating the corner; and that row's FlashRegions taken off, which must be refused.
+    sc.accept_probe("region-rows-genuine", "the board table's flash regions as the tree states them accepted, a row with the radio naming one", board_facts_fault(&board_facts).is_none() && wireless_row.is_some_and(|i| board_facts[i].flash_regions.is_some() && board_facts[i].kernel_corner));
+    let mut region_unnamed = board_facts.clone();
+    if let Some(i) = wireless_row {
+        region_unnamed[i].flash_regions = None;
+    }
+    sc.probe("region-wireless-row-unnamed", "a row with the radio whose table entry names no flash region must be refused", wireless_row.is_none() || !board_facts_fault(&region_unnamed).is_some_and(|f| f.contains("names no flash region")));
+    // The low-power UART's kind under the same tie: the rows as the tree states them, one of them with a block under
+    // the kernel's low-power law, its facts file and its table entry saying so; and that row's table entry taken off,
+    // which must be refused.
+    let lowpower_row = board_facts.iter().position(|r| !r.kernel_uart_lowpower.is_empty());
+    sc.accept_probe("uart-kind-rows-genuine", "the rows' low-power UART blocks as the tree states them accepted, a row with such a block naming it in its facts file and its table entry", board_facts_fault(&board_facts).is_none() && lowpower_row.is_some_and(|i| board_facts[i].table_uart_lowpower != 0 && board_facts[i].uart_lowpower == board_facts[i].kernel_uart_lowpower));
+    let mut kind_unnamed = board_facts.clone();
+    if let Some(i) = lowpower_row {
+        kind_unnamed[i].table_uart_lowpower = 0;
+    }
+    sc.probe("uart-kind-table-unnamed", "a row with a low-power UART whose table entry names no such block must be refused", lowpower_row.is_none() || !board_facts_fault(&kind_unnamed).is_some_and(|f| f.contains("the board table's UartLowPowerBlocks")));
+    sc.accept_probe("bus-rows-genuine", "a row whose kernel facts write their bus rows out in full accepted, its buses tied", board_facts.iter().any(|r| r.kernel_buses.is_some() && r.ties.iter().any(|t| t.0.contains("select"))) && board_facts_fault(&board_facts).is_none());
+    let unlisted = board_facts.iter().find_map(|r| r.kernel_buses.as_ref().filter(|_| !r.bus_lists.0.is_empty()).map(|k| literal_bus_ties(&r.board, &[], &r.bus_lists.1, &k.0, &k.1)));
+    sc.probe("bus-rows-unlisted", "a facts file that lists no I2C bus beside the kernel's bus with pads must be refused", !unlisted.is_some_and(|t| t.is_err_and(|f| f.contains("lists no such bus"))));
+
+
+    // The PWM table tie, probed on the tree's own rows: the unit's table and the tenants' tables as
+    // the tree states them; a table one channel short of the most PWM lines a row states; a tenant's
+    // table with its first two lines exchanged.
+    let pwm_table = read_pwm_table(repo).unwrap_or(PwmTable { channels: 0, tenants: Vec::new() });
+    sc.accept_probe("pwm-table-genuine", "the PWM unit's table and the PWM rows tenants' tables as the tree states them accepted", !pwm_table.tenants.is_empty() && pwm_table_fault(&board_facts, &pwm_table).is_none());
+    let mut pwm_short = pwm_table.clone();
+    pwm_short.channels = board_facts.iter().map(|r| r.kernel_pwm_lines.len() as u64).max().unwrap_or(0).saturating_sub(1);
+    sc.probe("pwm-table-short", "a PWM unit's table one channel short of the most PWM lines a row states must be refused", !pwm_table_fault(&board_facts, &pwm_short).is_some_and(|f| f.contains("more PWM lines than the unit's table")));
+    let mut pwm_exchanged = pwm_table.clone();
+    if let Some(t) = pwm_exchanged.tenants.first_mut().filter(|t| t.1.len() > 1) {
+        t.1.swap(0, 1);
+    }
+    sc.probe("pwm-table-tenant-order", "a PWM rows tenant's table with two lines exchanged must be refused", !pwm_table_fault(&board_facts, &pwm_exchanged).is_some_and(|f| f.contains("!= the kernel's PWM_LINES")));
+
     sc.finish("genuine inputs accepted");
 }
 
@@ -3817,6 +4040,14 @@ fn control_field<'a>(line: &'a str, key: &str) -> &'a str {
     line.split(' ').find_map(|w| w.strip_prefix(key_eq.as_str())).unwrap_or("")
 }
 
+/// A Debug publish's summary line as its seven facts: the publish's code, the
+/// image's state, the response file's counts of -O, --Os and -g, and the two
+/// keys the image's record names, how the framework's code was compiled and
+/// how the program's own.
+fn debug_fields(line: &str) -> (&str, &str, &str, &str, &str, &str, &str) {
+    (control_field(line, "rc"), control_field(line, "elf"), control_field(line, "opt-O"), control_field(line, "opt-Os"), control_field(line, "opt-g"), control_field(line, "profile"), control_field(line, "program"))
+}
+
 /// The SDK's half of the stack-size tie: the board table's thread stack facts (bytes) per row as
 /// the SDK ships them, beside the tree's constants they copy -- the kernel's
 /// pool for the row, the hosting layer's default and clamp.
@@ -3829,6 +4060,13 @@ struct StackRow {
     kernel_pool: u64,
     host_default: u64,
     host_clamp: u64,
+    /// The table's StackKernel: the bytes of the row's pool the kernel's own threads hold.
+    kernel_own: u64,
+    /// The same as the kernel's text states it, thread by thread: the idle thread and the thread
+    /// that runs a hosted program's Main. The kernel's network thread and its card watcher take
+    /// their stacks from bytes the scheduler's array carries above the row's pool, which the
+    /// tie reads in the scheduler's text.
+    kernel_threads: [u64; 2],
 }
 
 #[derive(Clone)]
@@ -3845,7 +4083,7 @@ struct StackFacts {
 const STACK_KNOB: u64 = 20480;
 /// The boot marker the knob moves: the hosting layer's third thread asks the
 /// row's default through the shim's own thread attributes.
-const STACK_KNOB_MARKER_DEFAULT: &str = "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 3)";
+const STACK_KNOB_MARKER_DEFAULT: &str = "[shim] pthread_create: stack 16384 B asked, 16384 B spawned (tid 4)";
 /// The portable symbol file's embedded-source record kind by its GUID as the
 /// file stores it (0E8A571B-6926-466E-B4AD-8AB04611F5FE): in the file's GUID
 /// heap exactly when a source is embedded.
@@ -3878,21 +4116,40 @@ const HEAP_WINDOW_LINE_INTERNAL: &str = "the managed heap's window is 0 (interna
 /// flash (the facts file's flash array: its external range mapped and
 /// executable): its payload kernel is built once under XIP_DIR, shared by
 /// both worlds, and packed beside the leg's own kernel, so the leg publishes
-/// the row under the program's two homes.
+/// the row under the program's two homes. The row carries two kernel sets:
+/// its kernel is built with the network (XIP_FEATURES), and the second
+/// set's default archive, built without it (XIP_PLAIN_FEATURES, under
+/// XIP_PLAIN_DIR), is named to the pack as the row's no-network kernel,
+/// which a pack of the row requires.
 const XIP_ROW: &str = "st-stm32f769i-disco";
 const XIP_TARGET: &str = "thumbv7em-none-eabihf";
-const XIP_FEATURES: &str = "board-st-stm32f769i-disco,payload";
+const XIP_FEATURES: &str = "board-st-stm32f769i-disco,payload,net";
 const XIP_DIR: &str = "src/kernel/target/sdk-parity-external-flash";
-/// The Raspberry Pi Pico 2 row for the Debug configuration's cases: the
-/// smallest RAM of the table's rows (520 KB, no external RAM), where an
-/// image compiled without the code optimization leaves no arena window at
-/// the row's floor; its payload kernel is built once under DEBUG_DIR, shared
-/// by both worlds, and packed beside the leg's own kernel, so the leg
-/// publishes the row in the Debug configuration (the SDK compiles every
-/// configuration with the optimization on and keeps the debug information)
-/// and once more with the optimization forced off, the control the link
+const XIP_PLAIN_FEATURES: &str = "board-st-stm32f769i-disco,payload";
+const XIP_PLAIN_DIR: &str = "src/kernel/target/sdk-parity-external-flash-no-network";
+/// The row the Debug configuration's cases fly: a row whose board the board
+/// table marks RequiresOptimization. The table's header states the rule
+/// (src/sdk/Lamella.Rhu.Sdk/Sdk/boards.props): on such a board an image
+/// compiled without the code optimization as a whole is refused at the
+/// link. The row's payload kernel is built once under DEBUG_DIR, shared by
+/// both worlds, and packed beside the leg's own kernel, so the leg
+/// publishes the row in the Debug configuration (the program's own code
+/// unoptimized, the framework's optimized, as on every row) and once more
+/// compiled without the optimization as a whole, the control the link
 /// refuses. The floor is read from the row's map in the tree.
 const DEBUG_ROW: &str = "raspberrypi-pico-2";
+/// The row for the image compiled without the code optimization as a whole:
+/// a row of the board table whose board does not require the optimization,
+/// packed by both worlds (the external-RAM row).
+const DEBUG_PLAIN_ROW: &str = RAM_INIT_ROW;
+/// A Debug publish's seven facts (debug_fields) as each build leaves them:
+/// the usual Debug build (the optimization words and the debug word once
+/// each; the framework's code optimized, the program's own unoptimized), the
+/// image compiled without the optimization as a whole, and the build with
+/// the optimization on for the program's own code too.
+const DEBUG_USUAL: (&str, &str, &str, &str, &str, &str, &str) = ("0", "present", "1", "1", "1", "optimized", "unoptimized");
+const DEBUG_WHOLE: (&str, &str, &str, &str, &str, &str, &str) = ("0", "present", "0", "0", "1", "unoptimized", "unoptimized");
+const DEBUG_OPTIMIZED: (&str, &str, &str, &str, &str, &str, &str) = ("0", "present", "1", "1", "1", "optimized", "optimized");
 const DEBUG_TARGET: &str = "thumbv8m.main-none-eabihf";
 const DEBUG_FEATURES: &str = "board-raspberrypi-pico-2,payload";
 const DEBUG_DIR: &str = "src/kernel/target/sdk-parity-debug";
@@ -4405,7 +4662,7 @@ fn channel_facts_check(repo: &Path) -> Result<Vec<(String, String, String, usize
 fn knob_boot_markers(value: u64, abi: u32, compat: u32) -> Vec<String> {
     BOOT_MARKERS
         .iter()
-        .map(|m| if *m == STACK_KNOB_MARKER_DEFAULT { format!("[shim] pthread_create: stack {value} B asked, {value} B spawned (tid 3)") } else { m.replace("{abi}", &abi.to_string()).replace("{compat}", &compat.to_string()) })
+        .map(|m| if *m == STACK_KNOB_MARKER_DEFAULT { format!("[shim] pthread_create: stack {value} B asked, {value} B spawned (tid 4)") } else { m.replace("{abi}", &abi.to_string()).replace("{compat}", &compat.to_string()) })
         .collect()
 }
 
@@ -4433,6 +4690,41 @@ fn kernel_pool_bytes(text: &str) -> Option<u64> {
         product = product.checked_mul(factor.parse::<u64>().ok()?)?;
     }
     Some(product)
+}
+
+/// A product of decimal factors (`16 * 1024`, or a plain number).
+fn decimal_product(expr: &str) -> Option<u64> {
+    let expr: String = expr.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut product = 1u64;
+    for factor in expr.split('*') {
+        product = product.checked_mul(factor.parse::<u64>().ok()?)?;
+    }
+    Some(product)
+}
+
+/// `pub const <name>: usize = <product>;` in a kernel source's text.
+fn kernel_const(text: &str, name: &str) -> Option<u64> {
+    let key = format!("pub const {name}: usize = ");
+    let start = text.find(&key)? + key.len();
+    let end = text[start..].find(';')? + start;
+    decimal_product(&text[start..end])
+}
+
+/// The stack the kernel gives its idle thread: the last word of the idle
+/// thread's spawn in the scheduler's text.
+fn kernel_idle_stack(sched: &str) -> Option<u64> {
+    let key = "spawn(\"idle\", idle_entry, 0, 0xFF, ";
+    let start = sched.find(key)? + key.len();
+    let end = sched[start..].find(')')? + start;
+    decimal_product(&sched[start..end])
+}
+
+/// Whether the scheduler's text carries the kernel's service threads'
+/// stacks above a row's pool: the pool's array is declared as the row's
+/// pool plus the service stacks, so those threads take none of the bytes
+/// a program's threads are given.
+fn kernel_service_stacks_above_pool(sched: &str) -> bool {
+    sched.lines().any(|l| l.trim() == "struct StackPool([u8; board::STACK_POOL_BYTES + SERVICE_STACK_BYTES]);")
 }
 
 /// `#define <name> <digits>` (a `u` suffix allowed) in a C header's text.
@@ -4730,6 +5022,10 @@ impl Json {
 /// One analog converter as the facts file states it: its number, its width in bits, its reference in millivolts
 /// and its channels (the chip's channel number and the pin, None for an internal source).
 type AdcFacts = (u64, u64, u64, Vec<(u64, Option<u64>)>);
+/// The network pool as a facts file states it for a row whose kernel serves a network: the medium's word, the
+/// stream and the datagram sockets, a stream's receive and transmit buffers and a datagram's buffer in bytes,
+/// and the resolver's slots.
+type NetFacts = (String, u64, u64, u64, u64, u64, u64);
 
 #[derive(Clone, Default)]
 struct FactsFile {
@@ -4752,12 +5048,16 @@ struct FactsFile {
     flash: Vec<(String, u64, u64, bool, bool, bool)>,
     /// The board's UART rows -- the block and its pins (absent on a row whose UARTs have no pins).
     uart: Vec<(u64, Option<u64>, Option<u64>)>,
+    /// The blocks whose UART row states the kind lowpower, in the rows' order.
+    uart_lowpower: Vec<u64>,
     /// The two streams' default channels and the row's legal set.
     channels: (String, String, Vec<String>),
     /// The chip's legal pin sets per block for a project's pin override.
     uart_pairs: Vec<(u64, Vec<u64>, Vec<u64>)>,
     /// The analog converters: a converter's number is its index in the kernel's block table.
     adc: Vec<AdcFacts>,
+    /// The network pool, on a row whose file carries the net object (a row whose kernel serves no network carries none).
+    net: Option<NetFacts>,
 }
 
 fn read_facts_file(path: &Path) -> Result<FactsFile, String> {
@@ -4808,12 +5108,24 @@ fn read_facts_file(path: &Path) -> Result<FactsFile, String> {
     for b in j.objects("uart", w)? {
         let tx = if b.member("tx", w).is_ok() { Some(b.int("tx", w)?) } else { None };
         let rx = if b.member("rx", w).is_ok() { Some(b.int("rx", w)?) } else { None };
-        f.uart.push((b.int("block", w)?, tx, rx));
+        let block = b.int("block", w)?;
+        if b.member("kind", w).is_ok() {
+            let kind = b.str("kind", w)?;
+            if kind != "lowpower" {
+                return Err(format!("{w}: the uart row of block {block} states the kind '{kind}', not the word lowpower"));
+            }
+            f.uart_lowpower.push(block);
+        }
+        f.uart.push((block, tx, rx));
     }
     let ch = j.member("channels", w)?;
     f.channels = (ch.str("log", w)?, ch.str("console", w)?, ch.strs("legal", w)?);
     for b in j.objects("uartPairs", w)? {
         f.uart_pairs.push((b.int("block", w)?, b.ints("tx", w)?, b.ints("rx", w)?));
+    }
+    if j.member("net", w).is_ok() {
+        let n = j.member("net", w)?;
+        f.net = Some((n.str("medium", w)?, n.int("streams", w)?, n.int("datagrams", w)?, n.int("streamRx", w)?, n.int("streamTx", w)?, n.int("datagramBuf", w)?, n.int("resolveSlots", w)?));
     }
     if f.name.is_empty() || f.pins == 0 || f.clock_hz == 0 || f.posture.is_empty() {
         return Err(format!("{where_}: an empty name, pins, clockHz or posture"));
@@ -4988,6 +5300,31 @@ fn kernel_uart_rows(text: &str) -> Option<Vec<(u64, Option<u64>, Option<u64>)>> 
     Some(out)
 }
 
+/// The kernel's low-power UART blocks of a facts module, by number: the
+/// `UART_BLOCKS` table holds one block for each row of `UART_ROWS`, in the
+/// rows' order, and a block under `Law::LowPower` is a low-power UART; its
+/// number is its row's. A module without the table (the rows of another
+/// chip family) has none.
+fn kernel_uart_lowpower(text: &str, rows: &[(u64, Option<u64>, Option<u64>)]) -> Option<Vec<u64>> {
+    let Some(start) = text.find("pub const UART_BLOCKS: ") else {
+        return Some(Vec::new());
+    };
+    let end = text[start..].find("];")? + start;
+    let mut out = Vec::new();
+    for (i, block) in text[start..end].split("Block {").skip(1).enumerate() {
+        if block.contains("Law::LowPower") {
+            out.push(rows.get(i)?.0);
+        }
+    }
+    Some(out)
+}
+
+/// The word of a list of UART blocks: bit n set for block n, as the board
+/// table's `UartLowPowerBlocks` and the link word state them.
+fn uart_blocks_word(blocks: &[u64]) -> u64 {
+    blocks.iter().fold(0u64, |word, b| word | 1u64.checked_shl(*b as u32).unwrap_or(0))
+}
+
 /// The kernel's `CHANNELS` facts of a row: the two streams'
 /// default codes and the legal set, each `CH_*` name read as the SDK's word.
 fn kernel_channels(text: &str) -> Option<(String, String, Vec<String>)> {
@@ -5061,6 +5398,10 @@ struct BoardFactsRow {
     clock_hz: u64,
     kernel_clock_hz: u64,
     ties: Vec<(String, u64, u64)>,
+    /// The facts file's two bus lists as it states them, and the bus rows the kernel's facts write out in full
+    /// for the row (None on a row whose buses the chip's module makes): the two sides of the second bus tie.
+    bus_lists: (Vec<I2cFacts>, Vec<SpiFacts>),
+    kernel_buses: Option<(Vec<LiteralBus>, Vec<LiteralBus>)>,
     /// The facts file's I2C rates and the kernel's modes whose floor the row's clock reaches, in order (the rate tie).
     rates: Vec<u64>,
     kernel_rates: Vec<u64>,
@@ -5080,6 +5421,11 @@ struct BoardFactsRow {
     /// The facts file's UART rows and the kernel's (`UART_ROWS`).
     uart: Vec<(u64, Option<u64>, Option<u64>)>,
     kernel_uart: Vec<(u64, Option<u64>, Option<u64>)>,
+    /// The low-power UART blocks: the facts file's (a UART row's kind), the kernel's (a block of `UART_BLOCKS`
+    /// under `Law::LowPower`, by its row's number) and the board table's word (`UartLowPowerBlocks`, 0 without it).
+    uart_lowpower: Vec<u64>,
+    kernel_uart_lowpower: Vec<u64>,
+    table_uart_lowpower: u64,
     /// The facts file's channels and the kernel's (`CHANNELS`).
     channels: (String, String, Vec<String>),
     kernel_channels: (String, String, Vec<String>),
@@ -5089,6 +5435,15 @@ struct BoardFactsRow {
     /// The facts file's analog converters and the kernel's (`ADC_BLOCKS` and `ADC_CHANNELS`).
     adc: Vec<AdcFacts>,
     kernel_adc: Vec<AdcFacts>,
+    /// The facts file's net object and the network pool the kernel gives the row (the build script's medium for
+    /// the row's board feature and the network module's constants); None on either side where there is none.
+    net: Option<NetFacts>,
+    kernel_net: Option<NetFacts>,
+    /// The flash regions the table's row names (FlashRegions), and whether the row's kernel facts state a radio
+    /// corner (RADIO_CORNER_OFFSET): the firmware of a row whose kernels carry the radio lies in such a region of
+    /// the board package, and the corner is the region's place.
+    flash_regions: Option<String>,
+    kernel_corner: bool,
 }
 
 /// Every row of the board table has a facts file naming it; its pin count,
@@ -5100,10 +5455,14 @@ fn read_board_facts(repo: &Path) -> Result<Vec<BoardFactsRow>, String> {
     let sdk = repo.join("src").join("sdk").join("Lamella.Rhu.Sdk");
     let boards = std::fs::read_to_string(sdk.join("Sdk").join("boards.props")).map_err(|e| format!("boards.props: {e}"))?;
     let kboard = repo.join("src").join("kernel").join("src").join("board");
+    // The kernel's network medium per board feature and its pool, for the facts files' net objects.
+    let net_build = std::fs::read_to_string(repo.join("src").join("kernel").join("build.rs")).map_err(|e| format!("build.rs: {e}"))?;
+    let net_module = std::fs::read_to_string(repo.join("src").join("kernel").join("src").join("net.rs")).map_err(|e| format!("net.rs: {e}"))?;
     let mut rows = Vec::new();
     for (i, _) in boards.match_indices("<LamellaTargetBoardRow Include=\"") {
         let end = boards[i..].find("/>").ok_or("a board row without its end")? + i;
         let board = row_attr_text(&boards[i..end], "Include").ok_or("a board row without a name")?;
+        let flash_regions = row_attr_text(&boards[i..end], "FlashRegions");
         let facts = read_facts_file(&sdk.join("boards").join(format!("{board}.json")))?;
         if facts.name != board {
             return Err(format!("boards/{board}.json names '{}', not its row", facts.name));
@@ -5134,14 +5493,52 @@ fn read_board_facts(repo: &Path) -> Result<Vec<BoardFactsRow>, String> {
         let mut kernel_rates = Vec::new();
         let mut ladder = Vec::new();
         let mut kernel_spi_hz = 0;
-        if !facts.i2c.is_empty() || !facts.spi.is_empty() {
-            // The chip's shared bus rows (rp2350_bus_math::i2c_buses, the Pico rows), or the row's own rows built
-            // through the chip's constructors (rp2350_bus_math::i2c_bus and spi_bus over the facts file's I2C_PADS,
-            // SPI_PADS and SPI_SELECTS): the pads are read where the row declares them.
-            let own = ktext.contains("rp2350_bus_math::i2c_bus(") || ktext.contains("rp2350_bus_math::spi_bus(");
-            if !ktext.contains("rp2350_bus_math::i2c_buses") && !own {
-                return Err(format!("{board}: the facts file carries buses but the tie knows the kernel's bus rows for the RP2350 alone"));
+        // A row's bus rows stand in one of two forms in its kernel facts. A chip's module makes them (the shared
+        // rows rp2350_bus_math::i2c_buses, or the row's own through the constructors i2c_bus and spi_bus over the
+        // facts file's I2C_PADS, SPI_PADS and SPI_SELECTS): the pads are read where the row declares them. Or the
+        // facts file writes them out in full (bus_math::I2cBus and bus_math::SpiBus rows): every such bus that
+        // has pads is a bus of the board's facts file and the reverse; the rates are those bus_math::i2c_setup
+        // serves -- fast mode plus by the row's fact for it, at that fact's clock, and every other rate at the
+        // bus's own clock, each where bus_math::i2c_timing has a word for the pair -- and the range is the
+        // divisor ladder's at the bus's own clock.
+        let own = ktext.contains("rp2350_bus_math::i2c_bus(") || ktext.contains("rp2350_bus_math::spi_bus(");
+        let made_by_chip = ktext.contains("rp2350_bus_math::i2c_buses") || own;
+        let mut kernel_buses = None;
+        if !made_by_chip {
+            let row_feature = format!("board-{}", board.strip_prefix("arm-").unwrap_or(&board));
+            let k_i2c = kernel_literal_buses(&ktext, "I2C_BUSES", "I2cBus", &row_feature).ok_or(format!("{}: an I2C bus row the tie cannot read", kfile.display()))?;
+            let k_spi = kernel_literal_buses(&ktext, "SPI_BUSES", "SpiBus", &row_feature).ok_or(format!("{}: an SPI bus row the tie cannot read", kfile.display()))?;
+            ties = literal_bus_ties(&board, &facts.i2c, &facts.spi, &k_i2c, &k_spi)?;
+            if !ties.is_empty() {
+                let math = std::fs::read_to_string(repo.join("src").join("kernel").join("src").join("bus_math.rs")).map_err(|e| format!("bus_math.rs: {e}"))?;
+                let timings = kernel_i2c_timings(&math).ok_or("bus_math.rs: i2c_timing is not a match over pairs of kernel_hz and rate_hz as the tie reads it")?;
+                let rate_set = kernel_i2c_rate_set(&math).ok_or("bus_math.rs: I2C_RATES_HZ and the rule of i2c_setup are not there as the tie reads them")?;
+                if !math.contains("while n < 8") || !math.contains("kernel_hz >> (n + 1)") {
+                    return Err("bus_math.rs: the SPI divisor ladder is not the eight halvings of the kernel clock the tie reads".to_string());
+                }
+                let chip_text = btext.lines().find_map(|l| l.trim().strip_prefix("pub use super::").and_then(|r| r.strip_suffix("::*;"))).and_then(|chip| std::fs::read_to_string(kboard.join(format!("{chip}.rs"))).ok());
+                let clock_of = |bus: &LiteralBus, what: &str| kernel_bus_clock(&bus.clock, chip_text.as_deref(), kernel_clock_hz).ok_or(format!("{board}: the kernel clock of {what}{} ({}) is not a number the tie can read", bus.number, bus.clock));
+                let fast_plus_hz = match k_i2c.first() {
+                    Some(first) => kernel_i2c_fast_plus(&ktext, &row_feature, clock_of(first, "I2C")?, chip_text.as_deref(), kernel_clock_hz).ok_or(format!("{}: the row's fact for fast mode plus (I2C_FAST_PLUS) is not stated in a form the tie reads", kfile.display()))?,
+                    None => None,
+                };
+                for (block, _, _, r) in &facts.i2c {
+                    if let Some(bus) = k_i2c.iter().find(|b| b.number == *block) {
+                        let hz = clock_of(bus, "I2C")?;
+                        let served = |rate: u64| (if rate == rate_set[2] { fast_plus_hz } else { Some(hz) }).is_some_and(|clock| timings.contains(&(clock, rate)));
+                        kernel_rates = rate_set.iter().copied().filter(|rate| served(*rate)).collect();
+                        rates = r.clone();
+                    }
+                }
+                for (block, _, _, _, _, min, max) in &facts.spi {
+                    if let Some(bus) = k_spi.iter().find(|b| b.number == *block) {
+                        kernel_spi_hz = clock_of(bus, "SPI")?;
+                        ladder.push((*min, *max, kernel_spi_hz >> 8, kernel_spi_hz >> 1));
+                    }
+                }
             }
+            kernel_buses = Some((k_i2c, k_spi));
+        } else if !facts.i2c.is_empty() || !facts.spi.is_empty() {
             let bus = std::fs::read_to_string(repo.join("src").join("kernel").join("src").join("rp2350_bus_math.rs")).map_err(|e| format!("rp2350_bus_math.rs: {e}"))?;
             let (i2c_pads, spi_pads, selects) = if own {
                 (
@@ -5189,10 +5586,13 @@ fn read_board_facts(repo: &Path) -> Result<Vec<BoardFactsRow>, String> {
         let kernel_ram = kernel_ram_ranges(&ktext, &feature).ok_or(format!("{}: no RAM_RANGES rows for the feature {feature}", kfile.display()))?;
         let kernel_flash = kernel_flash_ranges(&ktext).unwrap_or_default();
         let kernel_uart = kernel_uart_rows(&ktext).ok_or(format!("{}: no UART_ROWS table the tie can read", kfile.display()))?;
+        let kernel_uart_lowpower = kernel_uart_lowpower(&ktext, &kernel_uart).ok_or(format!("{}: a UART_BLOCKS table the tie cannot read against its UART_ROWS", kfile.display()))?;
+        let table_uart_lowpower = row_attr(&boards[i..end], "UartLowPowerBlocks").unwrap_or(0);
         let kernel_channels = kernel_channels(&ktext).ok_or(format!("{}: no CHANNELS facts the tie can read", kfile.display()))?;
         let kernel_uart_pairs = kernel_uart_pairs(&ktext).ok_or(format!("{}: no UART_PAIRS table the tie can read", kfile.display()))?;
         let kernel_adc = kernel_adc_tables(&ktext).ok_or(format!("{}: no ADC_BLOCKS and ADC_CHANNELS tables the tie can read", kfile.display()))?;
-        rows.push(BoardFactsRow { board, lines: facts.pins, kernel_lines, clock_hz: facts.clock_hz, kernel_clock_hz, ties, rates, kernel_rates, ladder, kernel_spi_hz, pwm_chip: facts.pwm_chip, pwm_lines: facts.pwm_lines.clone(), kernel_pwm_lines, ram: facts.ram, kernel_ram, flash: facts.flash, kernel_flash, uart: facts.uart, kernel_uart, channels: facts.channels, kernel_channels, uart_pairs: facts.uart_pairs, kernel_uart_pairs, adc: facts.adc.clone(), kernel_adc });
+        let kernel_net = kernel_net_facts(&net_build, &net_module, &feature).ok_or(format!("{board}: the kernel's network medium and pool are not there as the tie reads them (build.rs, net.rs)"))?;
+        rows.push(BoardFactsRow { board, lines: facts.pins, kernel_lines, clock_hz: facts.clock_hz, kernel_clock_hz, ties, bus_lists: (facts.i2c, facts.spi), kernel_buses, rates, kernel_rates, ladder, kernel_spi_hz, pwm_chip: facts.pwm_chip, pwm_lines: facts.pwm_lines.clone(), kernel_pwm_lines, ram: facts.ram, kernel_ram, flash: facts.flash, kernel_flash, uart: facts.uart, kernel_uart, uart_lowpower: facts.uart_lowpower, kernel_uart_lowpower, table_uart_lowpower,channels: facts.channels, kernel_channels, uart_pairs: facts.uart_pairs, kernel_uart_pairs, adc: facts.adc.clone(), kernel_adc, net: facts.net, kernel_net, flash_regions, kernel_corner: ktext.contains("pub const RADIO_CORNER_OFFSET: usize = ") });
     }
     Ok(rows)
 }
@@ -5248,6 +5648,123 @@ fn kernel_adc_tables(text: &str) -> Option<Vec<AdcFacts>> {
     Some(out)
 }
 
+/// The network pool the kernel gives a row, in the facts file's shape, read
+/// as text where the kernel states it. The medium: the build script's blocks
+/// that open `if cfg!(all(feature = "net", ...)) {` and set a medium's
+/// configuration word (`rhu_net_wired` or `rhu_net_virtual`, beside
+/// `rhu_net_rows`) for the board features they name, and the radio's block,
+/// which opens `if cfg!(feature = "wifi-cyw43") {`, names its boards in its
+/// refusal line (`if !cfg!(any(feature = ..., ...)) {`) and sets
+/// `rhu_net_wireless` beside `rhu_net_rows` before its end: a row's kernels
+/// built with that feature have the radio as their medium. The pool: the network
+/// module's STREAMS, DATAGRAMS, STREAM_TX, DGRAM_BUF and RESOLVE_SLOTS, each
+/// stated once as a plain number; STREAM_RX, stated once by two arms, the
+/// first the wired and the wireless medium's and the second the virtual
+/// medium's; and KIND_WORD, stated once by three arms, the wired, the
+/// wireless and the virtual medium's in that order. The outer None says the
+/// text is not there as read, a statement that names fewer media and a
+/// feature given two media among the cases; the inner None that the kernel
+/// gives the row's feature no medium.
+fn kernel_net_facts(build: &str, net: &str, feature: &str) -> Option<Option<NetFacts>> {
+    let lines: Vec<&str> = build.lines().collect();
+    let names = |line: &str| -> bool { line.split("feature = \"").skip(1).filter_map(|p| p.split('"').next()).any(|name| name == feature) };
+    // The row's medium as its arm of KIND_WORD: 0 the wired, 1 the wireless, 2 the virtual.
+    let mut medium: Option<usize> = None;
+    for (i, l) in lines.iter().enumerate() {
+        let s = l.trim();
+        let arm = if s == "if cfg!(feature = \"wifi-cyw43\") {" {
+            // The radio's block, to the closing brace at its own depth.
+            let close = format!("{}}}", &l[..l.len() - l.trim_start().len()]);
+            let len = lines.iter().skip(i + 1).position(|b| *b == close)?;
+            let body = &lines[i + 1..i + 1 + len];
+            let refusal = body.iter().map(|b| b.trim()).find(|b| b.starts_with("if !cfg!(any(") && b.ends_with('{'))?;
+            let words = body.join(" ");
+            if !words.contains("cargo:rustc-cfg=rhu_net_rows") || !words.contains("cargo:rustc-cfg=rhu_net_wireless") {
+                return None;
+            }
+            names(refusal).then_some(1)
+        } else if s.starts_with("if cfg!(all(feature = \"net\",") && s.ends_with('{') {
+            let body = lines.iter().skip(i + 1).take(3).copied().collect::<Vec<&str>>().join(" ");
+            let arm = if body.contains("rhu_net_wired") {
+                0
+            } else if body.contains("rhu_net_virtual") {
+                2
+            } else {
+                return None;
+            };
+            if !body.contains("rhu_net_rows") {
+                return None;
+            }
+            names(s).then_some(arm)
+        } else {
+            None
+        };
+        if arm.is_some() {
+            if medium.is_some() {
+                return None;
+            }
+            medium = arm;
+        }
+    }
+    let Some(medium) = medium else {
+        return Some(None);
+    };
+    let plain = |name: &str| -> Option<u64> {
+        let key = format!("pub const {name}: usize = ");
+        let mut found = None;
+        for l in net.lines() {
+            if let Some(rest) = l.trim().strip_prefix(key.as_str()) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(rest.strip_suffix(';')?.trim().parse::<u64>().ok()?);
+            }
+        }
+        found
+    };
+    // One statement's arms in their order: the text behind `head`, cut at each of `joints` in turn and closed by ` };`.
+    let arms = |head: &str, joints: &[&str]| -> Option<Vec<String>> {
+        let mut found = None;
+        for l in net.lines() {
+            if let Some(mut rest) = l.trim().strip_prefix(head) {
+                if found.is_some() {
+                    return None;
+                }
+                let mut out = Vec::new();
+                for joint in joints {
+                    let (arm, behind) = rest.split_once(*joint)?;
+                    out.push(arm.trim().to_string());
+                    rest = behind;
+                }
+                out.push(rest.strip_suffix(" };")?.trim().to_string());
+                if out.iter().any(|arm| arm.contains('{') || arm.contains('}')) {
+                    return None;
+                }
+                found = Some(out);
+            }
+        }
+        found
+    };
+    let rx = arms("pub const STREAM_RX: usize = if cfg!(any(rhu_net_wired, rhu_net_wireless)) { ", &[" } else { "])?;
+    let rx = rx.iter().map(|arm| arm.parse::<u64>().ok()).collect::<Option<Vec<u64>>>()?;
+    let words = arms("pub const KIND_WORD: &str = if cfg!(rhu_net_wired) { ", &[" } else if cfg!(rhu_net_wireless) { ", " } else { "])?;
+    let words = words.iter().map(|arm| arm.strip_prefix('"').and_then(|w| w.strip_suffix('"')).map(str::to_string)).collect::<Option<Vec<String>>>()?;
+    // The row's medium takes its arm of each statement: the wired and the wireless medium share STREAM_RX's first.
+    let (word, rx) = (words[medium].clone(), if medium == 2 { rx[1] } else { rx[0] });
+    Some(Some((word, plain("STREAMS")?, plain("DATAGRAMS")?, rx, plain("STREAM_TX")?, plain("DGRAM_BUF")?, plain("RESOLVE_SLOTS")?)))
+}
+
+/// A net object as words: `wired, 4 stream and 2 datagram sockets, stream buffers 4096 and 2048 B, a datagram
+/// buffer of 1536 B, 4 resolver slots` (`none` where there is no object).
+fn net_words(n: &Option<NetFacts>) -> String {
+    match n {
+        None => "none".to_string(),
+        Some((medium, streams, datagrams, rx, tx, dgram, slots)) => {
+            format!("{medium}, {streams} stream and {datagrams} datagram sockets, stream buffers {rx} and {tx} B, a datagram buffer of {dgram} B, {slots} resolver slots")
+        }
+    }
+}
+
 fn board_facts_fault(rows: &[BoardFactsRow]) -> Option<String> {
     if rows.is_empty() {
         return Some("the board table has no rows with facts files".to_string());
@@ -5290,11 +5807,28 @@ fn board_facts_fault(rows: &[BoardFactsRow]) -> Option<String> {
         if r.uart != r.kernel_uart {
             return Some(format!("{}: the facts file's UART rows {} != the kernel's UART_ROWS {}", r.board, uart_list(&r.uart), uart_list(&r.kernel_uart)));
         }
+        // A low-power UART's device file is /dev/ttyLP<block>: the facts file's kind names the board class's port,
+        // the board table's word names the hosting layer's, and both are the kernel's law for the block.
+        if r.uart_lowpower != r.kernel_uart_lowpower {
+            return Some(format!("{}: the facts file's low-power UART blocks {:?} != the kernel's UART_BLOCKS under Law::LowPower {:?}", r.board, r.uart_lowpower, r.kernel_uart_lowpower));
+        }
+        if r.table_uart_lowpower != uart_blocks_word(&r.kernel_uart_lowpower) {
+            return Some(format!("{}: the board table's UartLowPowerBlocks {} != the word of the kernel's low-power UART blocks {:?} ({})", r.board, r.table_uart_lowpower, r.kernel_uart_lowpower, uart_blocks_word(&r.kernel_uart_lowpower)));
+        }
         if r.channels != r.kernel_channels {
             return Some(format!("{}: the facts file's channels {} != the kernel's CHANNELS {}", r.board, channels_words(&r.channels), channels_words(&r.kernel_channels)));
         }
         if r.uart_pairs != r.kernel_uart_pairs {
             return Some(format!("{}: the facts file's uartPairs {} != the kernel's UART_PAIRS {}", r.board, pairs_list(&r.uart_pairs), pairs_list(&r.kernel_uart_pairs)));
+        }
+        if r.net != r.kernel_net {
+            return Some(format!("{}: the facts file's net object ({}) != the network pool the kernel gives the row ({})", r.board, net_words(&r.net), net_words(&r.kernel_net)));
+        }
+        if r.net.as_ref().is_some_and(|n| n.0 == "wireless") && r.flash_regions.is_none() {
+            return Some(format!("{}: the row's kernels carry the radio and the board table names no flash region for it (FlashRegions): the radio's firmware lies in a region of the board package", r.board));
+        }
+        if r.flash_regions.is_some() && !r.kernel_corner {
+            return Some(format!("{}: the board table names a flash region ({}) and the row's kernel facts state no radio corner (RADIO_CORNER_OFFSET)", r.board, r.flash_regions.as_deref().unwrap_or("")));
         }
     }
     None
@@ -5404,6 +5938,252 @@ fn kernel_i2c_modes(text: &str) -> Option<Vec<(u64, u64)>> {
     }
 }
 
+/// An I2C bus and an SPI bus as a facts file lists them: the block; the data and the clock pin with the rates;
+/// the clock, the out and the in pin with the selects and the range.
+type I2cFacts = (u64, u64, u64, Vec<u64>);
+type SpiFacts = (u64, u64, u64, u64, Vec<u64>, u64, u64);
+
+/// One bus row a kernel facts file writes out in full (`bus_math::I2cBus { .. }`, `bus_math::SpiBus { .. }`):
+/// the block's number, its kernel clock as the row writes it, its pads as line and role, its chip selects.
+#[derive(Clone)]
+struct LiteralBus {
+    number: u64,
+    clock: String,
+    pads: Vec<(u64, String)>,
+    selects: Vec<u64>,
+}
+
+/// A line number as a facts table writes it: a sum of products of decimal numbers (`7 * 16 + 6`).
+fn line_number(expr: &str) -> Option<u64> {
+    let mut total = 0u64;
+    for term in expr.split('+') {
+        let mut product = 1u64;
+        for factor in term.split('*') {
+            product = product.checked_mul(rust_number(factor)?)?;
+        }
+        total = total.checked_add(product)?;
+    }
+    Some(total)
+}
+
+/// The bus rows a facts file writes out in full under `name` (`I2C_BUSES`, `SPI_BUSES`), each a `row_type { .. }`
+/// literal: the declarations with no `#[cfg(...)]` line above them and those whose line names the row's board
+/// feature. A declaration a chip's constructor builds, or an empty one, yields no row.
+fn kernel_literal_buses(text: &str, name: &str, row_type: &str, feature: &str) -> Option<Vec<LiteralBus>> {
+    let key = format!("pub const {name}: ");
+    let open = format!("{row_type} {{");
+    let mut out = Vec::new();
+    for (i, _) in text.match_indices(&key) {
+        if let Some(above) = text[..i].lines().next_back() {
+            if above.trim_start().starts_with("#[cfg(") && !above.contains(&format!("feature = \"{feature}\"")) {
+                continue;
+            }
+        }
+        let end = text[i..].find(';')? + i;
+        for row in text[i..end].split(&open).skip(1) {
+            let mut pads = Vec::new();
+            for pad in row.split("Pad {").skip(1) {
+                let line = pad.split("line:").nth(1)?.split(',').next()?;
+                let role: String = pad.split("PadRole::").nth(1)?.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                pads.push((line_number(line)?, role));
+            }
+            let mut selects = Vec::new();
+            if let Some(list) = row.split("selects: &[").nth(1) {
+                for select in list[..list.find(']')?].split(',').filter(|s| !s.trim().is_empty()) {
+                    selects.push(line_number(select)?);
+                }
+                selects.truncate(field_number(row, "select_count:")? as usize);
+            }
+            let clock = row.split("kernel_hz:").nth(1)?.split(',').next()?.trim().to_string();
+            out.push(LiteralBus { number: field_number(row, "number:")?, clock, pads, selects });
+        }
+    }
+    Some(out)
+}
+
+/// A bus's kernel clock in Hz as its row writes it: a number, or a clock the chip's module names
+/// (`crate::board::PCLK1_HZ`), read there at the clock configuration whose `SYSCLK_HZ` is the row's clock --
+/// the definition under the same `#[cfg(...)]` line, `SYSCLK_HZ` itself or `SYSCLK_HZ / <n>`.
+fn kernel_bus_clock(clock: &str, chip_text: Option<&str>, sysclk_hz: u64) -> Option<u64> {
+    if let Some(n) = rust_number(clock) {
+        return Some(n);
+    }
+    let name = clock.strip_prefix("crate::board::")?;
+    let text = chip_text?;
+    let cfg_above = |i: usize| text[..i].lines().rev().take(4).find(|l| l.trim().starts_with("#[cfg(")).map(|l| l.trim().to_string());
+    let sys_key = "pub const SYSCLK_HZ: u32 = ";
+    let key = format!("pub const {name}: u32 = ");
+    for (i, _) in text.match_indices(sys_key) {
+        let rest = &text[i + sys_key.len()..];
+        if rust_number(&rest[..rest.find(';')?]) != Some(sysclk_hz) {
+            continue;
+        }
+        for (j, _) in text.match_indices(&key) {
+            if cfg_above(j) != cfg_above(i) {
+                continue;
+            }
+            let rest = &text[j + key.len()..];
+            let value = rest[..rest.find(';')?].trim();
+            return match value.strip_prefix("SYSCLK_HZ") {
+                Some("") => Some(sysclk_hz),
+                Some(over) => Some(sysclk_hz / rust_number(over.trim().strip_prefix('/')?)?),
+                None => rust_number(value),
+            };
+        }
+    }
+    None
+}
+
+/// The pairs of kernel clock and rate that `bus_math::i2c_timing` serves, as the arms of its match over the
+/// pair write them (`(16_000_000, 100_000) => Some(0x3042_0F13),`), closed by the arm that serves no other pair
+/// (`_ => None,`). None where the function is not that match or an arm has another form.
+fn kernel_i2c_timings(text: &str) -> Option<Vec<(u64, u64)>> {
+    let start = text.find("pub const fn i2c_timing(")?;
+    let end = text[start..].find("\n}")? + start;
+    let arms = text[start..end].split_once("match (kernel_hz, rate_hz) {")?.1;
+    let mut out = Vec::new();
+    let mut closed = false;
+    for arm in arms.lines().map(str::trim).filter(|l| l.contains("=>")) {
+        if closed {
+            return None;
+        }
+        if arm == "_ => None," {
+            closed = true;
+            continue;
+        }
+        let (pair, word) = arm.strip_prefix('(')?.split_once(") => Some(0x")?;
+        let (clock, rate) = pair.split_once(", ")?;
+        if !word.strip_suffix("),")?.chars().all(|c| c.is_ascii_hexdigit() || c == '_') {
+            return None;
+        }
+        out.push((rust_number(clock)?, rust_number(rate)?));
+    }
+    if out.is_empty() || !closed {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// The rates a claim may name, in the set's order (`pub const I2C_RATES_HZ: [u32; 3] = [..];`), read with the
+/// rule `bus_math::i2c_setup` states over the set: its last rate, fast mode plus, is served by the row's fact
+/// for the mode alone, at that fact's clock, and every other rate at the bus's own clock. None where the set
+/// or the rule's three lines are not there as read.
+fn kernel_i2c_rate_set(text: &str) -> Option<Vec<u64>> {
+    let start = text.find("pub const fn i2c_setup(")?;
+    let end = text[start..].find("\n}")? + start;
+    let rule = &text[start..end];
+    if !rule.contains("if rate_hz == I2C_RATES_HZ[2] {") || !rule.contains("match i2c_timing(f.kernel_hz, rate_hz) {") || !rule.contains("match i2c_timing(bus_hz, rate_hz) {") {
+        return None;
+    }
+    let set = rust_const(text, "I2C_RATES_HZ")?;
+    let rates = set.strip_prefix('[')?.strip_suffix(']')?.split(',').map(rust_number).collect::<Option<Vec<u64>>>()?;
+    if rates.len() == 3 {
+        Some(rates)
+    } else {
+        None
+    }
+}
+
+/// The kernel clock a row's I2C block takes for fast mode plus, as the row's facts state the fact
+/// (`pub const I2C_FAST_PLUS`, the one declaration with no `#[cfg(...)]` line above it or with the row's board
+/// feature on that line): the inner None where the row states none, or states the fact under a condition that
+/// does not hold at the row's clock; the outer None where the statement is not one of the forms read here.
+/// The forms: `None`; one `Some(..I2cFastPlus { mux_value: .., kernel_hz: <clock>, drive: .. })`; and that row
+/// under a condition, `if <clock> as u64 * <a> / <b> > <n> { Some(..) } else { None }`. A clock is the first
+/// bus's own (`I2C_BUSES[0].kernel_hz`, passed as `first_hz`), or one `kernel_bus_clock` reads.
+fn kernel_i2c_fast_plus(text: &str, feature: &str, first_hz: u64, chip_text: Option<&str>, sysclk_hz: u64) -> Option<Option<u64>> {
+    let key = "pub const I2C_FAST_PLUS: ";
+    let mut stated = None;
+    for (i, _) in text.match_indices(key) {
+        if let Some(above) = text[..i].lines().next_back() {
+            if above.trim_start().starts_with("#[cfg(") && !above.contains(&format!("feature = \"{feature}\"")) {
+                continue;
+            }
+        }
+        if stated.is_some() {
+            return None;
+        }
+        let end = text[i..].find(';')? + i;
+        stated = Some(text[i..end].split_once(" = ")?.1.split_whitespace().collect::<Vec<&str>>().join(" "));
+    }
+    let stated = stated?;
+    let clock = |expr: &str| if expr == "I2C_BUSES[0].kernel_hz" { Some(first_hz) } else { kernel_bus_clock(expr, chip_text, sysclk_hz) };
+    // The clock's text of one `Some(..I2cFastPlus { mux_value: .., kernel_hz: <clock>, drive: .. })`.
+    let row_clock = |row: &str| -> Option<String> {
+        let fields: Vec<&str> = row.strip_prefix("Some(")?.strip_suffix(" })")?.split_once("I2cFastPlus { ")?.1.split(", ").collect();
+        if fields.len() != 3 || !fields[0].starts_with("mux_value: ") || !matches!(fields[2], "drive: true" | "drive: false") {
+            return None;
+        }
+        fields[1].strip_prefix("kernel_hz: ").map(str::to_string)
+    };
+    if stated == "None" {
+        return Some(None);
+    }
+    let Some(conditional) = stated.strip_prefix("if ") else {
+        return Some(Some(clock(&row_clock(&stated)?)?));
+    };
+    let (condition, rest) = conditional.split_once(" { ")?;
+    let (row, tail) = rest.split_once(" } else { ")?;
+    if tail != "None }" {
+        return None;
+    }
+    let (left, floor) = condition.split_once(" > ")?;
+    let (name, scale) = left.split_once(" as u64 * ")?;
+    let (a, b) = scale.split_once(" / ")?;
+    let holds = clock(name)?.checked_mul(rust_number(a)?)?.checked_div(rust_number(b)?)? > rust_number(floor)?;
+    let hz = clock(&row_clock(row)?)?;
+    Some(if holds { Some(hz) } else { None })
+}
+
+/// The bus ties of a row whose kernel facts write their bus rows out in full: every kernel bus that has pads
+/// is a bus of the facts file and the reverse, by the block's number; the pads by their role and the selects
+/// in their order. A kernel bus without pads (an emulator row's model) is no row of a facts file.
+fn literal_bus_ties(board: &str, i2c: &[I2cFacts], spi: &[SpiFacts], k_i2c: &[LiteralBus], k_spi: &[LiteralBus]) -> Result<Vec<(String, u64, u64)>, String> {
+    let pad = |bus: &LiteralBus, role: &str| bus.pads.iter().find(|(_, r)| r == role).map(|(line, _)| *line);
+    let mut ties = Vec::new();
+    for (block, _, _, _) in i2c {
+        if !k_i2c.iter().any(|b| b.number == *block && !b.pads.is_empty()) {
+            return Err(format!("{board}: the facts file lists I2C block {block}; the kernel's facts carry no such bus with pads"));
+        }
+    }
+    for bus in k_i2c.iter().filter(|b| !b.pads.is_empty()) {
+        let n = bus.number;
+        let Some((_, sda, scl, _)) = i2c.iter().find(|(block, _, _, _)| *block == n) else {
+            return Err(format!("{board}: the kernel's facts carry I2C{n} with its pads and the facts file lists no such bus"));
+        };
+        let (Some(data), Some(clock)) = (pad(bus, "I2cData"), pad(bus, "I2cClock")) else {
+            return Err(format!("{board}: the kernel's I2C{n} row names no data pad or no clock pad"));
+        };
+        ties.push((format!("I2C{n}'s data pad"), *sda, data));
+        ties.push((format!("I2C{n}'s clock pad"), *scl, clock));
+    }
+    for (block, _, _, _, _, _, _) in spi {
+        if !k_spi.iter().any(|b| b.number == *block && !b.pads.is_empty()) {
+            return Err(format!("{board}: the facts file lists SPI block {block}; the kernel's facts carry no such bus with pads"));
+        }
+    }
+    for bus in k_spi.iter().filter(|b| !b.pads.is_empty()) {
+        let n = bus.number;
+        let Some((_, sck, mosi, miso, cs, _, _)) = spi.iter().find(|(block, _, _, _, _, _, _)| *block == n) else {
+            return Err(format!("{board}: the kernel's facts carry SPI{n} with its pads and the facts file lists no such bus"));
+        };
+        let (Some(clock), Some(out), Some(input)) = (pad(bus, "SpiClock"), pad(bus, "SpiOut"), pad(bus, "SpiIn")) else {
+            return Err(format!("{board}: the kernel's SPI{n} row names no clock pad, no out pad or no in pad"));
+        };
+        if cs.len() != bus.selects.len() {
+            return Err(format!("{board}: the facts file lists {} chip selects for SPI{n}; the kernel's row carries {}", cs.len(), bus.selects.len()));
+        }
+        ties.push((format!("SPI{n}'s clock pad"), *sck, clock));
+        ties.push((format!("SPI{n}'s out pad"), *mosi, out));
+        ties.push((format!("SPI{n}'s in pad"), *miso, input));
+        for (k, c) in cs.iter().enumerate() {
+            ties.push((format!("SPI{n}'s select {k}"), *c, bus.selects[k]));
+        }
+    }
+    Ok(ties)
+}
+
 /// The number after `key` in a struct row (`rate_hz: 100_000`), underscores allowed.
 fn field_number(row: &str, key: &str) -> Option<u64> {
     let i = row.find(key)? + key.len();
@@ -5414,6 +6194,63 @@ fn field_number(row: &str, key: &str) -> Option<u64> {
 /// The one RHU request on the I2C node (the rate request): the shim's `#define BUSDEV_I2C_RATE 0x...u`
 /// and the board class's private constant `BusRateRequest = 0x...` carry the same number,
 /// read as text as the pads are; the number as the shim writes it.
+/// The PWM unit's table size and the tables the shim gate's PWM rows tenants
+/// answer with, as the two sources state them.
+#[derive(Clone)]
+struct PwmTable {
+    channels: u64,
+    tenants: Vec<(String, Vec<u64>)>,
+}
+
+/// Reads the unit's `#define PWMFS_CHANNELS_MAX` (src/shim/rhu_pwmfs.c) and the
+/// tenants' tables (src/shim/gate/rhu_shimtest.c: every line of the form
+/// `static const uint16_t pr_lines[] = { ... }; /* PWM_LINES of <row> */`).
+fn read_pwm_table(repo: &Path) -> Result<PwmTable, String> {
+    let unit = std::fs::read_to_string(repo.join("src").join("shim").join("rhu_pwmfs.c")).map_err(|e| format!("rhu_pwmfs.c: {e}"))?;
+    let tenant = std::fs::read_to_string(repo.join("src").join("shim").join("gate").join("rhu_shimtest.c")).map_err(|e| format!("rhu_shimtest.c: {e}"))?;
+    pwm_table_of(&unit, &tenant).ok_or("the PWM unit's '#define PWMFS_CHANNELS_MAX' or the PWM rows tenants' tables are not there as the tie reads them".to_string())
+}
+
+fn pwm_table_of(unit: &str, tenant: &str) -> Option<PwmTable> {
+    let channels = unit.lines().find_map(|l| l.strip_prefix("#define PWMFS_CHANNELS_MAX "))?.trim().parse().ok()?;
+    let mut tenants = Vec::new();
+    for l in tenant.lines() {
+        let Some(rest) = l.strip_prefix("static const uint16_t pr_lines[] = { ") else {
+            continue;
+        };
+        let (list, tail) = rest.split_once(" }; /* PWM_LINES of ")?;
+        let row = tail.strip_suffix(" */")?;
+        let lines: Option<Vec<u64>> = list.split(", ").map(|n| n.parse().ok()).collect();
+        tenants.push((row.to_string(), lines?));
+    }
+    if tenants.is_empty() {
+        None
+    } else {
+        Some(PwmTable { channels, tenants })
+    }
+}
+
+/// The PWM table tie's first fault, by the row's name: a row whose kernel
+/// table states more PWM lines than the unit's table holds, a tenant's row
+/// that the board table does not carry, or a tenant's table that is not the
+/// kernel's for its row.
+fn pwm_table_fault(rows: &[BoardFactsRow], t: &PwmTable) -> Option<String> {
+    for r in rows {
+        if r.kernel_pwm_lines.len() as u64 > t.channels {
+            return Some(format!("{}: the kernel states {} PWM lines, more PWM lines than the unit's table of {} channels holds (src/shim/rhu_pwmfs.c, PWMFS_CHANNELS_MAX)", r.board, r.kernel_pwm_lines.len(), t.channels));
+        }
+    }
+    for (row, lines) in &t.tenants {
+        let Some(r) = rows.iter().find(|r| r.board == *row) else {
+            return Some(format!("{row}: the shim gate's PWM rows tenant names a row that the board table does not carry"));
+        };
+        if r.kernel_pwm_lines != *lines {
+            return Some(format!("{row}: the shim gate's PWM rows tenant answers with the lines {} != the kernel's PWM_LINES {}", number_list(lines), number_list(&r.kernel_pwm_lines)));
+        }
+    }
+    None
+}
+
 fn request_tie(repo: &Path) -> Result<String, String> {
     let shim = std::fs::read_to_string(repo.join("src").join("shim").join("rhu_busdev.c")).map_err(|e| format!("rhu_busdev.c: {e}"))?;
     let class = std::fs::read_to_string(repo.join("src").join("sdk").join("Lamella.Hardware").join("TargetBoard.cs")).map_err(|e| format!("TargetBoard.cs: {e}"))?;
@@ -5462,7 +6299,8 @@ fn board_class_markers(repo: &Path, board: &str) -> Result<Vec<String>, String> 
     }
     for (i, (block, tx, rx)) in f.uart.iter().enumerate() {
         ports.push_str(if i == 0 { " " } else { ", " });
-        ports.push_str(&format!("/dev/ttyS{block} (UART{block}"));
+        let leaf = if f.uart_lowpower.contains(block) { "ttyLP" } else { "ttyS" };
+        ports.push_str(&format!("/dev/{leaf}{block} (UART{block}"));
         match (tx, rx) {
             (Some(t), Some(r)) => ports.push_str(&format!(", TX pin {t}, RX pin {r}")),
             _ => ports.push_str(", no lines"),
@@ -5497,6 +6335,16 @@ fn read_stack_facts(repo: &Path) -> Result<StackFacts, String> {
     let targets = std::fs::read_to_string(sdk.join("Sdk.targets")).map_err(|e| format!("Sdk.targets: {e}"))?;
     let host = std::fs::read_to_string(repo.join("src").join("gc").join("host").join("mgc_board_rows.h")).map_err(|e| format!("mgc_board_rows.h: {e}"))?;
     let header = std::fs::read_to_string(repo.join("src").join("kernel").join("include").join("rhu.h")).map_err(|e| format!("rhu.h: {e}"))?;
+    // The kernel's own threads in a row's pool, each stack read as text where the kernel states
+    // it: the idle thread's spawn and, per row below, the stack of the thread that runs Main.
+    // The network thread's and the card watcher's stacks are not the pool's: the scheduler's
+    // array carries them above the row's pool, and the tie reads that the text says so.
+    let ksrc = repo.join("src").join("kernel");
+    let sched = std::fs::read_to_string(ksrc.join("src").join("sched.rs")).map_err(|e| format!("sched.rs: {e}"))?;
+    let idle_stack = kernel_idle_stack(&sched).ok_or("sched.rs: the idle thread's spawn is not there as read")?;
+    if !kernel_service_stacks_above_pool(&sched) {
+        return Err("sched.rs: the pool's array is not the row's pool with the service threads' stacks above it, as read".to_string());
+    }
     let mut rows = Vec::new();
     for (i, _) in boards.match_indices("<LamellaTargetBoardRow Include=\"") {
         let end = boards[i..].find("/>").ok_or("a board row without its end")? + i;
@@ -5505,6 +6353,7 @@ fn read_stack_facts(repo: &Path) -> Result<StackFacts, String> {
         let pool = row_attr(row, "StackPool").ok_or(format!("{board}: no StackPool"))?;
         let default = row_attr(row, "StackDefault").ok_or(format!("{board}: no StackDefault"))?;
         let clamp = row_attr(row, "StackClamp").ok_or(format!("{board}: no StackClamp"))?;
+        let kernel_own = row_attr(row, "StackKernel").ok_or(format!("{board}: no StackKernel"))?;
         let name = board.strip_prefix("arm-").unwrap_or(&board).to_string();
         let file = repo.join("src").join("kernel").join("src").join("board").join(format!("{}.rs", name.replace('-', "_")));
         let ktext = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
@@ -5526,7 +6375,21 @@ fn read_stack_facts(repo: &Path) -> Result<StackFacts, String> {
         let block = host_row_block(&host, &name).ok_or(format!("mgc_board_rows.h: no row block names {name}"))?;
         let host_default = c_define(block, "MGC_ROW_STACK_DEFAULT").ok_or(format!("mgc_board_rows.h: the {name} block has no MGC_ROW_STACK_DEFAULT"))?;
         let host_clamp = c_define(block, "MGC_ROW_STACK_CLAMP").ok_or(format!("mgc_board_rows.h: the {name} block has no MGC_ROW_STACK_CLAMP"))?;
-        rows.push(StackRow { board, pool, default, clamp, kernel_pool, host_default, host_clamp });
+        // The stack of the thread that runs a hosted program's Main: the board module's
+        // constant, or the chip module's it re-exports, as the pool is read above.
+        let kmain = match kernel_const(&ktext, "KMAIN_STACK_BYTES") {
+            Some(v) => v,
+            None => {
+                let chip = ktext
+                    .lines()
+                    .find_map(|l| l.trim().strip_prefix("pub use super::").and_then(|r| r.strip_suffix("::*;")))
+                    .ok_or(format!("{}: no KMAIN_STACK_BYTES and no chip module re-export", file.display()))?;
+                let cfile = repo.join("src").join("kernel").join("src").join("board").join(format!("{chip}.rs"));
+                let ctext = std::fs::read_to_string(&cfile).map_err(|e| format!("{}: {e}", cfile.display()))?;
+                kernel_const(&ctext, "KMAIN_STACK_BYTES").ok_or(format!("{}: no KMAIN_STACK_BYTES (the chip module {} re-exports)", cfile.display(), file.display()))?
+            }
+        };
+        rows.push(StackRow { board, pool, default, clamp, kernel_pool, host_default, host_clamp, kernel_own, kernel_threads: [idle_stack, kmain] });
     }
     let sdk_min = xml_value(&targets, "RhuThreadStackMin").and_then(|v| v.parse().ok()).ok_or("Sdk.targets: no RhuThreadStackMin")?;
     let kernel_min = c_define(&header, "RHU_THREAD_STACK_MIN").ok_or("rhu.h: no RHU_THREAD_STACK_MIN")?;
@@ -5551,6 +6414,13 @@ fn stack_facts_fault(f: &StackFacts) -> Option<String> {
         }
         if r.default > r.clamp || 3 * r.default + 1024 > r.pool {
             return Some(format!("{}: the default {} does not fit the budget (the clamp {}, the pool {})", r.board, r.default, r.clamp, r.pool));
+        }
+        let own: u64 = r.kernel_threads.iter().sum();
+        if r.kernel_own != own {
+            return Some(format!(
+                "{}: StackKernel {} != the kernel's own threads' {} (the idle thread {}, the thread that runs Main {})",
+                r.board, r.kernel_own, own, r.kernel_threads[0], r.kernel_threads[1]
+            ));
         }
     }
     if f.sdk_min != f.kernel_min {
@@ -5673,33 +6543,38 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         ram_init_kernels.push(format!("{name}={root}/{lib_rel}"));
     }
 
-    // The external-flash row's kernel: the row's payload staticlib built once
-    // under a directory both worlds share and packed beside the leg's own
-    // kernel, so the leg publishes the row under the program's two homes.
-    {
-        let dir = repo.join(XIP_DIR.replace('/', std::path::MAIN_SEPARATOR_STR));
+    // The external-flash row's kernels: the row's payload staticlib, built
+    // with the network, and the second set's default, built without it, each
+    // built once under a directory both worlds share and packed beside the
+    // leg's own kernel, so the leg publishes the row under the program's two
+    // homes and with either kernel.
+    for (name, dir_rel, features, tag) in [
+        (XIP_ROW.to_string(), XIP_DIR, XIP_FEATURES, "external-flash"),
+        (format!("{XIP_ROW}/no-network"), XIP_PLAIN_DIR, XIP_PLAIN_FEATURES, "external-flash-no-network"),
+    ] {
+        let dir = repo.join(dir_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
         let _ = std::fs::create_dir_all(&dir);
-        let log = rt.out.join("sdk-parity-external-flash-staticlib-build.log");
-        println!("== build kernel staticlib {XIP_ROW} (--lib --target {XIP_TARGET} --no-default-features --features {XIP_FEATURES}) ==");
-        match cargo_build_kernel_at(repo, &dir, &["--lib", "--target", XIP_TARGET, "--no-default-features", "--features", XIP_FEATURES], &log) {
+        let log = rt.out.join(format!("sdk-parity-{tag}-staticlib-build.log"));
+        println!("== build kernel staticlib {name} (--lib --target {XIP_TARGET} --no-default-features --features {features}) ==");
+        match cargo_build_kernel_at(repo, &dir, &["--lib", "--target", XIP_TARGET, "--no-default-features", "--features", features], &log) {
             Ok(true) => {}
             Ok(false) => {
                 echo_file(&log, "");
-                rt.fail(case, &format!("the {XIP_ROW} row's kernel staticlib build error"));
+                rt.fail(case, &format!("the kernel staticlib {name} build error"));
             }
             Err(e) => rt.fail(case, &e),
         }
-        let lib_rel = format!("{XIP_DIR}/{XIP_TARGET}/release/librhu_kernel.a");
+        let lib_rel = format!("{dir_rel}/{XIP_TARGET}/release/librhu_kernel.a");
         if !repo.join(lib_rel.replace('/', std::path::MAIN_SEPARATOR_STR)).is_file() {
             rt.fail(case, &format!("no staticlib at {lib_rel} after the build"));
         }
-        ram_init_kernels.push(format!("{XIP_ROW}={root}/{lib_rel}"));
+        ram_init_kernels.push(format!("{name}={root}/{lib_rel}"));
     }
 
     // The Debug configuration's row: the Raspberry Pi Pico 2's payload
     // kernel built once under a directory both worlds share and packed
     // beside the leg's own kernel, so the leg publishes the row in the
-    // Debug configuration and with the optimization forced off.
+    // Debug configuration and compiled without the optimization as a whole.
     {
         let dir = repo.join(DEBUG_DIR.replace('/', std::path::MAIN_SEPARATOR_STR));
         let _ = std::fs::create_dir_all(&dir);
@@ -5817,6 +6692,16 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     largs.extend(RT_LINK_WORDS.iter().map(|s| s.to_string()));
     largs.push(format!("{}/{MERGED}", w.tier));
     largs.push(SDK_LOG_LEVEL_WORD.to_string());
+    // The bound the build states to the runtime: the SDK's link line carries it as an absolute symbol on every
+    // link, so the link of record carries the same word, the number this runner's own.
+    let bound_row = match read_stack_facts(repo) {
+        Ok(f) => match f.rows.into_iter().find(|r| r.board == w.sdk_board) {
+            Some(r) => r,
+            None => rt.fail(case, &format!("the board table has no row {}", w.sdk_board)),
+        },
+        Err(e) => rt.fail(case, &e),
+    };
+    largs.push(format!("--defsym=__rhu_threadpool_max_threads={}", pool_bound(&bound_row).0));
     largs.extend(w.shim_objects.iter().map(|s| s.to_string()));
     largs.extend(w.gc_objects.iter().map(|s| s.to_string()));
     largs.push(format!("{}/{LIBC}", w.tier));
@@ -5887,6 +6772,9 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         Err(e) => rt.fail("rt.sdk-parity-control-stamped-version-doctored", &e),
     };
     let doctored_board = format!("Lamella.Rhu.Board.{} at {release}", w.sdk_board);
+    let bound_over = (pool_bound(&bound_row).0 + 1).to_string();
+    let pool_max_words = pool_max_refusal(&bound_row, &bound_over);
+    let pool_min_words = pool_min_refusal(&bound_row, &bound_over);
     let table: &[(&str, &str, &str, &[&str], &str)] = &[
         ("frozen", "frozen-byte", "RHU4012", &["does not tie its record: ", " (the board package)"], "one byte of a frozen tier object changed"),
         ("board-missing", "board-missing", "RHU1001", &["LamellaTargetBoard is not set"], "no board named"),
@@ -5925,8 +6813,17 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         ("rid-other", "rid-other", "RHU3002", &["RuntimeIdentifier 'linux-arm64' is not linux-arm"], "RuntimeIdentifier given as a global property with another value than the posture's (amendment 3: the posture's own value passes), refused by name without a restore"),
         ("roots-board", "roots-board", "RHU4005", &["is Lamella.Rhu.Board.raspberrypi-pico-2, not Lamella.Rhu.Board."], "the stub shell's board item in the cache doctored to another board's package id: the shell's board and the project's differ, refused before any root is read"),
         ("roots-runtime", "roots-runtime", "RHU4007", &["not Lamella.Rhu.Runtime."], "the stub shell's runtime item in the cache doctored to another class's package id: the shell's class and the board's differ, refused before any root is read"),
-        ("debug-unoptimized", "debug-unoptimized", "RHU5001", &["arena window under this board", "the image's data leaves this board less than the arena window its map guarantees"], "the board class's program published for the Raspberry Pi Pico 2 row in the Debug configuration with the code optimization forced off by a global property (Optimize=false): the unoptimized image leaves the row no arena window at its floor, refused at the link by name with the linker's words and the remedy"),
+        ("debug-unoptimized", "debug-unoptimized", "RHU5001", &["arena window under this board", "the image's data leaves this board less than the arena window its map guarantees", "this board's memory requires the framework's code compiled with it"], "the board class's program published for the Raspberry Pi Pico 2 row in the Debug configuration and compiled without the code optimization as a whole, by the one build property that asks for it: that image leaves the row no arena window at its floor, refused at the link by name with the linker's words and what the board's memory requires"),
         ("boardless-publish", "boardless-publish", "RHU1001", &["LamellaTargetBoard is not set"],"a publish with no board named, after the boardless build of the same copy: refused by name at the first step, the assembly from the build untouched, no image"),
+        ("pool-bound-over-row", "pool-bound-over-row", "RHU2026", &[pool_max_words.as_str()], "the gate's project with .NET's own ThreadPoolMaxThreads one above the most workers this runner computes for the row: refused before anything is compiled, in the sentence this runner composes from the board table"),
+        ("pool-min-over-bound", "pool-min-over-bound", "RHU2027", &[pool_min_words.as_str()], "the gate's project with .NET's own ThreadPoolMinThreads one above the bound: refused before anything is compiled (the runtime drops both bounds when the fewest is above the most)"),
+        ("network-value", "network-value", "RHU2028", &["RhuNetwork='maybe' is not one of: on, off"], "a network setting outside the two words"),
+        ("network-one-kernel", "network-one-kernel", "RHU2029", &["RhuNetwork=off, but the board 'raspberrypi-pico-2' has one kernel; the network is a choice on boards whose packages carry a kernel with it and a kernel without it"], "the network turned off on the Raspberry Pi Pico 2 row, whose packages carry one kernel"),
+        ("network-with-internal-heap", "network-with-internal-heap", "RHU2030", &["RhuNetwork=on with RhuManagedMemory=internal: with the managed memory in the chip's own RAM this board's kernel is the one without the network; leave RhuNetwork unset or the managed memory external (its default)"], "the network asked together with the managed memory in the chip's own RAM on the STM32F769I-DISCO row"),
+        ("network-no-room", "network-no-room", "RHU5001", &["the link printed a diagnostic or failed", "arena window under this board's GC-substrate floor (RHU_ARENA_MIN)", "; the image's data leaves this board less than the arena window its map guarantees: this image links the board's kernel with the network, which holds part of the chip's own memory: RhuNetwork=off links the kernel without it"], "the voltage switch's program published for the STM32F769I-DISCO row with no property: beside the kernel with the network its data leaves the row no arena window at its floor, refused at the link by name with the setting that takes the other kernel"),
+        ("network-kernel-internal", "network-kernel-internal", "RHU5001", &["arena window under this board's GC-substrate floor (RHU_ARENA_MIN)", "; the image's data leaves this board less than the arena window its map guarantees: "], "the board table in the package in the cache doctored so that the second kernel set's default names the row's kernel with the network, and the gate's project published with the managed memory in the chip's own RAM: that kernel leaves the internal map no arena window at its floor, refused at the link by name"),
+        ("program-memory-internal-overflow", "program-memory-internal-overflow", "RHU5001", &["will not fit in region", "; the image is larger than a memory region of this board's map: RhuProgramMemory=internal places the program in the chip's own flash; without it the program lies in this board's external flash"], "the network suite published for the STM32F769I-DISCO row with the chip's own flash named, which does not hold it: refused at the link by name with the home that does"),
+        ("flash-region-absent", "flash-region-absent", "RHU4015", &["names a flash region for", "that the board package does not carry with its record: regions/absent.bin"], "the board table in the package in the cache doctored so that the leg's row names a flash region its board package does not carry (the publish must refuse before the link, by name)"),
     ];
     for &(name, broke, code, needles, what) in table {
         let case = format!("rt.sdk-parity-control-{name}");
@@ -5988,7 +6885,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         rt.fail(case, &f);
     }
     for r in &stack_facts.rows {
-        println!("  {}: pool {} B, default {} B, clamp {} B -- the kernel's pool {}, the hosting layer's default {} and clamp {}", r.board, r.pool, r.default, r.clamp, r.kernel_pool, r.host_default, r.host_clamp);
+        println!("  {}: pool {} B, default {} B, clamp {} B -- the kernel's pool {}, the hosting layer's default {} and clamp {}; the kernel's own threads hold {} B of the pool -- the idle thread {}, the thread that runs Main {}", r.board, r.pool, r.default, r.clamp, r.kernel_pool, r.host_default, r.host_clamp, r.kernel_own, r.kernel_threads[0], r.kernel_threads[1]);
     }
     println!("  the targets' minimum {} B = the header's RHU_THREAD_STACK_MIN {}", stack_facts.sdk_min, stack_facts.kernel_min);
     // The board class's half of the same case: the boards' facts files (the shared board
@@ -6004,16 +6901,28 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     }
     for r in &board_facts {
         if r.ties.is_empty() {
-            println!("  {}: the facts file's {} pins and {} Hz = the kernel's LINE_COUNT and SYSCLK_HZ at the row's posture; {} bus pins tied; {} PWM lines = the kernel's table; the RAM ranges {} = the kernel's RAM_RANGES; the flash ranges {} = the kernel's FLASH_RANGES; the UART rows {} and the channels {} = the kernel's UART_ROWS and CHANNELS; the legal pairs {} = the kernel's UART_PAIRS; the analog converters {} = the kernel's ADC_BLOCKS and ADC_CHANNELS", r.board, r.lines, r.clock_hz, r.ties.len(), r.pwm_lines.len(), ram_list(&r.ram), flash_list(&r.flash), uart_list(&r.uart), channels_words(&r.channels), pairs_list(&r.uart_pairs), adc_list(&r.adc));
+            println!("  {}: the facts file's {} pins and {} Hz = the kernel's LINE_COUNT and SYSCLK_HZ at the row's posture; {} bus pins tied; {} PWM lines = the kernel's table; the RAM ranges {} = the kernel's RAM_RANGES; the flash ranges {} = the kernel's FLASH_RANGES; the UART rows {} and the channels {} = the kernel's UART_ROWS and CHANNELS; the legal pairs {} = the kernel's UART_PAIRS; the analog converters {} = the kernel's ADC_BLOCKS and ADC_CHANNELS; the net object ({}) = the network pool the kernel gives the row",r.board, r.lines, r.clock_hz, r.ties.len(), r.pwm_lines.len(), ram_list(&r.ram), flash_list(&r.flash), uart_list(&r.uart), channels_words(&r.channels), pairs_list(&r.uart_pairs), adc_list(&r.adc), net_words(&r.net));
         } else {
             let ranges: Vec<String> = r.ladder.iter().map(|(min, max, _, _)| format!("{min} to {max}")).collect();
-            println!("  {}: the facts file's {} pins and {} Hz = the kernel's LINE_COUNT and SYSCLK_HZ at the row's posture; {} bus pins tied; the I2C rates {} = the kernel's modes at that clock; the SPI range {} = the block's ladder at {} Hz; the RAM ranges {} = the kernel's RAM_RANGES; the flash ranges {} = the kernel's FLASH_RANGES; the UART rows {} and the channels {} = the kernel's UART_ROWS and CHANNELS; the legal pairs {} = the kernel's UART_PAIRS; the analog converters {} = the kernel's ADC_BLOCKS and ADC_CHANNELS", r.board, r.lines, r.clock_hz, r.ties.len(), number_list(&r.rates), ranges.join(" and "), r.kernel_spi_hz, ram_list(&r.ram), flash_list(&r.flash), uart_list(&r.uart), channels_words(&r.channels), pairs_list(&r.uart_pairs), adc_list(&r.adc));
+            println!("  {}: the facts file's {} pins and {} Hz = the kernel's LINE_COUNT and SYSCLK_HZ at the row's posture; {} bus pins tied; the I2C rates {} = the kernel's modes at that clock; the SPI range {} = the block's ladder at {} Hz; the RAM ranges {} = the kernel's RAM_RANGES; the flash ranges {} = the kernel's FLASH_RANGES; the UART rows {} and the channels {} = the kernel's UART_ROWS and CHANNELS; the legal pairs {} = the kernel's UART_PAIRS; the analog converters {} = the kernel's ADC_BLOCKS and ADC_CHANNELS; the net object ({}) = the network pool the kernel gives the row",r.board, r.lines, r.clock_hz, r.ties.len(), number_list(&r.rates), ranges.join(" and "), r.kernel_spi_hz, ram_list(&r.ram), flash_list(&r.flash), uart_list(&r.uart), channels_words(&r.channels), pairs_list(&r.uart_pairs), adc_list(&r.adc), net_words(&r.net));
         }
     }
     match request_tie(repo) {
         Ok(n) => println!("  the rate request's number {n}: the shim's define and the board class's constant carry the same number"),
         Err(e) => rt.fail(case, &e),
     }
+    // The PWM unit's table against every row: the unit holds one entry a PWM-capable line at the
+    // kernel's index of it, so its size bounds the count of a row's lines and nothing bounds a
+    // line's number; and the shim gate's PWM rows tenants answer as the kernel with their rows'
+    // tables, which must be the kernel's.
+    let pwm_table = match read_pwm_table(repo) {
+        Ok(t) => t,
+        Err(e) => rt.fail(case, &e),
+    };
+    if let Some(f) = pwm_table_fault(&board_facts, &pwm_table) {
+        rt.fail(case, &f);
+    }
+    println!("  the PWM unit's table of {} channels holds every row's PWM lines (the most a row states: {}); the shim gate's PWM rows tenants answer with the kernel's PWM_LINES of {}", pwm_table.channels, board_facts.iter().map(|r| r.kernel_pwm_lines.len()).max().unwrap_or(0), pwm_table.tenants.iter().map(|t| t.0.as_str()).collect::<Vec<&str>>().join(" and "));
     rt.pass(case, "positive", "", &format!("{{\"rows\":{},\"facts_files\":{}}}", stack_facts.rows.len(), board_facts.len()));
     println!("  PASS");
     let case = "rt.sdk-parity-control-row-facts";
@@ -6023,6 +6932,14 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     match stack_facts_fault(&doctored) {
         Some(f) => println!("  refused: {f}"),
         None => rt.fail_control(case, "row-facts", "a doctored pool was accepted by the tie"),
+    }
+    // The kernel's own threads' control -- the first row's StackKernel one byte larger in the table.
+    let mut doctored_own = stack_facts.clone();
+    doctored_own.rows[0].kernel_own += 1;
+    match stack_facts_fault(&doctored_own) {
+        Some(f) if f.contains("StackKernel") => println!("  refused: {f}"),
+        Some(f) => rt.fail_control(case, "row-facts", &format!("the tie refused the doctored StackKernel for another reason: {f}")),
+        None => rt.fail_control(case, "row-facts", "a doctored StackKernel was accepted by the tie"),
     }
     let mut doctored_facts = board_facts.clone();
     doctored_facts[0].lines += 1;
@@ -6053,6 +6970,38 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         Some(f) if f.contains("the facts file's channels") => println!("  refused: {f}"),
         Some(f) => rt.fail_control(case, "row-facts", &format!("the tie refused the doctored channels for another reason: {f}")),
         None => rt.fail_control(case, "row-facts", "a doctored channel was accepted by the tie"),
+    }
+    // The net object's control -- the first row whose facts file carries one, its stream
+    // receive buffer one byte larger than the kernel's.
+    let mut doctored_net = board_facts.clone();
+    match doctored_net.iter_mut().find_map(|r| r.net.as_mut()) {
+        Some(n) => n.3 += 1,
+        None => rt.fail_control(case, "row-facts", "no row's facts file carries a net object for the control to doctor"),
+    }
+    match board_facts_fault(&doctored_net) {
+        Some(f) if f.contains("the facts file's net object") => println!("  refused: {f}"),
+        Some(f) => rt.fail_control(case, "row-facts", &format!("the tie refused the doctored net object for another reason: {f}")),
+        None => rt.fail_control(case, "row-facts", "a doctored net object was accepted by the tie"),
+    }
+    // The second bus tie's controls -- the first row whose kernel facts write their bus rows out in full: a chip
+    // select of its facts file moved by one line, and its facts file listing no I2C bus at all.
+    let mut doctored_select = board_facts.clone();
+    match doctored_select.iter_mut().filter(|r| r.kernel_buses.is_some()).find_map(|r| r.ties.iter_mut().find(|t| t.0.contains("select"))) {
+        Some(t) => t.1 += 1,
+        None => rt.fail_control(case, "row-facts", "no row with bus rows written out in full has a chip select for the control to doctor"),
+    }
+    match board_facts_fault(&doctored_select) {
+        Some(f) if f.contains("select") && f.contains("!= the kernel's") => println!("  refused: {f}"),
+        Some(f) => rt.fail_control(case, "row-facts", &format!("the tie refused the doctored chip select for another reason: {f}")),
+        None => rt.fail_control(case, "row-facts", "a doctored chip select was accepted by the tie"),
+    }
+    let Some((unlisted_board, unlisted_spi, unlisted_buses)) = board_facts.iter().find_map(|r| r.kernel_buses.as_ref().filter(|_| !r.bus_lists.0.is_empty()).map(|k| (&r.board, &r.bus_lists.1, k))) else {
+        rt.fail_control(case, "row-facts", "no row with bus rows written out in full lists an I2C bus for the control to drop");
+    };
+    match literal_bus_ties(unlisted_board, &[], unlisted_spi, &unlisted_buses.0, &unlisted_buses.1) {
+        Err(f) if f.contains("lists no such bus") => println!("  refused: {f}"),
+        Err(f) => rt.fail_control(case, "row-facts", &format!("the tie refused the dropped I2C bus for another reason: {f}")),
+        Ok(_) => rt.fail_control(case, "row-facts", "a facts file that lists no I2C bus was accepted beside the kernel's bus with pads"),
     }
     rt.pass(case, "negative", "row-facts", "");
     println!("  PASS");
@@ -6087,6 +7036,20 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
         None => rt.fail_control(case, "pwm-lines", "a doctored PWM line list was accepted by the tie"),
     }
     rt.pass(case, "negative", "pwm-lines", "");
+    println!("  PASS");
+
+    // The PWM table tie's control -- the unit's table doctored to one channel fewer than the most
+    // PWM lines a row states.
+    let case = "rt.sdk-parity-control-pwm-table";
+    println!("== case {case}: the PWM unit's table doctored to one channel fewer than the most PWM lines a row states -- the tie must refuse ==");
+    let mut doctored_table = pwm_table.clone();
+    doctored_table.channels = board_facts.iter().map(|r| r.kernel_pwm_lines.len() as u64).max().unwrap_or(0).saturating_sub(1);
+    match pwm_table_fault(&board_facts, &doctored_table) {
+        Some(f) if f.contains("more PWM lines than the unit's table") => println!("  refused: {f}"),
+        Some(f) => rt.fail_control(case, "pwm-table", &format!("the tie refused for another reason: {f}")),
+        None => rt.fail_control(case, "pwm-table", "a table smaller than a row's PWM lines was accepted by the tie"),
+    }
+    rt.pass(case, "negative", "pwm-table", "");
     println!("  PASS");
 
     // The analog converters tie's control -- the first row with a channel on a pin, that channel's pin
@@ -6683,9 +7646,10 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     // unboxing stubs and the index brackets inside the facts' external flash
     // range; the program object's read-only data and its retyped index as
     // window sections of the section table; the native code inside the
-    // chip's flash with its own exception-index table) -- and the row's
-    // default publish as the pair (the row's own map, the named default the
-    // same image as none, no window declared).
+    // chip's flash with its own exception-index table) -- and the pair
+    // beside it: no property is that same image, the external flash being
+    // the row's default home, and the chip's own flash named holds the
+    // whole image under the row's own map, no window declared.
     let case = "rt.sdk-parity-program-memory-table";
     println!("== case {case}: the board table's external-flash maps against the boards' facts files and the tree -- a row names its external-flash map exactly when its facts list a mapped, executable external flash range, both files in the tree ==");
     let xip_rows = match program_memory_table_check(repo) {
@@ -6782,39 +7746,44 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "positive", "", &format!("{{\"map\":\"{xip_second}\",\"image_sha\":\"{xip_sha}\",\"xip_lo\":{},\"xip_hi\":{},\"managed_lo\":{},\"managed_hi\":{},\"exidx_start\":{},\"exidx_end\":{},\"rodata_bytes\":{rodata_size},\"exidx_bytes\":{exidx_size}}}", xs.lo, xs.hi, xs.code_lo, xs.code_hi, xs.exidx_start, xs.exidx_end));
     println!("  PASS (the image {}...)", &xip_sha[..16.min(xip_sha.len())]);
     let case = "rt.sdk-parity-program-memory-default";
-    println!("== case {case}: the row published with RhuProgramMemory=internal named and with the property empty -- the same image byte for byte under {xip_map}, the objects the record's, no window declared ==");
+    println!("== case {case}: the row published with no property and with RhuProgramMemory=internal named -- no property is the image of the external home named, byte for byte, under {xip_second} with the window half's notice; the chip's own flash named holds the whole image under {xip_map}, no window declared; the objects the record's ==");
+    let Some(plain_line) = control_line(&controls, "program-memory-default") else {
+        rt.fail(case, "the publish-side script left no summary line for the publish with no property");
+    };
     let Some(named_line) = control_line(&controls, "program-memory-internal-named") else {
-        rt.fail(case, "the publish-side script left no summary line for the named default's publish");
+        rt.fail(case, "the publish-side script left no summary line for the publish with the chip's own flash named");
     };
-    let Some(plain_line) = control_line(&controls, "program-memory-internal") else {
-        rt.fail(case, "the publish-side script left no summary line for the empty property's publish");
-    };
-    for (label, folder, l) in [("named", "control-program-memory-internal-named", named_line), ("plain", "control-program-memory-internal", plain_line)] {
-        if control_field(l, "rc") != "0" || control_field(l, "elf") != "present" || control_field(l, "map") != xip_map || control_field(l, "kernel") != xip_kernel || control_field(l, "program") != "internal" || control_field(l, "window-notice") != "0" {
-            rt.fail(case, &format!("the {label} default's publish did not run as registered (rc 0, the image present, the row's own map, its default kernel, the home internal, no window notice): {l}"));
-        }
+    if control_field(plain_line, "rc") != "0" || control_field(plain_line, "elf") != "present" || control_field(plain_line, "map") != xip_second || control_field(plain_line, "kernel") != xip_kernel || control_field(plain_line, "program") != "external" || control_field(plain_line, "window-notice") != "1" {
+        rt.fail(case, &format!("the publish with no property did not run as registered (rc 0, the image present, the row's external-flash map, its default kernel, the home external, the window half's notice once): {plain_line}"));
+    }
+    if control_field(named_line, "rc") != "0" || control_field(named_line, "elf") != "present" || control_field(named_line, "map") != xip_map || control_field(named_line, "kernel") != xip_kernel || control_field(named_line, "program") != "internal" || control_field(named_line, "window-notice") != "0" {
+        rt.fail(case, &format!("the publish with the chip's own flash named did not run as registered (rc 0, the image present, the row's own map, its default kernel, the home internal, no window notice): {named_line}"));
+    }
+    for (label, folder) in [("no property", "control-program-memory-default"), ("the chip's own flash named", "control-program-memory-internal-named")] {
         let o = std::fs::read(out.join(folder).join("rthello.o")).unwrap_or_default();
         if o != frozen_obj {
-            rt.fail(case, &format!("the {label} default's object is not the record's ({} bytes against {})", o.len(), frozen_obj.len()));
+            rt.fail(case, &format!("the object published with {label} is not the record's ({} bytes against {})", o.len(), frozen_obj.len()));
         }
     }
-    let named = std::fs::read(out.join("control-program-memory-internal-named").join("rthello.elf")).unwrap_or_default();
-    let plain_elf = out.join("control-program-memory-internal").join("rthello.elf");
+    let plain_elf = out.join("control-program-memory-default").join("rthello.elf");
     let plain = std::fs::read(&plain_elf).unwrap_or_default();
-    if named.is_empty() || named != plain {
-        rt.fail(case, &format!("the named default's image ({} bytes) is not the empty property's ({} bytes)", named.len(), plain.len()));
+    let external = std::fs::read(&xip_elf).unwrap_or_default();
+    if plain.is_empty() || plain != external {
+        rt.fail(case, &format!("the image published with no property ({} bytes) is not the image of the external home named ({} bytes)", plain.len(), external.len()));
     }
-    let plain_elf_arg = plain_elf.to_string_lossy().into_owned();
-    let dump = rt.tool_text(&nm_tool, case, &[&plain_elf_arg], "sdk-parity-program-memory-internal.nm.txt");
+    let named_elf = out.join("control-program-memory-internal-named").join("rthello.elf");
+    let named_elf_arg = named_elf.to_string_lossy().into_owned();
+    let dump = rt.tool_text(&nm_tool, case, &[&named_elf_arg], "sdk-parity-program-memory-internal.nm.txt");
     let (Some(lo), Some(hi)) = (word_sym_value(dump.as_bytes(), "__rhu_xip_lo"), word_sym_value(dump.as_bytes(), "__rhu_xip_hi")) else {
-        rt.fail(case, "the default image does not define the window's brackets (the row's own map provides them as zero)");
+        rt.fail(case, "the image with the chip's own flash named does not define the window's brackets (the row's own map provides them as zero)");
     };
     if lo != 0 || hi != 0 {
-        rt.fail(case, &format!("the default image declares a window [{lo:#x}, {hi:#x}); the row's own map provides none"));
+        rt.fail(case, &format!("the image with the chip's own flash named declares a window [{lo:#x}, {hi:#x}); the row's own map provides none"));
     }
     let plain_sha = sha256_file(&plain_elf).unwrap_or_default();
-    rt.pass(case, "positive", "", &format!("{{\"map\":\"{xip_map}\",\"image_sha\":\"{plain_sha}\",\"bytes\":{}}}", named.len()));
-    println!("  PASS (the two images byte-identical, {} bytes, no window declared; the objects the record's; the image {}...)", named.len(), &plain_sha[..16.min(plain_sha.len())]);
+    let named_sha = sha256_file(&named_elf).unwrap_or_default();
+    rt.pass(case, "positive", "", &format!("{{\"map\":\"{xip_second}\",\"image_sha\":\"{plain_sha}\",\"bytes\":{},\"internal_map\":\"{xip_map}\",\"internal_image_sha\":\"{named_sha}\"}}", plain.len()));
+    println!("  PASS (no property: the image of the external home named, {} bytes, {}...; the chip's own flash named: the whole image under the row's own map, no window declared, {}...; the objects the record's)", plain.len(), &plain_sha[..16.min(plain_sha.len())], &named_sha[..16.min(named_sha.len())]);
 
     // 10d. The analog voltage switch, set per program by the SDK: the switch's
     // program (tbvolts, naming the voltage members) published for the
@@ -6824,8 +7793,8 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     // leg's row -- false (the row does not hold the library), no feature
     // argument, no such symbol, the image booted on the emulator to the
     // program's lines; for the external-flash row under either home -- true
-    // under external with the library in the window, false under the
-    // default with the words naming the external home; the board class's
+    // under external with the library in the window, false with the chip's
+    // own flash named, the words naming the external home; the board class's
     // program (no voltage member) for the Plus 2 row -- false by the scan's
     // negative; the switch's program with the project's own false for the
     // Plus 2 row -- the project's value kept.
@@ -6926,7 +7895,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "positive", "", &format!("{{\"board\":\"{RAM_INIT_ROW}\",\"image_sha\":\"{un_sha}\",\"type_names\":0}}"));
     println!("  PASS (analog voltage {un_words}; no symbol of the quantity type; the image {}...)", &un_sha[..16.min(un_sha.len())]);
     let case = "rt.sdk-parity-analog-voltage-external-flash";
-    println!("== case {case}: the switch's program published for {XIP_ROW} with RhuProgramMemory=external -- the switch true with the scan's witness, the feature argument and the knob once each, the library's quantity type among the image's symbols, the managed code in the window ==");
+    println!("== case {case}: the switch's program published for {XIP_ROW} with RhuProgramMemory=external and RhuNetwork=off (beside the kernel with the network this program's data leaves no room, which its control shows) -- the switch true with the scan's witness, the feature argument and the knob once each, the library's quantity type among the image's symbols, the managed code in the window ==");
     let ext_line = voltage_publish_line(&mut rt, case, &controls, "analog-voltage-external-flash");
     let ext_words = voltage_words(ext_line);
     if !ext_words.starts_with("true (") || !VOLTAGE_MEMBERS.iter().any(|m| ext_words.contains(&format!("({m} referenced by tbvolts)"))) {
@@ -6953,7 +7922,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "positive", "", &format!("{{\"board\":\"{XIP_ROW}\",\"image_sha\":\"{ext_sha}\",\"type_names\":{ext_names},\"xip_lo\":{},\"xip_hi\":{}}}", es.lo, es.hi));
     println!("  PASS (analog voltage {ext_words}; {ext_names} symbols of the quantity type; the window [{:#x}, {:#x}) in the external flash; the image {}...)", es.lo, es.hi, &ext_sha[..16.min(ext_sha.len())]);
     let case = "rt.sdk-parity-analog-voltage-external-flash-default";
-    println!("== case {case}: the switch's program published for {XIP_ROW} under the default home -- the switch false with the words naming RhuProgramMemory=external, the feature argument false once, no symbol of the quantity type ==");
+    println!("== case {case}: the switch's program published for {XIP_ROW} with the chip's own flash named (RhuProgramMemory=internal) -- the switch false with the words naming RhuProgramMemory=external, the feature argument false once, no symbol of the quantity type ==");
     let def_line = voltage_publish_line(&mut rt, case, &controls, "analog-voltage-external-flash-default");
     let def_words = voltage_words(def_line);
     if !def_words.starts_with("false (") || !def_words.contains("RhuProgramMemory=external places the program in the board's external flash") {
@@ -6965,7 +7934,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     let def_elf = out.join("control-analog-voltage-external-flash-default").join("tbvolts.elf");
     let def_names = voltage_type_names(&mut rt, case, &nm_tool, &def_elf, "sdk-parity-analog-voltage-external-flash-default.nm.txt");
     if def_names != 0 {
-        rt.fail(case, &format!("the image carries {def_names} symbols of the library's quantity type under the default home"));
+        rt.fail(case, &format!("the image carries {def_names} symbols of the library's quantity type with the chip's own flash named"));
     }
     let def_sha = sha256_file(&def_elf).unwrap_or_default();
     rt.pass(case, "positive", "", &format!("{{\"board\":\"{XIP_ROW}\",\"image_sha\":\"{def_sha}\",\"type_names\":0}}"));
@@ -7152,8 +8121,8 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     let Some(line) = control_line(&controls, "manifest-unknown-field") else {
         rt.fail(case, "the publish-side script left no summary line for the unknown-field run");
     };
-    if control_field(line, "rc") != "7" || control_field(line, "model") != "native" || control_field(line, "accepted") != "1" || control_field(line, "keys") != "21" {
-        rt.fail(case, &format!("the stand-in's run did not accept the record with an unknown field as registered (rc 7, the model native, 21 keys): {line}"));
+    if control_field(line, "rc") != "7" || control_field(line, "model") != "native" || control_field(line, "accepted") != "1" || control_field(line, "keys") != "22" {
+        rt.fail(case, &format!("the stand-in's run did not accept the record with an unknown field as registered (rc 7, the model native, 22 keys): {line}"));
     }
     println!("  accepted (rc 7, the stand-in's code): the model native read, the unknown field ignored");
     rt.pass(case, "positive", "", "");
@@ -7197,7 +8166,7 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     let listing = std::fs::read_to_string(out.join("run-run-devices.stdout")).unwrap_or_default();
     let block = devices_block(&listing);
     let want = format!(
-        "Available devices:\n\n  1. probe:{RUN_PROBE_A} - Debug Probe (CMSIS-DAP) (Device, Connected)\n  2. probe:{RUN_PROBE_B} - {RUN_PROBE_B_WORDS} (Device, Connected)\n  3. emulator:{} - Arm MPS2+ {machine_word} reference board under QEMU, for testing the runtime -- not your board (Emulator, Installed)\n\nExample: dotnet run --device probe:{RUN_PROBE_A}\n",
+        "Available devices:\n\n  1. probe:{RUN_PROBE_A} - Debug Probe (CMSIS-DAP) (Device, Connected)\n  2. probe:{RUN_PROBE_B} - {RUN_PROBE_B_WORDS} (Device, Connected)\n  3. emulator:{} - Arm MPS2+ {machine_word} reference board under QEMU (Emulator, Installed)\n\nExample: dotnet run --device probe:{RUN_PROBE_A}\n",
         w.machine
     );
     if block != want {
@@ -7409,6 +8378,30 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     rt.pass(case, "negative", "library-publish", "");
     println!("  PASS");
 
+    let case = "rt.sdk-parity-bus-names";
+    println!("== case {case}: a class library that imports System.Device.Spi, System.Device.I2c and Lamella.Hardware together and names both of the board class's bus records, BoardI2cBus and BoardSpiBus -- the compiler passes it, the assembly written ==");
+    let Some(bn) = control_line(&controls, "bus-names") else {
+        rt.fail(case, "the publish-side script left no summary line for the build that names the two bus records");
+    };
+    if control_field(bn, "rc") != "0" || control_field(bn, "dll") != "present" || control_field(bn, "codes") != "NONE" {
+        rt.fail(case, &format!("the library that names both bus records beside the two device namespaces did not build as registered: {bn}"));
+    }
+    println!("  built: BoardI2cBus and BoardSpiBus named beside System.Device.I2c and System.Device.Spi, no compiler error");
+    rt.pass(case, "positive", "", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-bus-names";
+    println!("== case {case}: the same source with the two names the records carried before, I2cBusInfo and SpiBusInfo -- the compiler must refuse both: no namespace of the three carries the first, and the second is the device bindings package's own static class, which takes no board's bus ==");
+    let Some(bo) = control_line(&controls, "bus-names-old") else {
+        rt.fail_control(case, "bus-names-old", "the publish-side script left no summary line for the build under the old names");
+    };
+    let count = |key: &str| control_field(bo, key).parse::<u32>().unwrap_or(0);
+    if control_field(bo, "rc") == "0" || control_field(bo, "dll") != "absent" || control_field(bo, "codes") != "CS0029,CS0246,CS0723" || count("cs0246-i2c") == 0 || count("cs0029-spi") == 0 || control_field(bo, "cs0104") != "0" {
+        rt.fail_control(case, "bus-names-old", &format!("the old names were not refused as registered (CS0246 for I2cBusInfo, CS0029 and CS0723 for the bindings package's SpiBusInfo, nothing ambiguous and no other code): the control does not distinguish: {bo}"));
+    }
+    println!("  refused (rc {}): I2cBusInfo stands in no namespace of the three (CS0246), SpiBusInfo is the bindings package's own static class: it takes no board's bus (CS0029) and no variable of it is declared (CS0723)", control_field(bo, "rc"));
+    rt.pass(case, "negative", "bus-names-old", "");
+    println!("  PASS");
+
     // 14. The pack split's cases at the new hashes: the version
     // stamp, amendment 3's RuntimeIdentifier, and the boardless listing with its control; each read from the
     // publish-side script's summary lines and banked files.
@@ -7514,20 +8507,28 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     println!("  PASS");
 
     // 14. The Debug configuration: a plain dotnet run builds Debug, whose
-    // .NET default turns the code optimization off, and the compiler pack
-    // then hands the native compiler no optimization switch; the SDK's props
-    // turn it on for every configuration and keep the debug information, so
-    // the board class's program links on the Raspberry Pi Pico 2 row, where
-    // the unoptimized image leaves no arena window at the row's floor (the
-    // control above). The image's window is read against the floor the
-    // row's map states in the tree.
+    // .NET default turns the code optimization off. The SDK's targets keep
+    // that for the program's own code alone -- the project's assembly and
+    // the class libraries it references by project, handed to the native
+    // compiler marked not to be optimized -- and compile the framework and
+    // every package with the optimization on, on every row. On a row whose
+    // board the board table marks RequiresOptimization the Debug image
+    // links, where the image compiled without the optimization as a whole
+    // is refused at the link (the control above); the case flies
+    // DEBUG_ROW, one such row. The response file carries the
+    // optimization words and the debug word, names one assembly under the
+    // build's own-code folder, the program's (the board class's package is
+    // handed over as it is), and sets the folding of identical bodies to
+    // generic; the record names the framework's code optimized and the
+    // program's own unoptimized. The image's window is read against the
+    // floor the row's map states in the tree.
     let case = "rt.sdk-parity-debug-optimized";
-    println!("== case {case}: the board class's program published for {DEBUG_ROW} in the Debug configuration -- the compiler's response file carrying the optimization words (-O, --Os) and the debug word (-g) once each, the image linked, its arena window at or above the row's floor ==");
+    println!("== case {case}: the board class's program published for {DEBUG_ROW} in the Debug configuration -- the compiler's response file carrying the optimization words (-O, --Os) and the debug word (-g) once each, one assembly marked (the program's, the package's not), the folding of identical bodies at generic, the image linked, its record optimized and unoptimized, its arena window at or above the row's floor ==");
     let Some(line) = control_line(&controls, "debug-optimized") else {
         rt.fail(case, "the publish-side script left no summary line for the Debug publish");
     };
-    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "opt-O") != "1" || control_field(line, "opt-Os") != "1" || control_field(line, "opt-g") != "1" {
-        rt.fail(case, &format!("the Debug publish did not run as registered (rc 0, the image present, -O, --Os and -g in the response file once each): {line}"));
+    if debug_fields(line) != DEBUG_USUAL || control_field(line, "own") != "tbhello.dll" || control_field(line, "fold") != "generic" {
+        rt.fail(case, &format!("the Debug publish did not run as registered (rc 0, the image present, -O, --Os and -g in the response file once each, the record optimized and unoptimized, the one marked assembly tbhello.dll, the folding generic): {line}"));
     }
     let floor = match arena_floor(repo, DEBUG_MAP) {
         Ok(v) => v,
@@ -7543,10 +8544,803 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     if hi <= lo || hi - lo < floor {
         rt.fail(case, &format!("the Debug image's arena window [{lo:#x}, {hi:#x}) is {} B, under the row's floor {floor} B", hi.saturating_sub(lo)));
     }
-    println!("  -O, --Os and -g in the response file once each; the image's arena window [{lo:#x}, {hi:#x}) = {} B at or above the row's floor {floor} B (the map {DEBUG_MAP})", hi - lo);
+    println!("  -O, --Os and -g in the response file once each; one assembly marked, tbhello.dll; the folding generic; the record optimized and unoptimized; the image's arena window [{lo:#x}, {hi:#x}) = {} B at or above the row's floor {floor} B (the map {DEBUG_MAP})", hi - lo);
     rt.pass(case, "positive", "", &format!("{{\"window\":{},\"floor\":{floor},\"board\":\"{DEBUG_ROW}\"}}", hi - lo));
     println!("  PASS");
 
+    // 15. The image compiled without the optimization as a whole, on a row
+    // whose board holds it: one build property asks for it, the response
+    // file carries no optimization word and keeps its debug word, nothing
+    // is marked, the image links and its record names both unoptimized. The
+    // row's Debug configuration by itself is the usual one. The same
+    // publish with the optimization turned on for the program's own code by
+    // a global property (Optimize=true) marks nothing and its record names
+    // both optimized. Each publish's summary line is read by debug_fields.
+    let case = "rt.sdk-parity-debug-unoptimized-row";
+    println!("== case {case}: the board class's program published for {DEBUG_PLAIN_ROW} in the Debug configuration, and again compiled without the optimization as a whole -- the first the usual Debug build with one assembly marked, the second with no optimization word (-O, --Os) in the compiler's response file, the debug word (-g) once, nothing marked, the image linked, its record unoptimized and unoptimized ==");
+    match control_line(&controls, "debug-plain") {
+        Some(l) if debug_fields(l) == DEBUG_USUAL && control_field(l, "own") == "tbhello.dll" => {}
+        other => rt.fail(case, &format!("the Debug publish did not run as registered (rc 0, the image present, -O, --Os and -g once each, the record optimized and unoptimized, the one marked assembly tbhello.dll): {other:?}")),
+    }
+    match control_line(&controls, "debug-plain-whole") {
+        Some(l) if debug_fields(l) == DEBUG_WHOLE && control_field(l, "own") == "NONE" && control_field(l, "fold") == "none" => {}
+        other => rt.fail(case, &format!("the publish compiled without the optimization as a whole did not run as registered (rc 0, the image present, no -O and no --Os in the response file, -g once, nothing marked, the record unoptimized and unoptimized): {other:?}")),
+    }
+    println!("  the Debug configuration: the usual build; compiled without the optimization as a whole: no -O and no --Os in the response file, -g once, nothing marked, the image linked, the record unoptimized and unoptimized");
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{DEBUG_PLAIN_ROW}\",\"profile\":\"unoptimized\",\"program\":\"unoptimized\"}}"));
+    println!("  PASS");
+    let case = "rt.sdk-parity-debug-optimize-on";
+    println!("== case {case}: the same publish with the optimization turned on for the program's own code by a global property (Optimize=true) -- the optimization words and the debug word once each, nothing marked, the image linked, its record optimized and optimized ==");
+    match control_line(&controls, "debug-plain-optimize-on") {
+        Some(l) if debug_fields(l) == DEBUG_OPTIMIZED && control_field(l, "own") == "NONE" => {}
+        other => rt.fail(case, &format!("the Debug publish with the optimization turned on did not run as registered (rc 0, the image present, -O, --Os and -g in the response file once each, nothing marked, the record optimized and optimized): {other:?}")),
+    }
+    match control_line(&controls, "debug-plain-whole-optimize-on") {
+        Some(l) if debug_fields(l) == DEBUG_WHOLE && control_field(l, "own") == "NONE" => {}
+        other => rt.fail(case, &format!("the same publish compiled without the optimization as a whole did not run as registered (the native compiler has one setting for a compilation: rc 0, the image present, no -O and no --Os in the response file, -g once, nothing marked, the record unoptimized and unoptimized): {other:?}")),
+    }
+    println!("  -O, --Os and -g in the response file once each; nothing marked; the image linked; the record optimized and optimized; compiled without the optimization as a whole, the same publish is unoptimized and unoptimized");
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{DEBUG_PLAIN_ROW}\",\"profile\":\"optimized\",\"program\":\"optimized\"}}"));
+    println!("  PASS");
+
+    // 16. The row with an external-flash map: its board requires the
+    // optimization while the program's code lies in the chip's own flash.
+    // With the chip's own flash named its Debug configuration is the usual build;
+    // with the program's home external the image compiled without the
+    // optimization as a whole links under the external-flash map.
+    let case = "rt.sdk-parity-debug-program-memory";
+    println!("== case {case}: the board class's program published for {XIP_ROW} in the Debug configuration with the chip's own flash named, and compiled without the optimization as a whole with the program's home external -- the usual Debug build under the first (the record optimized and unoptimized), no optimization word and the image linked under the second (the record unoptimized and unoptimized) ==");
+    match control_line(&controls, "debug-program-internal").map(debug_fields) {
+        Some(got) if got == DEBUG_USUAL => {}
+        other => rt.fail(case, &format!("the Debug publish with the chip's own flash named did not run as registered (rc 0, the image present, -O, --Os and -g in the response file once each, the record optimized and unoptimized): {other:?}")),
+    }
+    match control_line(&controls, "debug-program-external").map(debug_fields) {
+        Some(got) if got == DEBUG_WHOLE => {}
+        other => rt.fail(case, &format!("the publish compiled without the optimization as a whole with the program's home external did not run as registered (rc 0, the image present, no -O and no --Os in the response file, -g once, the record unoptimized and unoptimized): {other:?}")),
+    }
+    println!("  the chip's own flash named: -O, --Os and -g once each, optimized and unoptimized; the external home, compiled without the optimization as a whole: no -O and no --Os, -g once, the image linked, unoptimized and unoptimized");
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{XIP_ROW}\"}}"));
+    println!("  PASS");
+
+    // 17. Both images run: the board class's program published for this
+    // leg's own emulator row in the Debug configuration, and again compiled
+    // without the optimization as a whole, each booted on the emulator --
+    // the class's lines in the facts file's order, the kernel's return
+    // line, no forbidden pattern, exit 0.
+    let case = "rt.sdk-parity-debug-boot";
+    println!("== case {case}: the board class's program published for {} in the Debug configuration, and again compiled without the optimization as a whole, each image booted on the emulator -- the class's six lines in order, exit 0 ==", w.sdk_board);
+    let class_markers = match board_class_markers(repo, w.sdk_board) {
+        Ok(m) => m,
+        Err(e) => rt.fail(case, &e),
+    };
+    let class_marker_refs: Vec<&str> = class_markers.iter().map(String::as_str).collect();
+    let mut boots: Vec<(String, String)> = Vec::new();
+    for (label, want, what) in [("debug-emulator", DEBUG_USUAL, "the Debug configuration's image"), ("debug-emulator-whole", DEBUG_WHOLE, "the image compiled without the optimization as a whole")] {
+        match control_line(&controls, label).map(debug_fields) {
+            Some(got) if got == want => {}
+            other => rt.fail(case, &format!("the publish of {what} for the emulator row did not run as registered ({want:?}): {other:?}")),
+        }
+        let boot_elf = out.join(format!("control-{label}")).join("tbhello.elf");
+        let boot_elf_arg = boot_elf.to_string_lossy().into_owned();
+        let raw_path = out.join(format!("{label}-boot.raw"));
+        let stderr_path = out.join(format!("{label}-boot.stderr"));
+        let mut qargs: Vec<&str> = vec!["-M", w.machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+        qargs.extend_from_slice(ExecProfile::Parity.qemu_args());
+        qargs.push("-kernel");
+        qargs.push(&boot_elf_arg);
+        let outcome = match run_captured(&qemu, &qargs, &raw_path, &stderr_path, Duration::from_secs(RUN_TIMEOUT_S)) {
+            Ok(o) => o,
+            Err(e) => rt.fail(case, &e),
+        };
+        let raw = std::fs::read(&raw_path).unwrap_or_default();
+        echo_file(&raw_path, "  | ");
+        if outcome.timed_out {
+            rt.fail(case, &format!("the boot of {what} hung (killed at its timeout)"));
+        }
+        if cr_count(&raw) == 0 {
+            rt.fail(case, "no CR bytes in raw capture (wire discipline lost)");
+        }
+        if let Some(fault) = markers_out_of_order(&raw, &class_marker_refs) {
+            rt.fail(case, &format!("the board class's lines in the boot of {what}, as the row's facts file predicts them: {fault}"));
+        }
+        if !contains_fixed(&raw, BOOT_RETURN_LINE) {
+            rt.fail(case, &format!("the kernel's return line '{BOOT_RETURN_LINE}' not found in the boot of {what}"));
+        }
+        for m in FORBIDDEN_PATTERNS {
+            if contains_fixed(&raw, m) {
+                rt.fail(case, &format!("forbidden pattern '{m}' present in the boot of {what}"));
+            }
+        }
+        if outcome.exit != 0 {
+            rt.fail(case, &format!("the boot of {what}: exit {}, wanted 0", outcome.exit));
+        }
+        boots.push((format!("{out_rel}/control-{label}/tbhello.elf"), sha256_file(&boot_elf).unwrap_or_default()));
+    }
+    rt.pass_image(case, 0, &boots[0].0, &boots[0].1, None, &format!("{{\"markers\":{},\"board\":\"{}\",\"profile\":\"optimized\",\"program\":\"unoptimized\",\"whole\":\"{}\"}}", class_markers.len(), w.sdk_board, boots[1].1));
+    println!("  PASS (the class's {} lines in the facts file's order, in both boots; the Debug image {}..., the image compiled without the optimization as a whole {}...; {qemu_version})", class_markers.len(), &boots[0].1[..16.min(boots[0].1.len())], &boots[1].1[..16.min(boots[1].1.len())]);
+
+    // 18. What a debugger reads from a Debug image: the six-line program
+    // published in the Debug configuration, its image read by
+    // tools/rt-publish/debug-readings.py -- a statement row on every
+    // statement with the local function a function of its own, a location
+    // for each local over the whole of its scope, the record's two keys
+    // (the framework's code optimized, the program's own unoptimized), the
+    // file under the SDK's path map -- for a row whose board does not
+    // require the optimization and for the Raspberry Pi Pico 2 row, whose
+    // board does. The control is the same program published for the
+    // Raspberry Pi Pico 2 row with the optimization turned on for the
+    // program's own code (Optimize=true): the reader reports the statements
+    // and the locals gone and the record's second key optimized, and the
+    // path map stands.
+    for (case, label, row, what) in [
+        ("rt.sdk-parity-debug-readings", "debug-readings", DEBUG_PLAIN_ROW, "whose board does not require the optimization"),
+        ("rt.sdk-parity-debug-readings-row", "debug-readings-row", DEBUG_ROW, "whose board requires the optimization"),
+    ] {
+        println!("== case {case}: the six-line program published for {row}, {what}, in the Debug configuration and its image read as a debugger reads it -- a statement row on every statement with the local function a function of its own, a location for each local over the whole of its scope, the record optimized and unoptimized, the file under the SDK's path map ==");
+        let Some(line) = control_line(&controls, label) else {
+            rt.fail(case, "the publish-side script left no summary line for the readings' publish");
+        };
+        let readings = std::fs::read_to_string(out.join(format!("control-{label}")).join("readings.txt")).unwrap_or_default();
+        for l in readings.lines().filter(|l| l.starts_with("READING ") || l.starts_with("readings: ")) {
+            println!("  | {l}");
+        }
+        if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "readings-rc") != "0" || ["r1", "r2", "r3", "r4"].iter().any(|k| control_field(line, k) != "HOLDS") {
+            rt.fail(case, &format!("the four readings did not hold as registered (rc 0, the image present, the reader's code 0, each reading HOLDS): {line}"));
+        }
+        rt.pass(case, "positive", "", &format!("{{\"board\":\"{row}\",\"readings\":4}}"));
+        println!("  PASS");
+    }
+    let case = "rt.sdk-parity-control-debug-readings-optimized";
+    println!("== case {case}: the same program published for {DEBUG_ROW} with the optimization turned on for the program's own code (Optimize=true) -- the reader must report the statements and the locals gone and the record's second key optimized, the path map standing ==");
+    let Some(line) = control_line(&controls, "debug-readings-optimized") else {
+        rt.fail_control(case, "debug-readings-optimized", "the publish-side script left no summary line for this control");
+    };
+    let readings = std::fs::read_to_string(out.join("control-debug-readings-optimized").join("readings.txt")).unwrap_or_default();
+    for l in readings.lines().filter(|l| l.starts_with("READING ") || l.starts_with("readings: ")) {
+        println!("  | {l}");
+    }
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "readings-rc") != "1" || ["r1", "r2", "r3"].iter().any(|k| control_field(line, k) != "FAILS") || control_field(line, "r4") != "HOLDS" {
+        rt.fail_control(case, "debug-readings-optimized", &format!("the reader did not report the optimized image as registered (the image present, the reader's code 1, the statements, the locals and the record FAILS, the path HOLDS): {line}"));
+    }
+    println!("  the reader refused the optimized image at its statements, its locals and its record");
+    rt.pass(case, "negative", "debug-readings-optimized", "");
+    println!("  PASS");
+
+    // 19. The program's own code with a class library referenced by project:
+    // the program dbgown, whose two local functions are of one body, and its
+    // class library dbgownlib, a plain class library, published in the Debug
+    // configuration for this leg's own emulator row and read three ways by
+    // the same reader. A project reference is the program's own code: the
+    // response file names two assemblies under the own-code folder and the
+    // library's lines read as the program's do. Two methods of one body are
+    // two functions: the folding of identical bodies stands at generic.
+    // And the library was compiled under the SDK's path map: its file is
+    // named under the map, and no line of the image carries the tree's path
+    // or the home directory's.
+    let own_readings = |name: &str| std::fs::read_to_string(out.join("control-debug-own").join(format!("readings-{name}.txt"))).unwrap_or_default();
+    let case = "rt.sdk-parity-debug-project-reference";
+    println!("== case {case}: a program with a class library referenced by project, published for {} in the Debug configuration -- two assemblies marked, the program's and the library's, and the image read as a debugger reads it at the program's lines and at the library's: a statement row on every statement, a function of its own for the method each calls, a location for each local over the whole of its scope ==", w.sdk_board);
+    let Some(line) = control_line(&controls, "debug-own") else {
+        rt.fail(case, "the publish-side script left no summary line for the program with a class library");
+    };
+    for name in ["program", "library"] {
+        println!("  the reader at the {name}'s lines:");
+        for l in own_readings(name).lines().filter(|l| l.starts_with("READING ") || l.starts_with("readings: ")) {
+            println!("  | {l}");
+        }
+    }
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "program-rc") != "0" || control_field(line, "library-rc") != "0" || control_field(line, "own") != "dbgown.dll+dbgownlib.dll" {
+        rt.fail(case, &format!("the program with a class library did not publish and read as registered (rc 0, the image present, the reader's code 0 at the program's lines and at the library's, the two marked assemblies dbgown.dll and dbgownlib.dll): {line}"));
+    }
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{}\",\"marked\":2}}", w.sdk_board));
+    println!("  PASS");
+    let case = "rt.sdk-parity-debug-one-body";
+    println!("== case {case}: the same image read at its two local functions of one body -- each line in a function of its own, no inlined call, the local of the first located, the folding of identical bodies at generic in the compiler's response file ==");
+    println!("  the reader at the two functions' lines:");
+    for l in own_readings("one-body").lines().filter(|l| l.starts_with("READING ") || l.starts_with("readings: ")) {
+        println!("  | {l}");
+    }
+    if control_field(line, "one-body-rc") != "0" || control_field(line, "fold") != "generic" {
+        rt.fail(case, &format!("the two functions of one body did not read as two (the reader's code 0, the folding generic): {line}"));
+    }
+    rt.pass(case, "positive", "", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-project-reference-path-map";
+    println!("== case {case}: the same image carries no path of the build machine -- the library's file named under the SDK's path map in the line table, and no line of the image carrying the tree's path or the home directory's ==");
+    if control_field(line, "library-path") != "HOLDS" || control_field(line, "machine-paths") != "0" {
+        rt.fail(case, &format!("the image of the program with a class library carries a path of the build machine (the library's path reading HOLDS and 0 lines with the tree's path or the home directory's wanted): {line}"));
+    }
+    println!("  the library's file under the map; 0 lines of the image carry the tree's path or the home directory's");
+    rt.pass(case, "positive", "", "");
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-mark-unreadable";
+    println!("== case {case}: the marking task given a file that is not a .NET assembly -- refused by name, no copy written ==");
+    let Some(line) = control_line(&controls, "mark-unreadable") else {
+        rt.fail_control(case, "mark-unreadable", "the publish-side script left no summary line for this control");
+    };
+    let refuse = line.split_once("refuse=").map(|(_, r)| r.trim()).unwrap_or("");
+    if control_field(line, "rc") == "0" || control_field(line, "copy") != "absent" || !refuse.contains("notanassembly.dll is not a .NET assembly") {
+        rt.fail_control(case, "mark-unreadable", &format!("the file was not refused as registered (a failing code, no copy, the file named as not a .NET assembly): {line}"));
+    }
+    println!("  refused (rc {}, no copy): {refuse}", control_field(line, "rc"));
+    rt.pass(case, "negative", "mark-unreadable", "");
+    println!("  PASS");
+
+    // 20. A compiled file is not the program's own code: the same class
+    // library built by itself and referenced by its file from the program
+    // dbgfile. One assembly is marked, the program's, whose lines read
+    // whole; at the library's lines the reader must report the statements
+    // not standing as a program's own do (its second method inlined into
+    // its first), where the same library referenced by project reads whole
+    // (the case above).
+    let case = "rt.sdk-parity-control-debug-file-reference";
+    println!("== case {case}: the same class library referenced as a compiled file, the program published for {} in the Debug configuration -- one assembly marked, the program's, whose lines read whole, and the reader must report the library's statements not standing as a program's own code does ==", w.sdk_board);
+    let Some(line) = control_line(&controls, "debug-file") else {
+        rt.fail_control(case, "debug-file-reference", "the publish-side script left no summary line for this control");
+    };
+    let file_readings = std::fs::read_to_string(out.join("control-debug-file").join("readings-library.txt")).unwrap_or_default();
+    for l in file_readings.lines().filter(|l| l.starts_with("READING ") || l.starts_with("readings: ")) {
+        println!("  | {l}");
+    }
+    if control_field(line, "rc") != "0" || control_field(line, "library-build-rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "program-rc") != "0" || control_field(line, "own") != "dbgfile.dll" || control_field(line, "library-statements") != "FAILS" {
+        rt.fail_control(case, "debug-file-reference", &format!("the compiled file's code did not read as registered (rc 0, the library built, the image present, the reader's code 0 at the program's lines, the one marked assembly dbgfile.dll, the statements reading at the library's lines FAILS): {line}"));
+    }
+    println!("  one assembly marked, dbgfile.dll; the program's lines read whole; the reader refused the library's statements");
+    rt.pass(case, "negative", "debug-file-reference", "");
+    println!("  PASS");
+
+    // 21. A class library reached through another is the program's own
+    // code: the program dbgvia references the class library dbgvialib by
+    // project, which references dbgownlib by project, and a copy of the
+    // three projects is published in the Debug configuration for this leg's
+    // own emulator row. The response file names three assemblies under the
+    // own-code folder, and at the far library's lines the reader holds as
+    // it does for a library the program references directly: its
+    // statements, its second method a function of its own, its local, the
+    // record's two keys and its file under the SDK's path map, with no line
+    // of the image carrying the tree's path or the home directory's.
+    let via_readings = |name: &str| std::fs::read_to_string(out.join("control-debug-via").join(format!("readings-{name}.txt"))).unwrap_or_default();
+    let case = "rt.sdk-parity-debug-through-reference";
+    println!("== case {case}: a program that reaches a class library only through another class library, each referenced by project, published for {} in the Debug configuration -- three assemblies marked, and the image read as a debugger reads it at the far library's lines: a statement row on every statement, a function of its own for the method it calls, a location for its local over the whole of its scope, its file under the SDK's path map, no path of the build machine in the image ==", w.sdk_board);
+    let Some(via) = control_line(&controls, "debug-via") else {
+        rt.fail(case, "the publish-side script left no summary line for the program that reaches a class library through another");
+    };
+    println!("  the reader at the far library's lines:");
+    for l in via_readings("far").lines().filter(|l| l.starts_with("READING ") || l.starts_with("readings: ")) {
+        println!("  | {l}");
+    }
+    if control_field(via, "rc") != "0" || control_field(via, "elf") != "present" || control_field(via, "far-rc") != "0" || control_field(via, "far-path") != "HOLDS" || control_field(via, "own") != "dbgownlib.dll+dbgvia.dll+dbgvialib.dll" || control_field(via, "fold") != "generic" || control_field(via, "machine-paths") != "0" {
+        rt.fail(case, &format!("the program that reaches a class library through another did not publish and read as registered (rc 0, the image present, the reader's code 0 at the far library's lines with its file under the map, the three marked assemblies dbgownlib.dll, dbgvia.dll and dbgvialib.dll, the folding generic, 0 lines with the tree's path or the home directory's): {via}"));
+    }
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{}\",\"marked\":3}}", w.sdk_board));
+    println!("  PASS");
+
+    // 22. A method the program itself marks AggressiveOptimization stays
+    // optimized: the same image read at Kept.cs, whose two methods carry
+    // the mark and have the shape of the far library's two. The reader
+    // must report their statements not standing as the program's own code
+    // does, while the file's rows are in the image under the SDK's path
+    // map: the two methods were compiled, so the failing reading is not an
+    // absent file's.
+    let case = "rt.sdk-parity-control-debug-aggressive-optimization";
+    println!("== case {case}: the same image read at two methods the program marks AggressiveOptimization -- the reader must report their statements not standing as the program's own code does, the file's rows in the image under the SDK's path map ==");
+    for l in via_readings("kept").lines().filter(|l| l.starts_with("READING ") || l.starts_with("readings: ")) {
+        println!("  | {l}");
+    }
+    if control_field(via, "kept-rc") != "1" || control_field(via, "kept-statements") != "FAILS" || control_field(via, "kept-path") != "HOLDS" {
+        rt.fail_control(case, "debug-aggressive-optimization", &format!("the two marked methods did not read as registered (the reader's code 1, the statements reading FAILS, the path reading HOLDS): {via}"));
+    }
+    println!("  the reader refused the two marked methods' statements; their file's rows are in the image");
+    rt.pass(case, "negative", "debug-aggressive-optimization", "");
+    println!("  PASS");
+
+    // 23. A build with nothing changed does not run the native compiler,
+    // and a build after a changed statement does: the same copy published
+    // a second time as it stands, and a third time after one statement of
+    // its Program.cs is changed. Each publish's own output is read for the
+    // compiler pack's line for its native compile step: once in the first,
+    // not at all in the second, whose image is the first's byte for byte,
+    // and once in the third, whose image moved.
+    let case = "rt.sdk-parity-debug-unchanged-build";
+    println!("== case {case}: the same program published again with nothing changed, and once more after one statement of its source is changed -- the native compiler's line once in the first publish's output, not at all in the second's with the image the same bytes, once in the third's with the image moved ==");
+    let (Some(again), Some(moved)) = (control_line(&controls, "debug-via-again"), control_line(&controls, "debug-via-moved")) else {
+        rt.fail(case, "the publish-side script left no summary line for the second publish or the third");
+    };
+    if control_field(via, "compiles") != "1" {
+        rt.fail(case, &format!("the first publish's output does not carry the native compiler's line once: {via}"));
+    }
+    if control_field(again, "rc") != "0" || control_field(again, "elf") != "present" || control_field(again, "compiles") != "0" || control_field(again, "same") != "yes" {
+        rt.fail(case, &format!("the publish with nothing changed did not run as registered (rc 0, the image present and the first publish's bytes, the native compiler's line absent from its output): {again}"));
+    }
+    if control_field(moved, "rc") != "0" || control_field(moved, "elf") != "present" || control_field(moved, "moved-lines") != "1" || control_field(moved, "compiles") != "1" || control_field(moved, "same") != "no" {
+        rt.fail(case, &format!("the publish after a changed statement did not run as registered (rc 0, one line of the source changed, the native compiler's line once in its output, the image moved): {moved}"));
+    }
+    println!("  the native compiler ran in the first publish, not in the second (the image the same bytes), and again in the third (one statement changed, the image moved)");
+    rt.pass(case, "positive", "", "");
+    println!("  PASS");
+
+    // 24. The Optimize property speaks for the program's own code in any
+    // configuration: the six-line program published for the Raspberry Pi
+    // Pico 2 row in the Release configuration with Optimize=false. The
+    // program's assembly is marked, the folding stands at generic, and the
+    // four readings hold as they do for a Debug image: the statements, the
+    // locals, the record's two keys (the framework's code optimized, the
+    // program's own unoptimized) and the file under the SDK's path map.
+    let case = "rt.sdk-parity-release-optimize-off";
+    println!("== case {case}: the six-line program published for {DEBUG_ROW} in the Release configuration with the optimization turned off for the program's own code (Optimize=false) -- one assembly marked, the folding generic, and the image read as a debugger reads it: a statement row on every statement with the local function a function of its own, a location for each local over the whole of its scope, the record optimized and unoptimized, the file under the SDK's path map ==");
+    let Some(line) = control_line(&controls, "release-optimize-off") else {
+        rt.fail(case, "the publish-side script left no summary line for the Release publish with the optimization off");
+    };
+    let readings = std::fs::read_to_string(out.join("control-release-optimize-off").join("readings.txt")).unwrap_or_default();
+    for l in readings.lines().filter(|l| l.starts_with("READING ") || l.starts_with("readings: ")) {
+        println!("  | {l}");
+    }
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "readings-rc") != "0" || ["r1", "r2", "r3", "r4"].iter().any(|k| control_field(line, k) != "HOLDS") || control_field(line, "own") != "dbgsample.dll" || control_field(line, "fold") != "generic" {
+        rt.fail(case, &format!("the Release publish with the optimization off did not run and read as registered (rc 0, the image present, the reader's code 0, each reading HOLDS, the one marked assembly dbgsample.dll, the folding generic): {line}"));
+    }
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{DEBUG_ROW}\",\"readings\":4}}"));
+    println!("  PASS");
+
+    // 25. The network suite: the gate's program for the socket classes
+    // published through the SDK for this leg's row and booted on the
+    // emulator -- its nine lines in order, the kernel's return line, no
+    // forbidden pattern, exit 0 -- and three of the socket functions read
+    // by the image's symbols: each defined once, at the size its frozen
+    // unit gives it, so none is the surface's generated refusal.
+    let case = "rt.sdk-parity-net-suite";
+    println!("== case {case}: the network suite published through the SDK for {} and booted on the emulator -- its nine lines in order, exit 0, and three of the socket functions each defined once in the image at the size of its frozen unit ==", w.sdk_board);
+    let Some(line) = control_line(&controls, "net-suite") else {
+        rt.fail(case, "the publish-side script left no summary line for the network suite's publish");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" {
+        rt.fail(case, &format!("the network suite's publish did not produce the image: {line}"));
+    }
+    let net_elf = out.join("control-net-suite").join("netsuite.elf");
+    let (raw, exit_code) = parity_boot(&mut rt, case, &qemu, w.machine, &net_elf, &out.join("net-suite-boot.raw"), &out.join("net-suite-boot.stderr"));
+    if let Some(fault) = markers_out_of_order(&raw, &NET_SUITE_LINES) {
+        rt.fail(case, &format!("the network suite's lines: {fault}"));
+    }
+    if !contains_fixed(&raw, BOOT_RETURN_LINE) {
+        rt.fail(case, &format!("the kernel's return line '{BOOT_RETURN_LINE}' not found"));
+    }
+    for m in NET_SUITE_FORBIDDEN {
+        if contains_fixed(&raw, m) {
+            rt.fail(case, &format!("forbidden pattern '{m}' present"));
+        }
+    }
+    if String::from_utf8_lossy(&raw).lines().any(|l| l.starts_with("FAIL ")) {
+        rt.fail(case, "a section's FAIL line is on the wire");
+    }
+    if exit_code != 0 {
+        rt.fail(case, &format!("exit {exit_code}, wanted 0"));
+    }
+    let net_image = match std::fs::read(&net_elf).map_err(|e| format!("cannot read {}: {e}", net_elf.display())).and_then(ArmImage::read) {
+        Ok(i) => i,
+        Err(e) => rt.fail(case, &e),
+    };
+    let mut unit_sizes: Vec<(String, u64)> = Vec::new();
+    for (i, obj) in w.shim_objects.iter().filter(|o| o.contains("/shim-socket") || o.contains("/shim-netinfo")).enumerate() {
+        let obj_arg = repo.join(obj.replace('/', std::path::MAIN_SEPARATOR_STR)).to_string_lossy().into_owned();
+        let text = rt.tool_text(&nm_tool, case, &["-S", "--defined-only", &obj_arg], &format!("sdk-parity-net-suite.unit-{i}.nm.txt"));
+        for l in text.lines() {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() == 4 && f[2] == "T" {
+                if let Ok(size) = u64::from_str_radix(f[1], 16) {
+                    unit_sizes.push((f[3].to_string(), size));
+                }
+            }
+        }
+    }
+    for name in NET_SUITE_SYMBOLS {
+        let defs: Vec<u64> = net_image.symbols.iter().filter(|s| s.defined && s.kind == 2 && s.name == name).map(|s| u64::from(s.size)).collect();
+        let unit: Vec<u64> = unit_sizes.iter().filter(|(n, _)| n == name).map(|(_, s)| *s).collect();
+        if defs.len() != 1 || unit.len() != 1 || defs[0] != unit[0] {
+            rt.fail(case, &format!("{name}: {} definition(s) in the image at the size(s) {defs:?} and {} in the frozen socket units at {unit:?} -- one of each at one size is wanted (a function of another size is not the unit's)", defs.len(), unit.len()));
+        }
+        println!("  {name}: defined once in the image at {} bytes, the frozen unit's size", defs[0]);
+    }
+    let net_sha = sha256_file(&net_elf).unwrap_or_default();
+    let net_rel = format!("{out_rel}/control-net-suite/netsuite.elf");
+    rt.pass_image(case, 0, &net_rel, &net_sha, None, &format!("{{\"lines\":{},\"board\":\"{}\"}}", NET_SUITE_LINES.len(), w.sdk_board));
+    println!("  PASS (the suite's {} lines in order; the image {}...; {qemu_version})", NET_SUITE_LINES.len(), &net_sha[..16.min(net_sha.len())]);
+
+    // The suite's control: the merged object the publish made, linked by
+    // this runner on the SDK's line against this row's kernel built with
+    // the kernel's own doctored name resolver, which keeps one record of
+    // an answer. The lookup section must fail by its one line, exact and
+    // whole; the six other sections pass; the summary counts one; exit 1.
+    let case = "rt.sdk-parity-control-net-suite-doctored-resolver";
+    let broke = "the network suite's merged object linked against this row's kernel built with the kernel's doctored name resolver (one record of an answer kept)";
+    println!("== case {case} (negative control): {broke} -- the lookup section must fail by its one line, the six other sections pass, exit 1 ==");
+    let net_dir = repo.join("src").join("kernel").join("target").join(w.out_dir).join("kernel-net-doctored-resolve");
+    let _ = std::fs::create_dir_all(&net_dir);
+    let net_log = rt.out.join("sdk-parity-net-doctored-staticlib-build.log");
+    let (net_target, net_feats): (Option<&str>, String) = match w.lib_build {
+        None => (None, format!("{AN500_FEATURES},test-net-doctored-resolve")),
+        Some((_, target, feats)) => (Some(target), format!("{feats},test-net-doctored-resolve")),
+    };
+    let mut bargs: Vec<&str> = vec!["--lib"];
+    if let Some(tg) = net_target {
+        bargs.extend_from_slice(&["--target", tg, "--no-default-features"]);
+    }
+    bargs.extend_from_slice(&["--features", net_feats.as_str()]);
+    match cargo_build_kernel_at(repo, &net_dir, &bargs, &net_log) {
+        Ok(true) => {}
+        Ok(false) => {
+            echo_file(&net_log, "");
+            rt.fail(case, "the doctored kernel's staticlib build error");
+        }
+        Err(e) => rt.fail(case, &e),
+    }
+    let net_triple = net_target.unwrap_or("thumbv7em-none-eabihf");
+    let net_lib = format!("src/kernel/target/{}/kernel-net-doctored-resolve/{net_triple}/release/librhu_kernel.a", w.out_dir);
+    let net_ctl_rel = format!("{out_rel}/control-net-suite/netsuite-doctored-resolver.elf");
+    let mut nargs: Vec<String> = vec!["-T".to_string(), w.map.to_string(), "--gc-sections".to_string(), format!("-Map={out_rel}/control-net-suite/netsuite-doctored-resolver.map")];
+    nargs.extend(RT_LINK_WORDS.iter().map(|s| s.to_string()));
+    nargs.push(format!("{out_rel}/control-net-suite/netsuite-merged.o"));
+    nargs.push(SDK_LOG_LEVEL_WORD.to_string());
+    nargs.push(format!("--defsym=__rhu_threadpool_max_threads={}", pool_bound(&bound_row).0));
+    nargs.extend(w.shim_objects.iter().map(|s| s.to_string()));
+    nargs.extend(w.gc_objects.iter().map(|s| s.to_string()));
+    nargs.push(format!("{}/{LIBC}", w.tier));
+    nargs.push(net_lib.clone());
+    nargs.push("-o".to_string());
+    nargs.push(net_ctl_rel.clone());
+    let net_ld_log = out.join("net-suite-doctored.ld.stderr");
+    match run_tool_bounded(repo, &ld, &nargs, &out.join("net-suite-doctored.ld.stdout"), &net_ld_log) {
+        Ok(true) => {}
+        Ok(false) => {
+            echo_file(&net_ld_log, "  | ");
+            rt.fail(case, "the control's image did not link (see its linker stderr log)");
+        }
+        Err(e) => rt.fail(case, &e),
+    }
+    let net_ctl_elf = repo.join(net_ctl_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let (raw, exit_code) = parity_boot(&mut rt, case, &qemu, w.machine, &net_ctl_elf, &out.join("net-suite-doctored-boot.raw"), &out.join("net-suite-doctored-boot.stderr"));
+    let wire_text = String::from_utf8_lossy(&raw).into_owned();
+    let wire: Vec<&str> = wire_text.lines().map(|l| l.trim_end_matches('\r')).collect();
+    let fails: Vec<&str> = wire.iter().copied().filter(|l| l.starts_with("FAIL ")).collect();
+    let others_pass = NET_SUITE_LINES.iter().filter(|l| l.starts_with("PASS ") && !l.starts_with("PASS net-lookup ")).all(|l| wire.contains(l));
+    let lookup_passed = wire.iter().any(|l| l.starts_with("PASS net-lookup "));
+    if fails != [NET_SUITE_CONTROL_LINE] || !others_pass || lookup_passed || !wire.contains(&NET_SUITE_CONTROL_SUMMARY) || !contains_fixed(&raw, NET_SUITE_RETURN_BAD) || exit_code != 1 {
+        rt.fail_control(case, broke, &format!("the doctored kernel was not refused as registered (the one FAIL line '{NET_SUITE_CONTROL_LINE}', the six other sections' PASS lines, '{NET_SUITE_CONTROL_SUMMARY}', '{NET_SUITE_RETURN_BAD}', exit 1): the FAIL lines {fails:?}, the other sections pass {others_pass}, the lookup's PASS line present {lookup_passed}, exit {exit_code}"));
+    }
+    println!("  refused as designed: '{NET_SUITE_CONTROL_LINE}' alone fails, the six other sections pass, the summary counts one, exit 1");
+    rt.pass(case, "negative", broke, "");
+    println!("  PASS (control)");
+
+    // 26. The thread pool's bound: the build states the most workers the
+    // row holds. The number is this runner's own, computed from the board
+    // table (the stack pool, less the kernel's own threads, less the
+    // runtime's service threads, in whole default stacks): the build's
+    // line in the gate's own publish says it, the image carries it as an
+    // absolute symbol, and the bound's program, booted on the emulator,
+    // prints the runtime's own answer, is refused one more worker, and
+    // runs more work items than the bound to their end.
+    let case = "rt.sdk-parity-pool-bound";
+    let (most, _, _) = pool_bound(&bound_row);
+    let bound_line = pool_bound_line(&bound_row);
+    println!("== case {case}: the thread pool's bound for {} -- {most} by this runner's arithmetic over the board table: the build's line in the gate's own publish, the image's absolute symbol, and the bound's program booted on the emulator ==", w.sdk_board);
+    let Some(line) = control_line(&controls, "pool-bound-line") else {
+        rt.fail(case, "the publish-side script left no summary line for the bound's line");
+    };
+    let printed = line.split_once("line=").map(|(_, r)| r.trim()).unwrap_or("");
+    if control_field(line, "most") != most.to_string() || printed != bound_line {
+        rt.fail(case, &format!("the build's line is not this runner's ('{bound_line}'): {line}"));
+    }
+    let fresh_image = match std::fs::read(&fresh_elf).map_err(|e| format!("cannot read {}: {e}", fresh_elf.display())).and_then(ArmImage::read) {
+        Ok(i) => i,
+        Err(e) => rt.fail(case, &e),
+    };
+    match fresh_image.symbol("__rhu_threadpool_max_threads") {
+        Some(s) if u64::from(s.value) == most => {}
+        Some(s) => rt.fail(case, &format!("the image's word __rhu_threadpool_max_threads is {}, not {most}", s.value)),
+        None => rt.fail(case, "the image defines no __rhu_threadpool_max_threads"),
+    }
+    let Some(line) = control_line(&controls, "pool-bound") else {
+        rt.fail(case, "the publish-side script left no summary line for the bound's program");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" {
+        rt.fail(case, &format!("the bound's program was not published: {line}"));
+    }
+    let pool_elf = out.join("control-pool-bound").join("poolbound.elf");
+    let (raw, exit_code) = parity_boot(&mut rt, case, &qemu, w.machine, &pool_elf, &out.join("pool-bound-boot.raw"), &out.join("pool-bound-boot.stderr"));
+    let items = 2 * most + 2;
+    let pool_lines = [
+        format!("POOLBOUND: the pool runs at most {most} {}", if most == 1 { "worker" } else { "workers" }),
+        format!("POOLBOUND: one more asked: refused; the most is {most}"),
+        format!("POOLBOUND: {items} of {items} work items ran; never more at once than the bound: true"),
+        "POOLBOUND: end".to_string(),
+    ];
+    let pool_refs: Vec<&str> = pool_lines.iter().map(String::as_str).collect();
+    if let Some(fault) = markers_out_of_order(&raw, &pool_refs) {
+        rt.fail(case, &format!("the bound's program's lines: {fault}"));
+    }
+    if !contains_fixed(&raw, BOOT_RETURN_LINE) {
+        rt.fail(case, &format!("the kernel's return line '{BOOT_RETURN_LINE}' not found"));
+    }
+    for m in FORBIDDEN_PATTERNS {
+        if contains_fixed(&raw, m) {
+            rt.fail(case, &format!("forbidden pattern '{m}' present"));
+        }
+    }
+    if exit_code != 0 {
+        rt.fail(case, &format!("exit {exit_code}, wanted 0"));
+    }
+    let pool_sha = sha256_file(&pool_elf).unwrap_or_default();
+    let pool_rel = format!("{out_rel}/control-pool-bound/poolbound.elf");
+    rt.pass_image(case, 0, &pool_rel, &pool_sha, None, &format!("{{\"most\":{most},\"board\":\"{}\"}}", w.sdk_board));
+    println!("  PASS (the build's line, the image's word and the runtime's answer all {most}; one more refused; {items} work items ran; the image {}...)", &pool_sha[..16.min(pool_sha.len())]);
+
+    // 27. The network on the external-flash row: its packages carry a kernel
+    // with the network and a kernel without it. With no property the image
+    // links the first; with the managed memory in the chip's own RAM, and
+    // with the network turned off, it links the second and the build says
+    // so in a line of its own. Each image is read by its own headers: what
+    // it loads in the external flash and in the chip's own, the section of
+    // the Ethernet controller's rings and the kernel's network banner.
+    let case = "rt.sdk-parity-network-kernel";
+    println!("== case {case}: the gate's project published for {XIP_ROW} with no property, with RhuManagedMemory=internal and with RhuNetwork=off -- the kernel with the network by default, the kernel without it for the other two with the build's line saying so; each image read for the Ethernet rings' section and the kernel's network banner ==");
+    let boards_text = std::fs::read_to_string(repo.join("src").join("sdk").join("Lamella.Rhu.Sdk").join("Sdk").join("boards.props")).unwrap_or_default();
+    let xip_row_text = boards_text.find(&format!("<LamellaTargetBoardRow Include=\"{XIP_ROW}\"")).and_then(|i| boards_text[i..].find("/>").map(|e| &boards_text[i..i + e]));
+    let (Some(internal_map), Some(plain_kernel)) = (xip_row_text.and_then(|r| row_attr_text(r, "MapInternal")), xip_row_text.and_then(|r| row_attr_text(r, "KernelNoNetwork"))) else {
+        rt.fail(case, &format!("the board table's row {XIP_ROW} names no MapInternal or no KernelNoNetwork"));
+    };
+    let network_rows: [(&str, &str, &str, &str, &str, &str, bool, bool); 3] = [
+        ("program-memory-default", xip_second.as_str(), xip_kernel.as_str(), "external", "on", "none", true, true),
+        ("network-internal-heap", internal_map.as_str(), plain_kernel.as_str(), "internal", "off", "managed-memory-internal", false, false),
+        ("network-off", xip_second.as_str(), plain_kernel.as_str(), "external", "off", "network-off", true, false),
+    ];
+    for (label, map, kernel, program, network, without, in_window, with_network) in network_rows {
+        let Some(l) = control_line(&controls, label) else {
+            rt.fail(case, &format!("the publish-side script left no summary line for {label}"));
+        };
+        let said = if without == "none" { "0" } else { "1" };
+        if control_field(l, "rc") != "0" || control_field(l, "elf") != "present" || control_field(l, "map") != map || control_field(l, "kernel") != kernel || control_field(l, "program") != program || control_field(l, "network") != network || control_field(l, "without-network") != without || control_field(l, "without-network-lines") != said {
+            rt.fail(case, &format!("{label} did not run as registered (rc 0, the image present, the map {map}, the kernel {kernel}, the home {program}, the network {network}, the build's line about a kernel without the network {said} time(s), its reason {without}): {l}"));
+        }
+        let o = std::fs::read(out.join(format!("control-{label}")).join("rthello.o")).unwrap_or_default();
+        if o != frozen_obj {
+            rt.fail(case, &format!("{label}: the object is not the record's ({} bytes against {}): the kernel is a pick of the link, which must not reach the compile", o.len(), frozen_obj.len()));
+        }
+        let image = std::fs::read(out.join(format!("control-{label}")).join("rthello.elf")).unwrap_or_default();
+        let (loads_window, loads_chip, rings, banner) = match image_net_readings(&image, (win_base, win_end), (chip_base, chip_base + chip_bytes)) {
+            Ok(r) => r,
+            Err(e) => rt.fail(case, &format!("{label}: {e}")),
+        };
+        if (loads_window > 0) != in_window || loads_chip == 0 || (rings > 0) != with_network || (banner > 0) != with_network {
+            rt.fail(case, &format!("{label}: the image loads {loads_window} B in the external flash and {loads_chip} B in the chip's own, its rings' section is {rings} B and it carries the network banner {banner} time(s) -- wanted: the external flash {}, the chip's own flash loaded, the rings and the banner {}", if in_window { "loaded" } else { "not loaded" }, if with_network { "present" } else { "absent" }));
+        }
+        println!("  {label}: map {map}, kernel {kernel}, the home {program}, network {network}; {loads_window} B in the external flash, {loads_chip} B in the chip's own; the rings' section {rings} B, the banner {banner} time(s)");
+    }
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{XIP_ROW}\",\"publishes\":{}}}", network_rows.len()));
+    println!("  PASS");
+
+    // 28. The debugger's exception entries: the program that throws what
+    // nothing catches, published for this leg's row in the Debug and the
+    // Release configuration; each image read for the entries a debugger
+    // stops at when an exception is thrown -- the eight function symbols,
+    // the thrown type's record by its symbol, the three fields the message
+    // is read through. The control: each image's copy through the tools
+    // package's object copier with its strip-all option, which the reader
+    // must refuse by name at the missing symbol table.
+    let exception_images = [("exception-debug", "Debug"), ("exception-release", "Release")];
+    let case = "rt.sdk-parity-exception-entry-symbols";
+    println!("== case {case}: the program that throws what nothing catches published for {} in the Debug and the Release configuration -- each image read for the exception entries a debugger stops at: the eight function symbols, the thrown type's record by its symbol, the three fields ==", w.sdk_board);
+    for (label, conf) in exception_images {
+        let Some(line) = control_line(&controls, label) else {
+            rt.fail(case, &format!("the publish-side script left no summary line for the {conf} publish"));
+        };
+        if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" || control_field(line, "warnings") != "0" {
+            rt.fail(case, &format!("the {conf} publish did not run as registered (rc 0, the image present, no warning): {line}"));
+        }
+        let readings_label = format!("{label}-readings");
+        let Some(rline) = control_line(&controls, &readings_label) else {
+            rt.fail(case, &format!("the publish-side script left no summary line for the {conf} image's readings"));
+        };
+        let readings = std::fs::read_to_string(out.join(format!("control-{label}")).join("readings.txt")).unwrap_or_default();
+        for l in readings.lines().filter(|l| l.starts_with("READING ") || l.starts_with("readings: ")) {
+            println!("  | {conf}: {l}");
+        }
+        let want = [
+            "READING 1 entries: HOLDS -- the 8 function symbols ".to_string(),
+            format!("READING 2 type-record: HOLDS -- the symbol {} at 0x", EVENT_PROGRAM.type_symbol),
+            "READING 3 fields: HOLDS -- S_P_CoreLib_System_Exception._message at 4; String._stringLength at 4; String._firstChar at 8".to_string(),
+            "readings: 3 of 3 hold".to_string(),
+        ];
+        if control_field(rline, "readings-rc") != "0" || control_field(rline, "held") != "3-of-3" || want.iter().any(|n| !readings.lines().any(|l| l.starts_with(n.as_str()))) {
+            rt.fail(case, &format!("the {conf} image's exception entries did not read as registered (the reader's code 0, three readings of three, each line in its registered words): {rline}"));
+        }
+    }
+    rt.pass(case, "positive", "", &format!("{{\"board\":\"{}\",\"images\":2,\"readings\":3}}", w.sdk_board));
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-exception-entry-stripped";
+    let broke = "each image's copy through the tools package's object copier with its strip-all option";
+    println!("== case {case} (negative control): {broke} -- the reader must refuse it by name at the missing symbol table, its code 2, no reading printed ==");
+    for (label, conf) in exception_images {
+        let readings_label = format!("{label}-readings");
+        let Some(rline) = control_line(&controls, &readings_label) else {
+            rt.fail_control(case, broke, "the publish-side script left no summary line for the stripped copy");
+        };
+        let image_bytes: u64 = control_field(rline, "image-bytes").parse().unwrap_or(0);
+        let stripped_bytes: u64 = control_field(rline, "stripped-bytes").parse().unwrap_or(0);
+        if control_field(rline, "stripped-rc") != "2" || control_field(rline, "stripped-refused") != "1" || control_field(rline, "stripped-readings") != "0" || stripped_bytes == 0 || stripped_bytes >= image_bytes {
+            rt.fail_control(case, broke, &format!("the {conf} image's stripped copy was not refused as registered (the reader's code 2, its one line naming the missing symbol table, no reading printed, the copy smaller than the image): {rline}"));
+        }
+        println!("  the {conf} image's stripped copy ({stripped_bytes} of {image_bytes} bytes): refused by name at the missing symbol table, the reader's code 2");
+    }
+    rt.pass(case, "negative", broke, "");
+    println!("  PASS (control)");
+
+    // 29. The debugger's unhandled-exception event, seen through the
+    // emulator's debug port in both images: the reading of the image (the
+    // events word, the routine, its one BKPT) and four runs -- the word
+    // never written, the word written before the startup, the word written
+    // at Main with a breakpoint on the instruction, and the word written
+    // with none. The control: each image's copy with the routine's BKPT
+    // overwritten by a no-operation, refused at the reading by name, no
+    // run started.
+    let case = "rt.sdk-parity-unhandled-event";
+    println!("== case {case}: the unhandled-exception event in the Debug and the Release image of the program that throws, on {} through the emulator's debug port -- the image's reading and four runs each ==", w.machine);
+    for (label, conf) in exception_images {
+        let image = out.join(format!("control-{label}")).join("unhandled.elf");
+        let dir = out.join(format!("event-{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        if std::fs::create_dir_all(&dir).is_err() {
+            rt.fail(case, &format!("cannot create {}", dir.display()));
+        }
+        let lines = event_lines(&qemu, w.machine, &image, &dir, label);
+        for (name, ok, text) in &lines {
+            println!("  | {conf}: {name} {} -- {text}", if *ok { "HOLDS" } else if name == "READING" { "REFUSED" } else { "FAILS" });
+        }
+        let held = lines.iter().filter(|l| l.1).count();
+        if lines.len() != 1 + EventRun::ALL.len() || held != lines.len() {
+            rt.fail(case, &format!("the {conf} image: {held} of {} lines hold (the image's reading and the four runs through the emulator's debug port)", 1 + EventRun::ALL.len()));
+        }
+    }
+    rt.pass(case, "positive", "", &format!("{{\"machine\":\"{}\",\"images\":2,\"runs\":{}}}", w.machine, EventRun::ALL.len()));
+    println!("  PASS");
+    let case = "rt.sdk-parity-control-unhandled-event-no-bkpt";
+    let broke = "each image's copy with the routine's BKPT #0x60 overwritten by a no-operation";
+    println!("== case {case} (negative control): {broke} -- refused at the reading by name, no run started ==");
+    for (label, conf) in exception_images {
+        let image = out.join(format!("control-{label}")).join("unhandled.elf");
+        let doctored_path = out.join(format!("control-{label}")).join("unhandled-no-bkpt.elf");
+        let verdict = std::fs::read(&image)
+            .map_err(|e| format!("cannot read {}: {e}", image.display()))
+            .and_then(|b| doctor_event_bkpt(&b))
+            .and_then(|d| std::fs::write(&doctored_path, &d).map_err(|e| format!("cannot write {}: {e}", doctored_path.display())).map(|_| d))
+            .and_then(ArmImage::read)
+            .map(|img| read_event_image(&img).map(|_| ()));
+        match verdict {
+            Ok(Err(why)) if why.contains("the routine holds no BKPT #0x60") => println!("  the {conf} image's doctored copy: refused at the reading -- {why}"),
+            Ok(Err(why)) => rt.fail_control(case, broke, &format!("the {conf} image's doctored copy was refused for another reason: {why}")),
+            Ok(Ok(())) => rt.fail_control(case, broke, &format!("the {conf} image's doctored copy was ACCEPTED: its reading holds though the routine's BKPT is gone")),
+            Err(e) => rt.fail_control(case, broke, &format!("the {conf} image's doctored copy could not be made or read: {e}")),
+        }
+    }
+    rt.pass(case, "negative", broke, "");
+    println!("  PASS (control)");
+
+    // 30. The runtime's stack helper: the class library asks it before work
+    // that may nest deeply, and on a board's stacks it must say yes while
+    // there is room and no while enough is left to raise its exception. The
+    // gate's program for it, published through the SDK for this leg's row
+    // and booted on the emulator: a record's ToString() on the thread that
+    // runs Main and on a spawned thread, a continuation asked to run
+    // synchronously, and a descent that asks the helper at each frame --
+    // every line of the program's own, whole and in order, the kernel's
+    // return line, no forbidden pattern, exit 0.
+    let case = "rt.sdk-parity-stack-helper";
+    println!("== case {case}: the stack helper's program published through the SDK for {} and booted on the emulator -- a record's ToString() on two threads, a continuation run synchronously and a descent that asks the helper at each frame, every line of the program's own whole and in order, exit 0 ==", w.sdk_board);
+    let Some(line) = control_line(&controls, "stack-helper") else {
+        rt.fail(case, "the publish-side script left no summary line for the stack helper's publish");
+    };
+    if control_field(line, "rc") != "0" || control_field(line, "elf") != "present" {
+        rt.fail(case, &format!("the stack helper's program was not published: {line}"));
+    }
+    let helper_elf = out.join("control-stack-helper").join("stackhelper.elf");
+    let (raw, exit_code) = parity_boot(&mut rt, case, &qemu, w.machine, &helper_elf, &out.join("stack-helper-boot.raw"), &out.join("stack-helper-boot.stderr"));
+    let frames = match stack_helper_lines(&raw, &STACK_HELPER_LINES) {
+        Ok(n) => n,
+        Err(fault) => rt.fail(case, &format!("the stack helper's program's lines: {fault}")),
+    };
+    if !contains_fixed(&raw, BOOT_RETURN_LINE) {
+        rt.fail(case, &format!("the kernel's return line '{BOOT_RETURN_LINE}' not found"));
+    }
+    for m in FORBIDDEN_PATTERNS {
+        if contains_fixed(&raw, m) {
+            rt.fail(case, &format!("forbidden pattern '{m}' present"));
+        }
+    }
+    if exit_code != 0 {
+        rt.fail(case, &format!("exit {exit_code}, wanted 0"));
+    }
+    let helper_sha = sha256_file(&helper_elf).unwrap_or_default();
+    let helper_rel = format!("{out_rel}/control-stack-helper/stackhelper.elf");
+    rt.pass_image(case, 0, &helper_rel, &helper_sha, None, &format!("{{\"lines\":{},\"frames\":{frames},\"board\":\"{}\"}}", STACK_HELPER_LINES.len(), w.sdk_board));
+    println!("  PASS (the program's {} lines whole and in order; the descent went {frames} frames down; the image {}...)", STACK_HELPER_LINES.len(), &helper_sha[..16.min(helper_sha.len())]);
+
+    // The helper's control: the merged object the publish made, linked by
+    // this runner on the SDK's line twice. With the world's own shim objects
+    // the link must give the published image's loadable bytes, so the second
+    // link differs from the build's by one object alone: the hosting layer's
+    // core replaced by the tier's unit that reports a thread's true stack
+    // bounds, on which the helper says no at once. The program must then say
+    // so by its own lines, whole and in order -- the record throws on both
+    // threads, the continuation runs on another thread, the descent goes no
+    // frame down -- and end 1.
+    let case = "rt.sdk-parity-control-stack-helper-true-bounds";
+    let broke = "the stack helper's merged object linked with the shim tier's core unit that reports a thread's true stack bounds (the helper's limit stands above every frame)";
+    println!("== case {case} (negative control): {broke} -- the record's ToString() must throw on both threads, the continuation run on another thread and the descent go no frame down, by the program's own lines whole and in order, exit 1 ==");
+    let helper_shim: Vec<String> = w.shim_objects.iter().map(|s| s.to_string()).collect();
+    let helper_broken = substitute_object(&helper_shim, "goldens/shim/shim-core.o", "goldens/shim/shim-core-break-stack-true-bounds.o", "goldens/shim/shim-core-an505.o", "goldens/shim/shim-core-break-stack-true-bounds-an505.o");
+    let mut helper_images: Vec<PathBuf> = Vec::new();
+    for (tag, objects) in [("linked-again", &helper_shim), ("true-bounds", &helper_broken)] {
+        let rel = format!("{out_rel}/control-stack-helper/stackhelper-{tag}.elf");
+        let mut hargs: Vec<String> = vec!["-T".to_string(), w.map.to_string(), "--gc-sections".to_string(), format!("-Map={out_rel}/control-stack-helper/stackhelper-{tag}.map")];
+        hargs.extend(RT_LINK_WORDS.iter().map(|s| s.to_string()));
+        hargs.push(format!("{out_rel}/control-stack-helper/stackhelper-merged.o"));
+        hargs.push(SDK_LOG_LEVEL_WORD.to_string());
+        hargs.push(format!("--defsym=__rhu_threadpool_max_threads={}", pool_bound(&bound_row).0));
+        hargs.extend(objects.iter().cloned());
+        hargs.extend(w.gc_objects.iter().map(|s| s.to_string()));
+        hargs.push(format!("{}/{LIBC}", w.tier));
+        hargs.push(w.lib.to_string());
+        hargs.push("-o".to_string());
+        hargs.push(rel.clone());
+        let helper_ld_log = out.join(format!("stack-helper-{tag}.ld.stderr"));
+        match run_tool_bounded(repo, &ld, &hargs, &out.join(format!("stack-helper-{tag}.ld.stdout")), &helper_ld_log) {
+            Ok(true) => {}
+            Ok(false) => {
+                echo_file(&helper_ld_log, "  | ");
+                rt.fail(case, &format!("the {tag} image did not link (see its linker stderr log)"));
+            }
+            Err(e) => rt.fail(case, &e),
+        }
+        helper_images.push(repo.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)));
+    }
+    // The pack strips the kernel's debug information, so the published
+    // image and a link against the whole archive are compared on their
+    // loadable bytes, each after the same strip (the link case's comparison).
+    let mut loadable: Vec<String> = Vec::new();
+    for (from, name) in [(&helper_elf, "stackhelper.loadable.elf"), (&helper_images[0], "stackhelper-linked-again.loadable.elf"), (&helper_images[1], "stackhelper-true-bounds.loadable.elf")] {
+        let to = out.join("control-stack-helper").join(name);
+        let from_arg = from.to_string_lossy().into_owned();
+        let to_arg = to.to_string_lossy().into_owned();
+        let oargs = ["--strip-debug", "-R", ".llvmbc", "-R", ".llvmcmd", "-R", ".comment", from_arg.as_str(), to_arg.as_str()];
+        match run_captured(&objcopy, &oargs, &out.join(format!("stack-helper-{name}.objcopy.stdout")), &out.join(format!("stack-helper-{name}.objcopy.stderr")), Duration::from_secs(120)) {
+            Ok(o) if o.exit == 0 => {}
+            Ok(o) => rt.fail(case, &format!("llvm-objcopy did not strip {name} for the comparison (exit {})", o.exit)),
+            Err(e) => rt.fail(case, &e),
+        }
+        loadable.push(sha256_file(&to).unwrap_or_default());
+    }
+    if loadable[1] != loadable[0] || loadable[0].is_empty() {
+        rt.fail(case, &format!("this runner's link of the merged object with the world's own objects has the loadable bytes {}, the published image {} -- the control's link would differ from the build's by more than the one object", loadable[1], loadable[0]));
+    }
+    if loadable[2] == loadable[0] || loadable[2].is_empty() {
+        rt.fail_control(case, broke, &format!("the image linked with the tier's unit has the loadable bytes {}, the published image {}: the unit was not linked in", loadable[2], loadable[0]));
+    }
+    println!("  the tie: this runner's link with the world's own objects has the published image's loadable bytes ({}...); with the one object replaced they are others ({}...)", &loadable[0][..16.min(loadable[0].len())], &loadable[2][..16.min(loadable[2].len())]);
+    let (raw, exit_code) = parity_boot(&mut rt, case, &qemu, w.machine, &helper_images[1], &out.join("stack-helper-true-bounds-boot.raw"), &out.join("stack-helper-true-bounds-boot.stderr"));
+    let listed = stack_helper_lines(&raw, &STACK_HELPER_CONTROL_LINES);
+    let returned = contains_fixed(&raw, STACK_HELPER_CONTROL_RETURN);
+    let carried: Vec<&str> = NET_SUITE_FORBIDDEN.iter().copied().filter(|m| contains_fixed(&raw, m)).collect();
+    if listed.is_err() || !returned || exit_code != 1 || !carried.is_empty() {
+        let lines_said = match &listed {
+            Ok(_) => "as registered".to_string(),
+            Err(fault) => fault.clone(),
+        };
+        rt.fail_control(case, broke, &format!("the true bounds were not refused as registered (the program's {} lines whole and in order, '{STACK_HELPER_CONTROL_RETURN}', exit 1, none of {NET_SUITE_FORBIDDEN:?}): the lines {lines_said}; the return line present {returned}; exit {exit_code}; the patterns found {carried:?}", STACK_HELPER_CONTROL_LINES.len()));
+    }
+    println!("  refused as designed: the program's {} lines whole and in order -- '{}', the same on a spawned thread, the continuation on another thread, the descent no frame down, '{}' -- and exit 1", STACK_HELPER_CONTROL_LINES.len(), STACK_HELPER_CONTROL_LINES[1], STACK_HELPER_CONTROL_LINES[5]);
+    rt.pass(case, "negative", broke, "");
+    println!("  PASS (control)");
+
+    for p in SDK_PARITY_PENDING {
+        println!("   pending (unarmed, not counted): {p}");
+    }
     rt.results.emit_summary(w.sdk_gate, "pass", 0);
     if !validate_results(repo, rt.results.path()) {
         println!("{}: FAIL -- results file failed schema validation", w.sdk_display);
@@ -7557,8 +9351,215 @@ pub fn sdk_parity(repo: &Path, w: &'static RtWorld) -> ! {
     let negative = rt.results.n_neg as usize;
     let positive = rt.results.n_pass as usize - negative;
     let ties = 5 + modes_offered + 5 + 1 + 2 + 3;
-    println!("{}: PASS ({positive} positive cases -- {ties} ties byte for byte, the fifth the same project at another directory under the SDK's path map the {modes_offered} after it the objects published for the external-RAM row in each offered init mode, {modes_withheld} withheld, two the objects published with the managed memory's home internal on this leg's row and the {RAM_INIT_ROW} row, three the objects published for the {XIP_ROW} row with the program's home internal, named and external, five the publishes with the output level or a channel named and the last the image's manifest against the expectation composed from its own facts; the board table's stack facts, the boards' facts files and the table's init-mode kernels tied to the tree; the stack knob's image booted with the row's default moved; a real git checkout at another path tying the record; the board class's program booted with the row's facts generated into it; the gate's program booted with the compiler's reflection data stripped; the init mode's kernel picked by the property on the {RAM_INIT_ROW} row and witnessed in the image's rodata, the named default the same image as none; the managed memory's home picked by the property on this leg's row and the {RAM_INIT_ROW} row and witnessed in the images' window symbols against the rows' facts, this leg's row booted under either map for the hosting layer's posture line, the named default the same image as none; the program's home picked by the property on the {XIP_ROW} row and witnessed in the image's window brackets and section table with no undefined name, the named default the same image as none; the analog voltage switch set per program by the SDK's scan, true on the {RAM_INIT_ROW} row and on the {XIP_ROW} row under the external home with the library's quantity type in the image, false on this leg's row (booted to the program's lines), under the {XIP_ROW} row's default home, for the board class's program and for a project's own false; the board table's external-flash map and its fit column tied to the facts files and the maps; the kernel's output level and the two streams' channels read from the images as the three absolute symbols with the board line's words, the board table's channel facts tied to the boards' facts files; the run verb's device list as .NET renders it and its two commands through dotnet run with the stand-in tool and emulator, the program's code returned unchanged, and the first list of a fresh project whole in the one command that restores it; the run's publish skipped under the no-build option and run again on a moved word, a publish with no C compiler to be found, and a class library built through the SDK and refused at publish; the image's manifest with the execution model native and the stand-in's acceptance of a field it does not know; the line tables of the image read whole with no host separator and the separator task rewriting nothing on a second run; the host inputs as the shell resolves them and the line-endings task's rewrite; the Debug configuration's image for the {DEBUG_ROW} row linked with the code optimization on and its arena window at the row's floor -- + {negative} negative controls through the real tool; the Linux environment's transcript under {out_rel})  [{} | {}]", w.sdk_display, facts.version, ld.version);
+    println!("{}: PASS ({positive} positive cases -- {ties} ties byte for byte, the fifth the same project at another directory under the SDK's path map the {modes_offered} after it the objects published for the external-RAM row in each offered init mode, {modes_withheld} withheld, two the objects published with the managed memory's home internal on this leg's row and the {RAM_INIT_ROW} row, three the objects published for the {XIP_ROW} row with no property, with the chip's own flash named and with the external home named, five the publishes with the output level or a channel named and the last the image's manifest against the expectation composed from its own facts; the board table's stack facts, the boards' facts files and the table's init-mode kernels tied to the tree; the stack knob's image booted with the row's default moved; a real git checkout at another path tying the record; the board class's program booted with the row's facts generated into it; the gate's program booted with the compiler's reflection data stripped; the init mode's kernel picked by the property on the {RAM_INIT_ROW} row and witnessed in the image's rodata, the named default the same image as none; the managed memory's home picked by the property on this leg's row and the {RAM_INIT_ROW} row and witnessed in the images' window symbols against the rows' facts, this leg's row booted under either map for the hosting layer's posture line, the named default the same image as none; the program's home picked by the property on the {XIP_ROW} row and witnessed in the image's window brackets and section table with no undefined name, no property the same image as the external home named, the whole image in the chip's own flash where that is named; the analog voltage switch set per program by the SDK's scan, true on the {RAM_INIT_ROW} row and on the {XIP_ROW} row under the external home beside the kernel without the network with the library's quantity type in the image, false on this leg's row (booted to the program's lines), on the {XIP_ROW} row with the chip's own flash named, for the board class's program and for a project's own false; the board table's external-flash map and its fit column tied to the facts files and the maps; the kernel's output level and the two streams' channels read from the images as the three absolute symbols with the board line's words, the board table's channel facts tied to the boards' facts files; the run verb's device list as .NET renders it and its two commands through dotnet run with the stand-in tool and emulator, the program's code returned unchanged, and the first list of a fresh project whole in the one command that restores it; the run's publish skipped under the no-build option and run again on a moved word, a publish with no C compiler to be found, and a class library built through the SDK and refused at publish; the image's manifest with the execution model native and the stand-in's acceptance of a field it does not know; the line tables of the image read whole with no host separator and the separator task rewriting nothing on a second run; the host inputs as the shell resolves them and the line-endings task's rewrite; the Debug configuration's image for the {DEBUG_ROW} row, the program's own code alone unoptimized in it, linked with its arena window at the row's floor, the image compiled without the optimization as a whole and the one with it on for the program's own code for the {DEBUG_PLAIN_ROW} row, for the {XIP_ROW} row the Debug configuration with the chip's own flash named and the image compiled without the optimization as a whole under the external one, both images booted on this leg's row, the six-line program's Debug image read as a debugger reads it for the {DEBUG_PLAIN_ROW} row and the {DEBUG_ROW} row, a program with a class library referenced by project read at the program's lines, at two functions of one body and at the library's, its image carrying no path of the build machine, a program that reaches a class library through another read at the far library's lines, the same program published again with nothing changed and after a changed statement, and the six-line program's Release image with the optimization off for the program's own code read as a debugger reads it; the network suite booted on this leg's row with three of the socket functions read by the image's symbols; the thread pool's bound in the build's line, the image's word and the booted program's answer, this runner's own number; the {XIP_ROW} row's kernel with the network by default and the kernel without it where the managed memory is in the chip's own RAM or the network is turned off; the exception entries read in the Debug and the Release image of the program that throws what nothing catches, and the unhandled-exception event seen through the emulator's debug port in both -- + {negative} negative controls through the real tool; the Linux environment's transcript under {out_rel})  [{} | {}]", w.sdk_display, facts.version, ld.version);
     exit(0);
+}
+
+/// The network suite's lines on the wire, in order; the one line its control must fail by, exact and whole, with
+/// the summary and the kernel's return line of that run; and the patterns a passing boot must not carry.
+const NET_SUITE_LINES: [&str; 9] = [
+    "NETSUITE: start",
+    "PASS net-lease (IPv4 alone; the board's own name rhu answered the lease's address 192.0.2.2)",
+    "PASS net-interfaces (lo and eth0; eth0 up, an Ethernet interface at 020000000001 with 192.0.2.2 and the mask 255.255.255.0)",
+    "PASS net-lookup (peer.rhu.test 192.0.2.1; pair.rhu.test 192.0.2.5 and 192.0.2.6 in the answer's order; second.rhu.test 192.0.2.3 through the asynchronous call; a name the server has not HostNotFound)",
+    "PASS net-stream (a listener on port 7777 accepted the client from the board's own address; 26 bytes and 3000 bytes read byte-exact; the client's shutdown read as the end of the stream)",
+    "PASS net-options (the peer's reset read ConnectionRefused by a blocking connect and as the pending error after a non-blocking one; the linger state and the two timeouts set and read back; a receive with nothing to read TimedOut at its bound)",
+    "PASS net-datagram (two bound datagram sockets: 64 bytes each way with the sender's address; a 2000-byte datagram answered MessageSize; an IPv6 socket asked while both are held AddressFamilyNotSupported)",
+    "PASS net-async (an accept, a connect, a send and a receive awaited: 26 bytes echoed)",
+    "NETSUITE: ALL GOOD",
+];
+const NET_SUITE_CONTROL_LINE: &str = "FAIL net-lookup: pair.rhu.test answered 1 address where 2 were expected";
+const NET_SUITE_CONTROL_SUMMARY: &str = "NETSUITE: FAIL (1 of 7 sections)";
+const NET_SUITE_RETURN_BAD: &str = "[payload] managed Main returned 1";
+const NET_SUITE_FORBIDDEN: [&str; 4] = ["KERNEL PANIC", "EXCEPTION:", "REFUSED", "abort()"];
+
+/// The section of the Ethernet controller's rings in a kernel built with
+/// the network, and the kernel's network banner words: an image that
+/// links the kernel without the network carries neither.
+const NET_RINGS_SECTION: &str = ".rhu_net_rings";
+const NET_BANNER: &str = "[boot] net: ";
+
+/// Three of the socket functions the class library imports by symbol, one
+/// from each of the hosting layer's socket units' families: the image of a
+/// program that reaches them must define each once, at its unit's size.
+const NET_SUITE_SYMBOLS: [&str; 3] = ["SystemNative_Socket", "SystemNative_GetHostEntryForName", "SystemNative_GetNetworkInterfaces"];
+
+/// The stack helper's program's own lines on the wire, whole and in order:
+/// with the hosting layer's repair, and with the tier's unit that reports a
+/// thread's true stack bounds in the core's place (the control's exact
+/// refusal, with the kernel's return line of that run). Every line the
+/// program writes begins with the head; <N> stands for a decimal number, 1
+/// or more: the frames its descent went down.
+const STACK_HELPER_HEAD: &str = "STACKHELPER: ";
+const STACK_HELPER_LINES: [&str; 6] = [
+    "STACKHELPER: start",
+    "STACKHELPER: on the thread that runs Main a record's ToString() returned \"Reading { Name = abc, Number = 7 }\"",
+    "STACKHELPER: on a spawned thread a record's ToString() returned \"Reading { Name = abc, Number = 7 }\"",
+    "STACKHELPER: a continuation asked to run synchronously ran on the thread that completed its task",
+    "STACKHELPER: a descent that asks the stack helper at each frame went <N> frames down, ended in InsufficientExecutionStackException and was caught",
+    "STACKHELPER: end; 4 of 4 checks hold",
+];
+const STACK_HELPER_CONTROL_LINES: [&str; 6] = [
+    "STACKHELPER: start",
+    "STACKHELPER: on the thread that runs Main a record's ToString() threw InsufficientExecutionStackException",
+    "STACKHELPER: on a spawned thread a record's ToString() threw InsufficientExecutionStackException",
+    "STACKHELPER: a continuation asked to run synchronously ran on another thread",
+    "STACKHELPER: a descent that asks the stack helper at each frame went 0 frames down, ended in InsufficientExecutionStackException and was caught",
+    "STACKHELPER: end; 0 of 4 checks hold",
+];
+const STACK_HELPER_CONTROL_RETURN: &str = "[payload] managed Main returned 1";
+
+/// The stack helper's program's own lines in a boot's capture against a
+/// registered list: every line that begins with the program's head must be
+/// the list's line at its place, and the list must be exhausted by them. A
+/// registered line that holds <N> matches a decimal number, 1 or more, at
+/// that place. Returns the number (0 when the list holds no such line), or
+/// the first line that differs.
+fn stack_helper_lines(raw: &[u8], want: &[&str]) -> Result<u64, String> {
+    let text = String::from_utf8_lossy(raw);
+    let own: Vec<&str> = text.lines().map(|l| l.trim_end_matches('\r')).filter(|l| l.starts_with(STACK_HELPER_HEAD)).collect();
+    let mut frames = 0u64;
+    for (i, w) in want.iter().enumerate() {
+        let Some(got) = own.get(i) else {
+            return Err(format!("line {} is absent: '{w}' ({} of {} lines printed)", i + 1, own.len(), want.len()));
+        };
+        match w.split_once("<N>") {
+            None => {
+                if got != w {
+                    return Err(format!("line {}: printed '{got}', registered '{w}'", i + 1));
+                }
+            }
+            Some((before, after)) => {
+                let number = got.strip_prefix(before).and_then(|r| r.strip_suffix(after)).unwrap_or("");
+                match number.parse::<u64>() {
+                    Ok(n) if n >= 1 && n.to_string() == number => frames = n,
+                    _ => return Err(format!("line {}: printed '{got}', registered '{w}' with a number of 1 or more for <N>", i + 1)),
+                }
+            }
+        }
+    }
+    if own.len() != want.len() {
+        return Err(format!("{} lines of the program's own were printed and {} are registered; the first beyond them: '{}'", own.len(), want.len(), own[want.len()]));
+    }
+    Ok(frames)
+}
+
+/// The thread pool's bound for a row at its default thread stack, by this
+/// runner's own arithmetic over the board table: the stack pool, less the
+/// kernel's own threads, less the runtime's service threads (three at the
+/// default stack, the pool's gate thread at the row's clamp), in whole
+/// default stacks and never fewer than one. Returns the bound, the service
+/// threads' bytes and what the pool leaves for workers.
+fn pool_bound(row: &StackRow) -> (u64, u64, i64) {
+    let service = 3 * row.default + row.clamp;
+    let left = row.pool as i64 - row.kernel_own as i64 - service as i64;
+    let fit = if left > 0 { left as u64 / row.default } else { 0 };
+    (fit.max(1), service, left)
+}
+
+/// The build's line for the bound, as the targets print it for a project
+/// that names no bound of its own.
+fn pool_bound_line(row: &StackRow) -> String {
+    let (most, service, left) = pool_bound(row);
+    if left >= row.default as i64 {
+        format!(
+            "Lamella RHU: the thread pool runs at most {most} {} (the board's: of the stack pool's {} B the kernel's own threads hold {} B and the runtime's service threads {service} B, which leaves {left} B for workers of {} B each)",
+            if most == 1 { "worker" } else { "workers" },
+            row.pool,
+            row.kernel_own,
+            row.default
+        )
+    } else {
+        format!(
+            "Lamella RHU: the thread pool runs at most 1 worker (the board's fewest: of the stack pool's {} B the kernel's own threads hold {} B and the runtime's service threads {service} B, which leaves {left} B, less than one worker's {} B: the one worker can be refused its stack while all four service threads run)",
+            row.pool, row.kernel_own, row.default
+        )
+    }
+}
+
+/// The targets' refusal of a project's own most workers above the row's.
+fn pool_max_refusal(row: &StackRow, value: &str) -> String {
+    let (most, service, left) = pool_bound(row);
+    format!(
+        "REFUSE: ThreadPoolMaxThreads='{value}' is not a whole number from 1 to {most}, the most thread-pool workers that fit on {}: of the thread stack pool's {} B the kernel's own threads hold {} B and the runtime's service threads {service} B (the finalizer's, the timer's and the socket engine's at {} B each, the pool's gate thread at {} B), which leaves {left} B for workers of {} B each",
+        row.board, row.pool, row.kernel_own, row.default, row.clamp, row.default
+    )
+}
+
+/// The targets' refusal of a project's own fewest workers above the bound.
+fn pool_min_refusal(row: &StackRow, value: &str) -> String {
+    let (most, _, _) = pool_bound(row);
+    format!(
+        "REFUSE: ThreadPoolMinThreads='{value}' is not a whole number from 1 to {most}, the thread pool's most workers in this build for {}: the runtime drops both bounds when the fewest is above the most, and a pool without a bound ends the program when the board has no stack left for its next worker",
+        row.board
+    )
+}
+
+/// One published image booted on the leg's emulator as the leg boots every
+/// image: the raw console echoed and returned with the emulator's exit
+/// code. A hang, or a console without its carriage returns, fails the case.
+fn parity_boot(rt: &mut Rt, case: &str, qemu: &Path, machine: &str, elf: &Path, raw_path: &Path, stderr_path: &Path) -> (Vec<u8>, i32) {
+    let elf_arg = elf.to_string_lossy().into_owned();
+    let mut qargs: Vec<&str> = vec!["-M", machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-semihosting"];
+    qargs.extend_from_slice(ExecProfile::Parity.qemu_args());
+    qargs.push("-kernel");
+    qargs.push(&elf_arg);
+    let outcome = match run_captured(qemu, &qargs, raw_path, stderr_path, Duration::from_secs(RUN_TIMEOUT_S)) {
+        Ok(o) => o,
+        Err(e) => rt.fail(case, &e),
+    };
+    let raw = std::fs::read(raw_path).unwrap_or_default();
+    echo_file(raw_path, "  | ");
+    if outcome.timed_out {
+        rt.fail(case, "the boot hung (killed at its timeout)");
+    }
+    if cr_count(&raw) == 0 {
+        rt.fail(case, "no CR bytes in raw capture (wire discipline lost)");
+    }
+    (raw, outcome.exit)
+}
+
+/// Four readings of a linked 32-bit Arm image by its own headers: the
+/// bytes it loads inside the first address range and inside the second
+/// (the loadable segments' file sizes, by their physical addresses), the
+/// size of the section of the Ethernet controller's rings (zero when the
+/// image has none) and how many times the file carries the kernel's
+/// network banner words.
+fn image_net_readings(d: &[u8], window: (u64, u64), chip: (u64, u64)) -> Result<(u64, u64, u64, usize), String> {
+    let u16_at = |o: usize| d.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    let u32_at = |o: usize| d.get(o..o + 4).map(|b| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+    if d.len() < 0x34 || &d[..4] != b"\x7fELF" || d[4] != 1 || d[5] != 1 {
+        return Err("not a 32-bit little-endian ELF image".to_string());
+    }
+    let bad = || "the image's headers do not read".to_string();
+    let (phoff, shoff) = (u32_at(0x1c).ok_or_else(bad)? as usize, u32_at(0x20).ok_or_else(bad)? as usize);
+    let (phentsize, phnum) = (u16_at(0x2a).ok_or_else(bad)?, u16_at(0x2c).ok_or_else(bad)?);
+    let (shentsize, shnum, shstrndx) = (u16_at(0x2e).ok_or_else(bad)?, u16_at(0x30).ok_or_else(bad)?, u16_at(0x32).ok_or_else(bad)?);
+    let (mut in_window, mut in_chip) = (0u64, 0u64);
+    for i in 0..phnum {
+        let at = phoff + i * phentsize;
+        let (p_type, paddr, filesz) = (u32_at(at).ok_or_else(bad)?, u32_at(at + 12).ok_or_else(bad)?, u32_at(at + 16).ok_or_else(bad)?);
+        if p_type != 1 {
+            continue;
+        }
+        if paddr >= window.0 && paddr < window.1 {
+            in_window += filesz;
+        } else if paddr >= chip.0 && paddr < chip.1 {
+            in_chip += filesz;
+        }
+    }
+    let names = u32_at(shoff + shstrndx * shentsize + 16).ok_or_else(bad)? as usize;
+    let mut rings = 0u64;
+    for i in 0..shnum {
+        let at = shoff + i * shentsize;
+        let name_at = names + u32_at(at).ok_or_else(bad)? as usize;
+        let name = d.get(name_at..).and_then(|t| t.split(|&b| b == 0).next()).ok_or_else(bad)?;
+        if name == NET_RINGS_SECTION.as_bytes() {
+            rings = u32_at(at + 20).ok_or_else(bad)?;
+        }
+    }
+    let banner = d.windows(NET_BANNER.len()).filter(|w| *w == NET_BANNER.as_bytes()).count();
+    Ok((in_window, in_chip, rings, banner))
 }
 
 /// The two probes the parity leg's stand-in tool lists, and the second one's description as .NET renders it once the tool's escapes are read back.
@@ -7591,7 +9592,7 @@ fn sdk_runtime_pin(repo: &Path) -> Result<String, String> {
 /// The manifest's record as the SDK writes it for the gate's program: the contract's keys in order (the execution model native the third), two-space indentation, LF, a final newline.
 fn manifest_text(board: &str, sha: &str, bytes: usize, abi: u32, debug_layout: u32, runtime: &str, console: &str, log: &str) -> String {
     format!(
-        "{{\n  \"schema\": 1,\n  \"kind\": \"flash-image\",\n  \"model\": \"native\",\n  \"board\": \"{board}\",\n  \"format\": \"elf\",\n  \"base\": null,\n  \"sha256\": \"{sha}\",\n  \"bytes\": {bytes},\n  \"producer\": \"ilc+rhu-link\",\n  \"elf\": \"rthello.elf\",\n  \"map\": null,\n  \"image_kind\": \"monolith\",\n  \"layout_version\": 1,\n  \"abi\": {abi},\n  \"debug_layout_version\": {debug_layout},\n  \"codegen_profile\": \"ship\",\n  \"runtime\": \"{runtime}\",\n  \"runtime_tested\": true,\n  \"console_channel\": \"{console}\",\n  \"log_channel\": \"{log}\"\n}}\n"
+        "{{\n  \"schema\": 1,\n  \"kind\": \"flash-image\",\n  \"model\": \"native\",\n  \"board\": \"{board}\",\n  \"format\": \"elf\",\n  \"base\": null,\n  \"sha256\": \"{sha}\",\n  \"bytes\": {bytes},\n  \"producer\": \"ilc+rhu-link\",\n  \"elf\": \"rthello.elf\",\n  \"map\": null,\n  \"image_kind\": \"monolith\",\n  \"layout_version\": 1,\n  \"abi\": {abi},\n  \"debug_layout_version\": {debug_layout},\n  \"codegen_profile\": \"optimized\",\n  \"program_codegen\": \"optimized\",\n  \"runtime\": \"{runtime}\",\n  \"runtime_tested\": true,\n  \"console_channel\": \"{console}\",\n  \"log_channel\": \"{log}\"\n}}\n"
     )
 }
 

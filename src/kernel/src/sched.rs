@@ -340,9 +340,9 @@ static mut SCHED: Sched = Sched {
 /// Thread stacks live in .kstacks -- outside the __sdata..__ebss window
 /// (the board map places the section; spawn zeroes each carved region).
 #[repr(align(8))]
-struct StackPool([u8; board::STACK_POOL_BYTES]);
+struct StackPool([u8; board::STACK_POOL_BYTES + SERVICE_STACK_BYTES]);
 #[unsafe(link_section = ".kstacks")]
-static mut STACK_POOL: StackPool = StackPool([0; board::STACK_POOL_BYTES]);
+static mut STACK_POOL: StackPool = StackPool([0; board::STACK_POOL_BYTES + SERVICE_STACK_BYTES]);
 
 /// Milliseconds since scheduler init (wrapping; all comparisons are
 /// wrapping). Only SysTick writes. Exported for the layout contract.
@@ -601,7 +601,7 @@ pub fn switch_count() -> u32 {
 /// The .kstacks pool window (for the boot selftest's placement check).
 pub fn kstacks_window() -> (usize, usize) {
     let base = addr_of!(STACK_POOL) as usize;
-    (base, base + board::STACK_POOL_BYTES)
+    (base, base + board::STACK_POOL_BYTES + SERVICE_STACK_BYTES)
 }
 
 /// The calling thread's stack top. A hosted payload's conservative GC
@@ -689,7 +689,7 @@ pub fn try_spawn(
         } else {
             // The subtraction form: the sum would wrap for a size near
             // the address space, the difference cannot.
-            if stack_bytes > board::STACK_POOL_BYTES - s.pool_used {
+            if stack_bytes > board::STACK_POOL_BYTES + SERVICE_STACK_BYTES - s.pool_used {
                 return Err(SpawnErr::PoolExhausted);
             }
             let b = addr_of!(STACK_POOL.0) as usize + s.pool_used;
@@ -2378,6 +2378,54 @@ pub fn probe_lazy_fp_witness() -> (u32, u32, u32) {
 pub fn pool_remainder() -> (usize, usize, usize) {
     with_cs(|| unsafe {
         let s = sched();
-        (board::STACK_POOL_BYTES, board::STACK_POOL_BYTES - s.pool_used, s.retired_n as usize)
+        (board::STACK_POOL_BYTES, board::STACK_POOL_BYTES + SERVICE_STACK_BYTES - s.pool_used, s.retired_n as usize)
+    })
+}
+
+/// The stacks of the kernel's own service threads, which the pool's array
+/// carries ABOVE the row's `STACK_POOL_BYTES` so that those threads take
+/// none of it: the network thread's on a kernel with a medium, the card
+/// watcher's on a row with a card socket -- each under the cfg that spawns
+/// its thread and read from that module's own constant; 0 on every other
+/// kernel. What the idle thread, the thread that runs a program's main and
+/// the program's own threads can take is `STACK_POOL_BYTES` on every kernel
+/// of a row. The api gate's control (`test-pool-doctored`) carries none of
+/// them, so the service threads take a program's bytes, and the pool check
+/// must refuse it.
+pub const SERVICE_STACK_BYTES: usize = if cfg!(feature = "test-pool-doctored") { 0 } else { NET_STACK_BYTES + CARD_STACK_BYTES };
+#[cfg(rhu_net_rows)]
+const NET_STACK_BYTES: usize = crate::net::THREAD_STACK;
+#[cfg(not(rhu_net_rows))]
+const NET_STACK_BYTES: usize = 0;
+#[cfg(all(rhu_sd_socket, not(feature = "test-sd-doctored")))]
+const CARD_STACK_BYTES: usize = crate::fsmount::THREAD_STACK;
+#[cfg(not(all(rhu_sd_socket, not(feature = "test-sd-doctored"))))]
+const CARD_STACK_BYTES: usize = 0;
+
+/// The live threads' stacks, for the api image's pool check ONLY
+/// (`test-pool-fit`; see `probe_futex_waiting` for the probe rules): per
+/// live slot the name's bytes, the stack's size, and 1 for the idle
+/// thread's slot, 2 for the caller's, 0 for any other. CS-bounded.
+#[cfg(all(feature = "api-smoke", feature = "test-pool-fit"))]
+pub fn probe_stacks(out: &mut [([u8; NAME_BYTES], u32, u8); MAX_THREADS]) -> usize {
+    with_cs(|| unsafe {
+        let s = sched();
+        let mut n = 0;
+        for i in 0..MAX_THREADS {
+            let t = &s.tcbs[i];
+            if t.state == State::Free {
+                continue;
+            }
+            let who = if i as u32 == IDLE_SLOT.load(Ordering::Relaxed) {
+                1
+            } else if i == s.current {
+                2
+            } else {
+                0
+            };
+            out[n] = (t.name_buf, t.stack_top - t.stack_base, who);
+            n += 1;
+        }
+        n
     })
 }

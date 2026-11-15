@@ -26,7 +26,7 @@
 #include "mgc_board_rows.h"
 #include "rhu.h"
 #include "rhu_glibc_arm32.h"
-#include "rhu_pal_errno_net11_rc3.h"
+#include "rhu_pal_errno_net11.h"
 
 void *memcpy(void *dst, const void *src, size_t n);
 void *memset(void *dst, int c, size_t n);
@@ -381,8 +381,26 @@ _Static_assert((unsigned long long)ROW_POOL_THREAD_TIMEOUT_MS * 1000000ull <= (u
                "the pool's idle-worker timeout must stay inside the thread-creation retry window");
 extern const char __rhu_threadpool_thread_timeout_ms[] __attribute__((weak));
 
+/* The thread pool's most workers row. A pool that asks the kernel for a
+ * worker's stack the row's stack pool does not have ends the program: the
+ * class library throws on the pool's own thread, where nothing catches.
+ * The SDK computes what the row holds (its stack pool, less the kernel's
+ * own threads, less the runtime's service threads, in default stacks) and
+ * defines the link word __rhu_threadpool_max_threads, an absolute symbol
+ * whose address IS the number, as the two words above are. When the link
+ * gave the word, the environment gains the row the pool reads before any
+ * compiled option (DOTNET_ThreadPool_ForceMaxWorkerThreads, read as
+ * hexadecimal), and a pool at its bound queues its work. With no word
+ * there is no row and the pool keeps the runtime's own bound: the gate
+ * images, and every image linked by another line than the SDK's. The
+ * SDK's number is at least one, so a zero word never has to be told from
+ * no word. */
+extern const char __rhu_threadpool_max_threads[] __attribute__((weak));
+
 static char g_env_hard_limit[48];
 static char g_env_pool_timeout[48];
+static char g_env_pool_max[56];
+#define ENV_POOL_MAX_SLOT 7
 static char *g_env[] = {
     g_env_hard_limit,
     "DOTNET_gcServer=0",
@@ -391,8 +409,10 @@ static char *g_env[] = {
     "DOTNET_GCName=rhu-mgc",
     "DOTNET_GCPath=rhu-mgc",
     "HOME=/tmp",
+    NULL, /* ENV_POOL_MAX_SLOT: the pool's most workers row, when the link gave the word */
     NULL,
 };
+_Static_assert(sizeof g_env / sizeof g_env[0] == ENV_POOL_MAX_SLOT + 2u, "the pool's most workers row is the last slot before the table's end");
 
 static void env_build(void)
 {
@@ -417,6 +437,19 @@ static void env_build(void)
     else
         line_num(&l, (unsigned long long)(uintptr_t)__rhu_threadpool_thread_timeout_ms, 10u, 0u, 0);
     g_env_pool_timeout[l.n < sizeof g_env_pool_timeout - 1u ? l.n : sizeof g_env_pool_timeout - 1u] = 0;
+    if (__rhu_threadpool_max_threads != NULL) {
+        l.buf = g_env_pool_max;
+        l.cap = (uint32_t)sizeof g_env_pool_max;
+        l.n = 0;
+        line_puts(&l, "DOTNET_ThreadPool_ForceMaxWorkerThreads=0x");
+#ifndef RHU_SHIM_BREAK_POOL_MAX_DECIMAL
+        line_num(&l, (unsigned long long)(uintptr_t)__rhu_threadpool_max_threads, 16u, 0u, 0);
+#else /* built with this define, the number is written in decimal, which the pool reads as another number */
+        line_num(&l, (unsigned long long)(uintptr_t)__rhu_threadpool_max_threads, 10u, 0u, 0);
+#endif
+        g_env_pool_max[l.n < sizeof g_env_pool_max - 1u ? l.n : sizeof g_env_pool_max - 1u] = 0;
+        g_env[ENV_POOL_MAX_SLOT] = g_env_pool_max;
+    }
 }
 
 char **rhu_shim_environ(void)
@@ -1273,8 +1306,28 @@ int pthread_getattr_np(uint32_t tid, void *a)
     return 0;
 }
 
-/* The stack carve of the thread the attributes name, or of the calling
- * thread, answered by the kernel from its own records. */
+/* The runtime's stack-depth helper (the check behind
+ * RuntimeHelpers.EnsureSufficientExecutionStack, which the class library
+ * calls before it recurses) puts its limit RHU_SHIM_STACK_HELPER_SPAN
+ * bytes above the lower bound it is told when the told stack is larger
+ * than that span, and at the upper bound otherwise. Told a carve of 16 KB
+ * as it is, it says no at every call. The reserve is what the runtime and
+ * the collector need under that limit on a thread: an exception thrown
+ * there, its handler, and a collection inside the handler. */
+#define RHU_SHIM_STACK_HELPER_SPAN 65536u
+#define RHU_SHIM_STACK_RESERVE 6144u
+_Static_assert(RHU_SHIM_STACK_RESERVE < RHU_SHIM_STACK_HELPER_SPAN, "the reserve is a part of the helper's span");
+
+/* The stack bounds the runtime is told for the thread the attributes
+ * name, or for the calling thread. The upper bound is the carve's own,
+ * as the kernel records it. The lower bound is NOT the carve's base: for
+ * a carve larger than the reserve it stands the helper's span less the
+ * reserve under the base, so the helper's limit lands the reserve above
+ * the true base, whatever the carve's size. A carve not larger than the
+ * reserve, or one based too low for the lowered bound to be an address,
+ * is answered as it is, and the helper says no on it. A thread's true
+ * bounds are the kernel's (rhu_thread_stack_bounds); a caller that needs
+ * the carve asks the kernel. */
 int pthread_attr_getstack(void *a, void **lo, size_t *bytes)
 {
     attr_slot *s = (attr_slot *)a;
@@ -1285,6 +1338,12 @@ int pthread_attr_getstack(void *a, void **lo, size_t *bytes)
         rhu_shim_log("attr_getstack: no live thread %d (EINVAL)", tid);
         return RHU_GERR_EINVAL;
     }
+#ifndef RHU_SHIM_BREAK_STACK_TRUE_BOUNDS
+    if (len > RHU_SHIM_STACK_RESERVE && base >= RHU_SHIM_STACK_HELPER_SPAN - RHU_SHIM_STACK_RESERVE) {
+        base -= RHU_SHIM_STACK_HELPER_SPAN - RHU_SHIM_STACK_RESERVE;
+        len += RHU_SHIM_STACK_HELPER_SPAN - RHU_SHIM_STACK_RESERVE;
+    }
+#endif /* built with this define, the carve is answered as it is */
     *lo = (void *)(uintptr_t)base;
     *bytes = (size_t)len;
     return 0;

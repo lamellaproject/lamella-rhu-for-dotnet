@@ -1,0 +1,9 @@
+shimtest-sockoptions: the socket options over a scripted kernel, from a native caller's side
+PASS shim-sock-options-kernel (no-delay, keep-alive and address reuse each written to the kernel by its own number and read back from it; exclusive address use the inverse of address reuse; a value shorter than four bytes EINVAL)
+PASS shim-sock-options-linger (the linger record kept and read back, off at a socket's start; seconds outside 0 to 65535 EINVAL; a null record EFAULT)
+PASS shim-sock-options-timeouts (the two timeouts kept apart: a blocking receive answers at the receive timeout of 20 ms and a blocking send not before the send timeout of 60 ms)
+PASS shim-sock-options-type (the type read as the runtime's number for a stream and for a datagram socket; a listener read as accepting connections)
+PASS shim-sock-options-buffers (a stream socket's two buffer sizes and a datagram socket's read from the row's pool; a write to a buffer size answered as success and the size as it was)
+PASS shim-sock-options-refusal (an option outside the served set ENOPROTOOPT on a read and on a write and the kernel not asked; a stream option on a datagram socket the kernel's ENOTSUP)
+PASS shim-sock-options-error (a reset's pending code read once as ECONNRESET, then none; a null result pointer EFAULT)
+SHIMTEST-SOCKOPTIONS: ALL GOOD (the socket options over a scripted kernel, from a native caller's side)

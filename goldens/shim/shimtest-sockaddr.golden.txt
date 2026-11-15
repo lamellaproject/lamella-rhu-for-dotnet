@@ -1,0 +1,9 @@
+shimtest-sockaddr: the socket-address helpers from a native caller's side
+PASS shim-sock-addr-sizes (the four record sizes 16, 28, 110 and 128; the largest record 128; the Unix-domain path at offset 2, 108 bytes; a null result pointer EFAULT)
+PASS shim-sock-addr-family (the family written as the platform's number and read back as the runtime's; an unknown number read as unknown; a number the platform lacks refused; a buffer shorter than the field EFAULT)
+PASS shim-sock-addr-port (the port in network byte order at offset 2 of an IPv4 and an IPv6 record, read back; another family EAFNOSUPPORT; a short record EFAULT)
+PASS shim-sock-addr-ipv4 (the four address bytes as given at offset 4, read back; the port beside them untouched; another family EINVAL; a short record EFAULT)
+PASS shim-sock-addr-ipv6 (the sixteen address bytes at offset 8 and the scope at offset 24, read back; the flow word cleared; another family EINVAL; a short record or address EFAULT)
+PASS shim-sock-addr-unix (a Unix-domain record takes its family and keeps the path bytes; it has no port)
+PASS shim-sock-addr-control (the control buffer's size for a packet-information record of each family, 24 and 32; no packet information found in a message)
+SHIMTEST-SOCKADDR: ALL GOOD (the socket-address helpers from a native caller's side)

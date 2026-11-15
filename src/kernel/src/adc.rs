@@ -17,7 +17,7 @@
 //! input/output code and the block released. No interrupt; no conversion
 //! runs under the kernel's critical section.
 
-#![cfg_attr(not(rhu_pwm_adc_rows), allow(dead_code))]
+#![cfg_attr(not(any(rhu_pwm_adc_rows, rhu_adc_st)), allow(dead_code))]
 
 use core::ptr::{addr_of_mut, read_volatile, write_volatile};
 
@@ -150,7 +150,7 @@ pub fn channel(index: u32, block: *mut u32, channel: *mut u32, line: *mut u32, b
 }
 
 
-#[cfg(rhu_pwm_adc_rows)]
+#[cfg(any(rhu_pwm_adc_rows, rhu_adc_st))]
 mod served {
     use super::*;
     use crate::board::adc_backend as hw;
@@ -279,31 +279,31 @@ mod served {
     }
 }
 
-#[cfg(rhu_pwm_adc_rows)]
+#[cfg(any(rhu_pwm_adc_rows, rhu_adc_st))]
 pub use served::{claim, line_held, read, reference, release};
 
 
-#[cfg(not(rhu_pwm_adc_rows))]
+#[cfg(not(any(rhu_pwm_adc_rows, rhu_adc_st)))]
 pub fn claim(index: u32) -> i32 {
     refused(index, sched::ERR_NODEV)
 }
 
-#[cfg(not(rhu_pwm_adc_rows))]
+#[cfg(not(any(rhu_pwm_adc_rows, rhu_adc_st)))]
 pub fn read(h: i32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
 
-#[cfg(not(rhu_pwm_adc_rows))]
+#[cfg(not(any(rhu_pwm_adc_rows, rhu_adc_st)))]
 pub fn reference(block: u32, _millivolts: *mut u32) -> i32 {
     refused(block, sched::ERR_NODEV)
 }
 
-#[cfg(not(rhu_pwm_adc_rows))]
+#[cfg(not(any(rhu_pwm_adc_rows, rhu_adc_st)))]
 pub fn release(h: i32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
 
-#[cfg(not(rhu_pwm_adc_rows))]
+#[cfg(not(any(rhu_pwm_adc_rows, rhu_adc_st)))]
 pub fn line_held(_line: u32) -> bool {
     false
 }

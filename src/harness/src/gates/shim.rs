@@ -52,7 +52,7 @@ use crate::results::{chain_json_from_env, validate_results, Results};
 use crate::sha256::{sha256_file, sha256_hex};
 use crate::text::{contains_fixed, cr_count, eq_lf_normalized, payload_stream, word_sym_present, word_sym_value};
 use crate::gates::echo;
-use crate::tools::{echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts, Echo, ExecProfile, RustcFacts};
+use crate::tools::{echo_file, llvm_tool, resolve_qemu, run_captured, rustc_facts, EchoStep, ExecProfile, GatheringEcho, RustcFacts};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::time::Duration;
@@ -62,6 +62,58 @@ const DISPLAY: &str = "SHIM GATE";
 const HOST: &str = "qemu-mps2-an500";
 const RUNNER: &str = "src/harness";
 const RUN_TIMEOUT_S: u64 = 120;
+
+/// The hold of the serial ladder's echo, in its gathering mode: what the
+/// ladder's port sends within this time of a receive leaves the peer in
+/// one write with it. Set from a measure and bounded from both sides. The
+/// blocking check's pair -- two bytes of one guest write -- reaches the
+/// peer in two receives: over the twenty runs of the measure of record,
+/// on a busy machine, the two lay 0.015 to 0.066 ms apart, so the hold
+/// stands some three hundred times above what it must cover. And it stays
+/// well under the inter-byte time of that check's read, 100 ms: a second
+/// byte that left the port more than a hold after the first comes back in
+/// a write of its own, a whole hold after it left, inside that read's
+/// wait. Every other timer an echoed byte is awaited against runs from the
+/// ladder's own write: 2,000 ms for the eight bytes of the counts, the
+/// four of the flush and the five of the stock layer, 10,000 ms for the
+/// 1,500 of the exchange; the hold is a hundredth of the least. The two
+/// checks that await silence against a timer each follow a check that has
+/// read back every byte it sent, so no byte is in a hold when they begin.
+/// A machine's timer may round a receive's wait up to its tick: where the
+/// tick is 15.6 ms the hold lasts 31 ms.
+const SERIAL_ECHO_HOLD: Duration = Duration::from_millis(20);
+
+/// What the echo did with the last two bytes it received, for a serial run
+/// that refused at the blocking check's inter-byte timer: that check's pair
+/// is the last the ladder sends before its line. The pair's receives and
+/// its write or writes, each as offset+length in the stream echoed with
+/// its time since the peer connected; then how the pair left the peer. In
+/// one write, the miss lies on the emulator's side of the port.
+fn serial_pair_record(steps: &[EchoStep]) -> String {
+    let received: u64 = steps.iter().filter(|s| !s.write).map(|s| s.len as u64).sum();
+    let written: u64 = steps.iter().filter(|s| s.write).map(|s| s.len as u64).sum();
+    let head = format!("   the echo's record at the miss ({received} bytes received, {written} written back; offset+length at ms since the peer connected)");
+    if received < 2 {
+        return format!("{head}: no pair reached the peer");
+    }
+    let pair = [received - 2, received - 1];
+    let covers = |s: &EchoStep, b: u64| s.offset <= b && b < s.offset + s.len as u64;
+    let shown: Vec<String> = steps
+        .iter()
+        .filter(|s| covers(*s, pair[0]) || covers(*s, pair[1]))
+        .map(|s| format!("{} {}+{} at {:.3}", if s.write { "wrote" } else { "received" }, s.offset, s.len, s.at.as_secs_f64() * 1000.0))
+        .collect();
+    let wrote = |b: u64| steps.iter().position(|s| s.write && covers(s, b));
+    let verdict = match (wrote(pair[0]), wrote(pair[1])) {
+        (Some(a), Some(b)) if a == b => "the pair left the peer in ONE write: the miss lies on the emulator's side of the port".to_string(),
+        (Some(a), Some(b)) => format!(
+            "the pair left the peer in two writes, {:.3} ms apart",
+            (steps[b].at.as_secs_f64() - steps[a].at.as_secs_f64()) * 1000.0
+        ),
+        (a, b) => format!("the peer had written back {} of the pair's two bytes when the run ended", a.iter().count() + b.iter().count()),
+    };
+    format!("{head}: {} -- {verdict}", shown.join(", "))
+}
 
 /// The compile flag set of record for the shim's C: clang, the compiler of
 /// record (the version the runtime archives at the pin
@@ -133,7 +185,7 @@ fn cc_flags(class: Class) -> &'static [&'static str] {
 
 /// goldens/shim/MANIFEST.md's own sha256: the in-code anchor beside the
 /// manifest.
-const SHA_FROZEN_MANIFEST: &str = "fb44374bb9565f1e396eb73b12a042bed253183d521cabc63966ce1c08ba41d9";
+const SHA_FROZEN_MANIFEST: &str = "0f8850d9b1473c1abf7d42ec38ed5ac8567e5d9971963fbf1b1b8fb92228549f";
 
 /// The frozen-object plan of record: file name under goldens/shim/,
 /// source TU, extra defines beyond the class's flag set, and the class
@@ -142,7 +194,7 @@ const SHA_FROZEN_MANIFEST: &str = "fb44374bb9565f1e396eb73b12a042bed253183d521ca
 /// name both directions; 'rhu-gate shim rederive' recompiles every row
 /// under its class's flag set and byte-asserts the output against the
 /// frozen bytes.
-const FROZEN_PLAN: [(&str, &str, &[&str], Class); 101] = [
+const FROZEN_PLAN: [(&str, &str, &[&str], Class); 156] = [
     ("shim-core.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
     ("shim-core-break-sipid.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SIPID"], Class::CortexM7),
     ("shim-core-break-ctxpc.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_CTXPC"], Class::CortexM7),
@@ -159,8 +211,17 @@ const FROZEN_PLAN: [(&str, &str, &[&str], Class); 101] = [
     ("shim-sysnative-break-store-slash.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_SLASH"], Class::CortexM7),
     ("shim-sysnative-break-store-times.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_TIMES"], Class::CortexM7),
     ("shim-sysnative-break-store-lock.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_LOCK"], Class::CortexM7),
+    ("shim-sysnative-break-store-identity-block.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_IDENTITY_BLOCK"], Class::CortexM7),
+    ("shim-sysnative-break-store-dir-open.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_DIR_OPEN"], Class::CortexM7),
+    ("shim-sysnative-break-store-at-root.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_AT_ROOT"], Class::CortexM7),
+    ("shim-sysnative-break-store-dir-mode.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_DIR_MODE"], Class::CortexM7),
+    ("shim-sysnative-break-store-dir-flock.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_DIR_FLOCK"], Class::CortexM7),
+    ("shim-sysnative-break-store-map-copy.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_MAP_COPY"], Class::CortexM7),
+    ("shim-sysnative-break-store-unmap.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_UNMAP"], Class::CortexM7),
+    ("shim-sysnative-break-store-page-pad.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STORE_PAGE_PAD"], Class::CortexM7),
     ("shim-sysnative-break-entropy-refusal.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_ENTROPY_REFUSAL"], Class::CortexM7),
     ("shim-sysnative-break-calendar-clock.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_CALENDAR_CLOCK"], Class::CortexM7),
+    ("shim-sysnative-break-xpm-owner-width.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_XPM_OWNER_WIDTH"], Class::CortexM7),
     ("shim-libc-glue.o", "src/shim/rhu_libc_glue.c", &[], Class::CortexM7),
     ("shim-host.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
     ("shim-host-break-dataverify.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_DATAVERIFY"], Class::CortexM7),
@@ -179,8 +240,8 @@ const FROZEN_PLAN: [(&str, &str, &[&str], Class); 101] = [
     ("shim-host-an505.o", "src/shim/rhu_host.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
     ("shim-stdio-sym-an505.o", "src/shim/rhu_stdio_sym.c", &[], Class::CortexM33),
     ("shim-core-rp2350.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_PICO2"], Class::CortexM33),
-    ("shim-pal-surface.o", "src/shim/rhu_pal_surface_net11_rc3.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
-    ("shim-pal-surface-an505.o", "src/shim/rhu_pal_surface_net11_rc3.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
+    ("shim-pal-surface.o", "src/shim/rhu_pal_surface_net11.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
+    ("shim-pal-surface-an505.o", "src/shim/rhu_pal_surface_net11.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
     ("shim-gpiod.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500"], Class::CortexM7),
     ("shim-gpiod-an505.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN505"], Class::CortexM33),
     ("shim-gpiod-break-version.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_VERSION"], Class::CortexM7),
@@ -274,6 +335,52 @@ const FROZEN_PLAN: [(&str, &str, &[&str], Class); 101] = [
     ("shim-sysnative-break-sdfs-close-keeps.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SDFS_CLOSE_KEEPS"], Class::CortexM7),
     ("shim-sysnative-break-sdfs-dup-closes.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SDFS_DUP_CLOSES"], Class::CortexM7),
     ("shimtest-sdfs.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SDFS"], Class::CortexM7),
+    ("shim-sockaddr.o", "src/shim/rhu_sockaddr.c", &[], Class::CortexM7),
+    ("shim-sockaddr-an505.o", "src/shim/rhu_sockaddr.c", &[], Class::CortexM33),
+    ("shim-sockaddr-break-port-order.o", "src/shim/rhu_sockaddr.c", &["-DRHU_SHIM_BREAK_SOCK_PORT_ORDER"], Class::CortexM7),
+    ("shim-sockaddr-break-size.o", "src/shim/rhu_sockaddr.c", &["-DRHU_SHIM_BREAK_SOCK_SIZE"], Class::CortexM7),
+    ("shim-sockaddr-break-errmap.o", "src/shim/rhu_sockaddr.c", &["-DRHU_SHIM_BREAK_SOCK_ERRMAP"], Class::CortexM7),
+    ("shim-socket.o", "src/shim/rhu_socket.c", &[], Class::CortexM7),
+    ("shim-socket-an505.o", "src/shim/rhu_socket.c", &[], Class::CortexM33),
+    ("shim-socket-break-peek.o", "src/shim/rhu_socket.c", &["-DRHU_SHIM_BREAK_SOCK_PEEK"], Class::CortexM7),
+    ("shim-socket-break-pending-error.o", "src/shim/rhu_socket.c", &["-DRHU_SHIM_BREAK_SOCK_PENDING_ERROR"], Class::CortexM7),
+    ("shim-socket-break-timeout.o", "src/shim/rhu_socket.c", &["-DRHU_SHIM_BREAK_SOCK_TIMEOUT"], Class::CortexM7),
+    ("shim-socket-break-close-linger.o", "src/shim/rhu_socket.c", &["-DRHU_SHIM_BREAK_SOCK_CLOSE_LINGER"], Class::CortexM7),
+    ("shim-socket-break-accept-peer.o", "src/shim/rhu_socket.c", &["-DRHU_SHIM_BREAK_SOCK_ACCEPT_PEER"], Class::CortexM7),
+    ("shim-socket-break-gather.o", "src/shim/rhu_socket.c", &["-DRHU_SHIM_BREAK_SOCK_GATHER"], Class::CortexM7),
+    ("shim-socket-break-option-refusal.o", "src/shim/rhu_socket.c", &["-DRHU_SHIM_BREAK_SOCK_OPTION_REFUSAL"], Class::CortexM7),
+    ("shim-socket-break-poll-level.o", "src/shim/rhu_socket.c", &["-DRHU_SHIM_BREAK_SOCK_POLL_LEVEL"], Class::CortexM7),
+    ("shim-socket-break-port-level.o", "src/shim/rhu_socket.c", &["-DRHU_SHIM_BREAK_SOCK_PORT_LEVEL"], Class::CortexM7),
+    ("shim-socket-break-port-lost-registration.o", "src/shim/rhu_socket.c", &["-DRHU_SHIM_BREAK_SOCK_PORT_LOST_REGISTRATION"], Class::CortexM7),
+    ("shim-socket-break-port-close-registration.o", "src/shim/rhu_socket.c", &["-DRHU_SHIM_BREAK_SOCK_PORT_CLOSE_REGISTRATION"], Class::CortexM7),
+    ("shim-netinfo.o", "src/shim/rhu_netinfo.c", &[], Class::CortexM7),
+    ("shim-netinfo-an505.o", "src/shim/rhu_netinfo.c", &[], Class::CortexM33),
+    ("shim-netinfo-break-slot-leak.o", "src/shim/rhu_netinfo.c", &["-DRHU_SHIM_BREAK_SOCK_RESOLVE_SLOT_LEAK"], Class::CortexM7),
+    ("shim-netinfo-break-prefix.o", "src/shim/rhu_netinfo.c", &["-DRHU_SHIM_BREAK_SOCK_NETINFO_PREFIX"], Class::CortexM7),
+    ("shim-pal-surface-break-refusal-value.o", "src/shim/rhu_pal_surface_net11.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_SURFACE_REFUSAL_VALUE"], Class::CortexM7),
+    ("shimtest-sockaddr.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SOCKADDR"], Class::CortexM7),
+    ("shimtest-sockerrors.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SOCKERRORS"], Class::CortexM7),
+    ("shimtest-sockrefusals.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SOCKREFUSALS"], Class::CortexM7),
+    ("shimtest-sockstream.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SOCKSTREAM"], Class::CortexM7),
+    ("shimtest-socklisten.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SOCKLISTEN"], Class::CortexM7),
+    ("shimtest-sockdatagram.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SOCKDATAGRAM"], Class::CortexM7),
+    ("shimtest-sockoptions.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SOCKOPTIONS"], Class::CortexM7),
+    ("shimtest-sockpoll.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SOCKPOLL"], Class::CortexM7),
+    ("shimtest-sockport.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SOCKPORT"], Class::CortexM7),
+    ("shimtest-sockresolve.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SOCKRESOLVE"], Class::CortexM7),
+    ("shimtest-socknetinfo.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_SOCKNETINFO"], Class::CortexM7),
+    ("shimtest-host-debug-event.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_HOST", "-DRHU_SHIMTEST_HOST_DEBUG_EVENT"], Class::CortexM7),
+    ("shim-core-break-stack-true-bounds.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_STACK_TRUE_BOUNDS"], Class::CortexM7),
+    ("shim-core-break-stack-true-bounds-an505.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN505", "-DRHU_SHIM_BREAK_STACK_TRUE_BOUNDS"], Class::CortexM33),
+    ("shim-core-break-pool-max-decimal.o", "src/shim/rhu_shim.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_POOL_MAX_DECIMAL"], Class::CortexM7),
+    ("shim-sysnative-break-etc-root-absent.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_ETC_ROOT_ABSENT"], Class::CortexM7),
+    ("shim-pwmfs-rows.o", "src/shim/rhu_pwmfs.c", &["-DMGC_HOST_ROW_AN500", "-Drhu_pwm_count=rows_pwm_count", "-Drhu_pwm_line=rows_pwm_line", "-Drhu_pwm_claim=rows_pwm_claim", "-Drhu_pwm_set=rows_pwm_set", "-Drhu_pwm_period=rows_pwm_period", "-Drhu_pwm_enable=rows_pwm_enable", "-Drhu_pwm_release=rows_pwm_release", "-Drhu_pwm_info=rows_pwm_info", "-Drhu_shim_log=rows_shim_log"], Class::CortexM7),
+    ("shim-pwmfs-rows-break-names-at-64.o", "src/shim/rhu_pwmfs.c", &["-DMGC_HOST_ROW_AN500", "-Drhu_pwm_count=rows_pwm_count", "-Drhu_pwm_line=rows_pwm_line", "-Drhu_pwm_claim=rows_pwm_claim", "-Drhu_pwm_set=rows_pwm_set", "-Drhu_pwm_period=rows_pwm_period", "-Drhu_pwm_enable=rows_pwm_enable", "-Drhu_pwm_release=rows_pwm_release", "-Drhu_pwm_info=rows_pwm_info", "-Drhu_shim_log=rows_shim_log", "-DRHU_SHIM_BREAK_PWMFS_NAMES_AT_64"], Class::CortexM7),
+    ("shimtest-pwmrows-f769.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_PWMROWS", "-DRHU_SHIMTEST_PWMROWS_F769"], Class::CortexM7),
+    ("shimtest-pwmrows-u5a5.o", "src/shim/gate/rhu_shimtest.c", &["-DRHU_SHIMTEST_LADDER_PWMROWS", "-DRHU_SHIMTEST_PWMROWS_U5A5"], Class::CortexM7),
+    ("shim-gpiod-break-table-per-open.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_TABLE_PER_OPEN"], Class::CortexM7),
+    ("shim-sysnative-break-etc-missing-erofs.o", "src/shim/rhu_sysnative.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_ETC_MISSING_EROFS"], Class::CortexM7),
+    ("shim-gpiod-break-pulls-first.o", "src/shim/rhu_gpiod.c", &["-DMGC_HOST_ROW_AN500", "-DRHU_SHIM_BREAK_GPIOD_PULLS_FIRST"], Class::CortexM7),
 ];
 
 /// The tier's text records beside the objects and goldens: the surface
@@ -284,7 +391,7 @@ const FROZEN_RECORDS: [&str; 1] = ["pal-surface.txt"];
 
 /// The frozen goldens: the payload stream of each positive image, class
 /// bytes. Recorded in the manifest beside the objects.
-const GOLDENS: [&str; 12] = [
+const GOLDENS: [&str; 25] = [
     "shimtest-core.golden.txt",
     "shimtest-fdmap.golden.txt",
     "shimtest-activation.golden.txt",
@@ -297,6 +404,19 @@ const GOLDENS: [&str; 12] = [
     "shimtest-ttydev.golden.txt",
     "shimtest-iiofs.golden.txt",
     "shimtest-sdfs.golden.txt",
+    "shimtest-sockaddr.golden.txt",
+    "shimtest-sockerrors.golden.txt",
+    "shimtest-sockrefusals.golden.txt",
+    "shimtest-sockstream.golden.txt",
+    "shimtest-socklisten.golden.txt",
+    "shimtest-sockdatagram.golden.txt",
+    "shimtest-sockoptions.golden.txt",
+    "shimtest-sockpoll.golden.txt",
+    "shimtest-sockport.golden.txt",
+    "shimtest-sockresolve.golden.txt",
+    "shimtest-socknetinfo.golden.txt",
+    "shimtest-pwmrows-f769.golden.txt",
+    "shimtest-pwmrows-u5a5.golden.txt",
 ];
 
 /// The core object's EXACT import closure: the kernel verbs it consumes
@@ -361,7 +481,7 @@ const IMPORTS_CORE: [&str; 47] = [
 /// allocator, the core's errno, environment table, diagnostics, formatter
 /// core, library-load path, thread and mmap paths, the mutex recipe, the
 /// string functions, the division helpers.
-const IMPORTS_SYSNATIVE: [&str; 95] = [
+const IMPORTS_SYSNATIVE: [&str; 97] = [
     "__aeabi_ldivmod",
     "__aeabi_uldivmod",
     "__errno_location",
@@ -424,6 +544,8 @@ const IMPORTS_SYSNATIVE: [&str; 95] = [
     "rhu_iiofs_pread",
     "rhu_iiofs_pwrite",
     "rhu_iiofs_stat",
+    "rhu_kheap_alloc",
+    "rhu_kheap_free",
     "rhu_now_ns",
     "rhu_pwmfs_access",
     "rhu_pwmfs_close",
@@ -651,7 +773,7 @@ const IMPORTS_PORTS: [&str; 20] = [
 /// linker's brackets it reads, the in-image header, the kernel's console,
 /// exit and arena functions, the shim's initialization and stream bridge.
 /// The kernel-log stage: rhu_log_write in place of rhu_console_write -- the layer's lines go through the kernel's log function.
-const IMPORTS_HOST: [&str; 36] = [
+const IMPORTS_HOST: [&str; 37] = [
     "AppendExceptionStackFrame",
     "GetRuntimeException",
     "GetSystemArrayEEType",
@@ -663,6 +785,7 @@ const IMPORTS_HOST: [&str; 36] = [
     "RhRegisterOSModule",
     "RuntimeFailFast",
     "ThreadEntryPoint",
+    "__aeabi_unwind_cpp_pr0",
     "__edata",
     "__fini_array_end",
     "__fini_array_start",
@@ -679,7 +802,7 @@ const IMPORTS_HOST: [&str; 36] = [
     "__sidata",
     "__start___modules",
     "__stop___modules",
-    "__vector_table", // the module handle from the vector table's symbol; the header unread
+    "__vector_table",
     "rhu_arena_headroom",
     "rhu_arena_report",
     "rhu_exit",
@@ -693,6 +816,72 @@ const IMPORTS_HOST: [&str; 36] = [
 /// The stream bridge's EXACT import closure: the C library's two parsers
 /// its forwarders call by the plain names (its task-record accessors are
 /// weak references, not imports).
+/// The address unit's EXACT import closure: the C library's two block functions and nothing of the kernel (the
+/// unit is tables and byte moves).
+const IMPORTS_SOCKADDR: [&str; 2] = [
+    "memcpy",
+    "memset",
+];
+
+/// The socket unit's EXACT import closure: the kernel's network functions its default table names, the futex
+/// wait and the clock of its one wait, the address unit's conversions, the descriptor layer's error conversion,
+/// the port's lock and the C library's allocator and block functions (its hook to a scripted kernel is a weak
+/// reference, not an import, and stays outside the pin).
+const IMPORTS_SOCKET: [&str; 37] = [
+    "SystemNative_ConvertErrorPalToPlatform",
+    "__errno_location",
+    "free",
+    "malloc",
+    "memcpy",
+    "memset",
+    "pthread_mutex_lock",
+    "pthread_mutex_unlock",
+    "rhu_futex_wait",
+    "rhu_net_accept",
+    "rhu_net_available",
+    "rhu_net_bind",
+    "rhu_net_close",
+    "rhu_net_connect",
+    "rhu_net_count",
+    "rhu_net_error",
+    "rhu_net_event_word",
+    "rhu_net_events_bump",
+    "rhu_net_events_word",
+    "rhu_net_lease",
+    "rhu_net_limits",
+    "rhu_net_listen",
+    "rhu_net_medium",
+    "rhu_net_name",
+    "rhu_net_option",
+    "rhu_net_readiness",
+    "rhu_net_recv",
+    "rhu_net_resolve",
+    "rhu_net_resolve_result",
+    "rhu_net_resolve_word",
+    "rhu_net_send",
+    "rhu_net_shutdown",
+    "rhu_net_socket",
+    "rhu_now_ns",
+    "rhu_sock_addr_from_kernel",
+    "rhu_sock_addr_to_kernel",
+    "rhu_sock_error",
+];
+
+/// The interface unit's EXACT import closure: the socket unit's table and its one wait, the clock, the
+/// descriptor layer's host name, the errno accessor and the C library's allocator, block and string functions.
+const IMPORTS_NETINFO: [&str; 10] = [
+    "SystemNative_GetHostName",
+    "__errno_location",
+    "free",
+    "malloc",
+    "memcpy",
+    "memset",
+    "rhu_now_ns",
+    "rhu_sock_kernel_table",
+    "rhu_sock_wait",
+    "strlen",
+];
+
 const IMPORTS_STDIO: [&str; 2] = ["vfscanf", "vsscanf"];
 
 /// The one named group of C-library imports the every-import-resolves
@@ -760,7 +949,18 @@ const BUSDEV_ALL_GOOD: &str = "SHIMTEST-BUSDEV: ALL GOOD (the bus device nodes f
 const GPIOD_ALL_GOOD: &str = "SHIMTEST-GPIOD: ALL GOOD (the GPIO library surface from a native caller's side)";
 const FROZEN_ALL_GOOD: &str = "SHIMTEST-FROZEN: ALL GOOD (the frozen object heap on a small board's pool)";
 const PWMFS_ALL_GOOD: &str = "SHIMTEST-PWMFS: ALL GOOD (the PWM device files from a native caller's side)";
+const PWMROWS_ALL_GOOD: &str = "SHIMTEST-PWMROWS: ALL GOOD (the PWM device files over a board row's own line table, from a native caller's side)";
 const TTYDEV_ALL_GOOD: &str = "SHIMTEST-TTYDEV: ALL GOOD (the serial device files from a native caller's side)";
+/// The serial tenant's lines when it is linked with its own low-power word:
+/// the names checks alone, under a verdict line of their own. No frozen
+/// golden runs under the word, so the expectation is stated here whole.
+const TTYDEV_LOWPOWER_ALL_GOOD: &str = "SHIMTEST-TTYDEV: ALL GOOD (the low-power port's name and its listing, by the link word)";
+const TTYDEV_LOWPOWER_LINES: [&str; 3] = [
+    "shimtest-ttydev: the low-power port's name by the link word, on the row's UART blocks",
+    "PASS shim-ttydev-init (the shim initialized)",
+    "PASS shim-ttydev-lowpower-names (/sys/class/tty a folder that lists ttyS0 then ttyLP1, device/of_node under the first and device/tty under the second; /dev lists the same two names as character devices; /dev/ttyLP1 opens and its alias names the same block; ttyS1 and ttyLP0 answer ENOENT)",
+];
+const TTYDEV_LOWPOWER_REFUSAL: &str = "FAIL shim-ttydev-lowpower-names (/sys/class/tty is not a folder on a row with a low-power block)";
 const IIOFS_ALL_GOOD: &str = "SHIMTEST-IIOFS: ALL GOOD (the analog input device files from a native caller's side)";
 const CANARY_LINE: &str = "[shim] free: corrupt block header (canary)";
 
@@ -913,6 +1113,252 @@ const PROBE_SOURCE: &[u8] = b"#include <stdio.h>\nvoid rhu_newlib_consumer(void)
 /// Patterns a positive run must not carry.
 const FORBIDDEN_PATTERNS: [&str; 6] = ["FAIL ", "KERNEL PANIC", "EXCEPTION:", "REFUSED", "abort()", "unsupported conversion"];
 
+/// One case of the socket family: the ladder's object, its golden's place
+/// in GOLDENS, its verdict line, the family's objects its image links after
+/// the store's world, one symbol the linked image must carry (a function
+/// of the family the ladder calls), and its negative controls -- the case's
+/// name, the object replaced, the control object linked in its place, the
+/// restored defect, and the line the ladder must refuse it with.
+struct SockCase {
+    case: &'static str,
+    ladder: &'static str,
+    golden: usize,
+    all_good: &'static str,
+    units: &'static [&'static str],
+    extra: &'static str,
+    controls: &'static [(&'static str, &'static str, &'static str, &'static str, &'static str)],
+}
+
+/// The socket family's eleven cases and seventeen negative controls, in
+/// the order they run.
+const SOCK_CASES: [SockCase; 11] = [
+    SockCase {
+        case: "shim.sock-addr",
+        ladder: "shimtest-sockaddr.o",
+        golden: 12,
+        all_good: "SHIMTEST-SOCKADDR: ALL GOOD (the socket-address helpers from a native caller's side)",
+        units: &["shim-sockaddr.o"],
+        extra: "SystemNative_GetPort",
+        controls: &[
+            ("shim.sock-addr-break-port-order", "shim-sockaddr.o", "shim-sockaddr-break-port-order.o", "the port stored in the host's byte order (RHU_SHIM_BREAK_SOCK_PORT_ORDER)", "FAIL shim-sock-addr-port (the port's bytes at offset 2 are not in network order)"),
+            ("shim.sock-addr-break-size", "shim-sockaddr.o", "shim-sockaddr-break-size.o", "the largest record's size answered 0 (RHU_SHIM_BREAK_SOCK_SIZE)", "FAIL shim-sock-addr-sizes (the largest record's size is not 128)"),
+        ],
+    },
+    SockCase {
+        case: "shim.sock-errors",
+        ladder: "shimtest-sockerrors.o",
+        golden: 13,
+        all_good: "SHIMTEST-SOCKERRORS: ALL GOOD (the kernel's network codes as the runtime's errors)",
+        units: &["shim-sockaddr.o"],
+        extra: "rhu_sock_error",
+        controls: &[
+            ("shim.sock-errors-break-errmap", "shim-sockaddr.o", "shim-sockaddr-break-errmap.o", "a code outside the table answered as success (RHU_SHIM_BREAK_SOCK_ERRMAP)", "FAIL shim-sock-errors-unknown (a code outside the table was answered as success)"),
+        ],
+    },
+    SockCase {
+        case: "shim.sock-refusals",
+        ladder: "shimtest-sockrefusals.o",
+        golden: 14,
+        all_good: "SHIMTEST-SOCKREFUSALS: ALL GOOD (the refused names of the socket surface, each read for the value its caller expects)",
+        units: &["shim-pal-surface.o"],
+        extra: "SystemNative_Select",
+        controls: &[
+            ("shim.sock-refusals-break-refusal-value", "shim-pal-surface.o", "shim-pal-surface-break-refusal-value.o", "the surface built with the wait over lists answering success (RHU_SHIM_BREAK_SURFACE_REFUSAL_VALUE)", "FAIL shim-sock-refusals-socket (the wait over lists was not ENOTSUP)"),
+        ],
+    },
+    SockCase {
+        case: "shim.sock-stream",
+        ladder: "shimtest-sockstream.o",
+        golden: 15,
+        all_good: "SHIMTEST-SOCKSTREAM: ALL GOOD (a stream socket over a scripted kernel, from a native caller's side)",
+        units: &["shim-sockaddr.o", "shim-socket.o"],
+        extra: "SystemNative_Connect",
+        controls: &[
+            ("shim.sock-stream-break-peek", "shim-socket.o", "shim-socket-break-peek.o", "a peek consumes the bytes it reads (RHU_SHIM_BREAK_SOCK_PEEK)", "FAIL shim-sock-stream-peek (a peek consumed the bytes it read)"),
+            ("shim.sock-stream-break-pending-error", "shim-socket.o", "shim-socket-break-pending-error.o", "a socket's pending code read and dropped (RHU_SHIM_BREAK_SOCK_PENDING_ERROR)", "FAIL shim-sock-stream-pending-error (a refused connect's pending code was not answered)"),
+            ("shim.sock-stream-break-timeout", "shim-socket.o", "shim-socket-break-timeout.o", "a blocking call's bound taken as passed at its first wait (RHU_SHIM_BREAK_SOCK_TIMEOUT)", "FAIL shim-sock-stream-timeout (a blocking receive answered before its bound)"),
+            ("shim.sock-stream-break-close-linger", "shim-socket.o", "shim-socket-break-close-linger.o", "the linger write answered ENOTSUP (RHU_SHIM_BREAK_SOCK_CLOSE_LINGER)", "FAIL shim-sock-stream-close (the zero linger of a handle's close was not answered as success)"),
+        ],
+    },
+    SockCase {
+        case: "shim.sock-listen",
+        ladder: "shimtest-socklisten.o",
+        golden: 16,
+        all_good: "SHIMTEST-SOCKLISTEN: ALL GOOD (a listening socket over a scripted kernel, from a native caller's side)",
+        units: &["shim-sockaddr.o", "shim-socket.o"],
+        extra: "SystemNative_Accept",
+        controls: &[
+            ("shim.sock-listen-break-accept-peer", "shim-socket.o", "shim-socket-break-accept-peer.o", "an accept that leaves the peer's address unwritten (RHU_SHIM_BREAK_SOCK_ACCEPT_PEER)", "FAIL shim-sock-listen-accept (the accepted connection's peer address was not written)"),
+        ],
+    },
+    SockCase {
+        case: "shim.sock-datagram",
+        ladder: "shimtest-sockdatagram.o",
+        golden: 17,
+        all_good: "SHIMTEST-SOCKDATAGRAM: ALL GOOD (a datagram socket over a scripted kernel, from a native caller's side)",
+        units: &["shim-sockaddr.o", "shim-socket.o"],
+        extra: "SystemNative_SendMessage",
+        controls: &[
+            ("shim.sock-datagram-break-gather", "shim-socket.o", "shim-socket-break-gather.o", "a datagram of several buffers sent as its first buffer alone (RHU_SHIM_BREAK_SOCK_GATHER)", "FAIL shim-sock-datagram-gather (a datagram of several buffers did not leave as one)"),
+        ],
+    },
+    SockCase {
+        case: "shim.sock-options",
+        ladder: "shimtest-sockoptions.o",
+        golden: 18,
+        all_good: "SHIMTEST-SOCKOPTIONS: ALL GOOD (the socket options over a scripted kernel, from a native caller's side)",
+        units: &["shim-sockaddr.o", "shim-socket.o"],
+        extra: "SystemNative_SetLingerOption",
+        controls: &[
+            ("shim.sock-options-break-option-refusal", "shim-socket.o", "shim-socket-break-option-refusal.o", "an option outside the served set accepted and ignored (RHU_SHIM_BREAK_SOCK_OPTION_REFUSAL)", "FAIL shim-sock-options-refusal (an option outside the served set was accepted)"),
+        ],
+    },
+    SockCase {
+        case: "shim.sock-poll",
+        ladder: "shimtest-sockpoll.o",
+        golden: 19,
+        all_good: "SHIMTEST-SOCKPOLL: ALL GOOD (Poll over the socket band over a scripted kernel, from a native caller's side)",
+        units: &["shim-sockaddr.o", "shim-socket.o"],
+        extra: "SystemNative_Poll",
+        controls: &[
+            ("shim.sock-poll-break-poll-level", "shim-socket.o", "shim-socket-break-poll-level.o", "a socket's poll events read from the bits that rose since the last look (RHU_SHIM_BREAK_SOCK_POLL_LEVEL)", "FAIL shim-sock-poll-level (a second poll of a standing level answered no event: an edge-triggered poll)"),
+        ],
+    },
+    SockCase {
+        case: "shim.sock-port",
+        ladder: "shimtest-sockport.o",
+        golden: 20,
+        all_good: "SHIMTEST-SOCKPORT: ALL GOOD (the socket event port over a scripted kernel, from a native caller's side)",
+        units: &["shim-sockaddr.o", "shim-socket.o"],
+        extra: "SystemNative_CreateSocketEventPort",
+        controls: &[
+            ("shim.sock-port-break-level", "shim-socket.o", "shim-socket-break-port-level.o", "a port whose scan reads the level at every wait (RHU_SHIM_BREAK_SOCK_PORT_LEVEL)", "FAIL shim-sock-port-risen-once (the port reported socket 1 a second time with no new edge (a level-triggered port))"),
+            ("shim.sock-port-break-lost-registration", "shim-socket.o", "shim-socket-break-port-lost-registration.o", "a registration that does not move the one word (RHU_SHIM_BREAK_SOCK_PORT_LOST_REGISTRATION)", "FAIL shim-sock-port-registration-under-waiter (a waiter slept through a registration)"),
+            ("shim.sock-port-break-close-registration", "shim-socket.o", "shim-socket-break-port-close-registration.o", "a close that leaves the socket's registration behind (RHU_SHIM_BREAK_SOCK_PORT_CLOSE_REGISTRATION)", "FAIL shim-sock-port-close-under-waiter (the port reported a closed socket's registration: its data word for a new socket at its descriptor)"),
+        ],
+    },
+    SockCase {
+        case: "shim.sock-resolve",
+        ladder: "shimtest-sockresolve.o",
+        golden: 21,
+        all_good: "SHIMTEST-SOCKRESOLVE: ALL GOOD (name resolution over a scripted kernel, from a native caller's side)",
+        units: &["shim-sockaddr.o", "shim-socket.o", "shim-netinfo.o"],
+        extra: "SystemNative_GetHostEntryForName",
+        controls: &[
+            ("shim.sock-resolve-break-slot-leak", "shim-netinfo.o", "shim-netinfo-break-slot-leak.o", "a wait for the answer that gives up at once and leaves the slot held (RHU_SHIM_BREAK_SOCK_RESOLVE_SLOT_LEAK)", "FAIL shim-sock-resolve-name (a lookup ended with its resolver slot still held)"),
+        ],
+    },
+    SockCase {
+        case: "shim.sock-netinfo",
+        ladder: "shimtest-socknetinfo.o",
+        golden: 22,
+        all_good: "SHIMTEST-SOCKNETINFO: ALL GOOD (the network interface records over a scripted kernel, from a native caller's side)",
+        units: &["shim-sockaddr.o", "shim-socket.o", "shim-netinfo.o"],
+        extra: "SystemNative_GetNetworkInterfaces",
+        controls: &[
+            ("shim.sock-netinfo-break-prefix", "shim-netinfo.o", "shim-netinfo-break-prefix.o", "a prefix length counted from the mask's zero bits (RHU_SHIM_BREAK_SOCK_NETINFO_PREFIX)", "FAIL shim-sock-netinfo-interfaces (an address's prefix length is not the count of its mask's bits)"),
+        ],
+    },
+];
+
+/// The event routine of the host unit and its breakpoint instruction as
+/// the disassembler prints it: the case shim.host-debug-event reads the
+/// instruction's address between the routine's label and the next label.
+const EVENT_ROUTINE: &str = "rhu_debug_event_unhandled";
+const EVENT_BKPT_OPERAND: &str = "#0x60";
+/// The host golden's line of the event check with the word clear: the
+/// event case's stream is the golden up to that line, then the line the
+/// ladder prints once it has set the word.
+const EVENT_CHECK_LINE: &str = "PASS shim-host-debug-event ";
+const EVENT_SET_LINE: &str = "shimtest: the debug events word set to the magic and the unhandled event's bit; the routine's BKPT follows";
+/// What the kernel's fault report says of a breakpoint instruction run
+/// with no debugger attached, and the argument the ladder passed.
+const EVENT_FAULT_FACTS: [&str; 3] = ["[fault] *** EXCEPTION: HardFault (IPSR=3) ***", "HFSR=0x40000000", "r0=0x00176176"];
+
+/// The address of the one breakpoint instruction of the given operand
+/// between a routine's label and the next label of a disassembly listing.
+/// None of them, or more than one, is a fault: the case names one address.
+pub(crate) fn event_bkpt_address(listing: &str, routine: &str, operand: &str) -> Result<u32, String> {
+    let label = format!("<{routine}>:");
+    let mut inside = false;
+    let mut found: Vec<u32> = Vec::new();
+    for line in listing.lines() {
+        let t = line.trim_end();
+        if t.ends_with(">:") {
+            inside = t.ends_with(&label);
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let mut cols = t.split('\t');
+        let head = cols.next().unwrap_or("").trim();
+        let mnemonic = cols.next().unwrap_or("").trim();
+        let operands = cols.next().unwrap_or("").trim();
+        if mnemonic == "bkpt" && operands == operand {
+            match u32::from_str_radix(head.split(':').next().unwrap_or("").trim(), 16) {
+                Ok(a) => found.push(a),
+                Err(_) => return Err(format!("the breakpoint instruction's address did not parse ('{head}')")),
+            }
+        }
+    }
+    match found.len() {
+        1 => Ok(found[0]),
+        n => Err(format!("{n} breakpoint instructions of operand {operand} inside {routine} (1 expected)")),
+    }
+}
+
+/// The event case's expectation, derived from the host golden: its lines
+/// up to the event check with the word clear, then the word-set line.
+pub(crate) fn event_expectation(host_golden: &[u8]) -> Option<Vec<u8>> {
+    let text = String::from_utf8_lossy(host_golden);
+    let mut out = String::new();
+    for line in text.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if line.starts_with(EVENT_CHECK_LINE) {
+            out.push_str(EVENT_SET_LINE);
+            out.push('\n');
+            return Some(out.into_bytes());
+        }
+    }
+    None
+}
+
+/// The event case's own assertion: a run that must END AT THE KERNEL's
+/// FAULT REPORT, at the event routine's breakpoint instruction. The
+/// positive assertion does not fit it (the report is a forbidden pattern
+/// on a positive run by design), so this one reads the capture for what
+/// the designed fault is and nothing else: no verdict line, the stream up
+/// to the word-set line, the report's facts, the fault's pc equal to the
+/// instruction's address, and no other forbidden pattern.
+pub(crate) fn debug_event_fault(raw: &[u8], bkpt: u32, expect: &[u8]) -> Option<String> {
+    if cr_count(raw) == 0 {
+        return Some("no CR bytes in raw capture (wire discipline lost)".to_string());
+    }
+    if contains_fixed(raw, HOST_ALL_GOOD) {
+        return Some("the host ladder's verdict line appeared on a run that must end at the event routine's breakpoint".to_string());
+    }
+    if !eq_lf_normalized(&payload_stream(raw), expect) {
+        return Some("the payload stream is not the host golden up to the event check, then the word-set line".to_string());
+    }
+    for m in EVENT_FAULT_FACTS {
+        if !contains_fixed(raw, m) {
+            return Some(format!("the kernel's fault report lacks '{m}'"));
+        }
+    }
+    let pc = format!("pc=0x{bkpt:08x}");
+    if !contains_fixed(raw, &pc) {
+        return Some(format!("the fault's pc is not the event routine's breakpoint instruction ({pc} expected)"));
+    }
+    for m in FORBIDDEN_PATTERNS {
+        if m != "EXCEPTION:" && contains_fixed(raw, m) {
+            return Some(format!("forbidden pattern '{m}' present"));
+        }
+    }
+    None
+}
+
 /// Listed, never counted and never vacuously green; empty, every listed
 /// check being armed.
 const PENDING: [&str; 0] = [];
@@ -928,7 +1374,7 @@ const PENDING: [&str; 0] = [];
 /// no instruction outside the Cortex-M7 decoder's reach, so one decoder
 /// censuses the whole tier. A moved count means the source, a flag or the
 /// compiler changed.
-const FP_CENSUS: [(&str, u32); 101] = [
+const FP_CENSUS: [(&str, u32); 156] = [
     ("shim-core.o", 0),
     ("shim-core-break-sipid.o", 0),
     ("shim-core-break-ctxpc.o", 0),
@@ -945,8 +1391,17 @@ const FP_CENSUS: [(&str, u32); 101] = [
     ("shim-sysnative-break-store-slash.o", 1),
     ("shim-sysnative-break-store-times.o", 1),
     ("shim-sysnative-break-store-lock.o", 1),
+    ("shim-sysnative-break-store-identity-block.o", 1),
+    ("shim-sysnative-break-store-dir-open.o", 1),
+    ("shim-sysnative-break-store-at-root.o", 1),
+    ("shim-sysnative-break-store-dir-mode.o", 1),
+    ("shim-sysnative-break-store-dir-flock.o", 1),
+    ("shim-sysnative-break-store-map-copy.o", 1),
+    ("shim-sysnative-break-store-unmap.o", 1),
+    ("shim-sysnative-break-store-page-pad.o", 1),
     ("shim-sysnative-break-entropy-refusal.o", 1),
     ("shim-sysnative-break-calendar-clock.o", 1),
+    ("shim-sysnative-break-xpm-owner-width.o", 1),
     ("shim-libc-glue.o", 0),
     ("shim-host.o", 0),
     ("shim-host-break-dataverify.o", 0),
@@ -1030,6 +1485,52 @@ const FP_CENSUS: [(&str, u32); 101] = [
     ("shim-sysnative-break-sdfs-close-keeps.o", 1),
     ("shim-sysnative-break-sdfs-dup-closes.o", 1),
     ("shimtest-sdfs.o", 0),
+    ("shim-sockaddr.o", 0),
+    ("shim-sockaddr-an505.o", 0),
+    ("shim-sockaddr-break-port-order.o", 0),
+    ("shim-sockaddr-break-size.o", 0),
+    ("shim-sockaddr-break-errmap.o", 0),
+    ("shim-socket.o", 0),
+    ("shim-socket-an505.o", 0),
+    ("shim-socket-break-peek.o", 0),
+    ("shim-socket-break-pending-error.o", 0),
+    ("shim-socket-break-timeout.o", 0),
+    ("shim-socket-break-close-linger.o", 0),
+    ("shim-socket-break-accept-peer.o", 0),
+    ("shim-socket-break-gather.o", 0),
+    ("shim-socket-break-option-refusal.o", 0),
+    ("shim-socket-break-poll-level.o", 0),
+    ("shim-socket-break-port-level.o", 0),
+    ("shim-socket-break-port-lost-registration.o", 0),
+    ("shim-socket-break-port-close-registration.o", 0),
+    ("shim-netinfo.o", 0),
+    ("shim-netinfo-an505.o", 0),
+    ("shim-netinfo-break-slot-leak.o", 0),
+    ("shim-netinfo-break-prefix.o", 0),
+    ("shim-pal-surface-break-refusal-value.o", 0),
+    ("shimtest-sockaddr.o", 0),
+    ("shimtest-sockerrors.o", 0),
+    ("shimtest-sockrefusals.o", 0),
+    ("shimtest-sockstream.o", 0),
+    ("shimtest-socklisten.o", 0),
+    ("shimtest-sockdatagram.o", 0),
+    ("shimtest-sockoptions.o", 0),
+    ("shimtest-sockpoll.o", 0),
+    ("shimtest-sockport.o", 0),
+    ("shimtest-sockresolve.o", 0),
+    ("shimtest-socknetinfo.o", 0),
+    ("shimtest-host-debug-event.o", 0),
+    ("shim-core-break-stack-true-bounds.o", 0),
+    ("shim-core-break-stack-true-bounds-an505.o", 0),
+    ("shim-core-break-pool-max-decimal.o", 0),
+    ("shim-sysnative-break-etc-root-absent.o", 1),
+    ("shim-pwmfs-rows.o", 0),
+    ("shim-pwmfs-rows-break-names-at-64.o", 0),
+    ("shimtest-pwmrows-f769.o", 0),
+    ("shimtest-pwmrows-u5a5.o", 0),
+    ("shim-gpiod-break-table-per-open.o", 0),
+    ("shim-sysnative-break-etc-missing-erofs.o", 1),
+    ("shim-gpiod-break-pulls-first.o", 0),
 ];
 
 /// Count the floating-point instructions in a decoded listing: every line whose
@@ -1354,8 +1855,8 @@ fn read_sdk_runtime_pin(repo: &Path) -> Result<String, String> {
 
 /// The tag the generated surface header states in its provenance comment.
 fn read_surface_header_tag(repo: &Path) -> Result<String, String> {
-    let p = repo.join("src").join("shim").join("rhu_pal_surface_net11_rc3.h");
-    let text = std::fs::read_to_string(&p).map_err(|e| format!("src/shim/rhu_pal_surface_net11_rc3.h unreadable: {e}"))?;
+    let p = repo.join("src").join("shim").join("rhu_pal_surface_net11.h");
+    let text = std::fs::read_to_string(&p).map_err(|e| format!("src/shim/rhu_pal_surface_net11.h unreadable: {e}"))?;
     let Some(i) = text.find("at tag ") else {
         return Err("the surface header states no tag".to_string());
     };
@@ -1364,8 +1865,8 @@ fn read_surface_header_tag(repo: &Path) -> Result<String, String> {
     Ok(rest[..end].to_string())
 }
 
-/// The twelve link objects of a row: the five the images link, the surface object, the GPIO API object, the bus device unit, the PWM device-file unit, the analog input device-file unit, the serial device unit and the stock serial layer's object.
-const ROW_AN500_LINK: [&str; 12] = [
+/// The fifteen link objects of a row: the five the images link, the surface object, the GPIO API object, the bus device unit, the PWM device-file unit, the analog input device-file unit, the serial device unit, the stock serial layer's object and the three socket units (the address unit, the socket unit and the interface unit, which define the family names the surface object does not).
+const ROW_AN500_LINK: [&str; 15] = [
     "goldens/shim/shim-core.o",
     "goldens/shim/shim-sysnative.o",
     "goldens/shim/shim-libc-glue.o",
@@ -1378,8 +1879,11 @@ const ROW_AN500_LINK: [&str; 12] = [
     "goldens/shim/shim-iiofs.o",
     "goldens/shim/shim-ttydev.o",
     "goldens/shim/shim-ports-native.o",
+    "goldens/shim/shim-sockaddr.o",
+    "goldens/shim/shim-socket.o",
+    "goldens/shim/shim-netinfo.o",
 ];
-const ROW_AN505_LINK: [&str; 12] = [
+const ROW_AN505_LINK: [&str; 15] = [
     "goldens/shim/shim-core-an505.o",
     "goldens/shim/shim-sysnative-an505.o",
     "goldens/shim/shim-libc-glue-an505.o",
@@ -1392,6 +1896,9 @@ const ROW_AN505_LINK: [&str; 12] = [
     "goldens/shim/shim-iiofs-an505.o",
     "goldens/shim/shim-ttydev-an505.o",
     "goldens/shim/shim-ports-native-an505.o",
+    "goldens/shim/shim-sockaddr-an505.o",
+    "goldens/shim/shim-socket-an505.o",
+    "goldens/shim/shim-netinfo-an505.o",
 ];
 
 /// True when the sorted import list equals the pinned set exactly.
@@ -1792,19 +2299,24 @@ impl Shim {
     /// Run a linked image under QEMU (Parity profile); (raw, exit).
     /// The wire's echo for an image that talks on the machine's second
     /// serial port: the chardev argument and the running echo, through the
-    /// shared module.
-    fn echo_start(&mut self, case: &str) -> (String, Echo) {
-        match echo::start_echo(Duration::from_secs(RUN_TIMEOUT_S)) {
+    /// shared module. The serial ladder is this gate's one user of the
+    /// echo, and it asks for the gathering mode with the hold above.
+    fn echo_start(&mut self, case: &str) -> (String, GatheringEcho) {
+        match echo::start_gathering_echo(Duration::from_secs(RUN_TIMEOUT_S), SERIAL_ECHO_HOLD) {
             Ok(x) => x,
             Err(e) => self.fail(case, &e),
         }
     }
 
     /// The echo's end: the thread joined, its count printed, its complaint
-    /// the case's failure.
-    fn echo_end(&mut self, case: &str, wire: Echo) {
-        match echo::end_echo(wire) {
-            Ok(n) => println!("  (the wire's echo on the second UART: {n} bytes echoed)"),
+    /// the case's failure; the record of its receives and writes answered.
+    fn echo_end(&mut self, case: &str, wire: GatheringEcho) -> Vec<EchoStep> {
+        match echo::end_gathering_echo(wire) {
+            Ok(steps) => {
+                let n: u64 = steps.iter().filter(|s| s.write).map(|s| s.len as u64).sum();
+                println!("  (the wire's echo on the second UART: {n} bytes echoed)");
+                steps
+            }
             Err(e) => self.fail(case, &e),
         }
     }
@@ -2015,10 +2527,10 @@ impl Shim {
         let gpiod_an505 = self.pin_closure(facts, "shim.core", "shim-gpiod-an505.o", &IMPORTS_GPIOD);
         let gpiod_break = self.pin_closure(facts, "shim.core", "shim-gpiod-break-version.o", &IMPORTS_GPIOD);
         let gpiod_break_an505 = self.pin_closure(facts, "shim.core", "shim-gpiod-break-version-an505.o", &IMPORTS_GPIOD);
-        for knob in ["close-keeps", "iter-shared", "both-pulls", "bias-stale", "timeout-fields", "open-unlocked", "arm-order", "kind-order"] {
+        for knob in ["close-keeps", "iter-shared", "both-pulls", "bias-stale", "timeout-fields", "open-unlocked", "arm-order", "kind-order", "table-per-open", "pulls-first"] {
             self.pin_closure(facts, "shim.core", &format!("shim-gpiod-break-{knob}.o"), &IMPORTS_GPIOD);
         }
-        println!("   the GPIO unit's eight control objects pinned against the unit's closure ({} names; the three race controls block on the kernel's futex the unit imports, no yield)", IMPORTS_GPIOD.len());
+        println!("   the GPIO unit's ten control objects pinned against the unit's closure ({} names; the three race controls block on the kernel's futex the unit imports, no yield)", IMPORTS_GPIOD.len());
         if gpiod_an505 != gpiod || gpiod_break != gpiod || gpiod_break_an505 != gpiod {
             self.fail("shim.core", "shim-gpiod-an505.o's, shim-gpiod-break-version.o's or shim-gpiod-break-version-an505.o's closure differs from shim-gpiod.o's: the class or a control moved an import");
         }
@@ -2039,13 +2551,14 @@ impl Shim {
         println!("   shim-pwmfs.o: import closure pinned exactly ({} names: the eight PWM doors, the diagnostics and the mutex pair, the C library's copy, fill and string functions, the core's errno and the 64-bit division helper)", IMPORTS_PWMFS.len());
         let pwmfs_an505 = self.pin_closure(facts, "shim.core", "shim-pwmfs-an505.o", &IMPORTS_PWMFS);
         // A control's closure is the unit's minus the kernel function its knob removes:
-        // the period-asked controls never read the period the timer runs, the unexport-keeps control
-        // never releases; the export-unjudged and npwm-count controls carry the unit's closure whole.
+        // the period-asked controls never read the period the timer runs; the export-unjudged,
+        // unexport-keeps and npwm-count controls carry the unit's closure whole (the export path
+        // gives back a claim it cannot keep, so the unexport-keeps control imports the release too).
         for (knob, dropped) in [
             ("period-asked", Some("rhu_pwm_period")),
             ("period-asked-an505", Some("rhu_pwm_period")),
             ("export-unjudged", None),
-            ("unexport-keeps", Some("rhu_pwm_release")),
+            ("unexport-keeps", None),
             ("npwm-count", None),
         ] {
             let want: Vec<&str> = IMPORTS_PWMFS.iter().copied().filter(|n| Some(*n) != dropped).collect();
@@ -2209,6 +2722,31 @@ impl Shim {
         self.emit_pass(case, 0, "positive", "", &sha_w, &rel_w, None);
         println!("== case {case}: PASS (exit 0; the payload stream equals the core golden with the row's line moved to the word's 250 ms, nothing else moved; the verdict line last) ==");
 
+        // The thread pool's most-workers link word: the same world and
+        // tenant linked once more with __rhu_threadpool_max_threads defined
+        // at 10 (the SDK's link line defines it from the board's row), run
+        // the same way. An image linked without the word carries no row,
+        // and the core golden's environment line says so; with the word the
+        // row is 0x and the word in hexadecimal, the form the pool reads,
+        // and the expectation is the core golden with that one phrase
+        // moved. Ten is the word because its two forms differ.
+        let max_word = "--defsym=__rhu_threadpool_max_threads=10";
+        {
+            let case = "shim.core-pool-max-word";
+            println!("== case {case} (the environment row built from the link word: the core world linked with __rhu_threadpool_max_threads = 10) ==");
+            let (sha_x, rel_x) = self.link_image_extra(ld, case, &[world[0], world[1], world[2], world[3], world[4], world[5], world[6], "goldens/shim/shimtest-core.o"], "shim-core-pool-max-word", &[], &[max_word]);
+            let from = "the pool's most workers: no row, no link word";
+            let to = "the pool's most workers: the row 0xa, the link word in hexadecimal";
+            if golden.matches(from).count() != 1 {
+                self.fail(case, &format!("goldens/shim/{} does not say exactly once that an image without the word carries no row ('{from}'): the derived expectation would be vacuous", GOLDENS[0]));
+            }
+            let want = golden.replacen(from, to, 1);
+            let (raw_x, code_x) = self.run_qemu(qemu, case, &rel_x, None);
+            self.assert_positive_bytes(case, &raw_x, code_x, &sha_x, &rel_x, &format!("goldens/shim/{} with the environment line's phrase moved to the word's row", GOLDENS[0]), want.as_bytes(), &PINNED_CORE_LINES, CORE_ALL_GOOD);
+            self.emit_pass(case, 0, "positive", "", &sha_x, &rel_x, None);
+            println!("== case {case}: PASS (exit 0; the payload stream equals the core golden with the phrase moved to the row 0xa, nothing else moved; the verdict line last) ==");
+        }
+
         println!("== case shim.core-break-errno (negative control) ==");
         let broke = "a worker writes through the main thread's errno pointer (RHU_SHIMTEST_BREAK_ERRNO)";
         let (sha_b, rel_b) = self.link_image(ld, "shim.core-break-errno", &[world[0], world[1], world[2], world[3], world[4], world[5], world[6], "goldens/shim/shimtest-core-break-errno.o"], "shim-core-break-errno");
@@ -2244,6 +2782,17 @@ impl Shim {
         self.emit_pass("shim.core-break-calendar-clock", 1, "negative", broke, &sha_k, &rel_k, None);
         println!("== case shim.core-break-calendar-clock: PASS (exit 1; the tenant refused a system time that was not the calendar) ==");
 
+        // The cross-process mutex's control: the System.Native unit built to
+        // keep the owner's thread id in 32 bits, linked under the core
+        // tenant, refused at the tenant's check of the id read back.
+        println!("== case shim.core-break-crossprocess-owner-width (negative control) ==");
+        let broke = "the cross-process mutex's owner thread id kept in 32 bits (RHU_SHIM_BREAK_XPM_OWNER_WIDTH)";
+        let (sha_x, rel_x) = self.link_image(ld, "shim.core-break-crossprocess-owner-width", &[world[0], "goldens/shim/shim-sysnative-break-xpm-owner-width.o", world[2], world[3], world[4], world[5], world[6], "goldens/shim/shimtest-core.o"], "shim-core-break-crossprocess-owner-width");
+        let (raw_x, code_x) = self.run_qemu(qemu, "shim.core-break-crossprocess-owner-width", &rel_x, None);
+        self.assert_control("shim.core-break-crossprocess-owner-width", &raw_x, code_x, 1, broke, &sha_x, &rel_x, GOLDENS[0], "FAIL shim-crossprocess-mutex (the owner's thread id did not come back whole)", CORE_ALL_GOOD);
+        self.emit_pass("shim.core-break-crossprocess-owner-width", 1, "negative", broke, &sha_x, &rel_x, None);
+        println!("== case shim.core-break-crossprocess-owner-width: PASS (exit 1; the tenant refused an owner thread id that lost its upper half) ==");
+
         println!("== case shim.core-break-realtime-wait (negative control) ==");
         let broke = "the clock a timed wait names discarded, a real-time timestamp read as a boot-relative one (RHU_SHIM_BREAK_REALTIME_WAIT)";
         let (sha_w, rel_w) = self.link_image(ld, "shim.core-break-realtime-wait", &["goldens/shim/shim-core-break-realtime-wait.o", world[1], world[2], world[3], world[4], world[5], world[6], "goldens/shim/shimtest-core.o"], "shim-core-break-realtime-wait");
@@ -2259,6 +2808,28 @@ impl Shim {
         self.assert_control("shim.core-break-mutex-adopt", &raw_m, code_m, 1, broke, &sha_m, &rel_m, GOLDENS[0], "FAIL shim-mutex-adopt (one of two first users of a zero-filled mutex was refused)", CORE_ALL_GOOD);
         self.emit_pass("shim.core-break-mutex-adopt", 1, "negative", broke, &sha_m, &rel_m, None);
         println!("== case shim.core-break-mutex-adopt: PASS (exit 1; one of two first users of a zero-filled mutex was refused and the tenant's two-thread check said so) ==");
+
+        // The most-workers row's control: the core built to write the
+        // number in decimal, linked with the same word as the positive
+        // case, refused at the tenant's check of the row.
+        println!("== case shim.core-break-pool-max-decimal (negative control) ==");
+        let broke = "the thread pool's most-workers row written in decimal (RHU_SHIM_BREAK_POOL_MAX_DECIMAL)";
+        let (sha_d, rel_d) = self.link_image_extra(ld, "shim.core-break-pool-max-decimal", &["goldens/shim/shim-core-break-pool-max-decimal.o", world[1], world[2], world[3], world[4], world[5], world[6], "goldens/shim/shimtest-core.o"], "shim-core-break-pool-max-decimal", &[], &[max_word]);
+        let (raw_d, code_d) = self.run_qemu(qemu, "shim.core-break-pool-max-decimal", &rel_d, None);
+        self.assert_control("shim.core-break-pool-max-decimal", &raw_d, code_d, 1, broke, &sha_d, &rel_d, GOLDENS[0], "FAIL shim-env (ThreadPool_ForceMaxWorkerThreads: the row is not the link word in hexadecimal)", CORE_ALL_GOOD);
+        self.emit_pass("shim.core-break-pool-max-decimal", 1, "negative", broke, &sha_d, &rel_d, None);
+        println!("== case shim.core-break-pool-max-decimal: PASS (exit 1; the tenant refused a row that is not the link word in hexadecimal) ==");
+
+        // The stack-attribute call's control: the core built to answer a
+        // thread's carve as it is, linked under the core tenant, refused
+        // at the tenant's check of the reported bounds.
+        println!("== case shim.core-break-stack-true-bounds (negative control) ==");
+        let broke = "the stack-attribute call answering the kernel's own bounds (RHU_SHIM_BREAK_STACK_TRUE_BOUNDS)";
+        let (sha_t, rel_t) = self.link_image(ld, "shim.core-break-stack-true-bounds", &["goldens/shim/shim-core-break-stack-true-bounds.o", world[1], world[2], world[3], world[4], world[5], world[6], "goldens/shim/shimtest-core.o"], "shim-core-break-stack-true-bounds");
+        let (raw_t, code_t) = self.run_qemu(qemu, "shim.core-break-stack-true-bounds", &rel_t, None);
+        self.assert_control("shim.core-break-stack-true-bounds", &raw_t, code_t, 1, broke, &sha_t, &rel_t, GOLDENS[0], "FAIL shim-thread (the reported bounds do not begin 59392 bytes under the kernel's base with its upper bound kept)", CORE_ALL_GOOD);
+        self.emit_pass("shim.core-break-stack-true-bounds", 1, "negative", broke, &sha_t, &rel_t, None);
+        println!("== case shim.core-break-stack-true-bounds: PASS (exit 1; the tenant refused bounds that do not put the runtime's stack-depth limit the reserve above the true base) ==");
     }
 
     fn run_fdmap(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
@@ -2292,7 +2863,7 @@ impl Shim {
         // The file store's contract, one negative control per clause: the
         // store built with that clause's defect restored, linked under the
         // same tenant, refused by the ladder's own check on the wire.
-        const STORE_CONTROLS: [(&str, &str, &str, &str); 8] = [
+        const STORE_CONTROLS: [(&str, &str, &str, &str); 18] = [
             ("shim.fdmap-break-store-bounds", "shim-sysnative-break-store-bounds.o", "a positioned transfer's offset cut to 32 bits (RHU_SHIM_BREAK_STORE_BOUNDS)", "FAIL shim-fdmap-bounds"),
             ("shim.fdmap-break-store-lifetime", "shim-sysnative-break-store-lifetime.o", "an unlink releasing an open object (RHU_SHIM_BREAK_STORE_LIFETIME)", "FAIL shim-fdmap-lifetime"),
             ("shim.fdmap-break-store-open-order", "shim-sysnative-break-store-open-order.o", "an open creating and truncating before the descriptor search (RHU_SHIM_BREAK_STORE_OPEN_ORDER)", "FAIL shim-fdmap-open-order"),
@@ -2301,6 +2872,16 @@ impl Shim {
             ("shim.fdmap-break-store-slash", "shim-sysnative-break-store-slash.o", "a trailing slash kept in a path (RHU_SHIM_BREAK_STORE_SLASH)", "FAIL shim-fdmap-dir-slash"),
             ("shim.fdmap-break-store-times", "shim-sysnative-break-store-times.o", "a nanosecond field unchecked (RHU_SHIM_BREAK_STORE_TIMES)", "FAIL shim-fdmap-times-range"),
             ("shim.fdmap-break-identity-leak", "shim-sysnative-break-identity-leak.o", "a refused open of the process identity file keeping the object slot it took (RHU_SHIM_BREAK_IDENTITY_LEAK)", "FAIL shim-fdmap-identity-leak"),
+            ("shim.fdmap-break-etc-root-absent", "shim-sysnative-break-etc-root-absent.o", "the /etc root not present, a read under it a missing directory (RHU_SHIM_BREAK_ETC_ROOT_ABSENT)", "FAIL shim-fdmap-etc-root (/etc is not a directory)"),
+            ("shim.fdmap-break-store-identity-block", "shim-sysnative-break-store-identity-block.o", "a refused open of the process identity file dropping its row without the row's block (RHU_SHIM_BREAK_STORE_IDENTITY_BLOCK)", "FAIL shim-fdmap-store-bounds (a refused open of the identity file past the band did not stay EMFILE over four thousand tries)"),
+            ("shim.fdmap-break-store-dir-open", "shim-sysnative-break-store-dir-open.o", "every open of a directory refused (RHU_SHIM_BREAK_STORE_DIR_OPEN)", "FAIL shim-fdmap-dir-open (a read-only open of a directory was refused)"),
+            ("shim.fdmap-break-store-at-root", "shim-sysnative-break-store-at-root.o", "a descriptor form's name looked for under the root (RHU_SHIM_BREAK_STORE_AT_ROOT)", "FAIL shim-fdmap-at (mkdirat did not make the directory under its descriptor's path)"),
+            ("shim.fdmap-break-store-dir-mode", "shim-sysnative-break-store-dir-mode.o", "every directory reporting one mode (RHU_SHIM_BREAK_STORE_DIR_MODE)", "FAIL shim-fdmap-dir-mode (a directory's mode is not the one given at mkdir)"),
+            ("shim.fdmap-break-store-dir-flock", "shim-sysnative-break-store-dir-flock.o", "a directory's lock granted whoever holds it (RHU_SHIM_BREAK_STORE_DIR_FLOCK)", "FAIL shim-fdmap-dir-flock (a second descriptor took the directory's exclusive lock)"),
+            ("shim.fdmap-break-store-map-copy", "shim-sysnative-break-store-map-copy.o", "a mapping that is a copy of the file's block (RHU_SHIM_BREAK_STORE_MAP_COPY)", "FAIL shim-fdmap-map (a write through the mapping is not what the file reads)"),
+            ("shim.fdmap-break-store-unmap", "shim-sysnative-break-store-unmap.o", "a mapping never given back at its unmap (RHU_SHIM_BREAK_STORE_UNMAP)", "FAIL shim-fdmap-map-lifetime (a growth past the block was not granted after the last unmap)"),
+            ("shim.fdmap-break-store-page-pad", "shim-sysnative-break-store-page-pad.o", "a page block carved with a lead of its own alignment (RHU_SHIM_BREAK_STORE_PAGE_PAD)", "FAIL shim-fdmap-store-pool (the row's pool does not carry seven page files at once: a page takes more of the heap than its bytes and one header)"),
+            ("shim.fdmap-break-etc-missing-erofs", "shim-sysnative-break-etc-missing-erofs.o", "a name that is not there under the read-only /etc root answered as read-only where nothing would be created (RHU_SHIM_BREAK_ETC_MISSING_EROFS)", "FAIL shim-fdmap-etc-root (a missing file opened for writing under /etc was not answered ENOENT)"),
         ];
         for (case, obj, broke, expect) in STORE_CONTROLS {
             println!("== case {case} (negative control) ==");
@@ -2358,6 +2939,56 @@ impl Shim {
     /// control per restored defect, the unit's control object linked in the
     /// unit's place under the same tenant, refused by the ladder's own check
     /// at a line of its own.
+    /// The PWM device files over a board row's own line table: the unit's
+    /// source compiled with the kernel's eight PWM functions and the shim's
+    /// diagnostic function renamed on the compile line, linked in the
+    /// unit's place under a tenant that defines the nine and answers as the
+    /// kernel with the row's PWM-capable lines. One image a row of the
+    /// case's two; every listed line lives a channel's whole life and a
+    /// number in no table is refused under the line that says why. The
+    /// control's unit refuses a name of 64 or more before the kernel is
+    /// asked, and each tenant refuses it naming exactly its row's lines of
+    /// that size.
+    fn run_pwm_rows(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
+        const UNIT: &str = "goldens/shim/shim-pwmfs-rows.o";
+        const BROKEN: &str = "goldens/shim/shim-pwmfs-rows-break-names-at-64.o";
+        // The world without the PWM unit: the core's three and the bus, analog input and serial units the core and the store dispatch to.
+        const WORLD: [&str; 6] = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o", "goldens/shim/shim-busdev.o", "goldens/shim/shim-iiofs.o", "goldens/shim/shim-ttydev.o"];
+        // (the case, its tenant, its golden, the line the tenant refuses the control with)
+        let rows: [(&str, &str, &str, &str); 2] = [
+            ("shim.pwm-rows-f769", "goldens/shim/shimtest-pwmrows-f769.o", GOLDENS[23], "FAIL shim-pwmrows-lines (refused at a step of a channel's life, the lines 86 87 118)"),
+            ("shim.pwm-rows-u5a5", "goldens/shim/shimtest-pwmrows-u5a5.o", GOLDENS[24], "FAIL shim-pwmrows-lines (refused at a step of a channel's life, the lines 77 75 73)"),
+        ];
+        let broke = "a channel name of 64 or more refused before the kernel is asked (RHU_SHIM_BREAK_PWMFS_NAMES_AT_64)";
+        for (case, tenant_obj, golden, expect) in rows {
+            println!("== case {case} ==");
+            let tenant = parse_undefined(&self.nm_dump(facts, case, tenant_obj, true));
+            if let Some(hit) = forbidden_import(&tenant) {
+                self.fail(case, &format!("the tenant imports forbidden family symbol '{hit}'"));
+            }
+            let mut objs: Vec<&str> = WORLD.to_vec();
+            objs.push(UNIT);
+            objs.push(tenant_obj);
+            self.sweep_strong(facts, case, &objs);
+            let (sha, rel) = self.link_image(ld, case, &objs, &case.replace('.', "-"));
+            self.artifact_contract(facts, case, &rel, &["__errno_location", "rhu_pwmfs_open", "rhu_pwmfs_pwrite", "rhu_pwmfs_close", "rows_pwm_claim"], NO_TEMPLATE);
+            let (raw, code) = self.run_qemu(qemu, case, &rel, None);
+            self.assert_positive(case, &raw, code, &sha, &rel, golden, &[PINNED_CORE_LINES[0]], PWMROWS_ALL_GOOD);
+            self.emit_pass(case, 0, "positive", "", &sha, &rel, Some(golden));
+            println!("== case {case}: PASS (exit 0; the payload stream equals its golden; the verdict line last) ==");
+            let control_case = format!("{case}-break-names-at-64");
+            println!("== case {control_case} (negative control) ==");
+            let mut objs_c: Vec<&str> = WORLD.to_vec();
+            objs_c.push(BROKEN);
+            objs_c.push(tenant_obj);
+            let (sha_c, rel_c) = self.link_image(ld, &control_case, &objs_c, &control_case.replace('.', "-"));
+            let (raw_c, code_c) = self.run_qemu(qemu, &control_case, &rel_c, None);
+            self.assert_control(&control_case, &raw_c, code_c, 1, broke, &sha_c, &rel_c, golden, expect, PWMROWS_ALL_GOOD);
+            self.emit_pass(&control_case, 1, "negative", broke, &sha_c, &rel_c, None);
+            println!("== case {control_case}: PASS (exit 1; the ladder refused the restored defect at its own check) ==");
+        }
+    }
+
     /// The frozen object heap on a small row's pool: the STM32F769 row's core
     /// and system-call objects under the frozen ladder's tenant, booted on
     /// the gate's machine. The tenant reads the runtime's hard-limit row
@@ -2404,9 +3035,9 @@ impl Shim {
             ("funcs-wide", "the functionality word stored eight bytes wide (RHU_SHIM_BREAK_BUSDEV_FUNCS_WIDE)", "FAIL shim-busdev-funcs (the functionality request stored past its four-byte output)"),
             ("reread", "a transfer's count re-read from the caller's memory after the receive write (RHU_SHIM_BREAK_BUSDEV_REREAD)", "FAIL shim-busdev-spi-overlay (a receive buffer over the record's length word changed the count returned)"),
             ("unowned", "a closed node's entry handed out while a request still runs on it (RHU_SHIM_BREAK_BUSDEV_UNOWNED)", "FAIL shim-busdev-close-under-request (the reopen received the entry a request still ran on)"),
-            ("rate-unjudged", "the rate request answering 0 and claiming nothing (RHU_SHIM_BREAK_BUSDEV_RATE_UNJUDGED)", "FAIL shim-busdev-rate (an unserved rate was not refused ENOTSUP with the word untouched)"),
+            ("rate-unjudged", "the rate request answering 0 and claiming nothing (RHU_SHIM_BREAK_BUSDEV_RATE_UNJUDGED)", "FAIL shim-busdev-rate (a second served rate was not refused EBUSY with the running rate read back)"),
         ];
-        const GPIOD_CONTROLS: [(&str, &str, &str); 8] = [
+        const GPIOD_CONTROLS: [(&str, &str, &str); 10] = [
             ("open-unlocked", "the list of open chips joined with no lock, the window held open, blocked, until another opener has moved its head (RHU_SHIM_BREAK_GPIOD_OPEN_UNLOCKED)", "FAIL shim-gpiod-open-race (a chip opened while another thread opened is not a live chip)"),
             ("close-keeps", "a closed chip keeping its lines (RHU_SHIM_BREAK_GPIOD_CLOSE_KEEPS)", "FAIL shim-gpiod-opens (a closed chip's line is still held)"),
             ("iter-shared", "every iterator one object (RHU_SHIM_BREAK_GPIOD_ITER_SHARED)", "FAIL shim-gpiod-iterators (two iterators are one object, or yielded no chip)"),
@@ -2415,6 +3046,8 @@ impl Shim {
             ("timeout-fields", "a timespec field outside its range taken as a deadline (RHU_SHIM_BREAK_GPIOD_TIMEOUT_FIELDS)", "FAIL shim-gpiod-timeouts (a timespec field outside its range became a deadline)"),
             ("arm-order", "the edge armed before the mark is read, the window held open, blocked on the line's word, until an edge is counted (RHU_SHIM_BREAK_GPIOD_ARM_ORDER)", "FAIL shim-gpiod-arm (an edge the kernel counted after the arm was never delivered)"),
             ("kind-order", "the level read apart from the count, the window held open, blocked on the word, until another edge is counted (RHU_SHIM_BREAK_GPIOD_KIND_ORDER)", "FAIL shim-gpiod-kind (the first event after a rising edge was labelled falling)"),
+            ("table-per-open", "every open making a table of lines of its own, not one table for the chip (RHU_SHIM_BREAK_GPIOD_TABLE_PER_OPEN)", "FAIL shim-gpiod-opens (a second open took a second table of lines)"),
+            ("pulls-first", "every open asking its chip object and a block of pulls before its table (RHU_SHIM_BREAK_GPIOD_PULLS_FIRST)", "FAIL shim-gpiod-reopen (an open was refused for memory on a heap that holds a room of exactly a table)"),
         ];
         const PWMFS_CONTROLS: [(&str, &str, &str); 4] = [
             ("period-asked", "the period file answering the value written, not the period the timer runs (RHU_SHIM_BREAK_PWMFS_PERIOD_ASKED)", "FAIL shim-pwmfs-period (the period file did not read the period the timer runs: the quantized truth)"),
@@ -2440,6 +3073,10 @@ impl Shim {
         // check and never reached the line the case asserts is
         // run ONCE MORE on a fresh echo peer and read again, the repeat printed so the record says it happened; the timer's
         // values are the tenant's (a frozen object), so the harness widens nothing of the read: it repeats the run.
+        // The echo runs in its gathering mode (SERIAL_ECHO_HOLD), so the pair leaves the peer in one write and the peer's
+        // share of that stall is closed. A run that refuses at the check all the same prints the echo's record of the
+        // pair before the repeat -- its receives and its write or writes with their times -- and a repeat that refuses
+        // prints its own: the refusal is read from the record.
         const TTYDEV_STALL_LINE: &str = "FAIL shim-ttydev-blocking (VMIN 2 VTIME 1 did not answer the two echoed bytes)";
         // (the case, its tenant, its golden, its verdict line, the symbols its image must carry, the unit whose ladder it is -- the object in the control's place)
         let ladders: [(&str, &str, &str, &str, &[&str], &str); 5] = [
@@ -2491,15 +3128,20 @@ impl Shim {
             self.artifact_contract(facts, case, &rel, symbols, NO_TEMPLATE);
             let wire = if unit == "ttydev" { Some(self.echo_start(case)) } else { None };
             let (raw, code) = self.run_qemu(qemu, case, &rel, wire.as_ref().map(|w| w.0.as_str()));
-            if let Some((_, w)) = wire {
-                self.echo_end(case, w);
-            }
+            let steps = match wire {
+                Some((_, w)) => self.echo_end(case, w),
+                None => Vec::new(),
+            };
             let (raw, code) = if unit == "ttydev" && contains_fixed(&raw, TTYDEV_STALL_LINE) && !contains_fixed(&raw, all_good) {
+                println!("{}", serial_pair_record(&steps));
                 println!("   the serial ladder missed its inter-byte timer over the echo (a stall of the host between the two echoed bytes): the run repeated once on a fresh echo peer");
                 let retry = format!("{case}-retry");
                 let (addr_r, wire_r) = self.echo_start(&retry);
                 let out = self.run_qemu(qemu, &retry, &rel, Some(addr_r.as_str()));
-                self.echo_end(&retry, wire_r);
+                let steps_r = self.echo_end(&retry, wire_r);
+                if contains_fixed(&out.0, TTYDEV_STALL_LINE) {
+                    println!("{}", serial_pair_record(&steps_r));
+                }
                 out
             } else {
                 (raw, code)
@@ -2522,15 +3164,20 @@ impl Shim {
                 let (sha_c, rel_c) = self.link_image(ld, &control_case, &refs_c, &control_case.replace('.', "-"));
                 let wire_c = if unit == "ttydev" { Some(self.echo_start(&control_case)) } else { None };
                 let (raw_c, code_c) = self.run_qemu(qemu, &control_case, &rel_c, wire_c.as_ref().map(|w| w.0.as_str()));
-                if let Some((_, w)) = wire_c {
-                    self.echo_end(&control_case, w);
-                }
+                let steps_c = match wire_c {
+                    Some((_, w)) => self.echo_end(&control_case, w),
+                    None => Vec::new(),
+                };
                 let (raw_c, code_c) = if unit == "ttydev" && contains_fixed(&raw_c, TTYDEV_STALL_LINE) && !contains_fixed(&raw_c, expect) {
+                    println!("{}", serial_pair_record(&steps_c));
                     println!("   the serial ladder missed its inter-byte timer over the echo before the control's own check (a stall of the host between the two echoed bytes): the control's run repeated once on a fresh echo peer");
                     let retry = format!("{control_case}-retry");
                     let (addr_r, wire_r) = self.echo_start(&retry);
                     let out = self.run_qemu(qemu, &retry, &rel_c, Some(addr_r.as_str()));
-                    self.echo_end(&retry, wire_r);
+                    let steps_r = self.echo_end(&retry, wire_r);
+                    if contains_fixed(&out.0, TTYDEV_STALL_LINE) {
+                        println!("{}", serial_pair_record(&steps_r));
+                    }
                     out
                 } else {
                     (raw_c, code_c)
@@ -2539,6 +3186,44 @@ impl Shim {
                 self.emit_pass(&control_case, 1, "negative", broke, &sha_c, &rel_c, None);
                 println!("== case {control_case}: PASS (exit 1; the ladder refused the restored defect at its own check) ==");
             }
+        }
+
+        // The low-power port's name: the serial ladder's world and tenant linked once more with two link words. The serial
+        // unit names a block /dev/ttyLP<n>, and serves the folder /sys/class/tty that the standard class searches first,
+        // where its word __rhu_uart_lowpower_blocks has the block's bit (the SDK's link line defines the word from the
+        // board table's row). The tenant reads what it expects from a word of its own, the same mask, and then runs its
+        // names checks alone under a verdict line of their own. The row's blocks are 0 and 1; the word names block 1.
+        // The control is the same world linked with the unit's word at zero under the tenant's word: the tenant still
+        // expects the low-power name, the unit serves none, and the first check refuses.
+        {
+            let mut objs: Vec<String> = CORE3.iter().map(|o| o.to_string()).collect();
+            for o in ["goldens/shim/shim-busdev.o", "goldens/shim/shim-pwmfs.o", "goldens/shim/shim-iiofs.o", "goldens/shim/shim-ttydev.o", "goldens/shim/shim-ports-native.o", "goldens/shim/shimtest-ttydev.o"] {
+                objs.push(o.to_string());
+            }
+            let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+            let tenant_word = "--defsym=__rhu_shimtest_uart_lowpower=2";
+
+            let case = "shim.ttydev-lowpower-word";
+            println!("== case {case} (the low-power port's name and its listing: the serial world linked with __rhu_uart_lowpower_blocks = 2) ==");
+            let (sha, rel) = self.link_image_extra(ld, case, &refs, "shim-ttydev-lowpower-word", &[], &["--defsym=__rhu_uart_lowpower_blocks=2", tenant_word]);
+            let (addr, wire) = self.echo_start(case);
+            let (raw, code) = self.run_qemu(qemu, case, &rel, Some(addr.as_str()));
+            self.echo_end(case, wire);
+            let want = format!("{}\n{}\n{}\n{TTYDEV_LOWPOWER_ALL_GOOD}\n", TTYDEV_LOWPOWER_LINES[0], TTYDEV_LOWPOWER_LINES[1], TTYDEV_LOWPOWER_LINES[2]);
+            self.assert_positive_bytes(case, &raw, code, &sha, &rel, "the serial tenant's lines under its low-power word", want.as_bytes(), &[PINNED_CORE_LINES[0]], TTYDEV_LOWPOWER_ALL_GOOD);
+            self.emit_pass(case, 0, "positive", "", &sha, &rel, None);
+            println!("== case {case}: PASS (exit 0; the payload stream is the tenant's lines under the word: /sys/class/tty and /dev list ttyS0 then ttyLP1, the low-power name opens, the other kind's name answers ENOENT; the verdict line last) ==");
+
+            let control_case = "shim.ttydev-lowpower-word-zero";
+            println!("== case {control_case} (negative control) ==");
+            let broke = "the serial unit linked with its low-power word at zero under a tenant that expects block 1's low-power name (__rhu_uart_lowpower_blocks = 0)";
+            let (sha_c, rel_c) = self.link_image_extra(ld, control_case, &refs, "shim-ttydev-lowpower-word-zero", &[], &["--defsym=__rhu_uart_lowpower_blocks=0", tenant_word]);
+            let (addr_c, wire_c) = self.echo_start(control_case);
+            let (raw_c, code_c) = self.run_qemu(qemu, control_case, &rel_c, Some(addr_c.as_str()));
+            self.echo_end(control_case, wire_c);
+            self.assert_control(control_case, &raw_c, code_c, 1, broke, &sha_c, &rel_c, GOLDENS[9], TTYDEV_LOWPOWER_REFUSAL, TTYDEV_LOWPOWER_ALL_GOOD);
+            self.emit_pass(control_case, 1, "negative", broke, &sha_c, &rel_c, None);
+            println!("== case {control_case}: PASS (exit 1; the tenant refused the unit without the word at its first check) ==");
         }
     }
 
@@ -2690,6 +3375,123 @@ impl Shim {
         }
         self.emit_pass("shim.host-break-dataverify", 70, "negative", broke, &sha_b, &rel_b, None);
         println!("== case shim.host-break-dataverify: PASS (exit 70; the data check refused, and the constructor step never ran) ==");
+    }
+
+    /// The host ladder with the debug events word set: the frozen event
+    /// routine run through its breakpoint instruction. The instruction's
+    /// address is read from the linked image's own disassembly before the
+    /// run, and the run must end at the kernel's fault report at that
+    /// address (exit 2).
+    fn run_host_debug_event(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
+        const CASE: &str = "shim.host-debug-event";
+        println!("== case {CASE} ==");
+        let tenant = parse_undefined(&self.nm_dump(facts, CASE, "goldens/shim/shimtest-host-debug-event.o", true));
+        if let Some(hit) = forbidden_import(&tenant) {
+            self.fail(CASE, &format!("the tenant imports forbidden family symbol '{hit}'"));
+        }
+        let world = [
+            "goldens/shim/shim-core.o",
+            "goldens/shim/shim-busdev.o",
+            "goldens/shim/shim-pwmfs.o",
+            "goldens/shim/shim-ttydev.o",
+            "goldens/shim/shim-iiofs.o",
+            "goldens/shim/shim-sysnative.o",
+            "goldens/shim/shim-libc-glue.o",
+            "goldens/shim/shim-host.o",
+            "goldens/shim/shim-stdio-sym.o",
+            "goldens/shim/shimtest-host-debug-event.o",
+        ];
+        self.sweep_strong(facts, CASE, &world);
+        let (sha, rel) = self.link_image(ld, CASE, &world, "shim-host-debug-event");
+        self.artifact_contract(facts, CASE, &rel, &[EVENT_ROUTINE, "__lamella_debug_events"], NO_TEMPLATE);
+        let objdump = match llvm_tool(facts, "llvm-objdump") {
+            Ok(p) => p,
+            Err(e) => self.fail(CASE, &e),
+        };
+        let elf_abs = self.repo.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let elf_arg = elf_abs.to_string_lossy().into_owned();
+        let dump_p = self.out.join("shim-host-debug-event.elf.objdump");
+        let scratch = self.out.join("objdump.stderr");
+        let run = run_captured(&objdump, &["-d", "--mcpu=cortex-m7", &elf_arg], &dump_p, &scratch, Duration::from_secs(120));
+        if !matches!(run, Ok(ref o) if o.exit == 0) {
+            self.fail(CASE, "llvm-objdump failed on the linked image");
+        }
+        let listing = std::fs::read_to_string(&dump_p).unwrap_or_default();
+        let bkpt = match event_bkpt_address(&listing, EVENT_ROUTINE, EVENT_BKPT_OPERAND) {
+            Ok(a) => a,
+            Err(e) => self.fail(CASE, &format!("the linked image's disassembly: {e}")),
+        };
+        let host_golden = std::fs::read(self.repo.join("goldens").join("shim").join(GOLDENS[4])).unwrap_or_default();
+        let expect = match event_expectation(&host_golden) {
+            Some(e) => e,
+            None => self.fail(CASE, "the host golden carries no line of the event check to derive the expectation from"),
+        };
+        let (raw, code) = self.run_qemu(qemu, CASE, &rel, None);
+        if let Some(fault) = debug_event_fault(&raw, bkpt, &expect) {
+            self.fail_run(CASE, code, 2, "positive", "", &sha, &rel, &fault);
+        }
+        if code != 2 {
+            self.fail_run(CASE, code, 2, "positive", "", &sha, &rel, &format!("exit {code}, wanted 2"));
+        }
+        self.emit_pass(CASE, 2, "positive", "", &sha, &rel, None);
+        println!("== case {CASE}: PASS (exit 2; the kernel's fault report at pc=0x{bkpt:08x}, the address of the event routine's breakpoint instruction in this image; no verdict line) ==");
+    }
+
+    /// The socket family from a native caller's side: the three units'
+    /// import closures pinned for both processor classes, then one positive
+    /// image per ladder -- the store's world, the family's objects, the
+    /// ladder -- and one negative control per restored defect, the control
+    /// object linked in its unit's place under the same ladder and refused
+    /// by the ladder's own check at a line of its own.
+    fn run_sock(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
+        let world = ["goldens/shim/shim-core.o", "goldens/shim/shim-sysnative.o", "goldens/shim/shim-libc-glue.o", "goldens/shim/shim-busdev.o", "goldens/shim/shim-pwmfs.o", "goldens/shim/shim-ttydev.o", "goldens/shim/shim-iiofs.o"];
+        let pins: [(&str, &[&str]); 6] = [
+            ("shim-sockaddr.o", &IMPORTS_SOCKADDR),
+            ("shim-sockaddr-an505.o", &IMPORTS_SOCKADDR),
+            ("shim-socket.o", &IMPORTS_SOCKET),
+            ("shim-socket-an505.o", &IMPORTS_SOCKET),
+            ("shim-netinfo.o", &IMPORTS_NETINFO),
+            ("shim-netinfo-an505.o", &IMPORTS_NETINFO),
+        ];
+        for (obj, want) in pins {
+            let got = self.pin_closure(facts, SOCK_CASES[0].case, obj, want);
+            println!("   {obj}: import closure pinned exactly ({} names)", got.len());
+        }
+        for sc in &SOCK_CASES {
+            println!("== case {} ==", sc.case);
+            let ladder_rel = format!("goldens/shim/{}", sc.ladder);
+            let tenant = parse_undefined(&self.nm_dump(facts, sc.case, &ladder_rel, true));
+            if let Some(hit) = forbidden_import(&tenant) {
+                self.fail(sc.case, &format!("the tenant imports forbidden family symbol '{hit}'"));
+            }
+            let units: Vec<String> = sc.units.iter().map(|u| format!("goldens/shim/{u}")).collect();
+            let mut objs: Vec<&str> = world.to_vec();
+            objs.extend(units.iter().map(|u| u.as_str()));
+            objs.push(ladder_rel.as_str());
+            self.sweep_strong(facts, sc.case, &objs);
+            let (sha, rel) = self.link_image(ld, sc.case, &objs, &sc.case.replace('.', "-"));
+            self.artifact_contract(facts, sc.case, &rel, &[sc.extra], NO_TEMPLATE);
+            let (raw, code) = self.run_qemu(qemu, sc.case, &rel, None);
+            self.assert_positive(sc.case, &raw, code, &sha, &rel, GOLDENS[sc.golden], &[PINNED_CORE_LINES[0]], sc.all_good);
+            self.emit_pass(sc.case, 0, "positive", "", &sha, &rel, Some(GOLDENS[sc.golden]));
+            println!("== case {}: PASS (exit 0; the payload stream equals its golden; the verdict line last) ==", sc.case);
+            for &(case, replaced, obj, broke, expect) in sc.controls {
+                println!("== case {case} (negative control) ==");
+                let replaced_rel = format!("goldens/shim/{replaced}");
+                let obj_rel = format!("goldens/shim/{obj}");
+                // The unit replaced BY NAME: a replacement by position would
+                // leave the unit beside its control (duplicate symbols at the link).
+                let broken: Vec<&str> = objs.iter().map(|o| if *o == replaced_rel.as_str() { obj_rel.as_str() } else { *o }).collect();
+                if broken.iter().filter(|o| **o == obj_rel.as_str()).count() != 1 {
+                    self.fail(case, &format!("the image links no goldens/shim/{replaced} to replace with its control"));
+                }
+                let (sha_b, rel_b) = self.link_image(ld, case, &broken, &case.replace('.', "-"));
+                let (raw_b, code_b) = self.run_qemu(qemu, case, &rel_b, None);
+                self.assert_control(case, &raw_b, code_b, 1, broke, &sha_b, &rel_b, GOLDENS[sc.golden], expect, sc.all_good);
+                self.emit_pass(case, 1, "negative", broke, &sha_b, &rel_b, None);
+                println!("== case {case}: PASS (exit 1; the ladder refused the restored defect at its own check) ==");
+            }
+        }
     }
 
     /// Compile one source with the compiler of record into the gate's obj dir;
@@ -2865,7 +3667,7 @@ impl Shim {
 
     /// The shim's P/Invoke-facing surface against the pinned pack's export
     /// tables: the frozen expectation's pin ties the SDK's pin and
-    /// the generated header's tag, then each row's six link objects define
+    /// the generated header's tag, then each row's link objects define
     /// the expectation's family names exactly.
     fn run_pal_surface(&mut self, facts: &RustcFacts) {
         const CASE: &str = "shim.pal-surface";
@@ -2903,7 +3705,7 @@ impl Shim {
             if let Some(f) = surface_fault(&defined, &exp.names) {
                 self.fail(CASE, &format!("the {row} row: {f}"));
             }
-            println!("   the {row} row's twelve link objects define the expectation's {} family names exactly", exp.names.len());
+            println!("   the {row} row's {} link objects define the expectation's {} family names exactly", objs.len(), exp.names.len());
         }
         self.results.emit(&format!(
             "{{\"schema\":1,\"type\":\"case\",\"gate\":\"{}\",\"case\":\"{CASE}\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"positive\",\"image\":null,\"stats\":{{\"names\":{},\"archives\":{},\"pin\":\"{}\"}}}}",
@@ -3067,7 +3869,7 @@ impl Shim {
         let probe_rel = "src/kernel/target/shim-gate/obj/foreign-errno-probe.c";
         write_fixture(
             &self.repo.join(probe_rel.replace('/', std::path::MAIN_SEPARATOR_STR)),
-            b"#include <errno.h>\n#include \"rhu_pal_errno_net11_rc3.h\"\nint rhu_probe_value = RHU_GERR_ETIMEDOUT;\n",
+            b"#include <errno.h>\n#include \"rhu_pal_errno_net11.h\"\nint rhu_probe_value = RHU_GERR_ETIMEDOUT;\n",
         );
         let out_rel = "src/kernel/target/shim-gate/obj/foreign-errno-probe.o";
         let stdout_p = self.out.join("foreign-errno-probe.cc.stdout");
@@ -3121,7 +3923,7 @@ impl Shim {
             Err(e) => self.fail(CASE, &e),
         };
         let stripped = self.out.join("obj").join("stripped");
-        for (src, frozen, tag) in [("src/shim/rhu_host.c", "shim-host.o", "host"), ("src/shim/rhu_pal_surface_net11_rc3.c", "shim-pal-surface.o", "pal-surface")] {
+        for (src, frozen, tag) in [("src/shim/rhu_host.c", "shim-host.o", "host"), ("src/shim/rhu_pal_surface_net11.c", "shim-pal-surface.o", "pal-surface")] {
             let out_rel = format!("src/kernel/target/shim-gate/obj/{tag}-f769-control.o");
             let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
             let _ = std::fs::remove_file(&out_abs);
@@ -3192,7 +3994,7 @@ impl Shim {
             ("src/shim/rhu_shim.c", "shim-core.o", "core"),
             ("src/shim/rhu_sysnative.c", "shim-sysnative.o", "sysnative"),
             ("src/shim/rhu_host.c", "shim-host.o", "host"),
-            ("src/shim/rhu_pal_surface_net11_rc3.c", "shim-pal-surface.o", "pal-surface"),
+            ("src/shim/rhu_pal_surface_net11.c", "shim-pal-surface.o", "pal-surface"),
         ] {
             let out_rel = format!("src/kernel/target/shim-gate/obj/{tag}-an505-row-control.o");
             let out_abs = self.repo.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -3436,7 +4238,7 @@ impl Shim {
         if std::fs::create_dir_all(&dir).is_err() {
             self.fail(CASE, "cannot create the control's directory");
         }
-        let doctored = dir.join("rhu_rt_entry_net11_rc3.h");
+        let doctored = dir.join("rhu_rt_entry_net11.h");
         let _ = std::fs::remove_file(&doctored);
         let host = match std::fs::read(self.repo.join("src").join("shim").join("rhu_host.c")) {
             Ok(b) => b,
@@ -3459,7 +4261,7 @@ impl Shim {
         }
         println!("   (a) the host's copy compiles against the genuine generated header and ties the frozen host object apart from the producer stamp ({})", &got[..16]);
 
-        let genuine = std::fs::read_to_string(self.repo.join("src").join("shim").join("rhu_rt_entry_net11_rc3.h")).unwrap_or_default();
+        let genuine = std::fs::read_to_string(self.repo.join("src").join("shim").join("rhu_rt_entry_net11.h")).unwrap_or_default();
         if !genuine.contains(RT_ENTRY_DOCTOR_FROM) {
             self.fail(CASE, "the doctored copy cannot be made: the unhandled-exception slot is not where the control expects it");
         }
@@ -3547,8 +4349,11 @@ pub fn run(repo: &Path) -> ! {
     shim.run_activation(&facts, &ld, &qemu);
     shim.run_tls(&facts, &ld, &qemu);
     shim.run_host(&facts, &ld, &qemu);
+    shim.run_host_debug_event(&facts, &ld, &qemu);
+    shim.run_sock(&facts, &ld, &qemu);
     shim.run_devnodes(&facts, &ld, &qemu);
     shim.run_frozen_pool(&facts, &ld, &qemu);
+    shim.run_pwm_rows(&facts, &ld, &qemu);
     shim.run_fp_census(&facts);
     shim.run_pal_surface(&facts);
     for p in PENDING {
@@ -4022,6 +4827,44 @@ pub fn selfcheck(repo: &Path) -> ! {
     let dump = "00000000 T SystemNative_Probe\n0000000c b SystemNative_Probe.initialized\n         U __errno_location\n";
     sc.accept_probe("surface-external-names", "an external text definition read as an export, its local static and an undefined name not", external_names(dump) == vec!["SystemNative_Probe".to_string()]);
     sc.probe("surface-local-symbol-excluded", "a function's static variable, a local symbol with a family prefix, counted as an export", external_names(dump).len() == 2);
+
+    // The event case's own assertion: a capture built from the host golden
+    // as the case derives its expectation, then the kernel's fault report
+    // at a stated pc. Each refusal is read for its reason, so a probe holds
+    // only when the assertion refuses for the right one.
+    let host_golden = selfcheck_frozen(repo, GOLDENS[4]);
+    let event_expect = event_expectation(&host_golden).unwrap_or_default();
+    let mut event_head: Vec<u8> = b"rhu 0.2.0 -- banner\r\n[host] entering managed entry\r\n".to_vec();
+    for line in String::from_utf8_lossy(&event_expect).lines() {
+        event_head.extend_from_slice(line.as_bytes());
+        event_head.extend_from_slice(b"\r\n");
+    }
+    let event_report = "\r\n[fault] *** EXCEPTION: HardFault (IPSR=3) ***\r\n[fault] CFSR=0x00000000 HFSR=0x40000000 MMFAR=0x00000000 BFAR=0x00000000\r\n[fault] r0=0x00176176 r1=0x40004000 r2=0x00004442 r3=0x80000000\r\n[fault] r12=0x20007dbf lr=0x00009cf5 pc=0x000084de xpsr=0x81000000\r\n[fault] *** halted ***\r\n";
+    let mut event_genuine = event_head.clone();
+    event_genuine.extend_from_slice(event_report.as_bytes());
+    sc.accept_probe(
+        "debug-event-genuine",
+        "the host golden up to the event check, the word-set line, then the fault report at the breakpoint's address",
+        !event_expect.is_empty() && debug_event_fault(&event_genuine, 0x84de, &event_expect).is_none(),
+    );
+    sc.probe(
+        "debug-event-other-pc",
+        "the same capture read against a breakpoint two bytes further on",
+        !matches!(debug_event_fault(&event_genuine, 0x84e0, &event_expect), Some(ref f) if f.contains("the fault's pc is not")),
+    );
+    sc.probe(
+        "debug-event-no-fault",
+        "a capture that stops at the word-set line, with no fault report",
+        !matches!(debug_event_fault(&event_head, 0x84de, &event_expect), Some(ref f) if f.contains("the kernel's fault report lacks")),
+    );
+    let mut event_verdict = event_head.clone();
+    event_verdict.extend_from_slice(HOST_ALL_GOOD.as_bytes());
+    event_verdict.extend_from_slice(event_report.as_bytes());
+    sc.probe(
+        "debug-event-verdict-line",
+        "a capture that carries the host ladder's verdict line before the fault report",
+        !matches!(debug_event_fault(&event_verdict, 0x84de, &event_expect), Some(ref f) if f.contains("verdict line appeared")),
+    );
 
     sc.finish("genuine inputs accepted");
 }

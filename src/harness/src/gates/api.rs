@@ -302,7 +302,7 @@ const MARKERS_U: [&str; 2] = [
     "[api] PASS exit-word (the magic at offset 0 and the code at offset 12 by symbol: RLOG and 0 while running; RRET beside 42, 70000 and 0 for returned, RABT beside 134, -1 and -2147483648 for aborted, each read back whole and decoded; a magic outside the three refused; RLOG and 0 restored)",
     "[api] PASS handler-stack (the high-water ",
 ];
-const MARKERS_T: [&str; 16] = [
+const MARKERS_T: [&str; 18] = [
     "[api] net-pump: the network thread's statistics after the boot's exchange -- passes counted, every pass and every deadline wake under the 400 ms bound",
     "[api] PASS net-pump (the network thread ran through the boot's exchange with every pass and every deadline wake under the 400 ms bound; the counts above)",
     "[api] net-medium: the count, the medium's facts, the lease by DHCP with the record exact, the limits, the medium word, the refusals",
@@ -310,7 +310,7 @@ const MARKERS_T: [&str; 16] = [
     "[api] net-retry: the first discover unanswered by the peer, the lease on the retry after one second; the medium's rings never full",
     "[api] PASS net-retry (the first discover dropped by the peer, the retry answered, the lease after the one-second retransmit; no frame dropped for want of a slot)",
     "[api] net-refuse: every refusal by its cause -- IPv6, a type the row has not, the pool spent, a second bind, the unconnected stream, bad handles and words, the peer's reset, the connect budget, a static address and the route",
-    "[api] PASS net-refuse (IPv6 EAFNOSUPPORT, a bad type and protocol EPROTONOSUPPORT, the fifth stream EMFILE, a second bind EADDRINUSE, a bound, foreign or zero-port bind EINVAL, the unconnected stream ENOTCONN, a listen or accept on a datagram socket EINVAL, unsupported options ENOTSUP with the read-back form proven, bad words and three bad handles EINVAL at every door, a null and an IPv6 peer refused, the peer's reset ECONNREFUSED read once, the unowned address EHOSTUNREACH at the connect budget, a static address without a gateway with the off-segment connect ENETUNREACH and a bad mask EINVAL, the DHCP client armed again with its lease)",
+    "[api] PASS net-refuse (IPv6 EAFNOSUPPORT, a bad type and protocol EPROTONOSUPPORT, the fifth stream EMFILE, a second bind EADDRINUSE, a bound or foreign bind EINVAL, the unconnected stream ENOTCONN, a listen or accept on a datagram socket EINVAL, unsupported options ENOTSUP with the read-back form proven, bad words and three bad handles EINVAL at every door, a null and an IPv6 peer refused, the peer's reset ECONNREFUSED read once, the unowned address EHOSTUNREACH at the connect budget, a static address without a gateway with the off-segment connect ENETUNREACH and a bad mask EINVAL, the DHCP client armed again with its lease)",
     "[api] net-resolve: a scripted answer read back as an address record, a second name, a name the server has not, the slots exhausted, the refusals",
     "[api] PASS net-resolve (two names answered with their records through the resolver's word, a name the server has not EHOSTUNREACH, four slots taken and the fifth EAGAIN with every answer read, a bad name and bad handles EINVAL, the released slot EINVAL, the witness exact)",
     "[api] net-stream: a listener and a client over the loopback -- the connect edge, the risen bits, the accept, 26 then 3000 bytes echoed byte-exact, the peek, the half-close, the closes",
@@ -319,6 +319,8 @@ const MARKERS_T: [&str; 16] = [
     "[api] PASS net-datagram (two bound datagram sockets over the loopback: a 64-byte datagram with the sender's address round-tripped through the peek and the available door, an oversize datagram EMSGSIZE, a buffer smaller than the datagram EMSGSIZE with the datagram discarded, the default peer set and used, an unbound sender given a port of the row's choosing and its name answered, the three closed)",
     "[api] net-port: the bump door moves the global word by one and wakes a parked waiter; an idle connected stream makes no bump across two of the thread's safety deadlines (1100 ms)",
     "[api] PASS net-port (an idle connected stream moved the global word not once across two of the thread's safety deadlines (1100 ms), the waiter sleeping to its deadline; the bump door moved the word by exactly one and woke the parked waiter; the pair closed)",
+    "[api] net-bind-any: a bind to port 0 over the loopback -- a stream and its client each given a port from 49152 up and read back, the refusals, the listener's accept, two datagram sockets given two ports",
+    "[api] PASS net-bind-any (a stream bound to port 0 given a port from 49152 up, its name reading it back and a second bind EINVAL; a foreign address with port 0 EINVAL with no port spent, the client's bind to port 0 given the very next port; the listener on its given port accepting the client from the client's given port, a byte across; two datagram sockets bound to port 0 given two ports from 49152 up, a second bind EINVAL, a datagram across carrying the sender's given port; the five closes and the stream pool whole)",
 ];
 
 /// The futex + nanosecond-time + arena + kheap/TLS/thread/registry +
@@ -1241,6 +1243,348 @@ impl API {
         println!("== case api-no-board-claim: PASS (the emulator row's facts claiming no line for the board -- the Pico rows' shape: the gpio-refuse check skipped its board-line assertion and said so, its witness bound held at the floor of 0 EBUSY, the pwm-claim check skipped its own; the api flavor whole to the exit door, exit 0)");
     }
 
+    /// The case for a PWM line of a large number: the api flavor built with
+    /// the emulator row's facts stating one more PWM line inside a wider line
+    /// space (`test-pwm-high-line`), so the kernel's PWM and GPIO APIs serve
+    /// a line number that the row's own three lines never reach, and the
+    /// check of that line runs in place of the pwm-claim check. Judged by
+    /// the banner's line space and PWM count and by the check's PASS line,
+    /// which names the line's number; the image walks on to the exit
+    /// function. A positive case, not a doctored control: the facts under
+    /// the word are the shape under test.
+    fn run_pwm_high_line(&mut self) {
+        let run = self.build_and_run_echo("pwm-high-line", &["--features", "api-smoke,test-pwm-high-line"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        if let Err(why) = run_ending(code, 0, &run.raw) {
+            self.fail_case("pwm-high-line", code, 0, &sha, &path_rel, &why);
+        }
+        let markers: [&str; 6] = [
+            "flavor: api-smoke",
+            MARKER_MPU_AN500,
+            "[boot] gpio: 176 virtual lines (6 populated), 1 claimed by the board (the virtual console)",
+            "[boot] pwm: 4 lines on 2 timers; adc: 6 channels on 2 blocks",
+            PWM_HIGH_LINE_PASS,
+            MARKER_EXIT_DOOR,
+        ];
+        self.common_asserts("pwm-high-line", &run, 0, &markers, &["EXCEPTION:", "KERNEL PANIC", "[api] PASS pwm-claim ("]);
+        self.emit_case("pwm-high-line", "pass", code, 0, &sha, &path_rel);
+        println!("== case pwm-high-line: PASS (PWM line 118, the fourth of the row's facts under the word, served in a line space of 176 with its period tied to the timer's own; the api flavor whole to the exit door, exit 0)");
+    }
+
+    /// The control of the case above: the same image with the virtual
+    /// timer's own reading of the period it runs made one prescaler step
+    /// long (`test-pwm-doctored`); the check of the line ties the function's
+    /// period to the timer's own and must refuse -- the refusal's words, no
+    /// PASS line, the image dead by its panic.
+    fn run_pwm_high_line_doctored_control(&mut self) {
+        let run = self.build_and_run_echo("pwm-high-line-doctored-control", &["--features", "api-smoke,test-pwm-high-line,test-pwm-doctored"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS pwm-high-line (") && contains_fixed(&run.raw, PWM_HIGH_LINE_REFUSAL);
+        if !refused {
+            self.emit_control("pwm-high-line-doctored-control", "fail", PWM_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("pwm-high-line-doctored-control: the doctored timer's check of the line passed, or died elsewhere than the tie (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control("pwm-high-line-doctored-control", "fail", PWM_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("pwm-high-line-doctored-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control("pwm-high-line-doctored-control", "pass", PWM_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+        println!("== control pwm-high-line-doctored-control: PASS (the virtual timer running its prescaler one step long refused at the tie on line 118: the refusal's words, no PASS line; the image died by its panic, exit 1)");
+    }
+
+
+    /// The link that changes, on the established row (the api flavor with
+    /// `net` and `test-net-link-drop`): the ninth network check must PASS
+    /// after the eight inside a walk that ends through the exit function --
+    /// the virtual medium's link dropped and raised under open sockets, the
+    /// medium's word moved and its waiter woken at every change, a connected
+    /// pair ended with RHU_ECONNRESET and a connecting stream with
+    /// RHU_ENETDOWN, the listener and the datagram socket kept and serving
+    /// after the return, the lease asked again by DHCP at the return, a
+    /// static address left alone, a connection nobody accepted dropped.
+    fn run_net_link_case(&mut self) {
+        let name = "net-link-drop";
+        let run = self.build_and_run_echo(name, &["--features", "api-smoke,net,test-net-link-drop"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        if let Err(why) = run_ending(code, 0, &run.raw) {
+            self.fail_case(name, code, 0, &sha, &path_rel, &why);
+        }
+        let mut markers: Vec<&str> = vec!["flavor: api-smoke", MARKER_EXIT_DOOR, MARKER_NET_LINK, "[api] PASS net-link ("];
+        markers.extend(MARKERS_T);
+        self.common_asserts(name, &run, 0, &markers, &["EXCEPTION:", "KERNEL PANIC"]);
+        self.emit_case(name, "pass", code, 0, &sha, &path_rel);
+        println!("== case {name}: PASS (after the nine network checks the link dropped and raised three times under open sockets: the medium's word woke its waiter at every change, a connected pair read ECONNRESET and a connecting stream ENETDOWN, the listener and the datagram socket served after the return, the lease came back by DHCP, a static address stayed, a connection nobody accepted was dropped; exit 0 through the exit door)");
+    }
+
+    /// The network thread that reads no link change
+    /// (`test-net-doctored-link`): the link check must refuse at its first
+    /// wait on the medium's word -- the refusal's exact words with the wait's
+    /// timeout code, no PASS line, the image dead by its panic. A refusal at
+    /// any other step carries other words and fails the control.
+    fn run_net_link_doctored_control(&mut self) {
+        let name = "net-link-doctored-control";
+        let run = self.build_and_run_echo(name, &["--features", "api-smoke,net,test-net-link-drop,test-net-doctored-link"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS net-link (") && contains_fixed(&run.raw, NET_LINK_REFUSAL);
+        if !refused {
+            self.emit_control(name, "fail", NET_LINK_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("net-link-doctored-control: the link check passed against the thread that reads no link change, or died elsewhere than its first wait on the medium's word (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control(name, "fail", NET_LINK_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("net-link-doctored-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control(name, "pass", NET_LINK_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+        println!("== control net-link-doctored-control: PASS (the network thread reading no link change is refused by the link check at its first wait on the medium's word: the refusal's exact words with the timeout code, no PASS line; the image died by its panic) ==");
+    }
+
+    /// A name with two address records, on the established row (the api
+    /// flavor with `net` and `test-net-resolve-two`): after the nine
+    /// network checks the scripted peer's name that has two records must
+    /// read back as both, in the answer's order, where the caller allows
+    /// four; as the first where it allows one; as none where it allows
+    /// none -- inside a walk that ends through the exit function.
+    fn run_net_resolve_two_case(&mut self) {
+        let name = "net-resolve-two";
+        let run = self.build_and_run_echo(name, &["--features", "api-smoke,net,test-net-resolve-two"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        if let Err(why) = run_ending(code, 0, &run.raw) {
+            self.fail_case(name, code, 0, &sha, &path_rel, &why);
+        }
+        let mut markers: Vec<&str> = vec!["flavor: api-smoke", MARKER_EXIT_DOOR, MARKER_NET_RESOLVE_TWO, "[api] PASS net-resolve-two ("];
+        markers.extend(MARKERS_T);
+        self.common_asserts(name, &run, 0, &markers, &["EXCEPTION:", "KERNEL PANIC"]);
+        self.emit_case(name, "pass", code, 0, &sha, &path_rel);
+        println!("== case {name}: PASS (after the nine network checks the scripted peer's name with two address records read back as both in the answer's order where four were allowed, as the first where one was and as none where none was; a name with one record read one; the records past the count untouched; exit 0 through the exit door)");
+    }
+
+    /// The resolver that keeps one record of an answer
+    /// (`test-net-doctored-resolve`, the defect as it was found on a real
+    /// network): the check must refuse at its first read -- the refusal's
+    /// exact words with the count 1, no PASS line, the image dead by its
+    /// panic. A refusal at any other step carries other words and fails
+    /// the control.
+    fn run_net_resolve_doctored_control(&mut self) {
+        let name = "net-resolve-doctored-control";
+        let run = self.build_and_run_echo(name, &["--features", "api-smoke,net,test-net-resolve-two,test-net-doctored-resolve"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS net-resolve-two (") && contains_fixed(&run.raw, NET_RESOLVE_REFUSAL);
+        if !refused {
+            self.emit_control(name, "fail", NET_RESOLVE_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("net-resolve-doctored-control: the check passed against the resolver that keeps one record, or died elsewhere than its first read of the name with two (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control(name, "fail", NET_RESOLVE_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("net-resolve-doctored-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control(name, "pass", NET_RESOLVE_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+        println!("== control net-resolve-doctored-control: PASS (the resolver keeping one record of an answer is refused by the check at its first read of the name with two: the refusal's exact words with the count 1, no PASS line; the image died by its panic) ==");
+    }
+
+    /// The second name server, positive (an image of its own: the api
+    /// flavor with `net` and `test-net-resolve-second`): after the nine
+    /// network checks a static record names two name servers and the
+    /// first never answers; the stack asks the second behind the first
+    /// one's ten seconds, so the name the scripted peer has reads its
+    /// record and the name it has not reads the name error, each between
+    /// 9500 and 15000 ms -- inside a walk that ends through the exit
+    /// function.
+    fn run_net_resolve_second_case(&mut self) {
+        let name = "net-resolve-second";
+        let run = self.build_and_run_echo(name, &["--features", "api-smoke,net,test-net-resolve-second"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        if let Err(why) = run_ending(code, 0, &run.raw) {
+            self.fail_case(name, code, 0, &sha, &path_rel, &why);
+        }
+        let mut markers: Vec<&str> = vec!["flavor: api-smoke", MARKER_EXIT_DOOR, MARKER_NET_RESOLVE_SECOND, "[api] PASS net-resolve-second ("];
+        markers.extend(MARKERS_T);
+        self.common_asserts(name, &run, 0, &markers, &["EXCEPTION:", "KERNEL PANIC"]);
+        self.emit_case(name, "pass", code, 0, &sha, &path_rel);
+        println!("== case {name}: PASS (after the nine network checks, under a static record whose first name server never answers, the second was asked behind the first one's ten seconds: the name it has read its record and the name it has not read the name error, each between 9500 and 15000 ms; the DHCP client was armed again; the image left through the exit function)");
+    }
+
+    /// The stack that is handed a record's first name server alone
+    /// (`test-net-doctored-dns2`, the defect as it was): the check must
+    /// refuse at its first read -- the refusal's exact words with the
+    /// timeout's code where one record was expected, no PASS line, the
+    /// image dead by its panic. A refusal at any other step carries other
+    /// words and fails the control.
+    fn run_net_resolve_second_doctored_control(&mut self) {
+        let name = "net-resolve-second-doctored-control";
+        let run = self.build_and_run_echo(name, &["--features", "api-smoke,net,test-net-resolve-second,test-net-doctored-dns2"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS net-resolve-second (") && contains_fixed(&run.raw, NET_RESOLVE_SECOND_REFUSAL);
+        if !refused {
+            self.emit_control(name, "fail", NET_RESOLVE_SECOND_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("net-resolve-second-doctored-control: the check passed against the stack that is handed the first name server alone, or died elsewhere than its first read (the control must refuse there, with the timeout's code)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control(name, "fail", NET_RESOLVE_SECOND_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("net-resolve-second-doctored-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control(name, "pass", NET_RESOLVE_SECOND_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+        println!("== control net-resolve-second-doctored-control: PASS (the stack handed a record's first name server alone is refused by the check at its first read: the refusal's exact words with the timeout's code where one record was expected, no PASS line, the image dead by its panic)");
+    }
+
+    /// The listener that listens again, on the established row (the api
+    /// flavor with `net` and `test-net-listen-again`): after the nine
+    /// network checks an accept that finds the stream pool spent leaves the
+    /// listener with no socket; a caller meanwhile is refused with a reset;
+    /// the pass that returns a stream to the pool gives it to the listener;
+    /// the next caller is accepted and its bytes cross both ways -- inside
+    /// a walk that ends through the exit function.
+    fn run_net_listen_again_case(&mut self) {
+        let name = "net-listen-again";
+        let run = self.build_and_run_echo(name, &["--features", "api-smoke,net,test-net-listen-again"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        if let Err(why) = run_ending(code, 0, &run.raw) {
+            self.fail_case(name, code, 0, &sha, &path_rel, &why);
+        }
+        let mut markers: Vec<&str> = vec!["flavor: api-smoke", MARKER_EXIT_DOOR, MARKER_NET_LISTEN, "[api] PASS net-listen ("];
+        markers.extend(MARKERS_T);
+        self.common_asserts(name, &run, 0, &markers, &["EXCEPTION:", "KERNEL PANIC"]);
+        self.emit_case(name, "pass", code, 0, &sha, &path_rel);
+        println!("== case {name}: PASS (after the nine network checks an accept that found the stream pool spent left the listener with no socket and no error; a caller meanwhile read ECONNREFUSED inside one second; the listener listened again on the pass that returned a stream to the pool, twice; the next caller was accepted and its bytes crossed both ways; the pool whole at the end; exit 0 through the exit door)");
+    }
+
+    /// The network thread that gives a listener left with no socket none
+    /// (`test-net-doctored-listen`, the defect as it was): the check must
+    /// refuse at its wait for the listener's socket after a stream returned
+    /// to the pool -- the refusal's exact words with the count 0, no PASS
+    /// line, the image dead by its panic. The steps before that wait do not
+    /// depend on the repair, so a refusal there carries other words and
+    /// fails the control.
+    fn run_net_listen_doctored_control(&mut self) {
+        let name = "net-listen-doctored-control";
+        let run = self.build_and_run_echo(name, &["--features", "api-smoke,net,test-net-listen-again,test-net-doctored-listen"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS net-listen (") && contains_fixed(&run.raw, NET_LISTEN_REFUSAL);
+        if !refused {
+            self.emit_control(name, "fail", NET_LISTEN_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("net-listen-doctored-control: the check passed against the thread that gives a listener no socket, or died elsewhere than its wait for the listener's socket (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control(name, "fail", NET_LISTEN_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("net-listen-doctored-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control(name, "pass", NET_LISTEN_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+        println!("== control net-listen-doctored-control: PASS (the network thread giving a listener left with no socket none is refused by the check at its wait after a stream returned to the pool: the refusal's exact words with the count 0, no PASS line; the image died by its panic) ==");
+    }
+
+    /// The reset before the accept, positive (an image of its own: the api
+    /// flavor with `net` and `test-net-listen-reset`): after the nine
+    /// network checks a caller is reset before the listener's accept takes
+    /// it; the listener's socket that the stack closed listens again on
+    /// the network thread's next pass and the next caller is accepted;
+    /// then a new socket binds the port of a connection that is still
+    /// closing and serves a caller -- inside a walk that ends through the
+    /// exit function.
+    fn run_net_listen_reset_case(&mut self) {
+        let name = "net-listen-reset";
+        let run = self.build_and_run_echo(name, &["--features", "api-smoke,net,test-net-listen-reset"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        if let Err(why) = run_ending(code, 0, &run.raw) {
+            self.fail_case(name, code, 0, &sha, &path_rel, &why);
+        }
+        let mut markers: Vec<&str> = vec!["flavor: api-smoke", MARKER_EXIT_DOOR, MARKER_NET_LISTEN_RESET, "[api] PASS net-listen-reset ("];
+        markers.extend(MARKERS_T);
+        self.common_asserts(name, &run, 0, &markers, &["EXCEPTION:", "KERNEL PANIC"]);
+        self.emit_case(name, "pass", code, 0, &sha, &path_rel);
+        println!("== case {name}: PASS (after the nine network checks a caller reset before the accept left the listener's socket closed by the stack; it listened again within one second and the next caller was accepted; a new socket then bound the port of a connection that was still closing, listened and served a caller; the image left through the exit function)");
+    }
+
+    /// The network thread that puts no socket of a listener back
+    /// (`test-net-doctored-listen`, the defect as it was): the check must
+    /// refuse at its wait for the listener's socket behind the caller's
+    /// reset -- the refusal's exact words with the count 0, no PASS line,
+    /// the image dead by its panic. The steps before that wait do not
+    /// depend on the repair, so a refusal there carries other words and
+    /// fails the control.
+    fn run_net_listen_reset_doctored_control(&mut self) {
+        let name = "net-listen-reset-doctored-control";
+        let run = self.build_and_run_echo(name, &["--features", "api-smoke,net,test-net-listen-reset,test-net-doctored-listen"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS net-listen-reset (") && contains_fixed(&run.raw, NET_LISTEN_RESET_REFUSAL);
+        if !refused {
+            self.emit_control(name, "fail", NET_LISTEN_RESET_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("net-listen-reset-doctored-control: the check passed against the thread that puts no socket of a listener back, or died elsewhere than its wait for the listener's socket behind the caller's reset (the control must refuse there, with the count 0)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control(name, "fail", NET_LISTEN_RESET_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("net-listen-reset-doctored-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control(name, "pass", NET_LISTEN_RESET_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+        println!("== control net-listen-reset-doctored-control: PASS (the network thread putting no socket of a listener back is refused by the check at its wait behind the caller's reset: the refusal's exact words with 0 sockets listening, no PASS line, the image dead by its panic)");
+    }
+
+    /// The bind to port 0 whose port is not recorded
+    /// (`test-net-doctored-bind`, the main image with the network): the
+    /// ninth network check must refuse at its first name read -- the
+    /// refusal's exact words with the port 0, no PASS line, the image dead
+    /// by its panic. The eight checks before it bind no port 0 and must
+    /// pass, so a refusal there fails the control.
+    fn run_net_bind_doctored_control(&mut self) {
+        let name = "net-bind-doctored-control";
+        let run = self.build_and_run_echo(name, &["--features", "api-smoke,net,test-net-doctored-bind"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS net-bind-any (") && contains_fixed(&run.raw, NET_BIND_REFUSAL) && contains_fixed(&run.raw, "[api] PASS net-port (");
+        if !refused {
+            self.emit_control(name, "fail", NET_BIND_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("net-bind-doctored-control: the check passed against the bind that records no port, or died elsewhere than its first name read (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control(name, "fail", NET_BIND_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("net-bind-doctored-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control(name, "pass", NET_BIND_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+        println!("== control net-bind-doctored-control: PASS (the bind to port 0 that gives a port and records the caller's 0 is refused by the bind check at its first name read, after the eight checks before it passed: the refusal's exact words with the port 0, no PASS line; the image died by its panic) ==");
+    }
+
+    /// What a program can take of the row's stack pool, on the established
+    /// row (the api flavor with `test-pool-fit`, an image of its own): at
+    /// the main thread's first line the bytes never carved are the pool
+    /// less the idle thread's and that thread's stacks; the six stacks an
+    /// awaited socket program's runtime asks are all given; a third worker
+    /// is refused with the kernel's own line. The image with the network
+    /// (the network thread listed, its stack none of the pool's) and the
+    /// image without it are held to THE SAME PASS LINE: the constant below
+    /// is the one marker of both.
+    fn run_pool_fit(&mut self, name: &'static str, features: &'static str, with_net: bool) {
+        let run = self.build_and_run_echo(name, &["--features", features]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        if let Err(why) = run_ending(code, 0, &run.raw) {
+            self.fail_case(name, code, 0, &sha, &path_rel, &why);
+        }
+        let markers: Vec<&str> = vec!["flavor: api-smoke", MARKER_EXIT_DOOR, MARKER_POOL_FIT, if with_net { POOL_FIT_CENSUS_NET } else { POOL_FIT_CENSUS_PLAIN }, POOL_FIT_REFUSED_LINE, POOL_FIT_PASS];
+        self.common_asserts(name, &run, 0, &markers, &["EXCEPTION:", "KERNEL PANIC"]);
+        if contains_fixed(&run.raw, POOL_FIT_NET_THREAD) != with_net {
+            self.fail_case(name, code, 0, &sha, &path_rel, "the network thread's line is in the image without the network, or missing from the image with it");
+        }
+        self.emit_case(name, "pass", code, 0, &sha, &path_rel);
+        println!("== case {name}: PASS (at the main thread's first line 113664 of the pool's 131072 bytes never carved, the pool less the idle thread's 1024 and that thread's 16384; six stacks as an awaited socket program's runtime asks them all given with 7168 left; a third worker refused EAGAIN with the kernel's line; {}; exit 0 through the exit function) ==", if with_net { "the network thread alive with its 8192-byte stack, none of it the pool's" } else { "no other thread of the kernel's" });
+    }
+
+    /// The pool whose array carries no bytes for the kernel's own service
+    /// threads (`test-pool-doctored`, the defect as it was, on the image
+    /// with the network): the census must refuse at the main thread's first
+    /// line -- the refusal's exact words with the 8192 bytes the network
+    /// thread took, no PASS line, the image dead by its panic.
+    fn run_pool_fit_doctored_control(&mut self) {
+        let name = "pool-fit-doctored-control";
+        let run = self.build_and_run_echo(name, &["--features", "api-smoke,net,test-pool-fit,test-pool-doctored"]);
+        let (sha, path_rel, code) = (run.sha.clone(), run.path_rel.clone(), run.exit);
+        let refused = !contains_fixed(&run.raw, "[api] PASS pool-fit (") && contains_fixed(&run.raw, POOL_FIT_REFUSAL);
+        if !refused {
+            self.emit_control(name, "fail", POOL_FIT_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail("pool-fit-doctored-control: the check passed against the pool that carries no bytes for the kernel's own threads, or died elsewhere than its census (the control did not bite)");
+        }
+        if let Err(why) = run_ending(code, 1, &run.raw) {
+            self.emit_control(name, "fail", POOL_FIT_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+            self.ctx.gate_fail(&format!("pool-fit-doctored-control: {why} (the control did not die as designed)"));
+        }
+        self.emit_control(name, "pass", POOL_FIT_DOCTORED_BROKE, code, 1, &sha, &path_rel);
+        println!("== control pool-fit-doctored-control: PASS (the pool whose array carries no bytes for the kernel's own threads is refused by the census at the main thread's first line: 105472 never carved where the pool less the two stacks is 113664, the 8192 the network thread took; no PASS line; the image died by its panic) ==");
+    }
 
     /// The four network controls on the established row (the api flavor
     /// with the `net` feature over the virtual medium): (1) the scripted peer
@@ -2016,6 +2360,32 @@ const NET_ARP_SILENT_BROKE: &str = "the virtual medium's scripted peer never ans
 const NET_BUMP_DOCTORED_BROKE: &str = "the network thread bumping the global event word every pass without a mask change, the storm the event port's recipe must never see (test-net-doctored-bump)";
 const NET_SLOW_PUMP_BROKE: &str = "the network thread spending half a second of busy work per pass, so its longest pass passes the pump check's bound (test-net-doctored-slow)";
 const NET_BUDGET_DOCTORED_BROKE: &str = "the network pool's table with a stream receive buffer a megabyte wide, which the compile-time assertion against the row's RAM window must refuse (test-net-doctored-budget)";
+const NET_LINK_DOCTORED_BROKE: &str = "the network thread reading no link change, so the medium's word never moves at the virtual medium's link drop and the link check's first wait runs to its deadline (test-net-doctored-link)";
+/// The link check's header line, and the doctored thread's exact refusal: the first wait on the medium's word run to its deadline.
+const MARKER_NET_LINK: &str = "[api] net-link: the virtual medium's link dropped and raised under open sockets -- the medium's word, a connected pair and a connecting stream ended with their codes, the listener and the datagram socket kept, the lease asked again at the return, a static address left alone, a connection nobody accepted";
+const NET_LINK_REFUSAL: &str = "net-link: the medium's word did not move within 1000 ms of the link's drop (the wait answered -110)";
+const NET_RESOLVE_DOCTORED_BROKE: &str = "the resolver keeping one address record of an answer, so the scripted peer's name with two records reads back as one (test-net-doctored-resolve)";
+const MARKER_NET_RESOLVE_TWO: &str = "[api] net-resolve-two: a name with two address records -- both read in the answer's order where four are allowed, the first where one is, none where none is; a name with one record; the records past the count untouched";
+const NET_RESOLVE_REFUSAL: &str = "net-resolve-two: the name with two address records read 1 where 2 were expected";
+const NET_RESOLVE_SECOND_DOCTORED_BROKE: &str = "the stack handed a record's first name server alone, so a name is never asked of the second name server when the first does not answer (test-net-doctored-dns2)";
+const MARKER_NET_RESOLVE_SECOND: &str = "[api] net-resolve-second: a record with two name servers whose first never answers -- the second asked behind the first one's ten seconds, a name it has read as its record and a name it has not as EHOSTUNREACH";
+const NET_RESOLVE_SECOND_REFUSAL: &str = "net-resolve-second: the name that the second name server has read -110 where 1 record was expected";
+const NET_LISTEN_DOCTORED_BROKE: &str = "the network thread giving a listener left with no socket none, so a listener whose accept found the stream pool spent never listens again (test-net-doctored-listen)";
+const MARKER_NET_LISTEN: &str = "[api] net-listen: a listener whose accept finds the stream pool spent -- left with no socket, a caller refused with a reset meanwhile, listening again on the pass that returns a stream to the pool, the next caller accepted";
+const NET_LISTEN_REFUSAL: &str = "net-listen: the listener did not listen again within 1000 ms of a stream's return to the pool (0 sockets listening)";
+const NET_LISTEN_RESET_DOCTORED_BROKE: &str = "the network thread putting no socket of a listener back, so a listener whose caller was reset before the accept never listens again (test-net-doctored-listen)";
+const MARKER_NET_LISTEN_RESET: &str = "[api] net-listen-reset: a caller reset before the accept -- the listener's socket that the stack closed listens again on the network thread's next pass and the next caller is accepted; then a bind to the port of a connection that is still closing";
+const NET_LISTEN_RESET_REFUSAL: &str = "net-listen-reset: the listener's socket did not listen again within 1000 ms of its caller's reset (0 sockets listening)";
+const NET_BIND_DOCTORED_BROKE: &str = "the bind to port 0 that gives a port of the row's choosing and records the caller's 0, so the socket's own name reads no port (test-net-doctored-bind)";
+const NET_BIND_REFUSAL: &str = "net-bind-any: the stream bound to port 0 reads its port as 0 where a port from 49152 up was expected";
+const POOL_FIT_DOCTORED_BROKE: &str = "the stack pool's array carrying no bytes for the kernel's own service threads, so the network thread's stack comes out of a program's pool (test-pool-doctored)";
+const MARKER_POOL_FIT: &str = "[api] pool-fit: what a program can take of the row's stack pool -- the census at the main thread's first line, six stacks as an awaited socket program's runtime asks them, the refusal past the pool";
+const POOL_FIT_CENSUS_NET: &str = "[api] pool-fit: at the first line 113664 never carved of 131072; the idle thread's stack 1024 and this thread's 16384; 1 other threads of the kernel's own with 8192 bytes of stack, none of it the pool's";
+const POOL_FIT_CENSUS_PLAIN: &str = "[api] pool-fit: at the first line 113664 never carved of 131072; the idle thread's stack 1024 and this thread's 16384; 0 other threads of the kernel's own with 0 bytes of stack, none of it the pool's";
+const POOL_FIT_NET_THREAD: &str = "[api] pool-fit: the kernel's own thread net holds a stack of 8192 bytes";
+const POOL_FIT_REFUSED_LINE: &str = "[sched] spawn refused: a stack of 16384 bytes asked; the pool of 131072 bytes has 7168 never carved and 0 retired stacks";
+const POOL_FIT_PASS: &str = "[api] PASS pool-fit (the pool of 131072 bytes: at the main thread's first line 113664 never carved, the pool less the idle thread's 1024 and this thread's 16384, and no stack retired; six stacks of 16384, 16384, 16384, 24576, 16384 and 16384 bytes all given, 7168 never carved after them; a third worker of 16384 refused EAGAIN and the report unmoved)";
+const POOL_FIT_REFUSAL: &str = "pool-fit: 105472 bytes never carved at the main thread's first line where the pool of 131072 less the idle thread's 1024 and this thread's 16384 is 113664: the kernel's own threads took 8192 of a program's bytes";
 const HEADER_DOCTORED_BROKE: &str = "a copy of include/rhu.h with one door's name declared as a type as well (a typedef struct rhu_net_count inserted before the prototype of rhu_net_count), which the compiler of record must refuse as a redefinition of the name as a different kind of symbol";
 
 /// The header the case compiles, repo-relative: the artifact of record.
@@ -2103,6 +2473,12 @@ fn header_refusal(ok: bool, stderr_text: &str) -> Result<(), String> {
     Ok(())
 }
 const PWM_DOCTORED_BROKE: &str = "the virtual timer's own reading of the period it runs made one prescaler step long, so the door's achieved period and the timer's disagree (test-pwm-doctored)";
+/// The PASS line of the api flavor's check of the PWM line of a large number
+/// (`test-pwm-high-line`), whole, and the words of its refusal at the tie
+/// under the doctored timer: the period as set, and the timer's own reading
+/// one prescaler step long.
+const PWM_HIGH_LINE_PASS: &str = "[api] PASS pwm-high-line (line 118 served on timer 2 channel 1 at 1000000 ns; 1 busy and 4 invalid refusals counted)";
+const PWM_HIGH_LINE_REFUSAL: &str = "pwm-high-line: the period reads 1000000 ns but the timer runs 2000000 ns";
 const ADC_DOCTORED_BROKE: &str = "the virtual loop channel answering the previous conversion's sample, a stale conversion at the second reading (test-adc-doctored)";
 const ADC_FLAGGED_DOCTORED_BROKE: &str = "the virtual converter answering a flagged conversion's undefined result as a sample instead of discarding it (test-adc-flagged-doctored)";
 const RAM_DOCTORED_BROKE: &str = "the RAM-range count door answering one range more than the board's facts state, with a record for the phantom (test-ram-doctored)";
@@ -2258,6 +2634,8 @@ pub fn run(repo: &Path) -> ! {
     api.run_bus_doctored_control();
     api.run_bus_rp2350();
     api.run_pwm_doctored_control();
+    api.run_pwm_high_line();
+    api.run_pwm_high_line_doctored_control();
     api.run_adc_doctored_control();
     api.run_adc_flagged_case();
     api.run_adc_flagged_doctored_control();
@@ -2268,6 +2646,20 @@ pub fn run(repo: &Path) -> ! {
     api.run_rezero_doctored_control();
     api.run_no_board_claim();
     api.run_net_controls();
+    api.run_net_link_case();
+    api.run_net_link_doctored_control();
+    api.run_net_resolve_two_case();
+    api.run_net_resolve_doctored_control();
+    api.run_net_resolve_second_case();
+    api.run_net_resolve_second_doctored_control();
+    api.run_net_listen_again_case();
+    api.run_net_listen_doctored_control();
+    api.run_net_listen_reset_case();
+    api.run_net_listen_reset_doctored_control();
+    api.run_net_bind_doctored_control();
+    api.run_pool_fit("pool-fit", "api-smoke,net,test-pool-fit", true);
+    api.run_pool_fit("pool-fit-plain", "api-smoke,test-pool-fit", false);
+    api.run_pool_fit_doctored_control();
     api.run_hang_controls();
     api.ctx.results.emit_summary(GATE, "pass", 0);
     if !validate_results(repo, api.ctx.results.path()) {

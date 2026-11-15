@@ -43,15 +43,39 @@ lamella-psram-qspi = { path = "../psram-qspi", version = "0.1.0", optional = tru
 # interrupt, no vector and no memory of its own: the kernel keeps every
 # buffer and drives the stack from its own pump. Behind the `net` feature
 # below and nothing else; with the feature off every row's image is
-# byte-identical to the image without this line (measured).
-smoltcp = { version = "=0.14.0", optional = true, default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "socket-dhcpv4", "socket-dns"] }
+# byte-identical to the image without this line (measured). The stack's
+# resolver is built to keep two address records of an answer
+# (`dns-max-result-count-2`; its own default is one), the two the kernel's
+# resolver slot holds: net.rs asserts the pair at compile time. It is
+# built to ask two name servers (`dns-max-server-count-2`; its own default
+# is one, and it cuts a longer list to its count without a word), the two
+# a lease record carries: net.rs asserts that pair too.
+smoltcp = { version = "=0.14.0", optional = true, default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "socket-dhcpv4", "socket-dns", "dns-max-result-count-2", "dns-max-server-count-2"] }
+# The wifi driver for the Pimoroni boards' wireless module (the
+# `lamella-wifi-cyw4343x` crate, in this tree beside the PSRAM crate), a
+# library on `core` alone with the RP2350's programmable I/O block as its
+# bus engine. Behind the `wifi-cyw43` feature below and nothing else: no
+# board feature and not `net` itself brings it, so every other archive is
+# byte-identical to the archive without this line (measured). The driver's
+# own stack adapter is not enabled: the kernel's medium seam presents the
+# driver to the stack.
+lamella-wifi-cyw4343x = { path = "../wifi-cyw4343x", version = "0.1.0", optional = true }
 
 [features]
 default = ["qemu-exit", "board-mps2-an500"]
 # The kernel's network API over the vendored stack, OFF by default on every row:
-# the stack and its arithmetic (net_math.rs), the functions, the virtual medium
-# and the api checks.
+# the stack and its arithmetic (net_math.rs), the functions, the emulator rows'
+# virtual medium with the api checks, the STM32F769 row's Ethernet controller.
 net = ["dep:smoltcp"]
+# The radio as the network's medium on the two Pimoroni boards that carry a
+# wireless module and PSRAM (the Pico Plus 2 W and the Pico LiPo 2 XL W), at
+# the PLL posture: the wifi driver, the reader of the network stored on the
+# board, the check of the radio's firmware in its corner of the flash, and
+# the medium behind the seam. Implies `net`. On any other board, and beside
+# a board's crystal posture, build.rs refuses it by name; `net` alone on
+# those two boards stays what it was, the functions that answer that the
+# board has no network.
+wifi-cyw43 = ["net", "dep:lamella-wifi-cyw4343x", "lamella-wifi-cyw4343x/rp2350-pio"]
 # Exactly one board feature must be selected (src/board/mod.rs enforces).
 # The boards in the registry's order: the emulator rows first, then the
 # silicon rows by maker and model.
@@ -271,6 +295,46 @@ test-net-doctored-arp = []
 test-net-doctored-bump = []
 test-net-doctored-slow = []
 test-net-doctored-budget = []
+# The link case and its control (the api gate's, on the emulator row with
+# the net feature): `test-net-link-drop` gives the virtual medium a link
+# the api flavor's ninth network check drops and raises, and compiles that
+# check; `test-net-doctored-link` makes the network thread read no link
+# change, which the check's first wait on the medium's word must refuse.
+test-net-link-drop = []
+test-net-doctored-link = []
+# The resolver's case and its control (the api gate's, on the emulator row
+# with the net feature): `test-net-resolve-two` compiles the check that asks
+# the scripted peer for its name with two address records and reads both;
+# `test-net-doctored-resolve` makes the resolver keep one record of an
+# answer, which the check's first read must refuse.
+test-net-resolve-two = []
+test-net-doctored-resolve = []
+# The second name server's case and its control (the same gate and row):
+# `test-net-resolve-second` compiles the check that sets a static record
+# whose first name server never answers and asks its second, the scripted
+# peer, for a name it has and a name it has not; `test-net-doctored-dns2`
+# hands the stack the record's first name server alone, which the check's
+# first read must refuse.
+test-net-resolve-second = []
+test-net-doctored-dns2 = []
+# The listener's case and its control (the same gate and row):
+# `test-net-listen-again` compiles the check that spends the stream pool
+# under a listener's accept and returns a stream to it, and the probe that
+# check reads; `test-net-doctored-listen` makes the network thread give a
+# listener left with no socket none, which the check's wait must refuse.
+test-net-listen-again = []
+test-net-doctored-listen = []
+# The reset before the accept (the same gate and row, the same control
+# word): `test-net-listen-reset` compiles the check whose caller is reset
+# before the listener's accept takes it, and the two probes that check
+# uses -- the reset itself, which no kernel function asks of the stack,
+# and the count of a listener's sockets that listen.
+test-net-listen-reset = []
+# The bind to port 0 and its control (the same gate and row): the api
+# image's bind check asks a port of the row's choosing and reads it back;
+# `test-net-doctored-bind` gives the port and records the caller's 0, which
+# the check's first name read must refuse.
+test-net-doctored-bind = []
 # Gate flavors: deliberately exercise the panic / fault path after the
 # selftests pass.
 test-panic = ["stack-watermark"]
@@ -386,9 +450,11 @@ test-stack-watermark-doctored = []
 # HardFault the funnel names from handler mode, and the watermark line reads
 # the handler stack's deepest use.
 test-fault-in-handler = ["stack-watermark"]
-# The PWM and ADC functions' doctored controls (the emulator rows only), never a
-# shipped image: the virtual timer reads its own period one prescaler step
-# long; the virtual loop channel answers the previous conversion's sample.
+# The PWM and ADC functions' doctored controls, never a shipped image: the
+# timer backend (the emulator rows' virtual timer, the ST rows' timer
+# block) reads its own period one prescaler step long; the emulator rows'
+# virtual loop channel, and the ST rows' converter backends, answer the
+# previous conversion's sample.
 test-pwm-doctored = []
 test-adc-doctored = []
 # The converter's conversion-error path (the emulator rows only), never a
@@ -472,6 +538,62 @@ test-sd-doctored = []
 # after the boot, so the transcript fits the console mirror a bench rig reads
 # over the debug probe; requires api-smoke and a row with a microSD socket.
 test-sd-flight = []
+# The flight flavor of the wired row's api image: the network flight alone
+# after the boot, on a real wire -- a lease from the network's own server, two
+# lookups, datagrams and streams with two small peer programs on a bench
+# machine found by one broadcast datagram, the link dropped and returned by
+# a hand at the jack; every address the image prints is masked. Requires
+# api-smoke, net and the row with the Ethernet controller; never a shipped
+# image.
+test-net-flight = []
+# The flight flavor of an ST timer row's api image: the PWM check alone after
+# the boot, on the board's own connector pins -- every line of the row's
+# table claimed and set, the period tied to the timer's own registers, the
+# pad read back through its input register, and one case on a jumper wire
+# that reads skipped without the wire. Requires api-smoke and a row whose
+# PWM lines are ST timer channels; never a shipped image.
+# `test-io2-probe` (the STM32U5 row alone, beside it) leaves the second I/O
+# supply's step out of the boot, so that the check reads a pin of that
+# supply as the reset leaves it, runs the step and reads the pin again.
+test-pwm-flight = []
+test-io2-probe = []
+# The ST converter rows' flight flavor of the api image: the analog check
+# alone, on the board's own connector pins -- every channel of the flight's
+# own list claimed and converted inside its budget, the internal reference
+# read inside the band its datasheet gives, and one case on a jumper wire
+# from a PWM pin to an analog pin that reads skipped without the wire.
+# Requires api-smoke and a row whose analog pins are channels of the chip's
+# converters; never a shipped image. Its control is `test-adc-doctored`
+# beside it (stated above: the backend answers the sample before the last).
+# `test-asv-probe` (the STM32U5 row alone, beside it) leaves the converter's
+# power-up to the check, which powers it with the analog supply's valid bit
+# clear, runs the supply's step and powers it again.
+test-adc-flight = []
+test-asv-probe = []
+# The stack pool's flight check (`test-pool-fit`: the api gate's pool-fit
+# cases on the emulator row with the network and without it, and a bench
+# flight on a row with a card socket): what a program can take of the row's
+# pool at the main thread's first line, the six stacks an awaited socket
+# program's runtime asks, the refusal past the pool. Requires api-smoke;
+# never a shipped image. Its control is `test-pool-doctored`: the pool's
+# array carries no bytes for the kernel's own service threads, so they take
+# a program's, which the check must refuse.
+test-pool-fit = []
+test-pool-doctored = []
+# The ST serial rows' flight flavor of the api image: the serial check
+# alone, on the connector's D0 and D1 -- the port's block read back from
+# the backend's record, the table stated and enumerated, the divisor and
+# the frame fields read back from the block at each rate and frame, the
+# frames and rates the block cannot serve refused, every byte value out and
+# back over the chip's own loop, the transmitter timed against the kernel's
+# clock, the claims refused while the port is held, and one case on a
+# jumper wire from D1 to D0 that reads skipped without the wire. Requires
+# api-smoke and a row with a serial port on an ST block; never a shipped
+# image. Its control is `test-uart-doctored` beside it: the backend writes
+# the divisor twice as long as the rate rule gives, a fault a loop cannot
+# see, which the read-back case and the timed case must refuse.
+test-uart-flight = []
+test-uart-doctored = []
 # The STM32H7 rows' three compile-time refusals (negative build cases checked on
 # the development machine; never a shipped image). `test-h7-supply-doctored` forces the
 # Portentas' supply wiring onto the GIGA row, whose facts say the switching
@@ -529,6 +651,14 @@ test-rezero-doctored = []
 # floor of 0 EBUSY, the pwm-claim check's the same, the image whole to its exit
 # function.
 test-no-board-claims = []
+# The emulator rows' PWM line of a large number (never a shipped image): under
+# this word the rows' facts (src/board/facts/mps2.rs) state a wider line space
+# and one more PWM line inside it, on the second virtual timer's free channel,
+# so a line number that the rows' three lines never reach is served on the
+# emulator. A word of the facts: it holds in every flavor, and the api flavor
+# runs its check of that line (src/api_smoke/pwm_high.rs) in place of the
+# pwm-claim check. Refused beside `test-no-board-claims` (the facts file).
+test-pwm-high-line = []
 # The GPIO acceptance run's image on the boards with a button row (a test image, not a product image):
 # the LED row blinked for the eye, then a bounded wait for a press that lights it.
 test-gpio-button = []

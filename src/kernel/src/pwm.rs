@@ -16,7 +16,7 @@
 //! witness. No interrupt: a timer runs free once set. The claims' few
 //! instructions and the witness's writes are the only critical sections.
 
-#![cfg_attr(not(rhu_pwm_adc_rows), allow(dead_code))]
+#![cfg_attr(not(any(rhu_pwm_adc_rows, rhu_pwm_st)), allow(dead_code))]
 
 use core::ptr::{addr_of_mut, read_volatile, write_volatile};
 
@@ -118,7 +118,7 @@ pub fn line(index: u32) -> i32 {
 }
 
 
-#[cfg(rhu_pwm_adc_rows)]
+#[cfg(any(rhu_pwm_adc_rows, rhu_pwm_st))]
 mod served {
     use super::*;
     use crate::board::pwm_backend as hw;
@@ -326,41 +326,41 @@ mod served {
     }
 }
 
-#[cfg(rhu_pwm_adc_rows)]
+#[cfg(any(rhu_pwm_adc_rows, rhu_pwm_st))]
 pub use served::{claim, enable, info, line_held, period, release, set};
 
 
-#[cfg(not(rhu_pwm_adc_rows))]
+#[cfg(not(any(rhu_pwm_adc_rows, rhu_pwm_st)))]
 pub fn line_held(_line: u32) -> bool {
     false
 }
 
-#[cfg(not(rhu_pwm_adc_rows))]
+#[cfg(not(any(rhu_pwm_adc_rows, rhu_pwm_st)))]
 pub fn claim(line: u32) -> i32 {
     refused(line, sched::ERR_NODEV)
 }
 
-#[cfg(not(rhu_pwm_adc_rows))]
+#[cfg(not(any(rhu_pwm_adc_rows, rhu_pwm_st)))]
 pub fn set(h: i32, _period_ns: u64, _duty_ns: u64, _polarity: u32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
 
-#[cfg(not(rhu_pwm_adc_rows))]
+#[cfg(not(any(rhu_pwm_adc_rows, rhu_pwm_st)))]
 pub fn period(h: i32, _achieved_ns: *mut u64) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
 
-#[cfg(not(rhu_pwm_adc_rows))]
+#[cfg(not(any(rhu_pwm_adc_rows, rhu_pwm_st)))]
 pub fn enable(h: i32, _on: u32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
 
-#[cfg(not(rhu_pwm_adc_rows))]
+#[cfg(not(any(rhu_pwm_adc_rows, rhu_pwm_st)))]
 pub fn release(h: i32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }
 
-#[cfg(not(rhu_pwm_adc_rows))]
+#[cfg(not(any(rhu_pwm_adc_rows, rhu_pwm_st)))]
 pub fn info(h: i32, _timer: *mut u32, _channel: *mut u32, _clock_hz: *mut u32) -> i32 {
     refused(h as u32, sched::ERR_NODEV)
 }

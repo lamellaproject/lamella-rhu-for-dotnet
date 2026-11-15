@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The gate's class library between a program and another class
+       library: the program dbgvia references it by project, and it
+       references the class library dbgownlib by project. Via.cs carries
+       no comment. -->
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../dbgownlib/dbgownlib.csproj" />
+  </ItemGroup>
+
+</Project>

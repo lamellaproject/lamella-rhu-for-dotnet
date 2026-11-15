@@ -28,6 +28,14 @@ namespace Lamella.Rhu.Build
 
         public bool RuntimeTested { get; set; }
 
+        // How the framework's and every package's code was compiled: optimized with the code optimization on, unoptimized without it.
+        [Required]
+        public string CodegenProfile { get; set; } = string.Empty;
+
+        // How the program's own code was compiled, in the same two words.
+        [Required]
+        public string ProgramCodegen { get; set; } = string.Empty;
+
         [Required]
         public string ConsoleChannel { get; set; } = string.Empty;
 
@@ -56,6 +64,16 @@ namespace Lamella.Rhu.Build
                 if (!File.Exists(Image))
                 {
                     Log.LogError("REFUSE: the image's manifest was not written: no image at {0}", Image);
+                    return false;
+                }
+                if (CodegenProfile != "unoptimized" && CodegenProfile != "optimized")
+                {
+                    Log.LogError("REFUSE: the image's manifest was not written: the codegen profile '{0}' is neither unoptimized nor optimized", CodegenProfile);
+                    return false;
+                }
+                if (ProgramCodegen != "unoptimized" && ProgramCodegen != "optimized")
+                {
+                    Log.LogError("REFUSE: the image's manifest was not written: the program's codegen '{0}' is neither unoptimized nor optimized", ProgramCodegen);
                     return false;
                 }
                 byte[] elf = File.ReadAllBytes(Image);
@@ -183,7 +201,8 @@ namespace Lamella.Rhu.Build
             sb.Append("  \"layout_version\": ").Append(h.LayoutVersion.ToString(CultureInfo.InvariantCulture)).Append(",\n");
             sb.Append("  \"abi\": ").Append(h.Abi.ToString(CultureInfo.InvariantCulture)).Append(",\n");
             sb.Append("  \"debug_layout_version\": ").Append(h.DebugLayoutVersion.ToString(CultureInfo.InvariantCulture)).Append(",\n");
-            sb.Append("  \"codegen_profile\": \"ship\",\n");
+            sb.Append("  \"codegen_profile\": ").Append(Quote(CodegenProfile)).Append(",\n");
+            sb.Append("  \"program_codegen\": ").Append(Quote(ProgramCodegen)).Append(",\n");
             sb.Append("  \"runtime\": ").Append(Quote(Runtime)).Append(",\n");
             sb.Append("  \"runtime_tested\": ").Append(RuntimeTested ? "true" : "false").Append(",\n");
             sb.Append("  \"console_channel\": ").Append(Quote(ConsoleChannel)).Append(",\n");

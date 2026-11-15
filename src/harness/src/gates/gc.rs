@@ -207,14 +207,14 @@ const IMPORTS_HOST_DRIVE: [&str; 9] = [
 ];
 
 /// The flat GCToEEInterface surface at the pinned tag: 53 methods (the
-/// IGCToCLR virtual count). The gc.B artifact
+/// IGCToCLR virtual count). The gc.allocator artifact
 /// check ties this three ways -- header declarations, probe REF sites,
 /// probe-object undefined symbols -- at the NAME level.
 const EE_SURFACE: usize = 53;
 
 /// The init-time call inventory of the activation boot (the union of
-/// the skeleton's logged calls over gc.A's positive run -- and over the
-/// gc.B control's run, which dies at the first allocation before any
+/// the skeleton's logged calls over gc.activation's positive run -- and over the
+/// gc.allocator control's run, which dies at the first allocation before any
 /// further surface call).
 const INVENTORY_ACTIVATION: [&str; 3] = [
     "IGCHandleManager::GetGlobalHandleStore",
@@ -347,7 +347,7 @@ const IMPORTS_COLLECT_BREAK: [&str; 24] = [
     "vsnprintf",
 ];
 
-/// The collect-world host object's exact import closure: the gc.B
+/// The collect-world host object's exact import closure: the gc.allocator
 /// drive five plus the six kernel verbs of the suspension world
 /// (spawn/suspend/resume/stack-bounds from the thread family, yield
 /// behind sched_yield, sleep for the deterministic windows).
@@ -390,8 +390,8 @@ const INVENTORY_COLLECT: [&str; 13] = [
     "IGCHeap::WhichGeneration",
 ];
 
-/// The positive gc.C census lines, pinned exact per collection (the
-/// derivation is the gc.C case's; the same numbers must
+/// The positive gc.mark census lines, pinned exact per collection (the
+/// derivation is the gc.mark case's; the same numbers must
 /// repeat at collection #2 -- the bitmap-reset proof). The break-roots
 /// control proves these very pins ABSENT (the detector bites).
 const CENSUS_ROOTS_LINE: &str = "[mgc-coll] roots: stacks=2 handles=1 (weak_skipped=1) dep_seen=1 dep_marked=1 finq=1 frozen_objs=2 frozen_edges=1";
@@ -1087,7 +1087,7 @@ const INVENTORY_TUNE_BREAK: [&str; 14] = [
     "IGCHeap::WhichGeneration",
 ];
 
-/// gc.C-sweep census pins, derived on paper from the schedule + the
+/// gc.sweep census pins, derived on paper from the schedule + the
 /// root graph + the collector's own arithmetic (throttle indices
 /// included: census lines print for #1-6 and every 8th; full logs
 /// for #1-4 and every 16th).
@@ -1108,7 +1108,7 @@ const SW_MARK_5: &str = "[mgc-coll] mark census #5: roots=7 marked=8 marked_byte
 const SW_DEATH_1_BREAK: &str = "[mgc-coll] death #1: ws_null=0 wl_null=0 dep_clear=0 odd=0 | finq kept=1 eager=1 suppressed=1 promoted=2(+1 crit) freach_pending=3";
 const SW_DEATH_2_BREAK: &str = "[mgc-coll] death #2: ws_null=0 wl_null=0 dep_clear=0 odd=0 | finq kept=1 eager=0 suppressed=0 promoted=0(+0 crit) freach_pending=0";
 
-/// gc.D census pins. The death line at collection #1 is BYTE-EQUAL to
+/// gc.windows census pins. The death line at collection #1 is BYTE-EQUAL to
 /// the sweep world's (SW_DEATH_1 is reused) -- the death pipeline is
 /// posture-invariant, and that cross-pin is deliberate.
 const TN_QUALS_1: &str = "[mgc-coll] quals: interior=1 (unresolved=0) pinned=1 nulls=2 out_of_heap=1 re_marks=3 ctx_seen=3 ctx_nonzero=1";
@@ -1129,10 +1129,10 @@ const TN_SELFTEST: &str = "[mgc-skel] handle reuse self-test: 200 create/destroy
 
 /// The region size the gate compiles into the allocator boot (a
 /// gate-image knob on the QEMU an500 payload map, comfortably inside
-/// the arena window; per-board knob rows are the gc.E deliverable).
+/// the arena window; per-board knob rows are the gc.board-table deliverable).
 const GATE_HEAP_BYTES: u32 = 2 * 1024 * 1024;
 
-/// gc.E row pins. The row world is the tune world under the DECLARED
+/// gc.board-table row pins. The row world is the tune world under the DECLARED
 /// an500 row (src/gc/host/mgc_board_rows.h): every address-free tune
 /// pin carries verbatim (TUNE_DRIVE_PINS below is shared by both
 /// cases) and the row adds its census, the containment verdict, the
@@ -1159,12 +1159,12 @@ const ROW_BOOT_MORE_KNOB: &str = "[mgc-heap] BREAK_BOOT_MORE: the managed heap t
 const ROW_REFUSAL_TEXT: &str = "evidence postures never ride a row image";
 const ROW_COVER_FAILFAST: &str = "[mgc-heap] FAIL-FAST: card cover too small for region placement (raise MGC_ARENA_COVER_BYTES)";
 
-/// The tune-world drive pins (address-free), shared verbatim by gc.D
-/// and gc.E: the row changes bookkeeping geometry, never behavior, so
+/// The tune-world drive pins (address-free), shared verbatim by gc.windows
+/// and gc.board-table: the row changes bookkeeping geometry, never behavior, so
 /// one list is the single truth for both worlds' wire.
 const TUNE_DRIVE_PINS: &[&str] = &[
     "[gc-host] GC ACTIVATION OK (heap + handle manager live; the allocator drive follows)",
-    "[gc-host] gc.D windows+event drive: the same payload under window posture, the GC-done futex, and the activation break-out",
+    "[gc-host] gc.windows windows+event drive: the same payload under window posture, the GC-done futex, and the activation break-out",
     TN_SELFTEST,
     "[gc-host] alloc #2 size=28 FAST-PATH from the window: zero-born OK, free-object birth stored",
     "[gc-host] alloc #2 adjacent to #1: the bump advanced exactly 24 bytes",
@@ -1976,14 +1976,14 @@ fn drive_case_fault(c: &DriveCase) -> Option<String> {
 const FORBIDDEN_IMPORT_FAMILIES: [&str; 5] = ["_Unwind", "__cxa", "_ZSt", "__aeabi_f", "__aeabi_d"];
 
 const PENDING: [&str; 1] = [
-    "gc.C remainder: managed value-set battery + doctored-golden control (rt world)",
+    "gc.mark remainder: managed value-set battery + doctored-golden control (rt world)",
 ];
 
 /// The compile-tier posture control: listed in every consumer run (the
 /// pending-list idiom -- stated loudly, never counted), armed on the
 /// re-derivation leg, where the compiler is.
 const INTERNAL_CASES: [&str; 2] = [
-    "gc.E-posture-refused -- compile-tier; runs under 'rhu-gate gc rederive' with the compiler of record",
+    "gc.board-table-posture-refused -- compile-tier; runs under 'rhu-gate gc rederive' with the compiler of record",
     "gc.sdk-rows-tie-their-row -- compile-tier; runs under 'rhu-gate gc rederive' with the compiler of record: every row of the SDK's board table names collector objects that tie their sources compiled under that row's own declaration apart from the producer stamp; the table with the U5A5 row's heap object put back to the emulator row's is refused",
 ];
 
@@ -1991,7 +1991,7 @@ const INTERNAL_CASES: [&str; 2] = [
 /// manifest (the payload-gate idiom, one level up -- doctoring the
 /// manifest and the objects together still cannot pass without editing
 /// this reviewed surface).
-const SHA_FROZEN_MANIFEST: &str = "e10ccc9b0822a4c40a8d7d00093dd49e95310dcd5776783bda7bf6df1f70db21";
+const SHA_FROZEN_MANIFEST: &str = "bfcf10f6710308d456bd9e1c93c9c78122222c789fabc412bc65350db8ab5911";
 
 /// The frozen-object plan of record: file name under goldens/gc/, source
 /// TU, extra defines beyond the class's flag set, and the class (the
@@ -2127,12 +2127,12 @@ const FROZEN_PLAN: [(&str, &str, &[&str], Class); 62] = [
     // segment's commit is backed (the negative control).
     ("host-frozen-bound.o", "src/gc/host/mgc_host.cpp", &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_DRIVE_FROZEN_BOUND"], Class::CortexM7),
     ("skel-tune-break-frozen.o", "src/gc/mgc_skeleton.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HANDLE_SLOTS=64", "-DMGC_BREAK_FROZEN_BOUND"], Class::CortexM7),
-    // gc.D's second control: the windows heap at the gate's size built with
+    // gc.windows's second control: the windows heap at the gate's size built with
     // the window-keep knob, under which the drive's flag-routed small objects
     // retire the first window and the layout the drive's tail asserts is
     // another.
     ("heap-tune-break-keep.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_BYTES=2097152u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_BREAK_WINDOW_KEEP"], Class::CortexM7),
-    // gc.E's two boot controls: the an500 row's heap object built to take
+    // gc.board-table's two boot controls: the an500 row's heap object built to take
     // one page less, and one page more, than the rule at boot gives.
     ("heap-row-break-less.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1572864u", "-DMGC_ARENA_COVER_BYTES=16777216u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_BREAK_BOOT_LESS"], Class::CortexM7),
     ("heap-row-break-more.o", "src/gc/mgc_heap.cpp", &["-DMGC_HEAP_LIVE", "-DMGC_COLLECT_LIVE", "-DMGC_SWEEP_LIVE", "-DMGC_TUNE_LIVE", "-DMGC_HEAP_AT_BOOT", "-DMGC_HEAP_KEEP_BYTES=131072u", "-DMGC_HEAP_MIN_GUARANTEED_BYTES=1572864u", "-DMGC_ARENA_COVER_BYTES=16777216u", "-DMGC_FINQ_RESERVE=16u", "-DMGC_BREAK_BOOT_MORE"], Class::CortexM7),
@@ -2846,7 +2846,7 @@ fn forbidden_import(got: &[String]) -> Option<String> {
 /// A boot's call-inventory union: every `[mgc-skel] call <head>` line
 /// contributes its head -- the `<Iface>::<Method>` token, cut at the
 /// first '(' or space -- deduplicated and sorted. The union over a boot
-/// IS the init-time call inventory the gc.B case pins (the skeleton
+/// IS the init-time call inventory the gc.allocator case pins (the skeleton
 /// logs every vtable method the EE side reaches).
 fn call_union(raw: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(raw);
@@ -3154,7 +3154,7 @@ struct Gc {
     /// checker requires every case line to match the run line's gate).
     gate_id: &'static str,
     display: &'static str,
-    /// gc.A's positive raw transcript, kept for gc.B's inventory pin
+    /// gc.activation's positive raw transcript, kept for gc.allocator's inventory pin
     /// (the activation boot's union is the init-time call inventory).
     raw_gca: Vec<u8>,
 }
@@ -3526,9 +3526,9 @@ impl Gc {
         (raw, exit)
     }
 
-    /// gc.A: the activation case + its doctored-version negative control.
+    /// gc.activation: the activation case + its doctored-version negative control.
     fn run_activation(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
-        println!("== case gc.A (activation) ==");
+        println!("== case gc.activation (activation) ==");
 
         // Build the staticlib the images link against (feature payload:
         // the hosting entry sequence + sh_write0 + memset via
@@ -3543,17 +3543,17 @@ impl Gc {
         };
         if !ok {
             echo_file(&log, "");
-            self.fail("gc.A", "kernel staticlib build error");
+            self.fail("gc.activation", "kernel staticlib build error");
         }
 
         // The world objects are FROZEN committed artifacts (goldens/gc,
         // sha-verified before the first case); the gate stages them in
         // place of compiling. Derivation: 'rhu-gate gc rederive'.
         // Import-closure pins on the objects (the world-change tripwire).
-        let bare = self.undefined_of(facts, "gc.A", "goldens/gc/skel-bare.o");
+        let bare = self.undefined_of(facts, "gc.activation", "goldens/gc/skel-bare.o");
         if !imports_match(&bare, &IMPORTS_BARE) {
             self.fail(
-                "gc.A",
+                "gc.activation",
                 &format!(
                     "bare skeleton import closure moved: got [{}] (pinned {} names) -- a new or vanished import is a world change",
                     bare.join(" "),
@@ -3561,20 +3561,20 @@ impl Gc {
                 ),
             );
         }
-        let bad = self.undefined_of(facts, "gc.A", "goldens/gc/skel-bad.o");
+        let bad = self.undefined_of(facts, "gc.activation", "goldens/gc/skel-bad.o");
         if !imports_match(&bad, &IMPORTS_BARE) {
-            self.fail("gc.A", "doctored skeleton import closure differs from the bare pin (the knob must change ONE constant, nothing else)");
+            self.fail("gc.activation", "doctored skeleton import closure differs from the bare pin (the knob must change ONE constant, nothing else)");
         }
-        let host = self.undefined_of(facts, "gc.A", "goldens/gc/host.o");
+        let host = self.undefined_of(facts, "gc.activation", "goldens/gc/host.o");
         if !imports_match(&host, &IMPORTS_HOST) {
             self.fail(
-                "gc.A",
+                "gc.activation",
                 &format!("activation host import closure moved: got [{}]", host.join(" ")),
             );
         }
         for (name, list) in [("skel-bare.o", &bare), ("skel-bad.o", &bad), ("host.o", &host)] {
             if let Some(hit) = forbidden_import(list) {
-                self.fail("gc.A", &format!("{name} imports forbidden family symbol '{hit}'"));
+                self.fail("gc.activation", &format!("{name} imports forbidden family symbol '{hit}'"));
             }
         }
         println!(
@@ -3588,13 +3588,13 @@ impl Gc {
         // Link both images.
         let (sha_ok, rel_ok) = self.link_image(
             ld,
-            "gc.A",
+            "gc.activation",
             &["goldens/gc/skel-bare.o", "goldens/gc/host.o"],
             "gcA-rhu",
         );
         let (sha_bad, rel_bad) = self.link_image(
             ld,
-            "gc.A",
+            "gc.activation",
             &["goldens/gc/skel-bad.o", "goldens/gc/host.o"],
             "gcA-doctored-rhu",
         );
@@ -3603,7 +3603,7 @@ impl Gc {
         // pair, the layout contract, and the five flat EE definitions.
         let nm = match llvm_tool(facts, "llvm-nm") {
             Ok(p) => p,
-            Err(e) => self.fail("gc.A", &e),
+            Err(e) => self.fail("gc.activation", &e),
         };
         let elf_abs = self.repo.join(rel_ok.replace('/', std::path::MAIN_SEPARATOR_STR));
         let elf_arg = elf_abs.to_string_lossy().into_owned();
@@ -3611,7 +3611,7 @@ impl Gc {
         let scratch = self.out.join("gcA-rhu.tool.stderr");
         let nm_run = run_captured(&nm, &[&elf_arg], &sym, &scratch, Duration::from_secs(60));
         if !matches!(nm_run, Ok(ref o) if o.exit == 0) {
-            self.fail("gc.A", "llvm-nm failed on the linked ELF");
+            self.fail("gc.activation", "llvm-nm failed on the linked ELF");
         }
         let dump = std::fs::read(&sym).unwrap_or_default();
         for s in [
@@ -3625,7 +3625,7 @@ impl Gc {
             "_ZN15GCToEEInterface9GetThreadEv",
         ] {
             if !word_sym_present(&dump, s) {
-                self.fail("gc.A", &format!("symbol '{s}' absent from the linked artifact"));
+                self.fail("gc.activation", &format!("symbol '{s}' absent from the linked artifact"));
             }
         }
 
@@ -3641,7 +3641,7 @@ impl Gc {
         let fmt_line = "[gc-host] fmt d=-42 u=3000000000 x=deadbeef lx=00123abc s=ok p=0x20000000 c=Q pct=%";
         let ok_line = "[gc-host] GC ACTIVATION OK (heap + handle manager live; first allocation deliberately not attempted)";
         if cr_count(&raw) == 0 {
-            self.fail_run("gc.A", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
+            self.fail_run("gc.activation", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
         }
         for m in [
             "flavor: payload",
@@ -3657,7 +3657,7 @@ impl Gc {
             "[payload] managed Main returned 0",
         ] {
             if !contains_fixed(&raw, m) {
-                self.fail_run("gc.A", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
+                self.fail_run("gc.activation", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
             }
         }
         if !in_order(
@@ -3665,7 +3665,7 @@ impl Gc {
             &[enter_line, &report_line, "[mgc-skel] GC_Initialize ENTER", ok_line],
         ) {
             self.fail_run(
-                "gc.A",
+                "gc.activation",
                 code,
                 0,
                 "positive",
@@ -3677,23 +3677,23 @@ impl Gc {
         }
         for m in ["KERNEL PANIC", "EXCEPTION:", "REFUSED", "FAIL-FAST", "shape MISMATCH", "abort()"] {
             if contains_fixed(&raw, m) {
-                self.fail_run("gc.A", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
+                self.fail_run("gc.activation", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
             }
         }
         if code != 0 {
-            self.fail_run("gc.A", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
+            self.fail_run("gc.activation", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
         }
         self.raw_gca = raw;
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.A\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.activation\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
         ));
         self.results.tally("pass", "positive");
-        println!("== case gc.A: PASS (exit 0; handshake printed before it reported; tuple == pinned constants; init-time calls live) ==");
+        println!("== case gc.activation: PASS (exit 0; handshake printed before it reported; tuple == pinned constants; init-time calls live) ==");
 
         // The negative control: the doctored-version build must be
         // refused loudly, with the pre-handshake print already on the
         // wire, exiting through the refusal class.
-        println!("== case gc.A-doctored-version (negative control) ==");
+        println!("== case gc.activation-doctored-version (negative control) ==");
         let broke = "doctored GC interface major version (MGC_SKEL_BAD_VERSION)";
         let (rawb, codeb) = self.run_qemu(qemu, "gcA-doctored", &rel_bad);
         let bad_report = format!(
@@ -3705,12 +3705,12 @@ impl Gc {
             GC_INTERFACE_MAJOR - 1
         );
         if cr_count(&rawb) == 0 {
-            self.fail_run("gc.A-doctored-version", codeb, 3, "negative", broke, &sha_bad, &rel_bad, "no CR bytes in raw capture");
+            self.fail_run("gc.activation-doctored-version", codeb, 3, "negative", broke, &sha_bad, &rel_bad, "no CR bytes in raw capture");
         }
         for m in [enter_line, bad_report.as_str(), refused_line.as_str(), "[payload] managed Main returned 3"] {
             if !contains_fixed(&rawb, m) {
                 self.fail_run(
-                    "gc.A-doctored-version",
+                    "gc.activation-doctored-version",
                     codeb,
                     3,
                     "negative",
@@ -3723,7 +3723,7 @@ impl Gc {
         }
         if !in_order(&rawb, &[enter_line, &refused_line]) {
             self.fail_run(
-                "gc.A-doctored-version",
+                "gc.activation-doctored-version",
                 codeb,
                 3,
                 "negative",
@@ -3736,7 +3736,7 @@ impl Gc {
         for m in ["GC_Initialize ENTER", "GC ACTIVATION OK"] {
             if contains_fixed(&rawb, m) {
                 self.fail_run(
-                    "gc.A-doctored-version",
+                    "gc.activation-doctored-version",
                     codeb,
                     3,
                     "negative",
@@ -3749,7 +3749,7 @@ impl Gc {
         }
         if codeb != 3 {
             self.fail_run(
-                "gc.A-doctored-version",
+                "gc.activation-doctored-version",
                 codeb,
                 3,
                 "negative",
@@ -3760,25 +3760,25 @@ impl Gc {
             );
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.A-doctored-version\",\"verdict\":\"pass\",\"exit\":3,\"exit_want\":3,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_bad}\",\"sha256\":\"{sha_bad}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.activation-doctored-version\",\"verdict\":\"pass\",\"exit\":3,\"exit_want\":3,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_bad}\",\"sha256\":\"{sha_bad}\"}}}}"
         ));
         self.results.tally("pass", "negative");
-        println!("== case gc.A-doctored-version: PASS (refused loudly, exit 3, ENTER print preceded the refusal) ==");
+        println!("== case gc.activation-doctored-version: PASS (refused loudly, exit 3, ENTER print preceded the refusal) ==");
     }
 
-    /// gc.B: the mangle-parity probe as a standing artifact check, the
+    /// gc.allocator: the mangle-parity probe as a standing artifact check, the
     /// init-time call-inventory pins, and the allocator live behind the
     /// interface -- plus the registered negative control (first object
     /// allocation on the bare skeleton fail-fasts).
     fn run_skeleton_alloc(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
-        println!("== case gc.B (skeleton inventory + probe + the allocator) ==");
+        println!("== case gc.allocator (skeleton inventory + probe + the allocator) ==");
 
         // (1) The probe artifact check: read the frozen probe object's
         // undefined set, tie the surface three ways at the name level.
-        let probe_undef = self.undefined_of(facts, "gc.B", "goldens/gc/probe.o");
+        let probe_undef = self.undefined_of(facts, "gc.allocator", "goldens/gc/probe.o");
         if probe_undef.len() != EE_SURFACE {
             self.fail(
-                "gc.B",
+                "gc.allocator",
                 &format!(
                     "probe object undefined-symbol count {} != the pinned surface {EE_SURFACE}",
                     probe_undef.len()
@@ -3790,7 +3790,7 @@ impl Gc {
             match mangled_method_name(sym) {
                 Some(n) => probe_names.push(n),
                 None => self.fail(
-                    "gc.B",
+                    "gc.allocator",
                     &format!("probe object import '{sym}' is not a flat GCToEEInterface method -- an alien import in the parity probe"),
                 ),
             }
@@ -3800,17 +3800,17 @@ impl Gc {
             self.repo.join("src").join("vendor").join("gcenv").join("gcenv.ee.h"),
         ) {
             Ok(t) => t,
-            Err(e) => self.fail("gc.B", &format!("cannot read vendored gcenv.ee.h: {e}")),
+            Err(e) => self.fail("gc.allocator", &format!("cannot read vendored gcenv.ee.h: {e}")),
         };
         let decl_names = gctoee_decl_names(&header_text);
         let probe_src = match std::fs::read_to_string(self.repo.join("src").join("gc").join("mgc_ee_probe.cpp")) {
             Ok(t) => t,
-            Err(e) => self.fail("gc.B", &format!("cannot read the probe source: {e}")),
+            Err(e) => self.fail("gc.allocator", &format!("cannot read the probe source: {e}")),
         };
         let ref_names = probe_ref_names(&probe_src);
         if decl_names != probe_names || ref_names != probe_names {
             self.fail(
-                "gc.B",
+                "gc.allocator",
                 &format!(
                     "surface tie broken: header declares {} names, probe REFs {} names, object imports {} -- the three sets must be identical",
                     decl_names.len(),
@@ -3840,7 +3840,7 @@ impl Gc {
             "DisablePreemptiveGC",
         ] {
             if !probe_names.iter().any(|n| n == known) {
-                self.fail("gc.B", &format!("host-served method '{known}' absent from the probe surface"));
+                self.fail("gc.allocator", &format!("host-served method '{known}' absent from the probe surface"));
             }
         }
         println!(
@@ -3849,9 +3849,9 @@ impl Gc {
 
         let merged_rel = "goldens/rt-m7/rthello-merged.o";
         if self.repo.join(merged_rel.replace('/', std::path::MAIN_SEPARATOR_STR)).is_file() {
-            let merged_defined = self.defined_extern_of(facts, "gc.B", merged_rel);
+            let merged_defined = self.defined_extern_of(facts, "gc.allocator", merged_rel);
             if let Some(f) = seam_spelling_fault(&probe_undef, &merged_defined) {
-                self.fail("gc.B", &f);
+                self.fail("gc.allocator", &f);
             }
             println!(
                 "   the seam's spellings: {}/{EE_SURFACE} flat-interface demands defined in {merged_rel} by the probe's exact spelling",
@@ -3863,10 +3863,10 @@ impl Gc {
 
         // (2) The allocator world (frozen objects); pin every closure
         // exactly.
-        let skel_heap = self.undefined_of(facts, "gc.B", "goldens/gc/skel-heap.o");
+        let skel_heap = self.undefined_of(facts, "gc.allocator", "goldens/gc/skel-heap.o");
         if !imports_match(&skel_heap, &IMPORTS_SKEL_HEAP) {
             self.fail(
-                "gc.B",
+                "gc.allocator",
                 &format!(
                     "heap-live skeleton import closure moved: got [{}] (pinned {} names)",
                     skel_heap.join(" "),
@@ -3874,10 +3874,10 @@ impl Gc {
                 ),
             );
         }
-        let heap = self.undefined_of(facts, "gc.B", "goldens/gc/heap.o");
+        let heap = self.undefined_of(facts, "gc.allocator", "goldens/gc/heap.o");
         if !imports_match(&heap, &IMPORTS_HEAP) {
             self.fail(
-                "gc.B",
+                "gc.allocator",
                 &format!(
                     "allocator import closure moved: got [{}] (pinned {} names)",
                     heap.join(" "),
@@ -3885,10 +3885,10 @@ impl Gc {
                 ),
             );
         }
-        let host_drive = self.undefined_of(facts, "gc.B", "goldens/gc/host-drive.o");
+        let host_drive = self.undefined_of(facts, "gc.allocator", "goldens/gc/host-drive.o");
         if !imports_match(&host_drive, &IMPORTS_HOST_DRIVE) {
             self.fail(
-                "gc.B",
+                "gc.allocator",
                 &format!("driving host import closure moved: got [{}]", host_drive.join(" ")),
             );
         }
@@ -3899,7 +3899,7 @@ impl Gc {
             ("host-drive.o", &host_drive),
         ] {
             if let Some(hit) = forbidden_import(list) {
-                self.fail("gc.B", &format!("{name} imports forbidden family symbol '{hit}'"));
+                self.fail("gc.allocator", &format!("{name} imports forbidden family symbol '{hit}'"));
             }
         }
         println!(
@@ -3915,7 +3915,7 @@ impl Gc {
         // (3) Link the allocator boot and the bare-skeleton control.
         let (sha_ok, rel_ok) = self.link_image(
             ld,
-            "gc.B",
+            "gc.allocator",
             &[
                 "goldens/gc/skel-heap.o",
                 "goldens/gc/heap.o",
@@ -3925,7 +3925,7 @@ impl Gc {
         );
         let (sha_ctl, rel_ctl) = self.link_image(
             ld,
-            "gc.B",
+            "gc.allocator",
             &[
                 "goldens/gc/skel-bare.o",
                 "goldens/gc/host-drive.o",
@@ -3937,11 +3937,11 @@ impl Gc {
         // every deterministic counter pinned exact, the wall honest.
         let (raw, code) = self.run_qemu(qemu, "gcB", &rel_ok);
         let ok_line = "[gc-host] GC ACTIVATION OK (heap + handle manager live; the allocator drive follows)";
-        let banner = "[gc-host] gc.B allocator drive: exercising IGCHeap::Alloc over the live region";
+        let banner = "[gc-host] gc.allocator allocator drive: exercising IGCHeap::Alloc over the live region";
         let done_line = "[gc-host] GC ALLOCATOR EXERCISE OK (5 allocations zero-born on the live region; honest NULL at the wall)";
         let wall_line = "[mgc-heap] OOM WALL at alloc #6: size=8388608(+pad 0) flags=0x0 exceeds region (used 0 of 2048 KB) -> NULL (managed OutOfMemoryException protocol)";
         if cr_count(&raw) == 0 {
-            self.fail_run("gc.B", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
+            self.fail_run("gc.allocator", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
         }
         for m in [
             "flavor: payload",
@@ -3990,7 +3990,7 @@ impl Gc {
             "[payload] managed Main returned 0",
         ] {
             if !contains_fixed(&raw, m) {
-                self.fail_run("gc.B", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
+                self.fail_run("gc.allocator", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
             }
         }
         if !in_order(
@@ -4002,7 +4002,7 @@ impl Gc {
                 ok_line,
             ],
         ) {
-            self.fail_run("gc.B", code, 0, "positive", "", &sha_ok, &rel_ok, "activation order violated in the allocator boot");
+            self.fail_run("gc.allocator", code, 0, "positive", "", &sha_ok, &rel_ok, "activation order violated in the allocator boot");
         }
         if !in_order(
             &raw,
@@ -4017,7 +4017,7 @@ impl Gc {
             ],
         ) {
             self.fail_run(
-                "gc.B",
+                "gc.allocator",
                 code,
                 0,
                 "positive",
@@ -4040,15 +4040,15 @@ impl Gc {
             "FMT UNSUPPORTED",
         ] {
             if contains_fixed(&raw, m) {
-                self.fail_run("gc.B", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
+                self.fail_run("gc.allocator", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
             }
         }
         // The inventory pins: this boot's union, and the activation
-        // boot's union off gc.A's stored transcript.
+        // boot's union off gc.activation's stored transcript.
         let drive_union = call_union(&raw);
         if !imports_match(&drive_union, &INVENTORY_DRIVE) {
             self.fail_run(
-                "gc.B",
+                "gc.allocator",
                 code,
                 0,
                 "positive",
@@ -4065,7 +4065,7 @@ impl Gc {
         let act_union = call_union(&self.raw_gca);
         if !imports_match(&act_union, &INVENTORY_ACTIVATION) {
             self.fail_run(
-                "gc.B",
+                "gc.allocator",
                 code,
                 0,
                 "positive",
@@ -4080,14 +4080,14 @@ impl Gc {
             );
         }
         if code != 0 {
-            self.fail_run("gc.B", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
+            self.fail_run("gc.allocator", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.B\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.allocator\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
         ));
         self.results.tally("pass", "positive");
         println!(
-            "== case gc.B: PASS (exit 0; surface tie {EE_SURFACE} three ways; inventories {} activation / {} drive; 5 allocations zero-born; honest NULL at the wall) ==",
+            "== case gc.allocator: PASS (exit 0; surface tie {EE_SURFACE} three ways; inventories {} activation / {} drive; 5 allocations zero-born; honest NULL at the wall) ==",
             INVENTORY_ACTIVATION.len(),
             INVENTORY_DRIVE.len()
         );
@@ -4095,19 +4095,19 @@ impl Gc {
         // (5) The registered control: the same driving host against the
         // BARE skeleton -- the first object allocation must fail-fast
         // with the skeleton's distinct marker and die through abort.
-        println!("== case gc.B-bare-alloc (negative control) ==");
+        println!("== case gc.allocator-bare-alloc (negative control) ==");
         let broke = "no allocator behind the interface (bare skeleton): the first object allocation must fail-fast";
         let (rawc, codec) = self.run_qemu(qemu, "gcB-bare-alloc", &rel_ctl);
         let attempt = "[mgc-skel] IGCHeap::Alloc(ctx=0x";
         let failfast = "[mgc-skel] FAIL-FAST: first object allocation (IGCHeap::Alloc) -- bare skeleton by design: no collector behind the interface";
         let abort_line = "[gc-host] abort() -- structurally broken path, exiting 134";
         if cr_count(&rawc) == 0 {
-            self.fail_run("gc.B-bare-alloc", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
+            self.fail_run("gc.allocator-bare-alloc", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
         }
         for m in [ok_line, banner, attempt, "size=24 flags=0x0)", failfast, abort_line] {
             if !contains_fixed(&rawc, m) {
                 self.fail_run(
-                    "gc.B-bare-alloc",
+                    "gc.allocator-bare-alloc",
                     codec,
                     134,
                     "negative",
@@ -4120,7 +4120,7 @@ impl Gc {
         }
         if !in_order(&rawc, &[ok_line, banner, attempt, "FAIL-FAST: first object allocation", abort_line]) {
             self.fail_run(
-                "gc.B-bare-alloc",
+                "gc.allocator-bare-alloc",
                 codec,
                 134,
                 "negative",
@@ -4133,7 +4133,7 @@ impl Gc {
         for m in ["[mgc-heap]", "EXERCISE OK", "managed Main returned"] {
             if contains_fixed(&rawc, m) {
                 self.fail_run(
-                    "gc.B-bare-alloc",
+                    "gc.allocator-bare-alloc",
                     codec,
                     134,
                     "negative",
@@ -4147,7 +4147,7 @@ impl Gc {
         let ctl_union = call_union(&rawc);
         if !imports_match(&ctl_union, &INVENTORY_ACTIVATION) {
             self.fail_run(
-                "gc.B-bare-alloc",
+                "gc.allocator-bare-alloc",
                 codec,
                 134,
                 "negative",
@@ -4159,7 +4159,7 @@ impl Gc {
         }
         if codec != 134 {
             self.fail_run(
-                "gc.B-bare-alloc",
+                "gc.allocator-bare-alloc",
                 codec,
                 134,
                 "negative",
@@ -4170,14 +4170,14 @@ impl Gc {
             );
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.B-bare-alloc\",\"verdict\":\"pass\",\"exit\":134,\"exit_want\":134,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.allocator-bare-alloc\",\"verdict\":\"pass\",\"exit\":134,\"exit_want\":134,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
         ));
         self.results.tally("pass", "negative");
-        println!("== case gc.B-bare-alloc: PASS (first allocation fail-fasted with the distinct marker, exit 134, activation green first) ==");
+        println!("== case gc.allocator-bare-alloc: PASS (first allocation fail-fasted with the distinct marker, exit 134, activation green first) ==");
     }
 
     fn run_collect(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
-        println!("== case gc.C (suspension + mark over the kernel verbs) ==");
+        println!("== case gc.mark (suspension + mark over the kernel verbs) ==");
 
         // (1) The collection world (frozen objects); pin every closure
         // exactly.
@@ -4188,10 +4188,10 @@ impl Gc {
             ("collect-break.o", "goldens/gc/collect-break.o", &IMPORTS_COLLECT_BREAK[..]),
             ("host-collect.o", "goldens/gc/host-collect.o", &IMPORTS_HOST_COLLECT[..]),
         ] {
-            let got = self.undefined_of(facts, "gc.C", obj_rel);
+            let got = self.undefined_of(facts, "gc.mark", obj_rel);
             if !imports_match(&got, want) {
                 self.fail(
-                    "gc.C",
+                    "gc.mark",
                     &format!(
                         "{name} import closure moved: got [{}] (pinned {} names)",
                         got.join(" "),
@@ -4200,7 +4200,7 @@ impl Gc {
                 );
             }
             if let Some(hit) = forbidden_import(&got) {
-                self.fail("gc.C", &format!("{name} imports forbidden family symbol '{hit}'"));
+                self.fail("gc.mark", &format!("{name} imports forbidden family symbol '{hit}'"));
             }
         }
         println!(
@@ -4215,7 +4215,7 @@ impl Gc {
         // (2) Link the collection boot and the break-roots control.
         let (sha_ok, rel_ok) = self.link_image(
             ld,
-            "gc.C",
+            "gc.mark",
             &[
                 "goldens/gc/skel-collect.o",
                 "goldens/gc/heap-collect.o",
@@ -4226,7 +4226,7 @@ impl Gc {
         );
         let (sha_ctl, rel_ctl) = self.link_image(
             ld,
-            "gc.C",
+            "gc.mark",
             &[
                 "goldens/gc/skel-collect.o",
                 "goldens/gc/heap-collect.o",
@@ -4241,13 +4241,13 @@ impl Gc {
         // number pinned exact and the callback bracket order-asserted.
         let (raw, code) = self.run_qemu(qemu, "gcC", &rel_ok);
         let ok_line = "[gc-host] GC ACTIVATION OK (heap + handle manager live; the allocator drive follows)";
-        let banner = "[gc-host] gc.C suspension+mark drive: allocation schedule, then two collections over the real interface";
+        let banner = "[gc-host] gc.mark suspension+mark drive: allocation schedule, then two collections over the real interface";
         let done_line = "[gc-host] GC SUSPENSION+MARK EXERCISE OK (worker suspended/resumed x2 over the kernel verbs; census exact x2; 7 marked of 8 walked -- the pad stayed unmarked)";
         let suspend_line = "[gc-host] EE SuspendEE(reason=1): worker tid=3 suspended; ctx.sp + published slot inside stack bounds (4096 B); counter FROZEN across a sleep window";
         let restart_line = "[gc-host] EE RestartEE: worker resumed; counter ADVANCED within the bounded window";
         let scan_line = "[gc-host] EE GcScanRoots: reported 7 slots (static, null, out-of-heap, worker-stack, interior, pinned-dup, pair-static)";
         if cr_count(&raw) == 0 {
-            self.fail_run("gc.C", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
+            self.fail_run("gc.mark", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
         }
         for m in [
             "flavor: payload",
@@ -4318,7 +4318,7 @@ impl Gc {
             "[payload] managed Main returned 0",
         ] {
             if !contains_fixed(&raw, m) {
-                self.fail_run("gc.C", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
+                self.fail_run("gc.mark", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
             }
         }
         // The callback bracket is an ORDER claim on collection
@@ -4343,7 +4343,7 @@ impl Gc {
             ],
         ) {
             self.fail_run(
-                "gc.C",
+                "gc.mark",
                 code,
                 0,
                 "positive",
@@ -4373,7 +4373,7 @@ impl Gc {
             ],
         ) {
             self.fail_run(
-                "gc.C",
+                "gc.mark",
                 code,
                 0,
                 "positive",
@@ -4404,13 +4404,13 @@ impl Gc {
             "heap walk CORRUPT",
         ] {
             if contains_fixed(&raw, m) {
-                self.fail_run("gc.C", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
+                self.fail_run("gc.mark", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
             }
         }
         let coll_union = call_union(&raw);
         if !imports_match(&coll_union, &INVENTORY_COLLECT) {
             self.fail_run(
-                "gc.C",
+                "gc.mark",
                 code,
                 0,
                 "positive",
@@ -4425,14 +4425,14 @@ impl Gc {
             );
         }
         if code != 0 {
-            self.fail_run("gc.C", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
+            self.fail_run("gc.mark", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.C\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.mark\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
         ));
         self.results.tally("pass", "positive");
         println!(
-            "== case gc.C: PASS (exit 0; suspend/resume x2 over the kernel verbs; census exact x2 incl. the traced edge and the unmarked pad; bracket order held; inventory {} heads) ==",
+            "== case gc.mark: PASS (exit 0; suspend/resume x2 over the kernel verbs; census exact x2 incl. the traced edge and the unmarked pad; bracket order held; inventory {} heads) ==",
             INVENTORY_COLLECT.len()
         );
 
@@ -4441,11 +4441,11 @@ impl Gc {
         // real, exit 0 (mark-only: nothing dies either way). The gate's
         // own positive census pins must FAIL against this transcript --
         // the detector provably bites.
-        println!("== case gc.C-break-roots (negative control) ==");
+        println!("== case gc.mark-break-roots (negative control) ==");
         let broke = "ALL root scanning suppressed (MGC_BREAK_ROOTS): the census detector must bite";
         let (rawc, codec) = self.run_qemu(qemu, "gcC-break-roots", &rel_ctl);
         if cr_count(&rawc) == 0 {
-            self.fail_run("gc.C-break-roots", codec, 0, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
+            self.fail_run("gc.mark-break-roots", codec, 0, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
         }
         for m in [
             ok_line,
@@ -4464,7 +4464,7 @@ impl Gc {
         ] {
             if !contains_fixed(&rawc, m) {
                 self.fail_run(
-                    "gc.C-break-roots",
+                    "gc.mark-break-roots",
                     codec,
                     0,
                     "negative",
@@ -4479,7 +4479,7 @@ impl Gc {
         for m in [CENSUS_ROOTS_LINE, CENSUS_QUALS_LINE, CENSUS_MARK_1, CENSUS_MARK_2] {
             if contains_fixed(&rawc, m) {
                 self.fail_run(
-                    "gc.C-break-roots",
+                    "gc.mark-break-roots",
                     codec,
                     0,
                     "negative",
@@ -4493,7 +4493,7 @@ impl Gc {
         let ctl_union = call_union(&rawc);
         if !imports_match(&ctl_union, &INVENTORY_COLLECT) {
             self.fail_run(
-                "gc.C-break-roots",
+                "gc.mark-break-roots",
                 codec,
                 0,
                 "negative",
@@ -4505,7 +4505,7 @@ impl Gc {
         }
         if codec != 0 {
             self.fail_run(
-                "gc.C-break-roots",
+                "gc.mark-break-roots",
                 codec,
                 0,
                 "negative",
@@ -4516,14 +4516,14 @@ impl Gc {
             );
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.C-break-roots\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.mark-break-roots\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
         ));
         self.results.tally("pass", "negative");
-        println!("== case gc.C-break-roots: PASS (census zeroed loudly, the positive detector bites, suspension real, exit 0) ==");
+        println!("== case gc.mark-break-roots: PASS (census zeroed loudly, the positive detector bites, suspension real, exit 0) ==");
     }
 
     fn run_sweep(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
-        println!("== case gc.C-sweep (the death pipeline; the mark-only wall retired) ==");
+        println!("== case gc.sweep (the death pipeline; the mark-only wall retired) ==");
 
         for (name, obj_rel, want) in [
             ("skel-sweep.o", "goldens/gc/skel-sweep.o", &IMPORTS_SKEL_SWEEP[..]),
@@ -4532,10 +4532,10 @@ impl Gc {
             ("collect-sweep-break.o", "goldens/gc/collect-sweep-break.o", &IMPORTS_COLLECT_SWEEP[..]),
             ("host-sweep.o", "goldens/gc/host-sweep.o", &IMPORTS_HOST_COLLECT[..]),
         ] {
-            let got = self.undefined_of(facts, "gc.C-sweep", obj_rel);
+            let got = self.undefined_of(facts, "gc.sweep", obj_rel);
             if !imports_match(&got, want) {
                 self.fail(
-                    "gc.C-sweep",
+                    "gc.sweep",
                     &format!(
                         "{name} import closure moved: got [{}] (pinned {} names)",
                         got.join(" "),
@@ -4544,7 +4544,7 @@ impl Gc {
                 );
             }
             if let Some(hit) = forbidden_import(&got) {
-                self.fail("gc.C-sweep", &format!("{name} imports forbidden family symbol '{hit}'"));
+                self.fail("gc.sweep", &format!("{name} imports forbidden family symbol '{hit}'"));
             }
         }
         println!(
@@ -4557,7 +4557,7 @@ impl Gc {
 
         let (sha_ok, rel_ok) = self.link_image(
             ld,
-            "gc.C-sweep",
+            "gc.sweep",
             &[
                 "goldens/gc/skel-sweep.o",
                 "goldens/gc/heap-sweep.o",
@@ -4568,7 +4568,7 @@ impl Gc {
         );
         let (sha_ctl, rel_ctl) = self.link_image(
             ld,
-            "gc.C-sweep",
+            "gc.sweep",
             &[
                 "goldens/gc/skel-sweep.o",
                 "goldens/gc/heap-sweep.o",
@@ -4579,7 +4579,7 @@ impl Gc {
         );
 
         let ok_line = "[gc-host] GC ACTIVATION OK (heap + handle manager live; the allocator drive follows)";
-        let banner = "[gc-host] gc.C-sweep death-pipeline drive: the schedule + a death cast, then collections that actually reclaim";
+        let banner = "[gc-host] gc.sweep death-pipeline drive: the schedule + a death cast, then collections that actually reclaim";
         let done_line = "[gc-host] GC DEATH-PIPELINE EXERCISE OK (four partition branches + three weak classes + resurrection; drain normals-then-critical with FINALIZER_RUN honored; zero-on-reuse; the mark-only wall retired; honest NULL + grace round trip)";
         let suspend_line = "[gc-host] EE SuspendEE(reason=1): worker tid=3 suspended; ctx.sp + published slot inside stack bounds (4096 B); counter FROZEN across a sleep window";
         let restart_line = "[gc-host] EE RestartEE: worker resumed; counter ADVANCED within the bounded window";
@@ -4587,7 +4587,7 @@ impl Gc {
 
         let (raw, code) = self.run_qemu(qemu, "gcC-sweep", &rel_ok);
         if cr_count(&raw) == 0 {
-            self.fail_run("gc.C-sweep", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
+            self.fail_run("gc.sweep", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
         }
         for m in [
             "flavor: payload",
@@ -4672,7 +4672,7 @@ impl Gc {
             "[payload] managed Main returned 0",
         ] {
             if !contains_fixed(&raw, m) {
-                self.fail_run("gc.C-sweep", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
+                self.fail_run("gc.sweep", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
             }
         }
         // The death-pipeline ORDER on collection #1's wire.
@@ -4693,7 +4693,7 @@ impl Gc {
             ],
         ) {
             self.fail_run(
-                "gc.C-sweep",
+                "gc.sweep",
                 code,
                 0,
                 "positive",
@@ -4722,7 +4722,7 @@ impl Gc {
             ],
         ) {
             self.fail_run(
-                "gc.C-sweep",
+                "gc.sweep",
                 code,
                 0,
                 "positive",
@@ -4756,13 +4756,13 @@ impl Gc {
             "handle reuse self-test",
         ] {
             if contains_fixed(&raw, m) {
-                self.fail_run("gc.C-sweep", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
+                self.fail_run("gc.sweep", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
             }
         }
         let sweep_union = call_union(&raw);
         if !imports_match(&sweep_union, &INVENTORY_SWEEP) {
             self.fail_run(
-                "gc.C-sweep",
+                "gc.sweep",
                 code,
                 0,
                 "positive",
@@ -4777,22 +4777,22 @@ impl Gc {
             );
         }
         if code != 0 {
-            self.fail_run("gc.C-sweep", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
+            self.fail_run("gc.sweep", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.C-sweep\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.sweep\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
         ));
         self.results.tally("pass", "positive");
         println!(
-            "== case gc.C-sweep: PASS (exit 0; 9 collections; deaths exact; drain ordered; wall retired; OOM+grace honest; inventory {} heads) ==",
+            "== case gc.sweep: PASS (exit 0; 9 collections; deaths exact; drain ordered; wall retired; OOM+grace honest; inventory {} heads) ==",
             INVENTORY_SWEEP.len()
         );
 
-        println!("== case gc.C-break-weak (negative control) ==");
+        println!("== case gc.mark-break-weak (negative control) ==");
         let broke = "weak nulling suppressed (MGC_BREAK_WEAK): the weak-visibility detectors must bite";
         let (rawc, codec) = self.run_qemu(qemu, "gcC-break-weak", &rel_ctl);
         if cr_count(&rawc) == 0 {
-            self.fail_run("gc.C-break-weak", codec, 0, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
+            self.fail_run("gc.mark-break-weak", codec, 0, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
         }
         for m in [
             ok_line,
@@ -4815,7 +4815,7 @@ impl Gc {
         ] {
             if !contains_fixed(&rawc, m) {
                 self.fail_run(
-                    "gc.C-break-weak",
+                    "gc.mark-break-weak",
                     codec,
                     0,
                     "negative",
@@ -4837,7 +4837,7 @@ impl Gc {
         ] {
             if contains_fixed(&rawc, m) {
                 self.fail_run(
-                    "gc.C-break-weak",
+                    "gc.mark-break-weak",
                     codec,
                     0,
                     "negative",
@@ -4851,7 +4851,7 @@ impl Gc {
         let ctl_union = call_union(&rawc);
         if !imports_match(&ctl_union, &INVENTORY_SWEEP) {
             self.fail_run(
-                "gc.C-break-weak",
+                "gc.mark-break-weak",
                 codec,
                 0,
                 "negative",
@@ -4863,7 +4863,7 @@ impl Gc {
         }
         if codec != 0 {
             self.fail_run(
-                "gc.C-break-weak",
+                "gc.mark-break-weak",
                 codec,
                 0,
                 "negative",
@@ -4874,10 +4874,10 @@ impl Gc {
             );
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.C-break-weak\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.mark-break-weak\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
         ));
         self.results.tally("pass", "negative");
-        println!("== case gc.C-break-weak: PASS (stale slots visible loudly, the positive detectors bite, partition/sweep unchanged, exit 0) ==");
+        println!("== case gc.mark-break-weak: PASS (stale slots visible loudly, the positive detectors bite, partition/sweep unchanged, exit 0) ==");
     }
 
     /// gc.free-pad: a dead space of exactly 12 bytes before a live
@@ -6038,7 +6038,7 @@ impl Gc {
     }
 
     fn run_tune(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
-        println!("== case gc.D (alloc-context windows + the futex-backed GC-done event) ==");
+        println!("== case gc.windows (alloc-context windows + the futex-backed GC-done event) ==");
 
         for (name, obj_rel, want) in [
             ("skel-tune.o", "goldens/gc/skel-tune.o", &IMPORTS_SKEL_TUNE[..]),
@@ -6047,10 +6047,10 @@ impl Gc {
             ("collect-tune.o", "goldens/gc/collect-tune.o", &IMPORTS_COLLECT_TUNE[..]),
             ("host-tune.o", "goldens/gc/host-tune.o", &IMPORTS_HOST_TUNE[..]),
         ] {
-            let got = self.undefined_of(facts, "gc.D", obj_rel);
+            let got = self.undefined_of(facts, "gc.windows", obj_rel);
             if !imports_match(&got, want) {
                 self.fail(
-                    "gc.D",
+                    "gc.windows",
                     &format!(
                         "{name} import closure moved: got [{}] (pinned {} names)",
                         got.join(" "),
@@ -6059,7 +6059,7 @@ impl Gc {
                 );
             }
             if let Some(hit) = forbidden_import(&got) {
-                self.fail("gc.D", &format!("{name} imports forbidden family symbol '{hit}'"));
+                self.fail("gc.windows", &format!("{name} imports forbidden family symbol '{hit}'"));
             }
         }
         println!(
@@ -6073,7 +6073,7 @@ impl Gc {
 
         let (sha_ok, rel_ok) = self.link_image(
             ld,
-            "gc.D",
+            "gc.windows",
             &[
                 "goldens/gc/skel-tune.o",
                 "goldens/gc/heap-tune.o",
@@ -6084,7 +6084,7 @@ impl Gc {
         );
         let (sha_ctl, rel_ctl) = self.link_image(
             ld,
-            "gc.D",
+            "gc.windows",
             &[
                 "goldens/gc/skel-tune.o",
                 "goldens/gc/heap-tune-break.o",
@@ -6095,7 +6095,7 @@ impl Gc {
         );
 
         let ok_line = "[gc-host] GC ACTIVATION OK (heap + handle manager live; the allocator drive follows)";
-        let banner = "[gc-host] gc.D windows+event drive: the same payload under window posture, the GC-done futex, and the activation break-out";
+        let banner = "[gc-host] gc.windows windows+event drive: the same payload under window posture, the GC-done futex, and the activation break-out";
         let done_line = "[gc-host] GC WINDOWS+EVENT EXERCISE OK (windows both sources, three fix sites, refunds exact; the GC-done event slept and woke over the kernel futex; an activation broke a blocked wait -- the RHU_EINTR contract; handle slots reused)";
         let suspend_line = "[gc-host] EE SuspendEE(reason=1): worker tid=3 suspended; ctx.sp + published slot inside stack bounds (4096 B); counter FROZEN across a sleep window";
         let restart_line = "[gc-host] EE RestartEE: worker resumed; counter ADVANCED within the bounded window";
@@ -6106,11 +6106,11 @@ impl Gc {
 
         let (raw, code) = self.run_qemu(qemu, "gcD", &rel_ok);
         if cr_count(&raw) == 0 {
-            self.fail_run("gc.D", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
+            self.fail_run("gc.windows", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
         }
         for &m in TUNE_DRIVE_PINS {
             if !contains_fixed(&raw, m) {
-                self.fail_run("gc.D", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
+                self.fail_run("gc.windows", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("pin '{m}' not found"));
             }
         }
         // The epoch-1 weave: armed inside SuspendEE, parked in its
@@ -6131,7 +6131,7 @@ impl Gc {
             ],
         ) {
             self.fail_run(
-                "gc.D",
+                "gc.windows",
                 code,
                 0,
                 "positive",
@@ -6155,7 +6155,7 @@ impl Gc {
             ],
         ) {
             self.fail_run(
-                "gc.D",
+                "gc.windows",
                 code,
                 0,
                 "positive",
@@ -6170,7 +6170,7 @@ impl Gc {
                 let slice = &raw[p1..p2];
                 if contains_fixed(slice, "SetWaitForGCEvent") || contains_fixed(slice, "futex_wake") {
                     self.fail_run(
-                        "gc.D",
+                        "gc.windows",
                         code,
                         0,
                         "positive",
@@ -6181,7 +6181,7 @@ impl Gc {
                     );
                 }
             }
-            _ => self.fail_run("gc.D", code, 0, "positive", "", &sha_ok, &rel_ok, "epoch-2 markers missing for the elimination slice"),
+            _ => self.fail_run("gc.windows", code, 0, "positive", "", &sha_ok, &rel_ok, "epoch-2 markers missing for the elimination slice"),
         }
         for m in [
             "KERNEL PANIC",
@@ -6210,13 +6210,13 @@ impl Gc {
             "grace CLOSED",
         ] {
             if contains_fixed(&raw, m) {
-                self.fail_run("gc.D", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
+                self.fail_run("gc.windows", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
             }
         }
         let tune_union = call_union(&raw);
         if !imports_match(&tune_union, &INVENTORY_TUNE) {
             self.fail_run(
-                "gc.D",
+                "gc.windows",
                 code,
                 0,
                 "positive",
@@ -6231,22 +6231,22 @@ impl Gc {
             );
         }
         if code != 0 {
-            self.fail_run("gc.D", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
+            self.fail_run("gc.windows", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.D\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.windows\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
         ));
         self.results.tally("pass", "positive");
         println!(
-            "== case gc.D: PASS (exit 0; windows both sources with three fix sites; the GC-done futex slept/woke; EINTR by elimination; death line posture-invariant; inventory {} heads) ==",
+            "== case gc.windows: PASS (exit 0; windows both sources with three fix sites; the GC-done futex slept/woke; EINTR by elimination; death line posture-invariant; inventory {} heads) ==",
             INVENTORY_TUNE.len()
         );
 
-        println!("== case gc.D-break-window-fix (negative control) ==");
+        println!("== case gc.windows-break-window-fix (negative control) ==");
         let broke = "window plug+count suppressed (MGC_BREAK_WINDOW_FIX): the heap-walk cross-check must die loudly";
         let (rawc, codec) = self.run_qemu(qemu, "gcD-break-window-fix", &rel_ctl);
         if cr_count(&rawc) == 0 {
-            self.fail_run("gc.D-break-window-fix", codec, 2, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
+            self.fail_run("gc.windows-break-window-fix", codec, 2, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
         }
         for m in [
             ok_line,
@@ -6263,7 +6263,7 @@ impl Gc {
         ] {
             if !contains_fixed(&rawc, m) {
                 self.fail_run(
-                    "gc.D-break-window-fix",
+                    "gc.windows-break-window-fix",
                     codec,
                     2,
                     "negative",
@@ -6286,7 +6286,7 @@ impl Gc {
         ] {
             if contains_fixed(&rawc, m) {
                 self.fail_run(
-                    "gc.D-break-window-fix",
+                    "gc.windows-break-window-fix",
                     codec,
                     2,
                     "negative",
@@ -6300,7 +6300,7 @@ impl Gc {
         let ctl_union = call_union(&rawc);
         if !imports_match(&ctl_union, &INVENTORY_TUNE_BREAK) {
             self.fail_run(
-                "gc.D-break-window-fix",
+                "gc.windows-break-window-fix",
                 codec,
                 2,
                 "negative",
@@ -6312,7 +6312,7 @@ impl Gc {
         }
         if codec != 2 {
             self.fail_run(
-                "gc.D-break-window-fix",
+                "gc.windows-break-window-fix",
                 codec,
                 2,
                 "negative",
@@ -6323,10 +6323,10 @@ impl Gc {
             );
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.D-break-window-fix\",\"verdict\":\"pass\",\"exit\":2,\"exit_want\":2,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.windows-break-window-fix\",\"verdict\":\"pass\",\"exit\":2,\"exit_want\":2,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
         ));
         self.results.tally("pass", "negative");
-        println!("== case gc.D-break-window-fix: PASS (the corrupted walk's first null read died loudly at the null-page guard, exit 2, suspension + event-arm real first, the positive detector bites) ==");
+        println!("== case gc.windows-break-window-fix: PASS (the corrupted walk's first null read died loudly at the null-page guard, exit 2, suspension + event-arm real first, the positive detector bites) ==");
 
         // The second control: the windows heap built with the window-keep
         // knob (MGC_BREAK_WINDOW_KEEP), under which the drive's three
@@ -6335,17 +6335,17 @@ impl Gc {
         // window leaves (the free-run window lands at alloc #5's address),
         // so its first check fails and the host aborts (exit 134): the
         // tail's expectations are held by a control.
-        println!("== case gc.D-break-window-keep (negative control) ==");
-        let got = self.undefined_of(facts, "gc.D-break-window-keep", "goldens/gc/heap-tune-break-keep.o");
+        println!("== case gc.windows-break-window-keep (negative control) ==");
+        let got = self.undefined_of(facts, "gc.windows-break-window-keep", "goldens/gc/heap-tune-break-keep.o");
         if !imports_match(&got, &IMPORTS_HEAP_TUNE_BREAK) {
             self.fail(
-                "gc.D-break-window-keep",
+                "gc.windows-break-window-keep",
                 &format!("heap-tune-break-keep.o import closure moved: got [{}] (pinned {} names)", got.join(" "), IMPORTS_HEAP_TUNE_BREAK.len()),
             );
         }
         let (sha_keep, rel_keep) = self.link_image(
             ld,
-            "gc.D",
+            "gc.windows",
             &[
                 "goldens/gc/skel-tune.o",
                 "goldens/gc/heap-tune-break-keep.o",
@@ -6357,12 +6357,12 @@ impl Gc {
         let broke_keep = "the window never kept (MGC_BREAK_WINDOW_KEEP): the drive's flag-routed small objects retire the first window, and the tail's first check on the layout the kept window leaves must fail";
         let (rawk, codek) = self.run_qemu(qemu, "gcD-break-window-keep", &rel_keep);
         if cr_count(&rawk) == 0 {
-            self.fail_run("gc.D-break-window-keep", codek, 134, "negative", broke_keep, &sha_keep, &rel_keep, "no CR bytes in raw capture");
+            self.fail_run("gc.windows-break-window-keep", codek, 134, "negative", broke_keep, &sha_keep, &rel_keep, "no CR bytes in raw capture");
         }
         for m in [ok_line, banner, TN_KEEP_KNOB, TN_KEEP_CHECK, "[gc-host] abort() -- structurally broken path, exiting 134"] {
             if !contains_fixed(&rawk, m) {
                 self.fail_run(
-                    "gc.D-break-window-keep",
+                    "gc.windows-break-window-keep",
                     codek,
                     134,
                     "negative",
@@ -6376,7 +6376,7 @@ impl Gc {
         for m in [done_line, "[gc-host] final books: kmain"] {
             if contains_fixed(&rawk, m) {
                 self.fail_run(
-                    "gc.D-break-window-keep",
+                    "gc.windows-break-window-keep",
                     codek,
                     134,
                     "negative",
@@ -6388,58 +6388,58 @@ impl Gc {
             }
         }
         if codek != 134 {
-            self.fail_run("gc.D-break-window-keep", codek, 134, "negative", broke_keep, &sha_keep, &rel_keep, &format!("exit {codek}, wanted 134 (the host's abort)"));
+            self.fail_run("gc.windows-break-window-keep", codek, 134, "negative", broke_keep, &sha_keep, &rel_keep, &format!("exit {codek}, wanted 134 (the host's abort)"));
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.D-break-window-keep\",\"verdict\":\"pass\",\"exit\":134,\"exit_want\":134,\"control\":\"negative\",\"broke\":\"{broke_keep}\",\"image\":{{\"path\":\"{rel_keep}\",\"sha256\":\"{sha_keep}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.windows-break-window-keep\",\"verdict\":\"pass\",\"exit\":134,\"exit_want\":134,\"control\":\"negative\",\"broke\":\"{broke_keep}\",\"image\":{{\"path\":\"{rel_keep}\",\"sha256\":\"{sha_keep}\"}}}}"
         ));
         self.results.tally("pass", "negative");
-        println!("== case gc.D-break-window-keep: PASS (with the window never kept the free-run window did not land at alloc #5's address; the tail's first check failed and the host aborted, exit 134) ==");
+        println!("== case gc.windows-break-window-keep: PASS (with the window never kept the free-run window did not land at alloc #5's address; the tail's first check failed and the host aborted, exit 134) ==");
     }
 
     fn run_row(&mut self, facts: &RustcFacts, ld: &ToolCmd, qemu: &Path) {
-        println!("== case gc.E (the board knob table: rows declared per board, asserted in-artifact) ==");
+        println!("== case gc.board-table (the board knob table: rows declared per board, asserted in-artifact) ==");
 
         // ---- the TABLE CHECK: every declared row against its payload
         // map and board module, before any image exists.
         let hdr_rel = "src/gc/host/mgc_board_rows.h";
         let hdr_text = match std::fs::read_to_string(self.repo.join(hdr_rel.replace('/', std::path::MAIN_SEPARATOR_STR))) {
             Ok(t) => t,
-            Err(e) => self.fail("gc.E", &format!("cannot read {hdr_rel}: {e}")),
+            Err(e) => self.fail("gc.board-table", &format!("cannot read {hdr_rel}: {e}")),
         };
         let rows = match parse_board_rows(&hdr_text) {
             Ok(r) => r,
-            Err(e) => self.fail("gc.E", &e),
+            Err(e) => self.fail("gc.board-table", &e),
         };
         if rows.len() != DECLARED_ROWS {
-            self.fail("gc.E", &format!("expected {DECLARED_ROWS} declared rows, parsed {}", rows.len()));
+            self.fail("gc.board-table", &format!("expected {DECLARED_ROWS} declared rows, parsed {}", rows.len()));
         }
         if let Err(e) = rows_uniform(&rows) {
-            self.fail("gc.E", &e);
+            self.fail("gc.board-table", &e);
         }
         println!("   knob table (census-derived; {} rows parsed from {hdr_rel}, each checked against its payload map + board module):", rows.len());
         for row in &rows {
             let map_rel = format!("src/kernel/payload-{}.x", row.board);
             let map_text = match std::fs::read_to_string(self.repo.join(map_rel.replace('/', std::path::MAIN_SEPARATOR_STR))) {
                 Ok(t) => t,
-                Err(e) => self.fail("gc.E", &format!("cannot read {map_rel}: {e}")),
+                Err(e) => self.fail("gc.board-table", &format!("cannot read {map_rel}: {e}")),
             };
             let (base, len, amin) = match parse_map_geometry(&map_text) {
                 Ok(g) => g,
-                Err(e) => self.fail("gc.E", &format!("{map_rel}: {e}")),
+                Err(e) => self.fail("gc.board-table", &format!("{map_rel}: {e}")),
             };
             let brd_rel = format!("src/kernel/src/board/{}.rs", row.board.replace('-', "_"));
             let brd_text = match std::fs::read_to_string(self.repo.join(brd_rel.replace('/', std::path::MAIN_SEPARATOR_STR))) {
                 Ok(t) => t,
-                Err(e) => self.fail("gc.E", &format!("cannot read {brd_rel}: {e}")),
+                Err(e) => self.fail("gc.board-table", &format!("cannot read {brd_rel}: {e}")),
             };
             let kheap = match parse_kheap_const(&brd_text) {
                 Ok(v) => v,
-                Err(e) => self.fail("gc.E", &format!("{brd_rel}: {e}")),
+                Err(e) => self.fail("gc.board-table", &format!("{brd_rel}: {e}")),
             };
             let ext = parse_map_external(&map_text);
             if let Err(e) = row_check(row, base, len, amin, kheap, ext) {
-                self.fail("gc.E", &e);
+                self.fail("gc.board-table", &e);
             }
             println!(
                 "   row {}: {}/{} least managed heap={} cover={} native heap={} thread stack={}/{} handles={} frozen object heap={} unallocated={} markstack={} finq={} reserve={} (DATA 0x{:x}+{}K floor {}K{})",
@@ -6486,10 +6486,10 @@ impl Gc {
             ("heap-row-f769.o", "goldens/gc/heap-row-f769.o", &IMPORTS_HEAP_ROW[..]),
             ("collect-row-f769.o", "goldens/gc/collect-row-f769.o", &IMPORTS_COLLECT_TUNE[..]),
         ] {
-            let got = self.undefined_of(facts, "gc.E", obj_rel);
+            let got = self.undefined_of(facts, "gc.board-table", obj_rel);
             if !imports_match(&got, want) {
                 self.fail(
-                    "gc.E",
+                    "gc.board-table",
                     &format!(
                         "{name} import closure moved: got [{}] (pinned {} names)",
                         got.join(" "),
@@ -6498,7 +6498,7 @@ impl Gc {
                 );
             }
             if let Some(hit) = forbidden_import(&got) {
-                self.fail("gc.E", &format!("{name} imports forbidden family symbol '{hit}'"));
+                self.fail("gc.board-table", &format!("{name} imports forbidden family symbol '{hit}'"));
             }
         }
         println!(
@@ -6521,7 +6521,7 @@ impl Gc {
 
         let (sha_ok, rel_ok) = self.link_image(
             ld,
-            "gc.E",
+            "gc.board-table",
             &[
                 "goldens/gc/skel-row.o",
                 "goldens/gc/heap-row.o",
@@ -6532,7 +6532,7 @@ impl Gc {
         );
         let (sha_ctl, rel_ctl) = self.link_image(
             ld,
-            "gc.E",
+            "gc.board-table",
             &[
                 "goldens/gc/skel-row.o",
                 "goldens/gc/heap-row-break-cover.o",
@@ -6543,7 +6543,7 @@ impl Gc {
         );
         let (sha_less, rel_less) = self.link_image(
             ld,
-            "gc.E",
+            "gc.board-table",
             &[
                 "goldens/gc/skel-row.o",
                 "goldens/gc/heap-row-break-less.o",
@@ -6554,7 +6554,7 @@ impl Gc {
         );
         let (sha_more, rel_more) = self.link_image(
             ld,
-            "gc.E",
+            "gc.board-table",
             &[
                 "goldens/gc/skel-row.o",
                 "goldens/gc/heap-row-break-more.o",
@@ -6564,12 +6564,12 @@ impl Gc {
             "gcE-break-boot-more-rhu",
         );
         let Some(an500) = rows.iter().find(|r| r.board == "mps2-an500").cloned() else {
-            self.fail("gc.E", "the row header declares no mps2-an500 row (the row the gate's image is built under)");
+            self.fail("gc.board-table", "the row header declares no mps2-an500 row (the row the gate's image is built under)");
         };
 
         let (raw, code) = self.run_qemu(qemu, "gcE", &rel_ok);
         if cr_count(&raw) == 0 {
-            self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
+            self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, "no CR bytes in raw capture");
         }
         for m in [
             ROW_CENSUS,
@@ -6581,7 +6581,7 @@ impl Gc {
             ROW_SYSMEM_VERDICT,
         ] {
             if !contains_fixed(&raw, m) {
-                self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("row pin '{m}' not found"));
+                self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("row pin '{m}' not found"));
             }
         }
         // The row world's declaration precedes the activation it
@@ -6599,7 +6599,7 @@ impl Gc {
             ],
         ) {
             self.fail_run(
-                "gc.E",
+                "gc.board-table",
                 code,
                 0,
                 "positive",
@@ -6616,18 +6616,18 @@ impl Gc {
         // the wire.
         let boot = match parse_boot_line(&raw) {
             Ok(b) => b,
-            Err(e) => self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &e),
+            Err(e) => self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, &e),
         };
         if let Err(e) = boot_rule(&an500, boot) {
-            self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("the rule at boot does not hold on the boot line: {e}"));
+            self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("the rule at boot does not hold on the boot line: {e}"));
         }
         match parse_sysmem_line(&raw) {
             Ok(line) => {
                 if let Err(e) = sysmem_rule(&an500, boot, &line) {
-                    self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("the system-memory line does not tie the boot line: {e}"));
+                    self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("the system-memory line does not tie the boot line: {e}"));
                 }
             }
-            Err(e) => self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &e),
+            Err(e) => self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, &e),
         }
         // The heap's own cover arithmetic, recomputed from the printed
         // line: buffer total = the row cover's 4160, cards affordable,
@@ -6636,22 +6636,22 @@ impl Gc {
         match parse_cover_line(&raw) {
             Ok((floor, span, cards, of)) => {
                 if of != 16448 {
-                    self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("cover buffer total {of}, wanted 16448 (the row cover did not reach the heap TU)"));
+                    self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("cover buffer total {of}, wanted 16448 (the row cover did not reach the heap TU)"));
                 }
                 if cards != span + 64 || cards > of {
-                    self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("cover arithmetic broken: span={span} cards={cards} of={of}"));
+                    self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("cover arithmetic broken: span={span} cards={cards} of={of}"));
                 }
                 if floor != "0x60000000" {
-                    self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("heap cover floor {floor} != the host containment floor 0x60000000"));
+                    self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("heap cover floor {floor} != the host containment floor 0x60000000"));
                 }
             }
-            Err(e) => self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &e),
+            Err(e) => self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, &e),
         }
         // The drive carries verbatim: every address-free tune pin, both
         // epoch weaves, and the EINTR elimination slice.
         for &m in TUNE_DRIVE_PINS {
             if !contains_fixed(&raw, m) {
-                self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("carried tune pin '{m}' not found"));
+                self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("carried tune pin '{m}' not found"));
             }
         }
         if !in_order(
@@ -6669,7 +6669,7 @@ impl Gc {
                 "-- collect #1 S_OK",
             ],
         ) {
-            self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, "epoch-1 order violated under the row (the carried weave)");
+            self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, "epoch-1 order violated under the row (the carried weave)");
         }
         if !in_order(
             &raw,
@@ -6681,7 +6681,7 @@ impl Gc {
                 "[gc-host] EINTR by elimination",
             ],
         ) {
-            self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, "epoch-2 order violated under the row (the carried weave)");
+            self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, "epoch-2 order violated under the row (the carried weave)");
         }
         match (
             find_pos(&raw, "[gc-host] waiter: parking on the GC-done event (epoch 2)"),
@@ -6690,20 +6690,20 @@ impl Gc {
             (Some(p1), Some(p2)) if p1 < p2 => {
                 let slice = &raw[p1..p2];
                 if contains_fixed(slice, "SetWaitForGCEvent") || contains_fixed(slice, "futex_wake") {
-                    self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, "a Set/wake appears in the epoch-2 parked slice under the row");
+                    self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, "a Set/wake appears in the epoch-2 parked slice under the row");
                 }
             }
-            _ => self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, "epoch-2 markers missing for the elimination slice"),
+            _ => self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, "epoch-2 markers missing for the elimination slice"),
         }
         for m in ["KERNEL PANIC", "EXCEPTION:", "REFUSED", "FAIL-FAST", "abort()", "DRIVE CHECK FAILED", "mark stack OVERFLOW", "heap walk CORRUPT", "OOM"] {
             if contains_fixed(&raw, m) {
-                self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
+                self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("forbidden pattern '{m}' present"));
             }
         }
         let row_union = call_union(&raw);
         if !imports_match(&row_union, &INVENTORY_TUNE) {
             self.fail_run(
-                "gc.E",
+                "gc.board-table",
                 code,
                 0,
                 "positive",
@@ -6714,25 +6714,25 @@ impl Gc {
             );
         }
         if code != 0 {
-            self.fail_run("gc.E", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
+            self.fail_run("gc.board-table", code, 0, "positive", "", &sha_ok, &rel_ok, &format!("exit {code}, wanted 0"));
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.E\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.board-table\",\"verdict\":\"pass\",\"exit\":0,\"exit_want\":0,\"control\":\"positive\",\"image\":{{\"path\":\"{rel_ok}\",\"sha256\":\"{sha_ok}\"}}}}"
         ));
         self.results.tally("pass", "positive");
         println!(
-            "== case gc.E: PASS ({} rows checked against maps + board modules; the an500 row asserted in-artifact: census + containment INSIDE + the managed heap sized at boot by the rule, recomputed from the wire + system memory FILLED; the tune drive carried verbatim under the row) ==",
+            "== case gc.board-table: PASS ({} rows checked against maps + board modules; the an500 row asserted in-artifact: census + containment INSIDE + the managed heap sized at boot by the rule, recomputed from the wire + system memory FILLED; the tune drive carried verbatim under the row) ==",
             rows.len()
         );
 
         // ---- the cover control: the guard's own loud boot death
         // at a doctored 2 MiB cover ("a bad board knob dies at boot,
         // loudly" -- the guard comment's own words).
-        println!("== case gc.E-break-cover (negative control) ==");
+        println!("== case gc.board-table-break-cover (negative control) ==");
         let broke = "card cover doctored to 2 MiB (region placement spans past the granule): the heap's coverage guard must die loudly at boot";
         let (rawc, codec) = self.run_qemu(qemu, "gcE-break-cover", &rel_ctl);
         if cr_count(&rawc) == 0 {
-            self.fail_run("gc.E-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
+            self.fail_run("gc.board-table-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, "no CR bytes in raw capture");
         }
         for m in [
             ROW_CENSUS,
@@ -6741,22 +6741,22 @@ impl Gc {
             "[gc-host] abort() -- structurally broken path, exiting 134",
         ] {
             if !contains_fixed(&rawc, m) {
-                self.fail_run("gc.E-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &format!("control pin '{m}' not found (the guard must die at boot with the declaration already on the wire)"));
+                self.fail_run("gc.board-table-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &format!("control pin '{m}' not found (the guard must die at boot with the declaration already on the wire)"));
             }
         }
         if !in_order(&rawc, &["[gc-host] handshake accepted", ROW_COVER_FAILFAST, "[gc-host] abort()"]) {
-            self.fail_run("gc.E-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, "control order violated (accepted -> FAIL-FAST -> abort is the boot-death order)");
+            self.fail_run("gc.board-table-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, "control order violated (accepted -> FAIL-FAST -> abort is the boot-death order)");
         }
         match parse_cover_line(&rawc) {
             Ok((_floor, span, cards, of)) => {
                 if of != 2112 {
-                    self.fail_run("gc.E-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &format!("control cover buffer total {of}, wanted 2112"));
+                    self.fail_run("gc.board-table-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &format!("control cover buffer total {of}, wanted 2112"));
                 }
                 if cards <= of || span <= 2048 {
-                    self.fail_run("gc.E-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &format!("the doctored cover is not actually unaffordable (span={span} cards={cards} of={of})"));
+                    self.fail_run("gc.board-table-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &format!("the doctored cover is not actually unaffordable (span={span} cards={cards} of={of})"));
                 }
             }
-            Err(e) => self.fail_run("gc.E-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &e),
+            Err(e) => self.fail_run("gc.board-table-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &e),
         }
         // The death is AT BOOT: nothing after heap init may exist. (The
         // handle-reuse self-test line IS present -- the skeleton
@@ -6770,27 +6770,27 @@ impl Gc {
             "[mgc-coll] collect #1 ENTER",
         ] {
             if contains_fixed(&rawc, m) {
-                self.fail_run("gc.E-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &format!("positive pin '{m}' PRESENT under the doctored cover -- the guard did not die at boot"));
+                self.fail_run("gc.board-table-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &format!("positive pin '{m}' PRESENT under the doctored cover -- the guard did not die at boot"));
             }
         }
         if codec != 134 {
-            self.fail_run("gc.E-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &format!("exit {codec}, wanted 134 (the abort class)"));
+            self.fail_run("gc.board-table-break-cover", codec, 134, "negative", broke, &sha_ctl, &rel_ctl, &format!("exit {codec}, wanted 134 (the abort class)"));
         }
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.E-break-cover\",\"verdict\":\"pass\",\"exit\":134,\"exit_want\":134,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc\",\"case\":\"gc.board-table-break-cover\",\"verdict\":\"pass\",\"exit\":134,\"exit_want\":134,\"control\":\"negative\",\"broke\":\"{broke}\",\"image\":{{\"path\":\"{rel_ctl}\",\"sha256\":\"{sha_ctl}\"}}}}"
         ));
         self.results.tally("pass", "negative");
-        println!("== case gc.E-break-cover: PASS (the unaffordable cover died loudly at boot, exit 134, before any allocation; the guard's arithmetic recomputed) ==");
+        println!("== case gc.board-table-break-cover: PASS (the unaffordable cover died loudly at boot, exit 134, before any allocation; the guard's arithmetic recomputed) ==");
 
         // ---- the two boot controls: the heap object built to take one
         // page less, and one page more, than the rule at boot gives. The
         // image's own system-memory verdict refuses each and the host
         // aborts (exit 134); the gate's recomputation refuses each boot
         // line too.
-        println!("== case gc.E-break-boot-less (negative control) ==");
+        println!("== case gc.board-table-break-boot-less (negative control) ==");
         let (rawl, codel) = self.run_qemu(qemu, "gcE-break-boot-less", &rel_less);
         self.judge_boot_control(
-            "gc.E-break-boot-less",
+            "gc.board-table-break-boot-less",
             ROW_BOOT_LESS_KNOB,
             "the managed heap built to take one page less than the rule at boot gives (MGC_BREAK_BOOT_LESS): the image's system-memory verdict must refuse",
             &rawl,
@@ -6799,10 +6799,10 @@ impl Gc {
             &rel_less,
             &an500,
         );
-        println!("== case gc.E-break-boot-more (negative control) ==");
+        println!("== case gc.board-table-break-boot-more (negative control) ==");
         let (rawm, codem) = self.run_qemu(qemu, "gcE-break-boot-more", &rel_more);
         self.judge_boot_control(
-            "gc.E-break-boot-more",
+            "gc.board-table-break-boot-more",
             ROW_BOOT_MORE_KNOB,
             "the managed heap built to take one page more than the rule at boot gives (MGC_BREAK_BOOT_MORE): the image's system-memory verdict must refuse",
             &rawm,
@@ -6814,7 +6814,7 @@ impl Gc {
 
     }
 
-    /// The judge of gc.E's two boot controls: the row image with a heap
+    /// The judge of gc.board-table's two boot controls: the row image with a heap
     /// object built to take one page less, or one page more, than the rule
     /// at boot gives. The knob's banner and the boot line are on the wire,
     /// the image's own system-memory verdict refuses and the host aborts
@@ -7140,20 +7140,20 @@ impl Gc {
 
         self.run_sdk_row_tie(gxx, &facts, &stripped);
 
-        println!("== case gc.E-posture-refused (negative control) ==");
+        println!("== case gc.board-table-posture-refused (negative control) ==");
         self.compile_expect_fail(
             gxx,
-            "gc.E-posture-refused",
+            "gc.board-table-posture-refused",
             "src/gc/host/mgc_host.cpp",
             &["-DMGC_HOST_DRIVE_ALLOC", "-DMGC_HOST_DRIVE_COLLECT", "-DMGC_HOST_DRIVE_SWEEP", "-DMGC_HOST_DRIVE_TUNE", "-DMGC_HOST_ROW_AN500", "-DMGC_FRAG_CENSUS"],
             "src/kernel/target/gc-gate/obj/host-row-posture.o",
             ROW_REFUSAL_TEXT,
         );
         self.results.emit(&format!(
-            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc-rederive\",\"case\":\"gc.E-posture-refused\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"negative\",\"broke\":\"MGC_FRAG_CENSUS on a row image: the header guard must refuse the compile\",\"image\":null}}"
+            "{{\"schema\":1,\"type\":\"case\",\"gate\":\"gc-rederive\",\"case\":\"gc.board-table-posture-refused\",\"verdict\":\"pass\",\"exit\":null,\"exit_want\":null,\"control\":\"negative\",\"broke\":\"MGC_FRAG_CENSUS on a row image: the header guard must refuse the compile\",\"image\":null}}"
         ));
         self.results.tally("pass", "negative");
-        println!("== case gc.E-posture-refused: PASS (an evidence-posture knob on a row image refused at compile with the designed message) ==");
+        println!("== case gc.board-table-posture-refused: PASS (an evidence-posture knob on a row image refused at compile with the designed message) ==");
     }
 }
 
@@ -7613,7 +7613,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         ),
     );
 
-    // gc.B checkers: the call-inventory union pin, both directions.
+    // gc.allocator checkers: the call-inventory union pin, both directions.
     let mut inv_extra: Vec<String> = INVENTORY_DRIVE.iter().map(|s| s.to_string()).collect();
     inv_extra.push("IGCHeap::Alloc".to_string());
     inv_extra.sort();
@@ -7754,7 +7754,7 @@ pub fn selfcheck(repo: &Path) -> ! {
         ),
     );
 
-    // gc.C checkers. The union parser must carry the skeleton's slot
+    // gc.mark checkers. The union parser must carry the skeleton's slot
     // index inside a bracketed head exactly as printed (a bare
     // RegisterFrozenSegment head would be a DIFFERENT head and must
     // mismatch the pinned inventory).
@@ -7927,15 +7927,15 @@ pub fn selfcheck(repo: &Path) -> ! {
     );
 
     // The knob'd handle pool: a census claiming the 4096 default must
-    // not satisfy the gc.D 64-slot pin.
+    // not satisfy the gc.windows 64-slot pin.
     let big_pool = TN_HANDLES_1.replace("of 64", "of 4096");
     sc.probe(
         "handle-pool-knob-doctored",
-        "a default-pool handles census satisfying the 64-slot gc.D pin",
+        "a default-pool handles census satisfying the 64-slot gc.windows pin",
         contains_fixed(big_pool.as_bytes(), TN_HANDLES_1),
     );
 
-    // ---- gc.E checkers: the row-header parser, the table-check rules,
+    // ---- gc.board-table checkers: the row-header parser, the table-check rules,
     // the cover-line recompute, and the posture-refusal detector.
 
     // The real header parses to exactly the rows the gate expects

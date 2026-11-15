@@ -28,8 +28,8 @@ objects the Cortex-M33 with the single-precision FPv5 under the same flag
 set but the core and FPU words. No C++ standard library header is used:
 the collector is freestanding C++ over the toolchain's C headers.
 
-The objects are compiled against the .NET 11 RC3 runtime
-(v11.0.0-rc.3.26522.148): the ten runtime-to-GC interface headers vendored
+The objects are compiled against the .NET 11 runtime
+(v11.0.0): the ten runtime-to-GC interface headers vendored
 under src/vendor at that tag (the GC interface 5.9, the EE interface's
 major version 5, the flat surface the gate ties three ways at 53 names).
 
@@ -114,7 +114,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `9c6d437f5f454538958025df028a6d30c8ec79d8ab2a52502ccae5b4e9fba1c4`
   (src/gc/mgc_skeleton.cpp; -DMGC_SKEL_BAD_VERSION)
 - `goldens/gc/host.o`
-  `9c31929257465cf0355e0a7831b8987e6aa7d0d3c8188440543a142b64c12d2c`
+  `b53da4f0d5baea9df99d91a6b4fc97c95e12dfc933dd8afe5c93b1fec7e44a7e`
   (src/gc/host/mgc_host.cpp; no extra defines)
 - `goldens/gc/probe.o`
   `cc9a74e2da19dca3aaab850361cf52b03c46474c58d654411dda87f85b29a958`
@@ -126,7 +126,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `46009bcd838ab6d0ecf74b94928a2aa4df2b2e51bc3a8eb1c447f046873f06a7`
   (src/gc/mgc_heap.cpp; -DMGC_HEAP_LIVE -DMGC_HEAP_BYTES=2097152u -DMGC_FINQ_RESERVE=16u)
 - `goldens/gc/host-drive.o`
-  `c2e26dd9c831844032f9e09cc7ebaf77f7fbceb0f9bd4ca9ce59976fc4b4aa15`
+  `981a2ebc33a034fb991c882eeaf166c29b8bfe30e46e8e98eff676e4bdc10858`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC)
 - `goldens/gc/skel-collect.o`
   `1921c54ffdfaea6a124b364aa6a1287dd7aee402af73d534d38c17edd5349562`
@@ -141,7 +141,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `4fd284bc9fa865e933e93509b86be85895591de6565ab384b2683eca1f7419c2`
   (src/gc/mgc_collect.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_BREAK_ROOTS)
 - `goldens/gc/host-collect.o`
-  `72f5f43adda5cfe0cf58f124065656442c5087306e588312a91c1d385b9b9a61`
+  `cb4cf599cd2f913dbfc3348af5aa716b7dbbc9d8a60a5fb3482bbc4ddacfd5bd`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT)
 - `goldens/gc/skel-sweep.o`
   `85eb33f0a60a4b63ca36b514cd90b6817e4085a9cfbe9cbf3b9eecbb8d4973af`
@@ -156,7 +156,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `6895aba57b169eed5aef8a0991957016b16cc8cf27c2b3f52730eae5e6e0cbff`
   (src/gc/mgc_collect.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_BREAK_WEAK)
 - `goldens/gc/host-sweep.o`
-  `a3131a6b5399dc006d327a6f26e77f07b4e57b830e50692adf19e8bc55c3f0f9`
+  `729d601eae41d955b56234365e7118afdd2fd4710d09b4320b307471130248ea`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP)
 - `goldens/gc/skel-tune.o`
   `8ad642990063d4d2d02538cc87fa43860dbedc2c0f8a5e77bcd12ca8161905fd`
@@ -171,7 +171,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `65d68d5a7c83dd7bfe3f514dc461e14c7f8c30f06fbfc80a00a17be73ac3fec6`
   (src/gc/mgc_collect.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE)
 - `goldens/gc/host-tune.o`
-  `5a2924350d3b4a9cef60b04e0565f01ef78817ecf96f5f6a74093460a6d3f846`
+  `855509a0edddee9a61e1b7314251d86357ab90628e6f6d210576996e32a7a499`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE)
 - `goldens/gc/skel-row.o`
   `8ad642990063d4d2d02538cc87fa43860dbedc2c0f8a5e77bcd12ca8161905fd`
@@ -186,7 +186,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `65d68d5a7c83dd7bfe3f514dc461e14c7f8c30f06fbfc80a00a17be73ac3fec6`
   (src/gc/mgc_collect.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE)
 - `goldens/gc/host-row.o`
-  `ad9847ad1d669b8eefd57c7f6f3d2fa31a978cc5a9ad21f84de929bdbfdfed08`
+  `0aa2d704af1a2d7d092809d5c1c40a27cd75daa8df67a13f5fbf0bc3aedef097`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE -DMGC_HOST_ROW_AN500)
 - `goldens/gc/heap-row-f769.o`
   `77c7904ca5235901ae4282a6e5a1500b79b781037b174831c26538c018a0698c`
@@ -195,19 +195,19 @@ Records (repo-relative path, sha256; defines documented per record):
   `9ac09e90bee9a7023c4263e7686615ac67203711838e828f041b5bc99deb1f88`
   (src/gc/mgc_collect.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_MARK_STACK_ENTRIES=2048u -DMGC_OOM_RESERVE=8192u)
 - `goldens/gc/host-freepad.o`
-  `27a7b34fa55f502caeddd0ade94e3e7d1bf236d602698cb2f764d754f1b78251`
+  `336d12cedcaec8a1c97823b62701e919e505db8e4962c5fb6d905c74868bfa64`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_FREEPAD)
 - `goldens/gc/heap-sweep-break-freepad.o`
   `04dee764ce6c2049772fa63d49ea29ae6d438a239ae438ee741a6ec479f14098`
   (src/gc/mgc_heap.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_HEAP_BYTES=2097152u -DMGC_FINQ_RESERVE=16u -DMGC_BREAK_FREE_PAD)
 - `goldens/gc/host-handles.o`
-  `88dea22433a7e784f80b5061a9866692d8be0a817c9b9116a866a7a2f0c0d0b5`
+  `60df5e0e1147ad99cc45e2f5c3998664b89a785e7c70d4375b8a45ca10f0f373`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE -DMGC_HOST_DRIVE_HANDLES -DMGC_HANDLES_ITER=100000u)
 - `goldens/gc/skel-tune-break-lock.o`
   `5170031d2b9669d1db0081ddf836b6bccdd0725b3fa5698c3cf962b7b1d0cb16`
   (src/gc/mgc_skeleton.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HANDLE_SLOTS=64 -DMGC_BREAK_HANDLE_LOCK)
 - `goldens/gc/host-nogc.o`
-  `db9cfa17ec2db845eb54ee171a0e7bd6c03ab8b95ffa728cf539b53385123484`
+  `90bd69e4d1df941b68b985625ee47c4200461ced27bb5f739a7d585d5e50914a`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE -DMGC_HOST_DRIVE_NOGC)
 - `goldens/gc/skel-tune-break-nogc.o`
   `857938195acc295f9e9640c20dc9d4f0b285f0b2c196b638456ba7771fae3e82`
@@ -240,28 +240,28 @@ Records (repo-relative path, sha256; defines documented per record):
   `0f8095cc717ed56fa24405d6a7d6879aa98f324874d9e5e19ab3cac4f9e91890`
   (src/gc/mgc_collect.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_MARK_STACK_ENTRIES=64u -DMGC_BREAK_MARK_OVERFLOW)
 - `goldens/gc/host-markovf.o`
-  `80f4b715ae72161963b2cf11362a078511d971e2bae92c3f618dc9bcf465bb0b`
+  `6d8376f3366bb58382fda9d3a374b2ac2a204ad41490c3faa1ddc7dbdace6641`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE -DMGC_HOST_DRIVE_MARKOVF)
 - `goldens/gc/host-handle-growth.o`
-  `b51c002715cba5303cd77ea49b8d0cf1fd6e3cdd97fa29297bb2c25563535508`
+  `849fefcf4b38a1ace10ae9a3c8225b939f6cd569d73be1b41ec15407676babe2`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE -DMGC_HOST_DRIVE_HANDLE_GROWTH)
 - `goldens/gc/skel-tune-break-growth.o`
   `178181b94b887cefb9d3a0e190f9acc972a6fba50748cba128839a17fa442d45`
   (src/gc/mgc_skeleton.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HANDLE_SLOTS=64 -DMGC_BREAK_HANDLE_GROWTH)
 - `goldens/gc/host-alloc-bound.o`
-  `7a81eac18de997180068cbf0121054f3e67f885d27a166b044ad463b19b46bba`
+  `eb4a36fd01d4283b4e3f44150fcf28fa682f1ceca24df66735a86c63e50293b2`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE -DMGC_HOST_DRIVE_ALLOC_BOUND)
 - `goldens/gc/heap-tune-break-bound.o`
   `0ef45091f519d07968c6e94845bdf3e079c187f8b30dd89a55909f7deee823f8`
   (src/gc/mgc_heap.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HEAP_BYTES=2097152u -DMGC_FINQ_RESERVE=16u -DMGC_BREAK_ALLOC_BOUND)
 - `goldens/gc/host-tail-rejoin.o`
-  `f2fc8fe897cef5c8599a34109255f1281aed6f9d776c07522659904149d552a7`
+  `fbc82fa690a1546e69abd0039c39b2a1b9cd7ef235d347a07629533064a21ad6`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE -DMGC_HOST_DRIVE_TAIL_REJOIN)
 - `goldens/gc/collect-tune-break-rejoin.o`
   `9748bea5898d956348ed02942b61825f9ea1af4b79a40cf22e7962ece0e52ff6`
   (src/gc/mgc_collect.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_BREAK_TAIL_REJOIN)
 - `goldens/gc/host-finalize-full.o`
-  `23fd035f63c5dc9b53a8203e74dd90b2a9ecffd2e4dc36aec365ff2e553840c9`
+  `2cb54298b07cea0617fef01282f58c3b7450385ac626a14c812ed3a8fa083881`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE -DMGC_HOST_DRIVE_FINALIZE_FULL)
 - `goldens/gc/heap-tune-break-finalize.o`
   `40d7426a8c6570136d91b8bb2e952c673cd50da32cd47658ebfa5b8426ed59cd`
@@ -270,7 +270,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `29cb51be6ef5244e6186d458f6679da0b09c1abcdd94000201a28881ef34af2c`
   (src/gc/mgc_heap.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HEAP_BYTES=2097152u -DMGC_FINQ_RESERVE=0u)
 - `goldens/gc/host-window-keep.o`
-  `eae1e62cc23aabb54932bc9d0c0995ecb6803ea5011f644f00902f046d9bd57d`
+  `c0a17e04028649c90d485d328ab2547f8e53df0992e24a2beed66be8c9c99561`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE -DMGC_HOST_DRIVE_WINDOW_KEEP)
 - `goldens/gc/heap-tune-128k.o`
   `c0ec140fb871b7cae67ae5f52c546c809168854d9f43f5ebcd4e8dea383501cb`
@@ -279,7 +279,7 @@ Records (repo-relative path, sha256; defines documented per record):
   `baed4e93ec76ed56dc2f9819d13ca23742489c82fefacfc7a364f28982e05129`
   (src/gc/mgc_heap.cpp; -DMGC_HEAP_LIVE -DMGC_COLLECT_LIVE -DMGC_SWEEP_LIVE -DMGC_TUNE_LIVE -DMGC_HEAP_BYTES=131072u -DMGC_FINQ_RESERVE=16u -DMGC_OOM_RESERVE=8192u -DMGC_BREAK_WINDOW_KEEP)
 - `goldens/gc/host-frozen-bound.o`
-  `1cd68550ae60a38ee7dcf290e8a988944309c5024f6ccda01c04e3b00cf864d3`
+  `14704f562296c9d61d02921e2a97a4f9124f382ce3ec6f79c7868598f50a1333`
   (src/gc/host/mgc_host.cpp; -DMGC_HOST_DRIVE_ALLOC -DMGC_HOST_DRIVE_COLLECT -DMGC_HOST_DRIVE_SWEEP -DMGC_HOST_DRIVE_TUNE -DMGC_HOST_DRIVE_FROZEN_BOUND)
 - `goldens/gc/skel-tune-break-frozen.o`
   `de8d8f3c607e0873bc66d80f9af9e09217144ee7a564e7b28eaaf167575294f1`

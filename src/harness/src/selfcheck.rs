@@ -4,6 +4,10 @@
 //! fixtures, and the emission validated by the shared results checker.
 
 use crate::chain::chain_verdict;
+use crate::debugport::{
+    doctor_event_bkpt, frame_packet, parse_halt, read_event_image, synth_event_image, unframe_packet, unwind_step, walk, word_from_wire,
+    word_to_wire, ArmImage, Halt,
+};
 use crate::gate::Selfcheck;
 use crate::release;
 use crate::results::{json_escape, validate_results, Results};
@@ -517,6 +521,92 @@ pub fn run(repo: &Path) -> ! {
         "release-malformed",
         "a record whose archive sha256 has sixty-three digits",
         fixture_ok(&doctor(&format!("| `{last_asset}` |"), &|l| Some(shorten(l))), &fx),
+    );
+
+    sc.accept_probe("debugport-frame", "a packet framed with its checksum", frame_packet("?") == b"$?#3f" && frame_packet("m20000010,4") == b"$m20000010,4#50");
+    sc.accept_probe(
+        "debugport-unframe",
+        "a reply read past its acknowledgement, with an escaped byte and a run-length code undone",
+        unframe_packet(b"+$a}\x03b* #8d").ok().flatten() == Some((b"a#bbbb".to_vec(), 11)) && unframe_packet(b"+$OK#9").ok().flatten().is_none(),
+    );
+    sc.probe("debugport-checksum", "a reply whose checksum does not match its payload", unframe_packet(b"$OK#9b").is_ok());
+    sc.probe("debugport-refused-packet", "a refusal of the packet sent, read as a reply", unframe_packet(b"-").is_ok());
+    sc.accept_probe(
+        "debugport-halt",
+        "a stop at a breakpoint and an exit report read as what they are",
+        parse_halt("T05thread:01;") == Ok(Halt::Stopped(5)) && parse_halt("S05") == Ok(Halt::Stopped(5)) && parse_halt("W86") == Ok(Halt::Exited(134)),
+    );
+    sc.probe("debugport-halt-other", "a reply that is no stop and no exit, read as a halt", parse_halt("OK").is_ok() || parse_halt("E01").is_ok() || parse_halt("").is_ok());
+    sc.accept_probe(
+        "debugport-word",
+        "a word read in the target's byte order and written back",
+        word_from_wire("7e6d0500") == Some(0x0005_6d7e) && word_to_wire(0x4442_0001) == "01004244",
+    );
+    sc.probe("debugport-word-short", "seven digits read as a word", word_from_wire("7e6d050").is_some() || word_from_wire("7e6d05zz").is_some());
+
+    let stack = |a: u32| match a {
+        0x2000_1000 => Some(0x44u32),
+        0x2000_1004 => Some(0x0000_2001),
+        _ => None,
+    };
+    let mut frame = [0u32; 16];
+    frame[13] = 0x2000_0ff8;
+    frame[14] = 0x0000_1235;
+    let mut read = stack;
+    let stepped = unwind_step(&mut frame, &[0x01, 0xa8, 0xb0], &mut read);
+    sc.accept_probe(
+        "unwind-step",
+        "a frame's stack released, r4 and the return address popped",
+        stepped.is_ok() && frame[4] == 0x44 && frame[15] == 0x2001 && frame[13] == 0x2000_1008,
+    );
+    let mut refused = [0u32; 16];
+    sc.probe("unwind-refuse", "an entry that refuses to unwind, stepped", unwind_step(&mut refused, &[0x80, 0x00], &mut read).is_ok());
+    let mut unread = [0u32; 16];
+    sc.probe("unwind-stack-unread", "a pop from a stack that does not read, stepped", unwind_step(&mut unread, &[0xa8], &mut read).is_ok());
+    sc.probe("unwind-unknown-opcode", "an opcode the reader does not know, stepped", unwind_step(&mut unread, &[0xff], &mut read).is_ok());
+
+    let genuine = synth_event_image(true, true, true, true);
+    let read_event = |bytes: Vec<u8>| ArmImage::read(bytes).and_then(|i| read_event_image(&i));
+    let event = read_event(genuine.clone());
+    sc.accept_probe(
+        "event-image",
+        "the events word in the zero-filled window, the routine with its own entry and its one BKPT #0x60",
+        matches!(event, Ok(f) if f.word == 0x2000_0010 && f.routine == 0x100 && f.routine_size == 12 && f.bkpt == 0x104),
+    );
+    let walked = ArmImage::read(genuine.clone()).map(|i| {
+        let mut regs = [0u32; 16];
+        regs[13] = 0x2000_0100;
+        regs[14] = 0x0000_0903;
+        regs[15] = 0x104;
+        let mut none = |_: u32| None;
+        let frames = walk(&i, regs, &mut none, 8);
+        frames.len() == 2 && frames[0].own && frames[0].kind == "inline" && frames[0].sp == 0x2000_0100 && frames[1].pc == 0x902 && !frames[1].own && frames[1].kind == "cannot-unwind" && frames[1].end.is_some()
+    });
+    sc.accept_probe("event-walk", "the walk leaves the routine by the link register and ends at the caller, whose entry cannot unwind", walked == Ok(true));
+    sc.probe(
+        "event-image-no-bkpt",
+        "the routine's BKPT overwritten by a no-operation (the data word that reads as one passed over)",
+        !matches!(read_event(synth_event_image(false, true, true, true)), Err(ref e) if e == "the routine holds no BKPT #0x60"),
+    );
+    sc.accept_probe(
+        "event-image-doctor",
+        "the control's doctored copy differs from the image in the BKPT's two bytes and is refused by name",
+        matches!(doctor_event_bkpt(&genuine), Ok(ref d) if d.len() == genuine.len() && d.iter().zip(genuine.iter()).filter(|(a, b)| a != b).count() == 2 && matches!(read_event(d.clone()), Err(ref e) if e == "the routine holds no BKPT #0x60")),
+    );
+    sc.probe(
+        "event-image-entry-refuses",
+        "the routine's index-table entry replaced by one that refuses to unwind",
+        !matches!(read_event(synth_event_image(true, false, true, true)), Err(ref e) if e.contains("does not unwind")),
+    );
+    sc.probe(
+        "event-image-word-outside",
+        "the events word placed outside the zero-filled window",
+        !matches!(read_event(synth_event_image(true, true, false, true)), Err(ref e) if e.contains("outside the zero-filled window")),
+    );
+    sc.probe(
+        "event-image-stripped",
+        "the image with no symbol table",
+        !matches!(read_event(synth_event_image(true, true, true, false)), Err(ref e) if e == "the image has no symbol table"),
     );
 
     sc.finish("genuine inputs accepted");

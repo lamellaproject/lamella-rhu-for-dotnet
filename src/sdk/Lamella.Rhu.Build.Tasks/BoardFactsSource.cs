@@ -37,6 +37,7 @@ namespace Lamella.Rhu.Build
             public readonly List<(int Block, int Sda, int Scl, List<long> Rates)> I2c = new List<(int, int, int, List<long>)>();
             public readonly List<(int Block, int Sck, int Mosi, int Miso, List<int> Cs, long Min, long Max)> Spi = new List<(int, int, int, int, List<int>, long, long)>();
             public readonly List<(int Block, int? Tx, int? Rx)> Uart = new List<(int, int?, int?)>();
+            public readonly List<int> UartLowPower = new List<int>();
             public int PwmChip;
             public readonly HashSet<int> PwmLines = new HashSet<int>();
             public readonly List<(int Number, int Bits, int ReferenceMillivolts, List<(int Number, int? Pin)> Channels)> Adc = new List<(int, int, int, List<(int, int?)>)>();
@@ -101,7 +102,22 @@ namespace Lamella.Rhu.Build
                         throw new FormatException("a uart row names a line past the package's pins");
                     }
 
+                    bool lowPower = false;
+                    if (u.TryGetProperty("kind", out JsonElement kindEl))
+                    {
+                        if (kindEl.ValueKind != JsonValueKind.String || kindEl.GetString() != "lowpower")
+                        {
+                            throw new FormatException("a uart row's kind is not the word lowpower");
+                        }
+
+                        lowPower = true;
+                    }
+
                     f.Uart.Add((checked((int)Num(u, "block")), tx, rx));
+                    if (lowPower)
+                    {
+                        f.UartLowPower.Add(checked((int)Num(u, "block")));
+                    }
                 }
 
                 JsonElement streams = Member(root, "channels");
@@ -191,6 +207,37 @@ namespace Lamella.Rhu.Build
             return (f, (pin / 2) % 2, (pin / 8) % 2);
         }
 
+        private static (int Functions, int? I2c, int? Spi) ListedFunctions(Facts f, int pin, int functions)
+        {
+            const int I2cSda = 2, I2cScl = 4, SpiSck = 8, SpiMosi = 16, SpiMiso = 32, SpiCs = 64, UartTx = 128, UartRx = 256;
+            int? i2c = null, spi = null;
+            foreach (var (block, sda, scl, _) in f.I2c)
+            {
+                if (pin == sda || pin == scl)
+                {
+                    functions |= pin == sda ? I2cSda : I2cScl;
+                    i2c = block;
+                }
+            }
+
+            foreach (var (block, sck, mosi, miso, cs, _, _) in f.Spi)
+            {
+                int role = pin == sck ? SpiSck : pin == mosi ? SpiMosi : pin == miso ? SpiMiso : cs.Contains(pin) ? SpiCs : 0;
+                if (role != 0)
+                {
+                    functions |= role;
+                    spi = block;
+                }
+            }
+
+            foreach (var (_, tx, rx) in f.Uart)
+            {
+                functions |= pin == tx ? UartTx : pin == rx ? UartRx : 0;
+            }
+
+            return (functions, i2c, spi);
+        }
+
         private const int PwmFunction = 512;
         private const int AdcFunction = 1024;
 
@@ -265,6 +312,11 @@ namespace Lamella.Rhu.Build
                 {
                     string? label = f.Labels == "gp" ? "GP" + N(pin) : f.Labels == "port" ? "P" + (char)('A' + pin / 16) + N(pin % 16) : null;
                     var (fn, i2cBus, spiBus) = FunctionsOf(f.Functions, pin);
+                    if (f.Functions != "rp2350a" && f.Functions != "rp2350b")
+                    {
+                        (fn, i2cBus, spiBus) = ListedFunctions(f, pin, fn);
+                    }
+
                     bool pwm = f.PwmLines.Contains(pin);
                     fn = pwm ? (fn | PwmFunction) : (fn & ~PwmFunction);
                     int? adcChannel = adcOf.TryGetValue(pin, out int adcNumber) ? adcNumber : (int?)null;
@@ -277,7 +329,7 @@ namespace Lamella.Rhu.Build
                     b.Append(pwm ? N(f.PwmChip) : "null").Append(", ").Append(pwm ? N(pin) : "null").Append(", ").Append(adcChannel.HasValue ? N(adcChannel.Value) : "null").Append(");\n");
                 }
 
-                b.Append("            var i2c = new global::Lamella.Hardware.I2cBusInfo[").Append(N(f.I2c.Count)).Append("];\n");
+                b.Append("            var i2c = new global::Lamella.Hardware.BoardI2cBus[").Append(N(f.I2c.Count)).Append("];\n");
                 for (int i = 0; i < f.I2c.Count; i++)
                 {
                     var (block, sda, scl, rates) = f.I2c[i];
@@ -287,10 +339,10 @@ namespace Lamella.Rhu.Build
                         rs.Add(N(r));
                     }
 
-                    b.Append("            i2c[").Append(N(i)).Append("] = new global::Lamella.Hardware.I2cBusInfo(").Append(N(block)).Append(", pins[").Append(N(sda)).Append("], pins[").Append(N(scl)).Append("], new int[] { ").Append(string.Join(", ", rs)).Append(" });\n");
+                    b.Append("            i2c[").Append(N(i)).Append("] = new global::Lamella.Hardware.BoardI2cBus(").Append(N(block)).Append(", pins[").Append(N(sda)).Append("], pins[").Append(N(scl)).Append("], new int[] { ").Append(string.Join(", ", rs)).Append(" });\n");
                 }
 
-                b.Append("            var spi = new global::Lamella.Hardware.SpiBusInfo[").Append(N(f.Spi.Count)).Append("];\n");
+                b.Append("            var spi = new global::Lamella.Hardware.BoardSpiBus[").Append(N(f.Spi.Count)).Append("];\n");
                 for (int i = 0; i < f.Spi.Count; i++)
                 {
                     var (block, sck, mosi, miso, cs, min, max) = f.Spi[i];
@@ -300,7 +352,7 @@ namespace Lamella.Rhu.Build
                         css.Add("pins[" + N(c) + "]");
                     }
 
-                    b.Append("            spi[").Append(N(i)).Append("] = new global::Lamella.Hardware.SpiBusInfo(").Append(N(block)).Append(", pins[").Append(N(sck)).Append("], pins[").Append(N(mosi)).Append("], pins[").Append(N(miso)).Append("], new global::Lamella.Hardware.BoardPin[] { ").Append(string.Join(", ", css)).Append(" }, ").Append(N(min)).Append(", ").Append(N(max)).Append(");\n");
+                    b.Append("            spi[").Append(N(i)).Append("] = new global::Lamella.Hardware.BoardSpiBus(").Append(N(block)).Append(", pins[").Append(N(sck)).Append("], pins[").Append(N(mosi)).Append("], pins[").Append(N(miso)).Append("], new global::Lamella.Hardware.BoardPin[] { ").Append(string.Join(", ", css)).Append(" }, ").Append(N(min)).Append(", ").Append(N(max)).Append(");\n");
                 }
 
                 string console = ConsoleChannel.Length != 0 ? ConsoleChannel : f.ConsoleChannel;
@@ -310,7 +362,7 @@ namespace Lamella.Rhu.Build
                 {
                     var (block, tx, rx) = f.Uart[i];
                     string word = "uart" + N(block);
-                    b.Append("            uart[").Append(N(i)).Append("] = new global::Lamella.Hardware.UartInfo(").Append(N(block)).Append(", ").Append(Quote("/dev/ttyS" + N(block))).Append(", ");
+                    b.Append("            uart[").Append(N(i)).Append("] = new global::Lamella.Hardware.UartInfo(").Append(N(block)).Append(", ").Append(Quote((f.UartLowPower.Contains(block) ? "/dev/ttyLP" : "/dev/ttyS") + N(block))).Append(", ");
                     b.Append(tx.HasValue ? "pins[" + N(tx.Value) + "]" : "null").Append(", ").Append(rx.HasValue ? "pins[" + N(rx.Value) + "]" : "null").Append(", ");
                     b.Append(console == word ? "true" : "false").Append(", ").Append(log == word ? "true" : "false").Append(");\n");
                 }

@@ -1,0 +1,8 @@
+shimtest-socknetinfo: the network interface records over a scripted kernel, from a native caller's side
+PASS shim-sock-netinfo-interfaces (the loopback and the medium in one block, the address records after the interface records: lo at index 1 with 127.0.0.1 and a prefix of 8; eth0 at index 2, Ethernet, up, its six hardware bytes, speed and MTU not known, with the lease's address and a prefix of 24; a null pointer EFAULT)
+PASS shim-sock-netinfo-prefix (the prefix length is the count of the mask's bits: 20 for 255.255.240.0, 32 for 255.255.255.255, 8 for 255.0.0.0)
+PASS shim-sock-netinfo-kinds (a wireless medium is wlan0 of the wireless type; the emulator's medium is eth0 of the Ethernet type)
+PASS shim-sock-netinfo-link-down (a link that is down reads as down; a medium with no lease has its record and no address record)
+PASS shim-sock-netinfo-no-medium (a kernel with no medium answers no interface and no address)
+PASS shim-sock-netinfo-enumerate (the enumeration calls the IPv4 function for the loopback and for the medium's address with its prefix, the link-layer function for the medium's hardware address, the IPv6 function never; the context handed through; a null function skipped)
+SHIMTEST-SOCKNETINFO: ALL GOOD (the network interface records over a scripted kernel, from a native caller's side)
